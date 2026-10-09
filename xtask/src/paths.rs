@@ -51,6 +51,10 @@ impl Layout {
         self.version_dir(ver).join("src")
     }
 
+    pub fn assets_dir(&self) -> PathBuf {
+        self.cache_dir().join("assets")
+    }
+
     pub fn tools_dir(&self) -> PathBuf {
         self.cache_dir().join("tools")
     }

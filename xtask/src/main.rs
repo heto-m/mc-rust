@@ -1,3 +1,4 @@
+mod assets;
 mod checksum;
 mod datagen;
 mod decompile;
@@ -60,6 +61,13 @@ enum Command {
         #[arg(long)]
         nogui: bool,
     },
+    /// Download the asset index and all objects into .cache/assets
+    Assets {
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
     /// Run fetch, jdk, datagen and decompile in order
     Setup {
         #[arg(long)]
@@ -94,6 +102,10 @@ fn main() -> Result<()> {
         } => {
             let ver = fetch::resolve_version(version.as_deref())?;
             server::run(&layout, &ver, port, nogui)?;
+        }
+        Command::Assets { version, force } => {
+            let ver = fetch::resolve_version(version.as_deref())?;
+            assets::run(&layout, &ver, force)?;
         }
         Command::Setup { version, force } => {
             let ver = fetch::resolve_version(version.as_deref())?;
