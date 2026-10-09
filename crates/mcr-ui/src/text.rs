@@ -94,7 +94,46 @@ pub fn flatten(lang: &Lang, component: &Component) -> Vec<Cell> {
     out
 }
 
+const MAX_CELLS: usize = 65_536;
+const MAX_STEPS: usize = 100_000;
+const MAX_DEPTH: usize = 64;
+
+/// Server-sent components can reference arguments repeatedly, so expansion is bounded by work and output.
+struct Budget {
+    steps: usize,
+    depth: usize,
+}
+
+impl Budget {
+    fn enter(&mut self, out: &[Cell]) -> bool {
+        if self.steps == 0 || self.depth >= MAX_DEPTH || out.len() >= MAX_CELLS {
+            return false;
+        }
+        self.steps -= 1;
+        self.depth += 1;
+        true
+    }
+}
+
 pub fn flatten_into(lang: &Lang, component: &Component, parent: Style, out: &mut Vec<Cell>) {
+    let mut budget = Budget {
+        steps: MAX_STEPS,
+        depth: 0,
+    };
+    flatten_bounded(lang, component, parent, out, &mut budget);
+    out.truncate(MAX_CELLS);
+}
+
+fn flatten_bounded(
+    lang: &Lang,
+    component: &Component,
+    parent: Style,
+    out: &mut Vec<Cell>,
+    budget: &mut Budget,
+) {
+    if !budget.enter(out) {
+        return;
+    }
     let style = merge(parent, &component.style);
     match &component.content {
         Content::Text(text) => push_legacy(out, text, style),
@@ -107,7 +146,7 @@ pub fn flatten_into(lang: &Lang, component: &Component, parent: Style, out: &mut
                 .get(key)
                 .or(fallback.as_deref())
                 .unwrap_or(key.as_str());
-            expand_template(lang, template, args, style, out);
+            expand_template(lang, template, args, style, out, budget);
         }
         Content::Keybind(key) => push_legacy(out, key, style),
         Content::Score { name, .. } => push_legacy(out, name, style),
@@ -115,16 +154,24 @@ pub fn flatten_into(lang: &Lang, component: &Component, parent: Style, out: &mut
         Content::Nbt(nbt) => push_legacy(out, &nbt.path, style),
         Content::Object { fallback, .. } => {
             if let Some(fallback) = fallback {
-                flatten_into(lang, fallback, style, out);
+                flatten_bounded(lang, fallback, style, out, budget);
             }
         }
     }
     for extra in &component.extra {
-        flatten_into(lang, extra, style, out);
+        flatten_bounded(lang, extra, style, out, budget);
     }
+    budget.depth -= 1;
 }
 
-fn expand_template(lang: &Lang, template: &str, args: &[Arg], style: Style, out: &mut Vec<Cell>) {
+fn expand_template(
+    lang: &Lang,
+    template: &str,
+    args: &[Arg],
+    style: Style,
+    out: &mut Vec<Cell>,
+    budget: &mut Budget,
+) {
     let mut literal = String::new();
     let mut next_arg = 0usize;
     let mut rest = template;
@@ -152,7 +199,11 @@ fn expand_template(lang: &Lang, template: &str, args: &[Arg], style: Style, out:
                     }
                 };
                 if let Some(arg) = args.get(slot) {
-                    push_arg(lang, arg, style, out);
+                    if budget.steps == 0 || out.len() >= MAX_CELLS {
+                        return;
+                    }
+                    budget.steps -= 1;
+                    push_arg(lang, arg, style, out, budget);
                 }
                 rest = &after[c.len_utf8()..];
             }
@@ -166,11 +217,11 @@ fn expand_template(lang: &Lang, template: &str, args: &[Arg], style: Style, out:
     push_legacy(out, &literal, style);
 }
 
-fn push_arg(lang: &Lang, arg: &Arg, style: Style, out: &mut Vec<Cell>) {
+fn push_arg(lang: &Lang, arg: &Arg, style: Style, out: &mut Vec<Cell>, budget: &mut Budget) {
     match arg {
         Arg::Str(s) => push_legacy(out, s, style),
         Arg::Number(n) => push_legacy(out, &number_text(n), style),
-        Arg::Component(c) => flatten_into(lang, c, style, out),
+        Arg::Component(c) => flatten_bounded(lang, c, style, out, budget),
     }
 }
 
@@ -277,6 +328,23 @@ mod tests {
     #[test]
     fn unknown_code_is_swallowed() {
         assert_eq!(plain(&parse_legacy("a§zb")), "ab");
+    }
+
+    #[test]
+    fn hostile_argument_expansion_is_bounded() {
+        let lang = Lang::from_pairs([("x", "%1$s%1$s%1$s%1$s%1$s%1$s%1$s%1$s")]);
+        let mut c = Component::text("ab");
+        for _ in 0..40 {
+            c = Component::from_content(Content::Translatable {
+                key: "x".into(),
+                fallback: None,
+                args: vec![Arg::Component(c)],
+            });
+        }
+        let start = std::time::Instant::now();
+        let cells = flatten(&lang, &c);
+        assert!(cells.len() <= MAX_CELLS);
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]
