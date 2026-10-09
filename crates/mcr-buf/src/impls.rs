@@ -1,5 +1,7 @@
 use uuid::Uuid;
 
+const MAX_PREALLOC_BYTES: usize = 64 * 1024;
+
 use crate::{
     BoundedString, ByteArray, Decode, DecodeError, Encode, MAX_STRING_CHARS, RestBytes, Result,
     decode_str, encode_str, read_len, take, write_varint,
@@ -156,9 +158,9 @@ impl<T: Encode> Encode for Vec<T> {
 
 impl<'a, T: Decode<'a>> Decode<'a> for Vec<T> {
     fn decode(input: &mut &'a [u8]) -> Result<Self> {
-        // Every element takes at least one byte, so this bounds hostile lengths.
         let len = read_len(input, input.len())?;
-        let mut v = Vec::with_capacity(len);
+        // A hostile length times a large `T` must not reserve gigabytes up front.
+        let mut v = Vec::with_capacity(len.min(MAX_PREALLOC_BYTES / size_of::<T>().max(1)));
         for _ in 0..len {
             v.push(T::decode(input)?);
         }
@@ -226,6 +228,7 @@ mod tests {
         roundtrip(Some(VarInt(300)));
         roundtrip(None::<i32>);
         roundtrip(vec![VarInt(1), VarInt(-1)]);
+        roundtrip(vec![[0u64; 64]; 3]);
         roundtrip([1u8, 2, 3]);
         assert_eq!(to_bytes(&25565u16), [0x63, 0xdd]);
     }
@@ -255,5 +258,8 @@ mod tests {
         ));
         let hostile = [0xff, 0xff, 0xff, 0xff, 0x07];
         assert!(Vec::<u8>::decode(&mut &hostile[..]).is_err());
+        let mut big_t = vec![0xff, 0xff, 0x7f];
+        big_t.resize(big_t.len() + 2_097_151, 0);
+        assert!(Vec::<[u64; 512]>::decode(&mut big_t.as_slice()).is_err());
     }
 }
