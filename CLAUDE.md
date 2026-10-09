@@ -48,6 +48,8 @@ GPU-driven rendering on wgpu and a custom engine (no Bevy, no OpenGL).
 
 - Performance is a feature: avoid per-packet/per-block allocation in hot paths, prefer flat arrays and
   borrowed decoding, measure with `criterion` benches before optimizing.
+- Everything from the server is hostile input: bound every loop, allocation, recursion and expansion
+  driven by packet data (lengths, counts, nesting, health/absorption, text components).
 - `unsafe` only with a `// SAFETY:` line and a benchmark proving it pays.
 - Errors: `thiserror` in libraries, `anyhow` only in binaries and xtask.
 - Tests: unit tests next to code; protocol codecs get round-trip tests plus byte fixtures captured
