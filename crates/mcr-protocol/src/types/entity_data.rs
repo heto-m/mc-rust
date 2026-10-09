@@ -1,10 +1,12 @@
 use mcr_buf::{
-    BlockPos, BoundedString, Decode, DecodeError, Encode, IdOr, Identifier, LengthPrefixed, Result,
-    read_varint, write_varint,
+    BlockPos, Decode, DecodeError, Encode, IdOr, Identifier, Result, read_varint, write_varint,
 };
 use uuid::Uuid;
 
-use super::{Component, ItemStack, Particle, Vec3f};
+use super::{
+    Component, ItemStack, Particle, Vec3f,
+    component::{GlobalPos, ResolvableProfile},
+};
 
 pub const END_MARKER: u8 = 0xFF;
 
@@ -136,12 +138,6 @@ pub struct Rotations {
     pub z: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-pub struct GlobalPos {
-    pub dimension: Identifier,
-    pub pos: BlockPos,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub struct VillagerData {
     #[mcr(varint)]
@@ -161,52 +157,6 @@ pub struct PaintingVariantData {
     pub asset_id: Identifier,
     pub title: Option<Component>,
     pub author: Option<Component>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-pub struct ProfileProperty {
-    pub name: BoundedString<64>,
-    pub value: BoundedString<32767>,
-    pub signature: Option<BoundedString<1024>>,
-}
-
-pub type ProfileProperties = LengthPrefixed<ProfileProperty, 16>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-pub struct GameProfile {
-    pub id: Uuid,
-    pub name: BoundedString<16>,
-    pub properties: ProfileProperties,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Encode, Decode)]
-pub struct PartialProfile {
-    pub name: Option<BoundedString<16>>,
-    pub id: Option<Uuid>,
-    pub properties: ProfileProperties,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-#[mcr(tag = u8)]
-#[repr(u8)]
-pub enum ProfileSource {
-    Partial(PartialProfile) = 0,
-    Full(GameProfile) = 1,
-}
-
-/// `slim` is the player model type: `true` for slim arms, `false` for wide.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Encode, Decode)]
-pub struct SkinPatch {
-    pub body: Option<Identifier>,
-    pub cape: Option<Identifier>,
-    pub elytra: Option<Identifier>,
-    pub slim: Option<bool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-pub struct ResolvableProfile {
-    pub source: ProfileSource,
-    pub skin_patch: SkinPatch,
 }
 
 /// Empty is 0 and a value `v` is `v + 1`.
@@ -337,23 +287,31 @@ impl Decode<'_> for EntityDataValues {
 mod tests {
     use mcr_buf::{DecodeError, from_bytes_exact, to_bytes};
 
+    use mcr_buf::BoundedString;
+
     use super::*;
-    use crate::test_util::roundtrip;
+    use crate::{
+        test_util::roundtrip,
+        types::{
+            component::{PartialProfile, ProfileSource, SkinPatch},
+            profile::{GameProfile, ProfileProperty},
+        },
+    };
 
     fn profile() -> ResolvableProfile {
         ResolvableProfile {
             source: ProfileSource::Full(GameProfile {
                 id: Uuid::from_u128(7),
-                name: BoundedString("Steve".into()),
-                properties: LengthPrefixed(vec![ProfileProperty {
-                    name: BoundedString("textures".into()),
-                    value: BoundedString("v".into()),
-                    signature: Some(BoundedString("s".into())),
-                }]),
+                name: "Steve".into(),
+                properties: vec![ProfileProperty {
+                    name: "textures".into(),
+                    value: "v".into(),
+                    signature: Some("s".into()),
+                }],
             }),
-            skin_patch: SkinPatch {
+            skin: SkinPatch {
                 body: Some(Identifier::parse("a:b").unwrap()),
-                slim: Some(true),
+                slim_model: Some(true),
                 ..Default::default()
             },
         }
@@ -437,7 +395,7 @@ mod tests {
                     name: Some(BoundedString("Alex".into())),
                     ..Default::default()
                 }),
-                skin_patch: SkinPatch::default(),
+                skin: SkinPatch::default(),
             })),
             V::HumanoidArm(HumanoidArm::Right),
             V::DyeColor(DyeColor::Black),
@@ -458,7 +416,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs Component"]
     fn component_serializers() {
         let values = [
             EntityDataValue::Component(Component::default()),
@@ -471,7 +428,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs ItemStack"]
     fn item_stack_serializer() {
         roundtrip(&EntityDataValue::ItemStack(ItemStack::default()));
     }
@@ -529,6 +485,92 @@ mod tests {
         assert_eq!(to_bytes(&V::OptionalUnsignedInt(Some(4))), [19, 5]);
         assert_eq!(to_bytes(&V::OptionalBlockState(None)), [15, 0]);
         assert_eq!(to_bytes(&V::OptionalBlockPos(None)), [11, 0]);
+    }
+
+    #[test]
+    fn java_layout_fixtures() {
+        use EntityDataValue as V;
+        let uuid = Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
+        let mut entity_ref = vec![13, 1];
+        entity_ref.extend(1..=16u8);
+        let mut global_pos = vec![33, 1, 19];
+        global_pos.extend(*b"minecraft:overworld");
+        global_pos.extend([0, 0, 0, 0, 0, 0, 0x10, 0]);
+        let cases: Vec<(V, Vec<u8>)> = vec![
+            (
+                V::Long(-1),
+                [2].into_iter().chain([0xFF; 9]).chain([1]).collect(),
+            ),
+            (V::String("hi".into()), vec![4, 2, b'h', b'i']),
+            (
+                V::Rotations(Rotations {
+                    x: 1.0,
+                    y: 2.0,
+                    z: -0.5,
+                }),
+                vec![9, 0x3F, 0x80, 0, 0, 0x40, 0, 0, 0, 0xBF, 0, 0, 0],
+            ),
+            (
+                V::OptionalBlockPos(Some(BlockPos::new(1, 0, 0))),
+                vec![11, 1, 0, 0, 0, 0x40, 0, 0, 0, 0],
+            ),
+            (V::Direction(Direction::East), vec![12, 5]),
+            (V::OptionalLivingEntityRef(Some(uuid)), entity_ref),
+            (V::BlockState(300), vec![14, 0xAC, 0x02]),
+            (V::OptionalBlockState(Some(300)), vec![15, 0xAC, 0x02]),
+            (
+                V::Particles(vec![
+                    Particle::Simple(11),
+                    Particle::DragonBreath { power: 1.0 },
+                ]),
+                vec![17, 2, 11, 15, 0x3F, 0x80, 0, 0],
+            ),
+            (
+                V::VillagerData(VillagerData {
+                    kind: 2,
+                    profession: 14,
+                    level: 5,
+                }),
+                vec![18, 2, 14, 5],
+            ),
+            (V::OptionalUnsignedInt(Some(0)), vec![19, 1]),
+            (V::WolfVariant(300), vec![25, 0xAC, 0x02]),
+            (
+                V::OptionalGlobalPos(Some(GlobalPos {
+                    dimension: Identifier::parse("overworld").unwrap(),
+                    pos: BlockPos::new(0, 0, 1),
+                })),
+                global_pos,
+            ),
+            (
+                V::PaintingVariant(IdOr::Inline(PaintingVariantData {
+                    width: 2,
+                    height: 1,
+                    asset_id: Identifier::parse("x:y").unwrap(),
+                    title: None,
+                    author: None,
+                })),
+                vec![34, 0, 2, 1, 3, b'x', b':', b'y', 0, 0],
+            ),
+            (
+                V::Vector3(Vec3f {
+                    x: 1.0,
+                    y: 0.0,
+                    z: -1.0,
+                }),
+                vec![39, 0x3F, 0x80, 0, 0, 0, 0, 0, 0, 0xBF, 0x80, 0, 0],
+            ),
+            (
+                V::Quaternion([0.0, 0.0, 0.0, 1.0]),
+                vec![40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x3F, 0x80, 0, 0],
+            ),
+            (V::HumanoidArm(HumanoidArm::Left), vec![42, 0]),
+            (V::DyeColor(DyeColor::Black), vec![43, 15]),
+        ];
+        for (value, bytes) in cases {
+            assert_eq!(roundtrip(&value), bytes, "{value:?}");
+            assert_eq!(from_bytes_exact::<V>(&bytes).unwrap(), value);
+        }
     }
 
     #[test]

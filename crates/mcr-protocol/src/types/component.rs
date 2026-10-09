@@ -19,6 +19,7 @@ pub use data::*;
 pub use predicate::*;
 
 use super::Component;
+use super::entity_data::PaintingVariantData;
 use super::item::ItemStackTemplate;
 
 macro_rules! components {
@@ -165,7 +166,7 @@ components! {
     106 "zombie_nautilus/variant" ZombieNautilusVariant(VarInt);
     107 "frog/variant" FrogVariant(VarInt);
     108 "horse/variant" HorseVariant(VarInt);
-    109 "painting/variant" PaintingVariant(VarInt);
+    109 "painting/variant" PaintingVariant(IdOr<PaintingVariantData>);
     110 "llama/variant" LlamaVariant(VarInt);
     111 "axolotl/variant" AxolotlVariant(VarInt);
     112 "cat/variant" CatVariant(VarInt);
@@ -521,5 +522,301 @@ mod tests {
         assert!(DataComponentPatch::decode(&mut &bytes[..]).is_err());
         let bytes = [1, 0, 51, 0xff, 0xff, 0xff, 0xff, 0x07];
         assert!(DataComponentPatch::decode(&mut &bytes[..]).is_err());
+    }
+
+    fn id(s: &str) -> Identifier {
+        Identifier::parse(s).unwrap()
+    }
+
+    fn text(s: &str) -> Vec<u8> {
+        let mut v = vec![8, 0, s.len() as u8];
+        v.extend_from_slice(s.as_bytes());
+        v
+    }
+
+    fn str_bytes(s: &str) -> Vec<u8> {
+        let mut v = vec![s.len() as u8];
+        v.extend_from_slice(s.as_bytes());
+        v
+    }
+
+    fn assert_component(component: DataComponent, expected: &[&[u8]]) {
+        assert_eq!(roundtrip(&component), expected.concat());
+    }
+
+    #[test]
+    fn painting_variant_is_holder() {
+        assert_component(DataComponent::PaintingVariant(IdOr::Id(4)), &[&[109, 5]]);
+        assert_component(
+            DataComponent::PaintingVariant(IdOr::Inline(PaintingVariantData {
+                width: 2,
+                height: 1,
+                asset_id: id("a:b"),
+                title: Some(Component::text("t")),
+                author: None,
+            })),
+            &[&[109, 0, 2, 1], &str_bytes("a:b"), &[1], &text("t"), &[0]],
+        );
+    }
+
+    #[test]
+    fn consumable_bytes() {
+        use crate::types::SoundEvent;
+        assert_component(
+            DataComponent::Consumable(Consumable {
+                consume_seconds: 1.6,
+                animation: ItemUseAnimation::Eat,
+                sound: IdOr::Id(10),
+                has_consume_particles: true,
+                on_consume_effects: vec![
+                    ConsumeEffect::ApplyEffects {
+                        effects: vec![MobEffectInstance {
+                            effect: 3,
+                            details: MobEffectDetails {
+                                amplifier: 0,
+                                duration: 100,
+                                ambient: false,
+                                show_particles: true,
+                                show_icon: true,
+                                hidden_effect: None,
+                            },
+                        }],
+                        probability: 1.0,
+                    },
+                    ConsumeEffect::ClearAllEffects,
+                    ConsumeEffect::PlaySound(IdOr::Inline(SoundEvent {
+                        location: id("a:b"),
+                        fixed_range: Some(2.0),
+                    })),
+                ],
+            }),
+            &[
+                &[24, 0x3f, 0xcc, 0xcc, 0xcd, 1, 11, 1, 3],
+                &[0, 1, 3, 0, 100, 0, 1, 1, 0, 0x3f, 0x80, 0, 0],
+                &[2],
+                &[4, 0],
+                &str_bytes("a:b"),
+                &[1, 0x40, 0, 0, 0],
+            ],
+        );
+    }
+
+    #[test]
+    fn equippable_bytes() {
+        assert_component(
+            DataComponent::Equippable(Equippable {
+                slot: EquipmentSlot::Head,
+                equip_sound: IdOr::Id(0),
+                asset_id: Some(id("a:b")),
+                camera_overlay: None,
+                allowed_entities: Some(HolderSet::Tag(id("a:c"))),
+                dispensable: true,
+                swappable: false,
+                damage_on_hurt: true,
+                equip_on_interact: false,
+                can_be_sheared: false,
+                shearing_sound: IdOr::Id(1),
+            }),
+            &[
+                &[32, 4, 1, 1],
+                &str_bytes("a:b"),
+                &[0, 1, 0],
+                &str_bytes("a:c"),
+                &[1, 0, 1, 0, 0, 2],
+            ],
+        );
+    }
+
+    #[test]
+    fn attribute_modifiers_bytes() {
+        assert_component(
+            DataComponent::AttributeModifiers(ItemAttributeModifiers(vec![
+                AttributeModifierEntry {
+                    attribute: 3,
+                    modifier: AttributeModifier {
+                        id: id("a:m"),
+                        amount: 1.0,
+                        operation: AttributeOperation::AddMultipliedTotal,
+                    },
+                    slot: EquipmentSlotGroup::Armor,
+                    display: AttributeDisplay::Override(Component::text("o")),
+                },
+            ])),
+            &[
+                &[16, 1, 3],
+                &str_bytes("a:m"),
+                &[0x3f, 0xf0, 0, 0, 0, 0, 0, 0, 2, 8, 2],
+                &text("o"),
+            ],
+        );
+    }
+
+    #[test]
+    fn profile_bytes() {
+        assert_component(
+            DataComponent::Profile(ResolvableProfile {
+                source: ProfileSource::Partial(PartialProfile {
+                    name: Some(mcr_buf::BoundedString("Bo".into())),
+                    id: None,
+                    properties: LengthPrefixed(vec![]),
+                }),
+                skin: SkinPatch {
+                    elytra: Some(id("a:e")),
+                    slim_model: Some(false),
+                    ..SkinPatch::default()
+                },
+            }),
+            &[
+                &[72, 0, 1, 2, b'B', b'o', 0, 0, 0, 0, 1],
+                &str_bytes("a:e"),
+                &[1, 0],
+            ],
+        );
+        let uuid = uuid::Uuid::from_u128(1);
+        assert_component(
+            DataComponent::Profile(ResolvableProfile {
+                source: ProfileSource::Full(crate::types::profile::GameProfile {
+                    id: uuid,
+                    name: "N".into(),
+                    properties: vec![],
+                }),
+                skin: SkinPatch::default(),
+            }),
+            &[&[72, 1], uuid.as_bytes(), &[1, b'N', 0, 0, 0, 0, 0]],
+        );
+    }
+
+    #[test]
+    fn sign_text_bytes() {
+        let blank = text("");
+        assert_component(
+            DataComponent::SignTextFront(SignText {
+                messages: Default::default(),
+                filtered_messages: None,
+                color: DyeColor::Black,
+                has_glowing_text: true,
+            }),
+            &[&[118], &blank, &blank, &blank, &blank, &[0, 15, 1]],
+        );
+    }
+
+    #[test]
+    fn can_break_predicate_bytes() {
+        let empty = NetworkNbt(mcr_nbt::Value::Compound(mcr_nbt::Compound::new()));
+        assert_component(
+            DataComponent::CanBreak(AdventureModePredicate(vec![BlockPredicate {
+                blocks: Some(HolderSet::Ids(vec![1])),
+                properties: Some(StatePropertiesPredicate(vec![PropertyMatcher {
+                    name: "f".into(),
+                    matcher: ValueMatcher::Ranged(RangedMatcher {
+                        min: Some("1".into()),
+                        max: None,
+                    }),
+                }])),
+                nbt: None,
+                components: DataComponentMatchers {
+                    exact: vec![DataComponent::Damage(VarInt(2))],
+                    partial: LengthPrefixed(vec![ComponentPredicate {
+                        kind: PredicateType::AnyValue(3),
+                        value: empty,
+                    }]),
+                },
+            }])),
+            &[&[
+                15, 1, 1, 2, 1, 1, 1, 1, b'f', 0, 1, 1, b'1', 0, 0, 1, 3, 2, 1, 0, 3, 0x0a, 0,
+            ]],
+        );
+    }
+
+    #[test]
+    fn fuel_and_container_bytes() {
+        assert_component(
+            DataComponent::CookingFuel(CookingFuel {
+                burn_time: ResolvableInt::Constant(200),
+                speed_multiplier: ResolvableFloat::Reference(id("a:s")),
+            }),
+            &[&[85, 1, 0, 0, 0, 200, 0], &str_bytes("a:s")],
+        );
+        assert_component(
+            DataComponent::Container(LengthPrefixed(vec![
+                Some(ItemStackTemplate {
+                    item: 1,
+                    count: 1,
+                    components: DataComponentPatch::default(),
+                }),
+                None,
+            ])),
+            &[&[77, 2, 1, 1, 1, 0, 0, 0]],
+        );
+    }
+
+    #[test]
+    fn book_and_trim_bytes() {
+        assert_component(
+            DataComponent::WrittenBookContent(WrittenBookContent {
+                title: Filterable {
+                    raw: mcr_buf::BoundedString("T".into()),
+                    filtered: None,
+                },
+                author: "A".into(),
+                generation: 0,
+                pages: vec![Filterable {
+                    raw: Component::text("p"),
+                    filtered: Some(Component::text("")),
+                }],
+                resolved: true,
+            }),
+            &[
+                &[57, 1, b'T', 0, 1, b'A', 0, 1],
+                &text("p"),
+                &[1],
+                &text(""),
+                &[1],
+            ],
+        );
+        assert_component(
+            DataComponent::Trim(ArmorTrim {
+                material: IdOr::Inline(TrimMaterial {
+                    palette_id: id("a:p"),
+                    description: Component::text(""),
+                }),
+                pattern: IdOr::Id(2),
+            }),
+            &[&[58, 0], &str_bytes("a:p"), &text(""), &[3]],
+        );
+    }
+
+    #[test]
+    fn weapon_and_potion_bytes() {
+        assert_component(
+            DataComponent::KineticWeapon(KineticWeapon {
+                contact_cooldown_ticks: 10,
+                delay_ticks: 0,
+                dismount_conditions: Some(KineticCondition {
+                    max_duration_ticks: 5,
+                    min_speed: 0.0,
+                    min_relative_speed: 0.0,
+                }),
+                knockback_conditions: None,
+                damage_conditions: None,
+                forward_movement: 1.0,
+                damage_multiplier: 2.0,
+                sound: None,
+                hit_sound: Some(IdOr::Id(0)),
+            }),
+            &[&[
+                39, 10, 0, 1, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x3f, 0x80, 0, 0, 0x40, 0, 0, 0, 0,
+                1, 1,
+            ]],
+        );
+        assert_component(
+            DataComponent::PotionContents(PotionContents {
+                potion: Some(VarInt(5)),
+                custom_color: None,
+                custom_effects: vec![],
+                custom_name: Some("x".into()),
+            }),
+            &[&[53, 1, 5, 0, 0, 1, 1, b'x']],
+        );
     }
 }

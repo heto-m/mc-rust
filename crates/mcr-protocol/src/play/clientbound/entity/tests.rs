@@ -1,6 +1,7 @@
 use mcr_buf::{from_bytes_exact, to_bytes};
 
 use super::*;
+use crate::types::component::AttributeOperation;
 
 fn decoded_like<'a, T: Decode<'a>>(_: &T, bytes: &'a [u8]) -> T {
     from_bytes_exact(bytes).unwrap()
@@ -132,9 +133,14 @@ fn stepped_delta_rejects_hostile_count() {
     assert!(from_bytes_exact::<MoveEntityPos>(&[1, 0xfe, 0xff, 0x7f, 0, 0]).is_err());
 }
 
+const D1: [u8; 8] = [0x3f, 0xf0, 0, 0, 0, 0, 0, 0];
+const D2: [u8; 8] = [0x40, 0, 0, 0, 0, 0, 0, 0];
+const D3: [u8; 8] = [0x40, 0x08, 0, 0, 0, 0, 0, 0];
+const D0: [u8; 8] = [0; 8];
+
 #[test]
 fn minecart_vehicle_and_position_sync() {
-    rt!(MoveMinecartAlongTrack {
+    let bytes = rt!(MoveMinecartAlongTrack {
         entity_id: 9,
         steps: vec![MinecartStep {
             position: v(1.0, 2.0, 3.0),
@@ -144,12 +150,26 @@ fn minecart_vehicle_and_position_sync() {
             weight: 1.5,
         }],
     });
+    let half = [0x3f, 0xe0, 0, 0, 0, 0, 0, 0];
+    let expected = [
+        &[9, 1][..],
+        &D1,
+        &D2,
+        &D3,
+        &D0,
+        &D0,
+        &half,
+        &[10, 20, 0x3f, 0xc0, 0, 0],
+    ]
+    .concat();
+    assert_eq!(bytes, expected);
     let bytes = rt!(MoveVehicle {
         position: v(1.0, 2.0, 3.0),
         y_rot: 90.0,
         x_rot: -10.0,
     });
-    assert_eq!(bytes.len(), 32);
+    let expected = [&D1[..], &D2, &D3, &[0x42, 0xb4, 0, 0, 0xc1, 0x20, 0, 0]].concat();
+    assert_eq!(bytes, expected);
     let linear = EntityPositionSync {
         entity_id: 2,
         position: PositionPath::Linear(v(1.0, 2.0, 3.0)),
@@ -186,9 +206,18 @@ fn teleport_entity() {
         relatives: Relatives(Relatives::X | Relatives::ROTATE_DELTA),
         on_ground: true,
     };
-    let bytes = rt!(packet);
-    assert_eq!(bytes.len(), 1 + 48 + 8 + 4 + 1);
-    assert_eq!(&bytes[bytes.len() - 5..], [0, 0, 1, 1, 1]);
+    let expected = [
+        &[3][..],
+        &D1,
+        &D2,
+        &D3,
+        &D0,
+        &D0,
+        &D0,
+        &[0x42, 0x34, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1],
+    ]
+    .concat();
+    assert_eq!(rt!(packet), expected);
     assert!(Relatives(0b11).contains(Relatives::Y));
 }
 
@@ -228,11 +257,18 @@ fn small_packets() {
         [0, 0, 0, 1, 0xfe]
     );
     assert_eq!(
-        rt!(HurtAnimation {
-            entity_id: 1,
-            yaw: 0.0
+        rt!(Animate {
+            entity_id: 300,
+            action: 255
         }),
-        [1, 0, 0, 0, 0]
+        [0xac, 0x02, 0xff]
+    );
+    assert_eq!(
+        rt!(HurtAnimation {
+            entity_id: 300,
+            yaw: 90.0
+        }),
+        [0xac, 0x02, 0x42, 0xb4, 0, 0]
     );
     assert_eq!(
         rt!(RemoveEntities {
@@ -257,9 +293,9 @@ fn small_packets() {
     assert_eq!(
         rt!(SetEntityLink {
             source_id: 1,
-            dest_id: -1
+            dest_id: 0x0102_0304
         }),
-        [0, 0, 0, 1, 0xff, 0xff, 0xff, 0xff]
+        [0, 0, 0, 1, 1, 2, 3, 4]
     );
     assert_eq!(
         rt!(SetEntityMotion {
@@ -271,9 +307,16 @@ fn small_packets() {
     assert_eq!(
         rt!(SetPassengers {
             vehicle: 10,
-            passengers: vec![1, 2, 3]
+            passengers: vec![1, 300, 3]
         }),
-        [10, 3, 1, 2, 3]
+        [10, 3, 1, 0xac, 0x02, 3]
+    );
+    assert_eq!(
+        rt!(SetPassengers {
+            vehicle: 10,
+            passengers: vec![]
+        }),
+        [10, 0]
     );
     assert_eq!(
         rt!(TakeItemEntity {
@@ -286,9 +329,9 @@ fn small_packets() {
     assert_eq!(
         rt!(ProjectilePower {
             entity_id: 1,
-            acceleration_power: 1.0
-        })[0],
-        1
+            acceleration_power: 0.25
+        }),
+        [1, 0x3f, 0xd0, 0, 0, 0, 0, 0, 0]
     );
     assert_eq!(
         rt!(UpdateMobEffect {
@@ -344,12 +387,16 @@ fn waypoints() {
     let tail = &bytes[18 + 1 + "minecraft:default".len()..];
     assert_eq!(tail, [1, 1, 2, 3, 1, 1, 0xff, 0xff, 0xff, 0xff, 0x0f, 2]);
 
-    for data in [
-        WaypointData::Empty,
-        WaypointData::Chunk { x: -4, z: 4 },
-        WaypointData::Azimuth { angle: 1.5 },
+    let head = [&[0, 0, 1, b'n', 17][..], b"minecraft:default", &[0]].concat();
+    for (data, contents) in [
+        (WaypointData::Empty, &[0][..]),
+        (
+            WaypointData::Chunk { x: -4, z: 4 },
+            &[2, 0xfc, 0xff, 0xff, 0xff, 0x0f, 4],
+        ),
+        (WaypointData::Azimuth { angle: 1.5 }, &[3, 0x3f, 0xc0, 0, 0]),
     ] {
-        rt!(Waypoint {
+        let bytes = rt!(Waypoint {
             operation: WaypointOperation::Track,
             waypoint: TrackedWaypoint {
                 id: WaypointId::Name("n".into()),
@@ -360,6 +407,7 @@ fn waypoints() {
                 data,
             },
         });
+        assert_eq!(bytes, [&head[..], contents].concat());
     }
 }
 
@@ -378,7 +426,6 @@ fn set_entity_data() {
 }
 
 #[test]
-#[ignore = "needs ItemStack"]
 fn set_equipment() {
     rt!(SetEquipment {
         entity_id: 1,
@@ -393,4 +440,18 @@ fn set_equipment() {
             },
         ],
     });
+}
+
+#[test]
+fn entity_swing_bytes() {
+    use crate::types::{component::SwingAnimationType, game::Hand};
+    let packet = EntitySwing {
+        entity_id: 300,
+        hand: Hand::Off,
+        animation: crate::types::component::SwingAnimation {
+            kind: SwingAnimationType::Stab,
+            duration: 6,
+        },
+    };
+    assert_eq!(rt!(packet), [0xac, 0x02, 1, 2, 6]);
 }

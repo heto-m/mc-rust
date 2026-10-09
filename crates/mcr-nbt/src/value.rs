@@ -100,7 +100,32 @@ impl List {
     }
 }
 
+impl List {
+    pub fn sort_vanilla_order(&mut self) {
+        match self {
+            List::List(lists) => lists.iter_mut().for_each(List::sort_vanilla_order),
+            List::Compound(compounds) => compounds.iter_mut().for_each(|c| {
+                c.values_mut().for_each(Value::sort_vanilla_order);
+                c.sort_vanilla_order();
+            }),
+            _ => {}
+        }
+    }
+}
+
 impl Value {
+    /// Applies [`Compound::sort_vanilla_order`] to every compound in the tree.
+    pub fn sort_vanilla_order(&mut self) {
+        match self {
+            Value::Compound(c) => {
+                c.values_mut().for_each(Value::sort_vanilla_order);
+                c.sort_vanilla_order();
+            }
+            Value::List(list) => list.sort_vanilla_order(),
+            _ => {}
+        }
+    }
+
     pub fn tag(&self) -> u8 {
         match self {
             Value::Byte(_) => tag::BYTE,

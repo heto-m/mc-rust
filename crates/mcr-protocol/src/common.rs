@@ -2,9 +2,9 @@
 
 use mcr_buf::{
     ByteArray, Decode, DecodeError, Encode, IdOr, Identifier, LengthPrefixed, RestBytes, Result,
-    read_len, take, write_varint,
+    read_len, read_varint, take, write_varint,
 };
-use mcr_nbt::{Limits, NetworkNbt, OptionalNetworkNbt, Value};
+use mcr_nbt::{Limits, NetworkNbt, OptionalNetworkNbt, Value, write_network};
 use uuid::Uuid;
 
 use crate::packet;
@@ -18,16 +18,48 @@ const CLICK_NBT_LIMITS: Limits = Limits {
     max_bytes: 32768,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub(crate) const MAX_CLIENTBOUND_PAYLOAD: usize = 1048576;
+
+#[derive(Debug, Clone, PartialEq, Eq, Encode)]
 pub struct ClientboundCustomPayload<'a> {
     pub channel: Identifier,
     pub data: RestBytes<'a>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+impl<'a> Decode<'a> for ClientboundCustomPayload<'a> {
+    fn decode(input: &mut &'a [u8]) -> Result<Self> {
+        Ok(Self {
+            channel: Identifier::decode(input)?,
+            data: decode_rest_bytes(input, MAX_CLIENTBOUND_PAYLOAD)?,
+        })
+    }
+}
+
+pub(crate) fn decode_rest_bytes<'a>(input: &mut &'a [u8], max: usize) -> Result<RestBytes<'a>> {
+    if input.len() > max {
+        return Err(DecodeError::TooLong {
+            len: input.len(),
+            max,
+        });
+    }
+    RestBytes::decode(input)
+}
+
+pub(crate) const MAX_SERVERBOUND_PAYLOAD: usize = 32767;
+
+#[derive(Debug, Clone, PartialEq, Eq, Encode)]
 pub struct ServerboundCustomPayload<'a> {
     pub channel: Identifier,
     pub data: RestBytes<'a>,
+}
+
+impl<'a> Decode<'a> for ServerboundCustomPayload<'a> {
+    fn decode(input: &mut &'a [u8]) -> Result<Self> {
+        Ok(Self {
+            channel: Identifier::decode(input)?,
+            data: decode_rest_bytes(input, MAX_SERVERBOUND_PAYLOAD)?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
@@ -141,19 +173,35 @@ pub struct CustomReportDetails {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Encode, Decode)]
 pub struct ClearDialog;
 
+/// Root NBT read without the network heap quota, as vanilla's trusted codecs do.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrustedNbt(pub Value);
+
+impl Encode for TrustedNbt {
+    fn encode(&self, out: &mut Vec<u8>) {
+        write_network(out, Some(&self.0));
+    }
+}
+
+impl Decode<'_> for TrustedNbt {
+    fn decode(input: &mut &[u8]) -> Result<Self> {
+        Ok(Self(NetworkNbt::decode_with(input, Limits::UNLIMITED)?.0))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct ShowDialog {
-    pub dialog: IdOr<NetworkNbt>,
+    pub dialog: IdOr<TrustedNbt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct ConfigShowDialog {
-    pub dialog: NetworkNbt,
+    pub dialog: TrustedNbt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct PostEffects {
-    pub effects: Vec<Identifier>,
+    pub post_effects: Vec<Identifier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
@@ -194,7 +242,7 @@ pub struct UpdateTags {
     pub registries: Vec<RegistryTags>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode)]
 pub enum KnownLinkType {
     BugReport,
     CommunityGuidelines,
@@ -206,6 +254,32 @@ pub enum KnownLinkType {
     Forums,
     News,
     Announcements,
+}
+
+impl KnownLinkType {
+    const ALL: [Self; 10] = [
+        Self::BugReport,
+        Self::CommunityGuidelines,
+        Self::Support,
+        Self::Status,
+        Self::Feedback,
+        Self::Community,
+        Self::Website,
+        Self::Forums,
+        Self::News,
+        Self::Announcements,
+    ];
+}
+
+/// Vanilla maps out-of-range ids to `BugReport` instead of rejecting them.
+impl Decode<'_> for KnownLinkType {
+    fn decode(input: &mut &[u8]) -> Result<Self> {
+        let id = read_varint(input)?;
+        Ok(usize::try_from(id)
+            .ok()
+            .and_then(|i| Self::ALL.get(i).copied())
+            .unwrap_or(Self::BugReport))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
@@ -374,10 +448,26 @@ mod tests {
         };
         let bytes = roundtrip_borrowed!(&packet);
         assert_eq!(&bytes[bytes.len() - 4..], [7, b'v', b'a', b'n']);
-        roundtrip_borrowed!(&ServerboundCustomPayload {
+        let serverbound = ServerboundCustomPayload {
             channel: id("a:b"),
-            data: RestBytes(&[]),
-        });
+            data: RestBytes(&[9]),
+        };
+        assert_eq!(roundtrip_borrowed!(&serverbound), [3, b'a', b':', b'b', 9]);
+    }
+
+    #[test]
+    fn serverbound_payload_limit() {
+        let mut bytes = vec![3, b'a', b':', b'b'];
+        bytes.resize(4 + MAX_SERVERBOUND_PAYLOAD, 0);
+        assert!(from_bytes_exact::<ServerboundCustomPayload>(&bytes).is_ok());
+        bytes.push(0);
+        assert_eq!(
+            from_bytes_exact::<ServerboundCustomPayload>(&bytes),
+            Err(DecodeError::TooLong {
+                len: MAX_SERVERBOUND_PAYLOAD + 1,
+                max: MAX_SERVERBOUND_PAYLOAD
+            })
+        );
     }
 
     #[test]
@@ -387,12 +477,20 @@ mod tests {
             key: id("a:b"),
             payload: Some(ByteArray(&[1, 2])),
         };
-        let bytes = roundtrip_borrowed!(&present);
-        assert_eq!(&bytes[bytes.len() - 4..], [1, 2, 1, 2]);
-        roundtrip_borrowed!(&CookieResponse {
-            key: id("a:b"),
-            payload: None,
-        });
+        assert_eq!(
+            roundtrip_borrowed!(&present),
+            [3, b'a', b':', b'b', 1, 2, 1, 2]
+        );
+        assert_eq!(
+            roundtrip_borrowed!(&CookieResponse {
+                key: id("a:b"),
+                payload: None,
+            }),
+            [3, b'a', b':', b'b', 0]
+        );
+        let mut oversized = vec![3, b'a', b':', b'b', 1, 0x81, 0x28];
+        oversized.resize(oversized.len() + MAX_COOKIE_PAYLOAD + 1, 0);
+        assert!(from_bytes_exact::<CookieResponse>(&oversized).is_err());
         let big = vec![0u8; MAX_COOKIE_PAYLOAD + 1];
         let bytes = to_bytes(&StoreCookie {
             key: id("a:b"),
@@ -436,13 +534,15 @@ mod tests {
             id: Uuid::from_u128(1),
             action: ResourcePackAction::Accepted,
         };
-        let bytes = roundtrip(&response);
-        assert_eq!(bytes[16], 3);
+        let mut expected = [0; 17];
+        expected[15] = 1;
+        expected[16] = 3;
+        assert_eq!(roundtrip(&response), expected);
     }
 
     #[test]
     fn dialogs() {
-        let dialog = NetworkNbt(Value::String("d".into()));
+        let dialog = TrustedNbt(Value::String("d".into()));
         assert_eq!(
             roundtrip(&ConfigShowDialog {
                 dialog: dialog.clone()
@@ -462,19 +562,37 @@ mod tests {
             [3]
         );
         assert_eq!(roundtrip(&ClearDialog), Vec::<u8>::new());
+        assert!(from_bytes_exact::<ConfigShowDialog>(&[0]).is_err());
+        let mut huge = vec![9, 1, 0x00, 0x30, 0x00, 0x00];
+        huge.extend(vec![0; 0x30_0000]);
+        assert!(from_bytes_exact::<NetworkNbt>(&huge).is_err());
+        assert!(from_bytes_exact::<ConfigShowDialog>(&huge).is_ok());
     }
 
     #[test]
     fn tags_and_effects() {
-        roundtrip(&UpdateTags {
+        let tags = UpdateTags {
             registries: vec![RegistryTags {
-                registry: id("block"),
-                tags: vec![],
+                registry: id("a:b"),
+                tags: vec![crate::types::registry::TagEntries {
+                    name: id("c:d"),
+                    ids: crate::types::registry::IdList(vec![1, 300]),
+                }],
             }],
-        });
-        roundtrip(&PostEffects {
-            effects: vec![id("a:b")],
-        });
+        };
+        assert_eq!(
+            roundtrip(&tags),
+            [
+                1, 3, b'a', b':', b'b', 1, 3, b'c', b':', b'd', 2, 1, 0xac, 2
+            ]
+        );
+        assert_eq!(
+            roundtrip(&PostEffects {
+                post_effects: vec![id("a:b")],
+            }),
+            [1, 3, b'a', b':', b'b']
+        );
+        assert_eq!(roundtrip(&ResourcePackPop { id: None }), [0]);
     }
 
     #[test]
@@ -491,8 +609,58 @@ mod tests {
                 },
             ],
         };
-        let bytes = roundtrip(&links);
-        assert_eq!(&bytes[..3], [2, 1, 6]);
+        let mut expected = vec![2, 1, 6, 9];
+        expected.extend(*b"https://a");
+        expected.extend([0, 8, 0, 4]);
+        expected.extend(*b"Wiki");
+        expected.push(9);
+        expected.extend(*b"https://b");
+        assert_eq!(roundtrip(&links), expected);
+        let unknown = from_bytes_exact::<ServerLinkLabel>(&[1, 42]).unwrap();
+        assert_eq!(unknown, ServerLinkLabel::Known(KnownLinkType::BugReport));
+    }
+
+    #[test]
+    fn clientbound_payload_limit() {
+        let mut bytes = vec![3, b'a', b':', b'b'];
+        bytes.resize(4 + MAX_CLIENTBOUND_PAYLOAD, 0);
+        assert!(from_bytes_exact::<ClientboundCustomPayload>(&bytes).is_ok());
+        bytes.push(0);
+        assert!(from_bytes_exact::<ClientboundCustomPayload>(&bytes).is_err());
+    }
+
+    #[test]
+    fn resource_pack_push_bytes() {
+        let push = ResourcePackPush {
+            id: Uuid::from_u128(1),
+            url: "u".into(),
+            hash: "h".into(),
+            required: false,
+            prompt: None,
+        };
+        let mut expected = Uuid::from_u128(1).as_bytes().to_vec();
+        expected.extend([1, b'u', 1, b'h', 0, 0]);
+        assert_eq!(roundtrip(&push), expected);
+        let long_hash = to_bytes(&ResourcePackPush {
+            hash: "x".repeat(41),
+            ..push
+        });
+        assert!(from_bytes_exact::<ResourcePackPush>(&long_hash).is_err());
+    }
+
+    #[test]
+    fn report_details_bytes() {
+        let details = CustomReportDetails {
+            details: LengthPrefixed(vec![ReportDetail {
+                key: "k".into(),
+                value: "v".into(),
+            }]),
+        };
+        assert_eq!(roundtrip(&details), [1, 1, b'k', 1, b'v']);
+        let too_many = to_bytes(&CustomReportDetails {
+            details: LengthPrefixed(vec![details.details.0[0].clone(); 33]),
+        });
+        assert!(from_bytes_exact::<CustomReportDetails>(&too_many).is_err());
     }
 
     #[test]
@@ -511,10 +679,13 @@ mod tests {
             payload: None,
         };
         assert_eq!(roundtrip(&none), [3, b'a', b':', b'b', 1, 0]);
-        roundtrip(&CustomClickAction {
-            id: id("a:b"),
-            payload: Some(Value::Int(5)),
-        });
+        assert_eq!(
+            roundtrip(&CustomClickAction {
+                id: id("a:b"),
+                payload: Some(Value::Int(5)),
+            }),
+            [3, b'a', b':', b'b', 5, 3, 0, 0, 0, 5]
+        );
     }
 
     #[test]

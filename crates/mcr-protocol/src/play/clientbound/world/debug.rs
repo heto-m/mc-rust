@@ -45,13 +45,21 @@ impl DebugValue<'_> {
     }
 }
 
+impl DebugSubscription {
+    fn require_value_codec(self) -> Result<Self> {
+        if self == Self::DedicatedServerTickTime {
+            return Err(DecodeError::InvalidValue {
+                what: "debug subscription without a value codec",
+                value: self as i64,
+            });
+        }
+        Ok(self)
+    }
+}
+
 impl<'a> DebugValue<'a> {
     fn decode_value(subscription: DebugSubscription, input: &mut &'a [u8]) -> Result<Self> {
-        match subscription {
-            DebugSubscription::DedicatedServerTickTime => Err(DecodeError::InvalidValue {
-                what: "debug subscription without a value codec",
-                value: subscription as i64,
-            }),
+        match subscription.require_value_codec()? {
             DebugSubscription::VillageSections => Ok(Self::VillageSections),
             DebugSubscription::Raids => Vec::decode(input).map(Self::Raids),
             DebugSubscription::NeighborUpdates => {
@@ -80,7 +88,7 @@ impl Encode for DebugUpdate<'_> {
 
 impl<'a> Decode<'a> for DebugUpdate<'a> {
     fn decode(input: &mut &'a [u8]) -> Result<Self> {
-        let subscription = DebugSubscription::decode(input)?;
+        let subscription = DebugSubscription::decode(input)?.require_value_codec()?;
         let value = if bool::decode(input)? {
             Some(DebugValue::decode_value(subscription, input)?)
         } else {
@@ -182,7 +190,10 @@ mod tests {
             },
         };
         let bytes = to_bytes(&present);
-        assert_eq!(&bytes[8..], [11, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(
+            bytes,
+            [0, 0, 0, 0, 0, 0, 0, 5, 11, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1]
+        );
         assert_eq!(
             from_bytes_exact::<DebugBlockValue>(&bytes).unwrap(),
             present
@@ -202,11 +213,29 @@ mod tests {
     }
 
     #[test]
+    fn chunk_value_bytes() {
+        let bytes = [0xff, 0xff, 0xff, 0xff, 0, 0, 0, 2, 10, 1];
+        let packet = DebugChunkValue {
+            pos: ChunkPos { x: 2, z: -1 },
+            update: DebugUpdate {
+                subscription: DebugSubscription::VillageSections,
+                value: Some(DebugValue::VillageSections),
+            },
+        };
+        assert_eq!(from_bytes_exact::<DebugChunkValue>(&bytes).unwrap(), packet);
+        assert_eq!(to_bytes(&packet), bytes);
+    }
+
+    #[test]
     fn rejects_unknown_and_valueless_subscriptions() {
         assert!(matches!(
             from_bytes_exact::<DebugEvent>(&[99]),
             Err(DecodeError::InvalidValue { .. })
         ));
         assert!(from_bytes_exact::<DebugEvent>(&[0]).is_err());
+        assert!(matches!(
+            from_bytes_exact::<DebugEntityValue>(&[3, 0, 0]),
+            Err(DecodeError::InvalidValue { .. })
+        ));
     }
 }

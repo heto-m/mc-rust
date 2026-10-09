@@ -4,7 +4,7 @@ mod common;
 mod recipe;
 
 use mcr_buf::{BlockPos, Decode, DecodeError, Encode, Identifier, Result, read_len, take};
-use mcr_nbt::{NetworkNbt, OptionalNetworkNbt};
+use mcr_nbt::{NetworkCompound, NetworkNbt, OptionalNetworkNbt, Value};
 use uuid::Uuid;
 
 pub use self::{
@@ -13,18 +13,20 @@ pub use self::{
         SelectAdvancementsTab, UpdateAdvancements,
     },
     commands::{ArgumentParser, CommandNode, Commands, NodeKind, StringKind},
-    common::{
-        ComponentPatch, ComponentPredicate, HolderSet, ItemStackTemplate, Pairs, optional_varint,
-    },
+    common::{Pairs, optional_varint},
     recipe::{
         PlaceGhostRecipe, RecipeBookAdd, RecipeBookEntry, RecipeBookRemove, RecipeBookSettings,
         RecipeBookTypeSettings, RecipeDisplay, RecipeDisplayEntry, SlotDisplay, StonecutterRecipe,
-        TrimPattern, UpdateRecipes,
+        UpdateRecipes,
     },
 };
 use crate::{
     packet,
-    types::{Component, ItemStack},
+    types::{
+        Component, ItemStack,
+        component::DataComponent,
+        game::{Hand, SignSide},
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
@@ -107,24 +109,12 @@ pub struct OpenScreen {
 
 packet!(OpenScreen, "open_screen", Clientbound);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
-pub enum Hand {
-    MainHand,
-    OffHand,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct OpenBook {
     pub hand: Hand,
 }
 
 packet!(OpenBook, "open_book", Clientbound);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
-pub enum SignSide {
-    Back,
-    Front,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct OpenSignEditor {
@@ -140,7 +130,7 @@ pub struct ItemCost {
     pub item: i32,
     #[mcr(varint)]
     pub count: i32,
-    pub components: ComponentPredicate,
+    pub components: Vec<DataComponent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
@@ -363,11 +353,34 @@ pub struct TabList {
 
 packet!(TabList, "tab_list", Clientbound);
 
+/// Vanilla `readNbt`: the End tag is absent, any root other than a compound is an error.
+mod optional_compound {
+    use super::*;
+
+    pub fn encode(tag: &Option<NetworkCompound>, out: &mut Vec<u8>) {
+        match tag {
+            Some(tag) => tag.encode(out),
+            None => OptionalNetworkNbt(None).encode(out),
+        }
+    }
+
+    pub fn decode(input: &mut &[u8]) -> Result<Option<NetworkCompound>> {
+        match OptionalNetworkNbt::decode(input)?.0 {
+            None => Ok(None),
+            Some(Value::Compound(compound)) => Ok(Some(NetworkCompound(compound))),
+            Some(_) => Err(DecodeError::Other(
+                "tag query root is not a compound".into(),
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct TagQuery {
     #[mcr(varint)]
     pub transaction_id: i32,
-    pub tag: OptionalNetworkNbt,
+    #[mcr(with = optional_compound)]
+    pub tag: Option<NetworkCompound>,
 }
 
 packet!(TagQuery, "tag_query", Clientbound);
@@ -677,12 +690,7 @@ mod tests {
             }),
             [0, 0, 0, 0, 0, 0, 0x10, 0, 1]
         );
-        assert_eq!(
-            roundtrip(&OpenBook {
-                hand: Hand::OffHand
-            }),
-            [1]
-        );
+        assert_eq!(roundtrip(&OpenBook { hand: Hand::Off }), [1]);
         assert_eq!(
             roundtrip(&Cooldown {
                 cooldown_group: Identifier::parse("a:b").unwrap(),
@@ -852,13 +860,131 @@ mod tests {
             }],
         };
         assert_eq!(roundtrip(&packet), [1, 2, 3, 1, 2, b'm', b'e', 0]);
+        let with_tooltip = CommandSuggestions {
+            suggestions: vec![Suggestion {
+                text: "me".into(),
+                tooltip: Some(Component::text("t")),
+            }],
+            ..packet
+        };
+        assert_eq!(
+            roundtrip(&with_tooltip),
+            [1, 2, 3, 1, 2, b'm', b'e', 1, 8, 0, 1, b't']
+        );
         assert_eq!(
             roundtrip(&TagQuery {
                 transaction_id: 5,
-                tag: OptionalNetworkNbt(None),
+                tag: None,
             }),
             [5, 0]
         );
+        let mut compound = mcr_nbt::Compound::new();
+        compound.insert("a", 1i32);
+        assert_eq!(
+            roundtrip(&TagQuery {
+                transaction_id: 5,
+                tag: Some(NetworkCompound(compound)),
+            }),
+            [5, 10, 3, 0, 1, b'a', 0, 0, 0, 1, 0]
+        );
+        assert!(TagQuery::decode(&mut &[5u8, 8, 0, 0][..]).is_err());
+    }
+
+    #[test]
+    fn screens_and_text() {
+        let mut expected = vec![1, 2, 8, 0, 5];
+        expected.extend_from_slice(b"Chest");
+        assert_eq!(
+            roundtrip(&OpenScreen {
+                container_id: 1,
+                menu_type: 2,
+                title: Component::text("Chest"),
+            }),
+            expected
+        );
+        assert_eq!(
+            roundtrip(&TabList {
+                header: Component::text("h"),
+                footer: Component::text(""),
+            }),
+            [8, 0, 1, b'h', 8, 0, 0]
+        );
+        assert_eq!(
+            roundtrip(&ResetScore {
+                owner: "a".into(),
+                objective_name: Some("o".into()),
+            }),
+            [1, b'a', 1, 1, b'o']
+        );
+    }
+
+    #[test]
+    fn inventory_slots() {
+        assert_eq!(
+            roundtrip(&SetCursorItem {
+                contents: ItemStack::new(5, 2),
+            }),
+            [2, 5, 0, 0]
+        );
+        assert_eq!(
+            roundtrip(&SetCursorItem {
+                contents: ItemStack::default(),
+            }),
+            [0]
+        );
+        assert_eq!(
+            roundtrip(&SetPlayerInventory {
+                slot: 40,
+                contents: ItemStack::new(1, 64),
+            }),
+            [40, 64, 1, 0, 0]
+        );
+    }
+
+    #[test]
+    fn merchant_offers_bytes() {
+        let packet = MerchantOffers {
+            container_id: 1,
+            offers: vec![MerchantOffer {
+                cost_a: ItemCost {
+                    item: 7,
+                    count: 2,
+                    components: vec![DataComponent::Damage(VarInt(3))],
+                },
+                result: ItemStack::new(8, 1),
+                cost_b: Some(ItemCost {
+                    item: 9,
+                    count: 1,
+                    components: vec![],
+                }),
+                out_of_stock: true,
+                uses: 1,
+                max_uses: 12,
+                xp: 5,
+                special_price_diff: -1,
+                price_multiplier: 0.05,
+                demand: 0,
+            }],
+            villager_level: 2,
+            villager_xp: 10,
+            show_progress: true,
+            can_restock: false,
+        };
+        #[rustfmt::skip]
+        assert_eq!(roundtrip(&packet), [
+            1, 1,
+            7, 2, 1, 3, 3,
+            1, 8, 0, 0,
+            1, 9, 1, 0,
+            1,
+            0, 0, 0, 1,
+            0, 0, 0, 12,
+            0, 0, 0, 5,
+            0xff, 0xff, 0xff, 0xff,
+            0x3d, 0x4c, 0xcc, 0xcd,
+            0, 0, 0, 0,
+            2, 10, 1, 0,
+        ]);
     }
 
     #[test]
@@ -869,63 +995,29 @@ mod tests {
         roundtrip(&remove);
     }
 
-    macro_rules! needs_placeholder {
-        ($($name:ident: $reason:literal => $value:expr;)*) => {$(
+    macro_rules! roundtrip_cases {
+        ($($name:ident => $value:expr;)*) => {$(
             #[test]
-            #[ignore = $reason]
             fn $name() {
                 roundtrip(&$value);
             }
         )*};
     }
 
-    needs_placeholder! {
-        container_set_content: "needs item stacks" => ContainerSetContent {
+    roundtrip_cases! {
+        container_set_content => ContainerSetContent {
             container_id: 1,
             state_id: 2,
             items: vec![ItemStack::default()],
             carried_item: ItemStack::default(),
         };
-        container_set_slot: "needs item stacks" => ContainerSetSlot {
+        container_set_slot => ContainerSetSlot {
             container_id: 1,
             state_id: 2,
             slot: 3,
             item: ItemStack::default(),
         };
-        set_cursor_item: "needs item stacks" => SetCursorItem { contents: ItemStack::default() };
-        set_player_inventory: "needs item stacks" => SetPlayerInventory {
-            slot: 1,
-            contents: ItemStack::default(),
-        };
-        open_screen: "needs text components" => OpenScreen {
-            container_id: 1,
-            menu_type: 2,
-            title: Component::default(),
-        };
-        merchant_offers: "needs item stacks and data component predicates" => MerchantOffers {
-            container_id: 1,
-            offers: vec![MerchantOffer {
-                cost_a: ItemCost {
-                    item: 1,
-                    count: 2,
-                    components: ComponentPredicate::default(),
-                },
-                result: ItemStack::default(),
-                cost_b: None,
-                out_of_stock: false,
-                uses: 1,
-                max_uses: 2,
-                xp: 3,
-                special_price_diff: 4,
-                price_multiplier: 0.05,
-                demand: 5,
-            }],
-            villager_level: 2,
-            villager_xp: 10,
-            show_progress: true,
-            can_restock: true,
-        };
-        boss_event_add: "needs text components" => BossEvent {
+        boss_event_add => BossEvent {
             id: Uuid::from_u128(1),
             operation: BossEventOperation::Add {
                 name: Component::default(),
@@ -935,14 +1027,10 @@ mod tests {
                 flags: BossBarFlags::default(),
             },
         };
-        text_packets: "needs text components" => TabList {
-            header: Component::default(),
-            footer: Component::default(),
-        };
-        title_text: "needs text components" => SetTitleText { text: Component::default() };
-        subtitle_text: "needs text components" => SetSubtitleText { text: Component::default() };
-        action_bar_text: "needs text components" => SetActionBarText { text: Component::default() };
-        set_objective_add: "needs text components" => SetObjective {
+        title_text => SetTitleText { text: Component::default() };
+        subtitle_text => SetSubtitleText { text: Component::default() };
+        action_bar_text => SetActionBarText { text: Component::default() };
+        set_objective_add => SetObjective {
             objective_name: "o".into(),
             action: ObjectiveAction::Add(ObjectiveDisplay {
                 display_name: Component::default(),
@@ -950,7 +1038,7 @@ mod tests {
                 number_format: Some(NumberFormat::Fixed(Component::default())),
             }),
         };
-        team_add: "needs text components" => SetPlayerTeam {
+        team_add => SetPlayerTeam {
             name: "t".into(),
             action: TeamAction::Add {
                 parameters: TeamParameters {

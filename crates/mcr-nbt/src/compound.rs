@@ -70,6 +70,10 @@ impl Compound {
         self.entries.iter().map(|(_, v)| v)
     }
 
+    pub fn values_mut(&mut self) -> impl ExactSizeIterator<Item = &mut Value> {
+        self.entries.iter_mut().map(|(_, v)| v)
+    }
+
     fn position(&self, key: &str) -> Option<usize> {
         let Some(slots) = &self.index else {
             return self.entries.iter().position(|(k, _)| k == key);
@@ -122,6 +126,24 @@ impl Compound {
             }
         }
         None
+    }
+
+    /// Reorders entries as vanilla's `HashMap`-backed compound iterates them, so encoded bytes
+    /// match a vanilla peer. Ties keep insertion order.
+    pub fn sort_vanilla_order(&mut self) {
+        let mut capacity = 16usize;
+        while self.entries.len() * 4 > capacity * 3 {
+            capacity *= 2;
+        }
+        self.entries.sort_by_cached_key(|(k, _)| {
+            let h = k
+                .encode_utf16()
+                .fold(0u32, |h, unit| h.wrapping_mul(31).wrapping_add(unit.into()));
+            ((h ^ (h >> 16)) as usize) & (capacity - 1)
+        });
+        if self.index.is_some() {
+            self.index = Some(build_index(&self.entries));
+        }
     }
 
     pub fn remove(&mut self, key: &str) -> Option<Value> {

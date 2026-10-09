@@ -103,7 +103,7 @@ pub struct Filterable<T> {
     pub filtered: Option<T>,
 }
 
-#[derive(Debug, Clone, PartialEq, mcr_buf::Encode, mcr_buf::Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, mcr_buf::Encode, mcr_buf::Decode)]
 pub struct GlobalPos {
     pub dimension: Identifier,
     pub pos: mcr_buf::BlockPos,
@@ -148,6 +148,24 @@ pub enum EquipmentSlot {
     OffHand = 5,
     Body = 6,
     Saddle = 7,
+}
+
+impl EquipmentSlot {
+    /// Declaration order, which `set_equipment` writes instead of the component id.
+    pub const ALL: [Self; 8] = [
+        Self::MainHand,
+        Self::OffHand,
+        Self::Feet,
+        Self::Legs,
+        Self::Chest,
+        Self::Head,
+        Self::Body,
+        Self::Saddle,
+    ];
+
+    pub fn ordinal(self) -> u8 {
+        Self::ALL.iter().position(|&s| s == self).unwrap() as u8
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
@@ -233,5 +251,26 @@ impl DepthGuard {
 impl Drop for DepthGuard {
     fn drop(&mut self) {
         DEPTH.with(|d| d.set(d.get() - 1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::roundtrip;
+
+    #[test]
+    fn holder_set_forms() {
+        let tag = HolderSet::Tag(Identifier::parse("planks").unwrap());
+        let mut expected = vec![0, 16];
+        expected.extend_from_slice(b"minecraft:planks");
+        assert_eq!(roundtrip(&tag), expected);
+        assert_eq!(roundtrip(&HolderSet::Ids(vec![5, 300])), [3, 5, 0xac, 2]);
+        assert_eq!(roundtrip(&HolderSet::Ids(vec![])), [1]);
+    }
+
+    #[test]
+    fn holder_set_rejects_oversized_count() {
+        assert!(HolderSet::decode(&mut &[0xff, 0xff, 0xff, 0x7f][..]).is_err());
     }
 }

@@ -4,8 +4,14 @@ use mcr_buf::{
     Decode, DecodeError, Encode, IdOr, Identifier, Result, VarInt, read_varint, write_varint,
 };
 
-use super::common::{HolderSet, ItemStackTemplate, Pairs, optional_varint};
-use crate::{packet, types::Component};
+use super::common::{Pairs, optional_varint};
+use crate::{
+    packet,
+    types::{
+        component::{HolderSet, TrimPattern},
+        item::ItemStackTemplate,
+    },
+};
 
 const MAX_SLOT_DISPLAY_DEPTH: u32 = 64;
 
@@ -31,13 +37,6 @@ impl Drop for DepthGuard {
     fn drop(&mut self) {
         DEPTH.with(|depth| depth.set(depth.get() - 1));
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Encode, Decode)]
-pub struct TrimPattern {
-    pub asset_id: Identifier,
-    pub description: Component,
-    pub decal: bool,
 }
 
 /// Variants follow the `minecraft:slot_display` registry order.
@@ -292,7 +291,7 @@ mod tests {
     use mcr_buf::to_bytes;
 
     use super::*;
-    use crate::{play::clientbound::ui::common::ComponentPatch, test_util::roundtrip};
+    use crate::test_util::roundtrip;
 
     fn item(id: i32) -> SlotDisplay {
         SlotDisplay::Item(id)
@@ -307,7 +306,7 @@ mod tests {
         let nested = SlotDisplay::Dyed {
             dye: Box::new(SlotDisplay::WithAnyPotion(Box::new(SlotDisplay::AnyFuel))),
             target: Box::new(SlotDisplay::OnlyWithComponent {
-                source: Box::new(SlotDisplay::Tag(HolderSet::Direct(vec![1, 2]))),
+                source: Box::new(SlotDisplay::Tag(HolderSet::Ids(vec![1, 2]))),
                 component: 9,
             }),
         };
@@ -387,7 +386,7 @@ mod tests {
                     },
                     group: Some(0),
                     category: 3,
-                    crafting_requirements: Some(vec![HolderSet::Direct(vec![9])]),
+                    crafting_requirements: Some(vec![HolderSet::Ids(vec![9])]),
                 },
                 flags: 3,
             }],
@@ -432,7 +431,7 @@ mod tests {
                 vec![VarInt(4)],
             )]),
             stonecutter_recipes: vec![StonecutterRecipe {
-                input: HolderSet::Direct(vec![2]),
+                input: HolderSet::Ids(vec![2]),
                 option_display: item(8),
             }],
         };
@@ -450,24 +449,24 @@ mod tests {
     }
 
     #[test]
-    fn place_ghost_recipe_roundtrip() {
-        roundtrip(&PlaceGhostRecipe {
+    fn place_ghost_recipe_bytes() {
+        let packet = PlaceGhostRecipe {
             container_id: 2,
             recipe_display: RecipeDisplay::Stonecutter {
                 input: item(1),
                 result: item(2),
                 crafting_station: item(3),
             },
-        });
+        };
+        assert_eq!(roundtrip(&packet), [2, 3, 4, 1, 4, 2, 4, 3]);
     }
 
     #[test]
-    #[ignore = "needs data component patch"]
     fn item_stack_slot_display_roundtrip() {
         roundtrip(&SlotDisplay::ItemStack(ItemStackTemplate {
             item: 1,
             count: 1,
-            components: ComponentPatch::default(),
+            components: Default::default(),
         }));
     }
 }

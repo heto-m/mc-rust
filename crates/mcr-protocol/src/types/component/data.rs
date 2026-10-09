@@ -10,7 +10,11 @@ use super::common::{
     FireworkShape, GlobalPos, HolderSet, ItemUseAnimation, ResolvableFloat, ResolvableInt,
     SwingAnimationType, either_codec,
 };
-use crate::types::{Component, SoundEvent, item::ItemStackTemplate};
+use crate::types::{
+    Component, SoundEvent,
+    item::ItemStackTemplate,
+    profile::{GameProfile, ProfileProperty},
+};
 
 pub type SoundHolder = IdOr<SoundEvent>;
 
@@ -380,23 +384,9 @@ pub struct Fireworks {
     pub explosions: LengthPrefixed<FireworkExplosion, 256>,
 }
 
-#[derive(Debug, Clone, PartialEq, Encode, Decode)]
-pub struct ProfileProperty {
-    pub name: BoundedString<64>,
-    pub value: String,
-    pub signature: Option<BoundedString<1024>>,
-}
-
 pub type ProfileProperties = LengthPrefixed<ProfileProperty, 16>;
 
-#[derive(Debug, Clone, PartialEq, Encode, Decode)]
-pub struct GameProfile {
-    pub id: Uuid,
-    pub name: BoundedString<16>,
-    pub properties: ProfileProperties,
-}
-
-#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Default, Encode, Decode)]
 pub struct PartialProfile {
     pub name: Option<BoundedString<16>>,
     pub id: Option<Uuid>,

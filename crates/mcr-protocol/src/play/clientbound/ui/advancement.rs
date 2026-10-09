@@ -1,7 +1,10 @@
 use mcr_buf::{Decode, Encode, Identifier, Result};
 
-use super::common::{ItemStackTemplate, Pairs};
-use crate::{packet, types::Component};
+use super::common::Pairs;
+use crate::{
+    packet,
+    types::{Component, item::ItemStackTemplate},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub enum AdvancementFrame {
@@ -116,7 +119,7 @@ packet!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{play::clientbound::ui::common::ComponentPatch, test_util::roundtrip};
+    use crate::test_util::roundtrip;
 
     fn plain(display: Option<DisplayInfo>) -> Advancement {
         Advancement {
@@ -183,7 +186,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs Component and data component patch"]
     fn display_info_roundtrip() {
         let display = DisplayInfo {
             title: Component::default(),
@@ -191,7 +193,7 @@ mod tests {
             icon: ItemStackTemplate {
                 item: 1,
                 count: 1,
-                components: ComponentPatch::default(),
+                components: Default::default(),
             },
             frame: AdvancementFrame::Goal,
             background: Some(Identifier::parse("textures/bg.png").unwrap()),

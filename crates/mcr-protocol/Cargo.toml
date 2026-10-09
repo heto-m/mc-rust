@@ -15,9 +15,14 @@ uuid = "1"
 [dev-dependencies]
 criterion.workspace = true
 mcr-world = { path = "../mcr-world" }
+serde_json.workspace = true
 
 [[bench]]
 name = "move_player"
+harness = false
+
+[[bench]]
+name = "dispatch"
 harness = false
 
 [lints]

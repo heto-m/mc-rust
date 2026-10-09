@@ -1,6 +1,7 @@
-use mcr_buf::{ByteArray, Decode, Encode, Identifier, RestBytes};
+use mcr_buf::{ByteArray, Decode, Encode, Identifier, RestBytes, Result, read_varint};
 use uuid::Uuid;
 
+use crate::common::{MAX_CLIENTBOUND_PAYLOAD, decode_rest_bytes};
 use crate::packet;
 use crate::types::profile::GameProfile;
 
@@ -32,12 +33,22 @@ pub struct LoginCompression {
     pub threshold: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode)]
 pub struct CustomQuery<'a> {
     #[mcr(varint)]
     pub transaction_id: i32,
     pub channel: Identifier,
     pub data: RestBytes<'a>,
+}
+
+impl<'a> Decode<'a> for CustomQuery<'a> {
+    fn decode(input: &mut &'a [u8]) -> Result<Self> {
+        Ok(Self {
+            transaction_id: read_varint(input)?,
+            channel: Identifier::decode(input)?,
+            data: decode_rest_bytes(input, MAX_CLIENTBOUND_PAYLOAD)?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
@@ -128,6 +139,9 @@ mod tests {
             data: RestBytes(&[7, 7]),
         };
         assert_eq!(roundtrip!(&query), [3, 3, b'a', b':', b'b', 7, 7]);
+        let mut oversized = vec![3, 3, b'a', b':', b'b'];
+        oversized.resize(5 + MAX_CLIENTBOUND_PAYLOAD + 1, 0);
+        assert!(from_bytes_exact::<CustomQuery>(&oversized).is_err());
         assert_eq!(
             roundtrip!(&CustomQueryAnswer {
                 transaction_id: 1,

@@ -1,7 +1,4 @@
-use mcr_buf::{
-    Decode, DecodeError, Encode, Identifier, Result, prealloc_capacity, read_len, read_varint,
-    write_varint,
-};
+use mcr_buf::{Decode, Encode, Result, prealloc_capacity, read_len, read_varint, write_varint};
 
 /// Vanilla `ByteBufCodecs.map`: VarInt count, then key and value per entry, in order.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,92 +23,6 @@ impl<'a, K: Decode<'a>, V: Decode<'a>> Decode<'a> for Pairs<K, V> {
         }
         Ok(Self(pairs))
     }
-}
-
-/// An item holder set: a tag reference or an explicit list of item registry ids.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HolderSet {
-    Tag(Identifier),
-    Direct(Vec<i32>),
-}
-
-impl Encode for HolderSet {
-    fn encode(&self, out: &mut Vec<u8>) {
-        match self {
-            Self::Tag(tag) => {
-                write_varint(out, 0);
-                tag.encode(out);
-            }
-            Self::Direct(ids) => {
-                write_varint(out, ids.len() as i32 + 1);
-                for &id in ids {
-                    write_varint(out, id);
-                }
-            }
-        }
-    }
-}
-
-impl Decode<'_> for HolderSet {
-    fn decode(input: &mut &[u8]) -> Result<Self> {
-        let count = read_varint(input)?;
-        if count == 0 {
-            return Identifier::decode(input).map(Self::Tag);
-        }
-        let len = usize::try_from(count - 1).map_err(|_| DecodeError::NegativeLength(count))?;
-        if len > input.len() {
-            return Err(DecodeError::UnexpectedEof);
-        }
-        let mut ids = Vec::with_capacity(prealloc_capacity::<i32>(len));
-        for _ in 0..len {
-            ids.push(read_varint(input)?);
-        }
-        Ok(Self::Direct(ids))
-    }
-}
-
-/// Stand-in for vanilla's `DataComponentPatch`, which needs the data component registry.
-#[derive(Debug, Clone, PartialEq, Default)]
-#[non_exhaustive]
-pub struct ComponentPatch {}
-
-impl Encode for ComponentPatch {
-    fn encode(&self, _out: &mut Vec<u8>) {
-        todo!("data component patch")
-    }
-}
-
-impl Decode<'_> for ComponentPatch {
-    fn decode(_input: &mut &[u8]) -> Result<Self> {
-        todo!("data component patch")
-    }
-}
-
-/// Stand-in for vanilla's `DataComponentExactPredicate`.
-#[derive(Debug, Clone, PartialEq, Default)]
-#[non_exhaustive]
-pub struct ComponentPredicate {}
-
-impl Encode for ComponentPredicate {
-    fn encode(&self, _out: &mut Vec<u8>) {
-        todo!("data component predicate")
-    }
-}
-
-impl Decode<'_> for ComponentPredicate {
-    fn decode(_input: &mut &[u8]) -> Result<Self> {
-        todo!("data component predicate")
-    }
-}
-
-/// An item stack without the empty case: item id, then count, then components.
-#[derive(Debug, Clone, PartialEq, Encode, Decode)]
-pub struct ItemStackTemplate {
-    #[mcr(varint)]
-    pub item: i32,
-    #[mcr(varint)]
-    pub count: i32,
-    pub components: ComponentPatch,
 }
 
 /// `OPTIONAL_VAR_INT`: 0 is absent, otherwise the value plus one.
@@ -141,21 +52,6 @@ mod tests {
     fn pairs_keep_order() {
         let pairs = Pairs(vec![(VarInt(2), true), (VarInt(1), false)]);
         assert_eq!(roundtrip(&pairs), [2, 2, 1, 1, 0]);
-    }
-
-    #[test]
-    fn holder_set_forms() {
-        let tag = HolderSet::Tag(Identifier::parse("planks").unwrap());
-        let mut expected = vec![0, 16];
-        expected.extend_from_slice(b"minecraft:planks");
-        assert_eq!(roundtrip(&tag), expected);
-        assert_eq!(roundtrip(&HolderSet::Direct(vec![5, 300])), [3, 5, 0xac, 2]);
-        assert_eq!(roundtrip(&HolderSet::Direct(vec![])), [1]);
-    }
-
-    #[test]
-    fn holder_set_rejects_oversized_count() {
-        assert!(HolderSet::decode(&mut &[0xff, 0xff, 0xff, 0x7f][..]).is_err());
     }
 
     #[test]

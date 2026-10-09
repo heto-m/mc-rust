@@ -5,7 +5,7 @@ use mcr_buf::{
 use mcr_nbt::NetworkCompound;
 
 use crate::packet;
-use crate::types::{ChunkPos, Component, Particle, SoundEvent, Vec3d};
+use crate::types::{ChunkPos, Component, Particle, SoundEvent, Vec3d, game::Vec3i};
 
 pub mod debug;
 
@@ -27,16 +27,6 @@ pub enum SoundSource {
     Ambient,
     Voice,
     Ui,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Encode, Decode)]
-pub struct Vec3i {
-    #[mcr(varint)]
-    pub x: i32,
-    #[mcr(varint)]
-    pub y: i32,
-    #[mcr(varint)]
-    pub z: i32,
 }
 
 /// Chunk-section coordinates, packed as x (22 bits) | z (22 bits) | y (20 bits).
@@ -124,10 +114,26 @@ pub struct ChunkBatchFinished {
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct ChunkBatchStart;
 
+mod biome_buffer {
+    use mcr_buf::{ByteArray, Encode, Result, read_len, take};
+
+    const MAX_LEN: usize = 2 * 1024 * 1024;
+
+    pub fn encode(buffer: &ByteArray<'_>, out: &mut Vec<u8>) {
+        buffer.encode(out);
+    }
+
+    pub fn decode<'a>(input: &mut &'a [u8]) -> Result<ByteArray<'a>> {
+        let len = read_len(input, MAX_LEN)?;
+        take(input, len).map(ByteArray)
+    }
+}
+
 /// Serialised biome containers, one per section; decoded by `mcr-world` with registry sizes.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct ChunkBiomeData<'a> {
     pub pos: ChunkPos,
+    #[mcr(with = biome_buffer)]
     pub buffer: ByteArray<'a>,
 }
 

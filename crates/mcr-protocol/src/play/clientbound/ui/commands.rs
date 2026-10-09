@@ -550,6 +550,35 @@ mod tests {
             }),
             [1, 1, 0x3f, 0x80, 0, 0]
         );
+        assert_eq!(
+            to_bytes(&ArgumentParser::Double {
+                min: None,
+                max: Some(9.0)
+            }),
+            [2, 2, 0x40, 0x22, 0, 0, 0, 0, 0, 0]
+        );
+        #[rustfmt::skip]
+        assert_eq!(
+            to_bytes(&ArgumentParser::Long { min: Some(i64::MIN), max: Some(-1) }),
+            [4, 3, 0x80, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+        );
+        assert_eq!(
+            to_bytes(&ArgumentParser::String(StringKind::GreedyPhrase)),
+            [5, 2]
+        );
+        assert_eq!(
+            to_bytes(&ArgumentParser::ScoreHolder { multiple: true }),
+            [31, 1]
+        );
+        assert_eq!(to_bytes(&ArgumentParser::Time { min: 1 }), [43, 0, 0, 0, 1]);
+        let mut expected = vec![47, 19];
+        expected.extend_from_slice(b"minecraft:dimension");
+        assert_eq!(
+            to_bytes(&ArgumentParser::ResourceKey(
+                Identifier::parse("dimension").unwrap()
+            )),
+            expected
+        );
     }
 
     #[test]

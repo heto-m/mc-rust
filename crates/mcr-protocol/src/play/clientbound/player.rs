@@ -1,49 +1,28 @@
 mod chat;
 mod info;
 
-use mcr_buf::{
-    BlockPos, Decode, DecodeError, Encode, Identifier, Result, VarInt, read_varint, write_varint,
-};
+use mcr_buf::{Decode, DecodeError, Encode, Identifier, Result, VarInt, read_varint, write_varint};
 
 pub use self::{
     chat::{
         BoundChatType, ChatParameter, ChatType, ChatTypeDecoration, CompletionAction,
-        CustomChatCompletions, DeleteChat, DisguisedChat, FilterMask, MessageSignature,
-        PackedSignature, PlayerChat, SignedMessageBody, SystemChat,
+        CustomChatCompletions, DeleteChat, DisguisedChat, FilterMask, PackedSignature, PlayerChat,
+        SignedMessageBody, SystemChat,
     },
     info::{
         PlayerInfoAction, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate, PlayerProfile,
-        ProfileProperty, RemoteChatSession,
+        RemoteChatSession,
     },
 };
 use super::ui::Pairs;
 use crate::{
     packet,
-    types::{Component, Vec3d},
+    types::{
+        Component, Vec3d,
+        component::GlobalPos,
+        game::{Difficulty, GameType},
+    },
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Encode, Decode)]
-pub enum GameType {
-    #[default]
-    Survival,
-    Creative,
-    Adventure,
-    Spectator,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
-pub enum Difficulty {
-    Peaceful,
-    Easy,
-    Normal,
-    Hard,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-pub struct GlobalPos {
-    pub dimension: Identifier,
-    pub pos: BlockPos,
-}
 
 /// `0` is absent, otherwise the game type id plus one.
 mod optional_game_type {
@@ -327,13 +306,6 @@ pub struct ServerData {
 packet!(ServerData, "server_data", Clientbound);
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-pub struct PostEffects {
-    pub post_effects: Vec<Identifier>,
-}
-
-packet!(PostEffects, "post_effects", Clientbound);
-
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct GameRuleValues {
     pub values: Pairs<Identifier, String>,
 }
@@ -357,8 +329,10 @@ packet!(AwardStats, "award_stats", Clientbound);
 
 #[cfg(test)]
 mod tests {
+    use mcr_buf::BlockPos;
+
     use super::*;
-    use crate::test_util::roundtrip;
+    use crate::{common::PostEffects, test_util::roundtrip};
 
     fn spawn_info() -> CommonPlayerSpawnInfo {
         CommonPlayerSpawnInfo {
@@ -427,6 +401,24 @@ mod tests {
             roundtrip(&Respawn {
                 spawn_info: spawn_info(),
                 data_to_keep: Respawn::KEEP_ALL_DATA,
+            }),
+            expected
+        );
+        let mut died = spawn_info();
+        died.previous_game_type = None;
+        died.last_death_location = Some(GlobalPos {
+            dimension: Identifier::parse("the_end").unwrap(),
+            pos: BlockPos::new(0, 0, 1),
+        });
+        let mut expected = vec![2, 19];
+        expected.extend_from_slice(b"minecraft:overworld");
+        expected.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 17]);
+        expected.extend_from_slice(b"minecraft:the_end");
+        expected.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0x10, 0, 0, 63, 1]);
+        assert_eq!(
+            roundtrip(&Respawn {
+                spawn_info: died,
+                data_to_keep: Respawn::KEEP_ATTRIBUTE_MODIFIERS,
             }),
             expected
         );
@@ -578,12 +570,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs text components"]
     fn component_packets() {
-        roundtrip(&PlayerCombatKill {
-            player_id: 1,
-            message: Component::default(),
-        });
+        assert_eq!(
+            roundtrip(&PlayerCombatKill {
+                player_id: 300,
+                message: Component::text("x"),
+            }),
+            [0xac, 2, 8, 0, 1, b'x']
+        );
         roundtrip(&ServerData {
             motd: Component::default(),
             icon: Some(vec![1, 2, 3]),

@@ -325,7 +325,9 @@ impl From<String> for Component {
 
 impl Encode for Component {
     fn encode(&self, out: &mut Vec<u8>) {
-        write_network(out, Some(&self.to_nbt()));
+        let mut nbt = self.to_nbt();
+        nbt.sort_vanilla_order();
+        write_network(out, Some(&nbt));
     }
 }
 

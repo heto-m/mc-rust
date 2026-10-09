@@ -251,6 +251,76 @@ mod tests {
         assert_eq!(bytes, expected);
     }
 
+    const ONE: [u8; 8] = [0x3f, 0xf0, 0, 0, 0, 0, 0, 0];
+    const TWO: [u8; 8] = [0x40, 0, 0, 0, 0, 0, 0, 0];
+    const THREE: [u8; 8] = [0x40, 0x08, 0, 0, 0, 0, 0, 0];
+
+    #[test]
+    fn pos_and_rot_bytes() {
+        let expected = [
+            &ONE[..],
+            &[0x40, 0x50, 0, 0, 0, 0, 0, 0],
+            &[0xc0, 0x0c, 0, 0, 0, 0, 0, 0],
+            &[1],
+        ]
+        .concat();
+        assert_eq!(
+            roundtrip(&MovePlayerPos::new(1.0, 64.0, -3.5, true, false)),
+            expected
+        );
+        assert_eq!(
+            roundtrip(&MovePlayerRot::new(90.0, -10.0, false, true)),
+            [0x42, 0xb4, 0, 0, 0xc1, 0x20, 0, 0, 2]
+        );
+    }
+
+    #[test]
+    fn vehicle_and_teleport_bytes() {
+        let vehicle = MoveVehicle {
+            position: Vec3d {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+            },
+            y_rot: 1.0,
+            x_rot: 2.0,
+            on_ground: true,
+        };
+        let expected = [
+            &ONE[..],
+            &TWO,
+            &THREE,
+            &[0x3f, 0x80, 0, 0, 0x40, 0, 0, 0, 1],
+        ]
+        .concat();
+        assert_eq!(roundtrip(&vehicle), expected);
+
+        let teleport = AcceptTeleportation {
+            id: 300,
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            y_rot: 4.0,
+            x_rot: 5.0,
+        };
+        let expected = [
+            &[0xac, 0x02][..],
+            &ONE,
+            &TWO,
+            &THREE,
+            &[0x40, 0x80, 0, 0, 0x40, 0xa0, 0, 0],
+        ]
+        .concat();
+        assert_eq!(roundtrip(&teleport), expected);
+        assert_eq!(
+            roundtrip(&PaddleBoat {
+                left: true,
+                right: false
+            }),
+            [1, 0]
+        );
+    }
+
     #[test]
     fn flags_byte() {
         assert_eq!(roundtrip(&MovePlayerStatusOnly::new(true, true)), [3]);

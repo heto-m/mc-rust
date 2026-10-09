@@ -5,7 +5,11 @@ use mcr_buf::{
 use uuid::Uuid;
 
 use crate::packet;
-use crate::types::{EntityDataValues, ItemStack, Vec3d};
+use crate::types::{
+    EntityDataValues, ItemStack, Vec3d,
+    component::{self, AttributeModifier, EquipmentSlot},
+    game::Hand,
+};
 
 pub mod varint_list {
     use mcr_buf::{Result, prealloc_capacity, read_len, read_varint, write_varint};
@@ -376,6 +380,14 @@ pub struct Animate {
     pub action: u8,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct EntitySwing {
+    #[mcr(varint)]
+    pub entity_id: i32,
+    pub hand: Hand,
+    pub animation: component::SwingAnimation,
+}
+
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct DamageEvent {
     #[mcr(varint)]
@@ -450,33 +462,6 @@ pub struct SetEntityMotion {
     pub movement: LpVec3,
 }
 
-/// Wire value is the declaration order, not vanilla's slot ids.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum EquipmentSlot {
-    MainHand,
-    OffHand,
-    Feet,
-    Legs,
-    Chest,
-    Head,
-    Body,
-    Saddle,
-}
-
-impl EquipmentSlot {
-    const ALL: [Self; 8] = [
-        Self::MainHand,
-        Self::OffHand,
-        Self::Feet,
-        Self::Legs,
-        Self::Chest,
-        Self::Head,
-        Self::Body,
-        Self::Saddle,
-    ];
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct EquipmentEntry {
     pub slot: EquipmentSlot,
@@ -494,7 +479,7 @@ impl Encode for SetEquipment {
         write_varint(out, self.entity_id);
         for (i, entry) in self.slots.iter().enumerate() {
             let more = if i + 1 < self.slots.len() { 0x80 } else { 0 };
-            out.push(entry.slot as u8 | more);
+            out.push(entry.slot.ordinal() | more);
             entry.item.encode(out);
         }
     }
@@ -540,20 +525,6 @@ pub struct TakeItemEntity {
     pub player_id: i32,
     #[mcr(varint)]
     pub amount: i32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
-pub enum AttributeOperation {
-    AddValue,
-    AddMultipliedBase,
-    AddMultipliedTotal,
-}
-
-#[derive(Debug, Clone, PartialEq, Encode, Decode)]
-pub struct AttributeModifier {
-    pub id: Identifier,
-    pub amount: f64,
-    pub operation: AttributeOperation,
 }
 
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
@@ -675,6 +646,7 @@ mod tests;
 
 packet!(AddEntity, "add_entity", Clientbound);
 packet!(Animate, "animate", Clientbound);
+packet!(EntitySwing, "swing_animation", Clientbound);
 packet!(DamageEvent, "damage_event", Clientbound);
 packet!(EntityEvent, "entity_event", Clientbound);
 packet!(EntityPositionSync, "entity_position_sync", Clientbound);

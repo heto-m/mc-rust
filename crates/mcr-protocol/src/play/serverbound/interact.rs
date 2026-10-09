@@ -280,9 +280,47 @@ mod tests {
             },
             ..zero
         };
-        let bytes = roundtrip(&far);
-        assert_eq!(bytes.len(), 2 + 6 + 1 + 1);
-        assert_eq!(bytes[2] & 7, 4);
+        assert_eq!(
+            roundtrip(&far),
+            [0, 1, 0xf4, 0xff, 0x7f, 0xfe, 0xff, 0xff, 2, 0]
+        );
+    }
+
+    #[test]
+    fn small_packet_bytes() {
+        assert_eq!(roundtrip(&Attack { entity_id: 300 }), [0xac, 0x02]);
+        assert!(roundtrip(&Punch).is_empty());
+        assert_eq!(
+            roundtrip(&UseItem {
+                hand: Hand::Off,
+                sequence: 4,
+                y_rot: 1.5,
+                x_rot: -2.5
+            }),
+            [1, 4, 0x3f, 0xc0, 0, 0, 0xc0, 0x20, 0, 0]
+        );
+        assert_eq!(
+            roundtrip(&PlayerCommand {
+                entity_id: 3,
+                action: PlayerCommandKind::StartFallFlying,
+                data: 0
+            }),
+            [3, 6, 0]
+        );
+        assert_eq!(
+            roundtrip(&PickItemFromBlock {
+                pos: BlockPos::new(0, 5, 0),
+                include_data: true
+            }),
+            [0, 0, 0, 0, 0, 0, 0, 5, 1]
+        );
+        assert_eq!(
+            roundtrip(&PickItemFromEntity {
+                id: 99,
+                include_data: false
+            }),
+            [99, 0]
+        );
     }
 
     #[test]

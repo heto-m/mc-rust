@@ -3,16 +3,10 @@ use mcr_buf::{
 };
 use uuid::Uuid;
 
-use super::GameType;
-use crate::{packet, types::Component};
-
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-pub struct ProfileProperty {
-    #[mcr(max_len = 64)]
-    pub name: String,
-    pub value: String,
-    pub signature: Option<String>,
-}
+use crate::{
+    packet,
+    types::{Component, game::GameType, profile::ProfileProperty},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Encode, Decode)]
 pub struct PlayerProfile {
@@ -267,7 +261,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs text components"]
     fn display_name_roundtrip() {
         let mut entry = PlayerInfoEntry::new(Uuid::from_u128(1));
         entry.display_name = Some(Component::default());

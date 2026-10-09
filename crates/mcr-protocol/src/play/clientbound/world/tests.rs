@@ -52,10 +52,17 @@ fn block_update_and_friends() {
     assert_eq!(rt!(BundleDelimiter), Vec::<u8>::new());
     assert_eq!(rt!(ChunkBatchStart), Vec::<u8>::new());
     assert_eq!(rt!(ChunkBatchFinished { batch_size: 4 }), [4]);
-    rt!(GameTestHighlightPos {
-        absolute_pos: pos,
-        relative_pos: BlockPos::new(-1, -2, -3)
-    });
+    assert_eq!(
+        rt!(GameTestHighlightPos {
+            absolute_pos: pos,
+            relative_pos: BlockPos::new(-1, -2, -3)
+        }),
+        [
+            &pos_bytes[..],
+            &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xdf, 0xfe]
+        ]
+        .concat()
+    );
 }
 
 #[test]
@@ -112,11 +119,16 @@ fn borders_time_and_ticking() {
         new_center_x: 1.0,
         new_center_z: 2.0
     });
-    rt!(SetBorderLerpSize {
-        old_size: 1.0,
-        new_size: 2.0,
-        lerp_time: 3
-    });
+    assert_eq!(
+        rt!(SetBorderLerpSize {
+            old_size: 1.0,
+            new_size: 2.0,
+            lerp_time: 300
+        }),
+        [
+            0x3f, 0xf0, 0, 0, 0, 0, 0, 0, 0x40, 0, 0, 0, 0, 0, 0, 0, 0xac, 0x02
+        ]
+    );
     rt!(SetBorderSize { size: 1.0 });
     assert_eq!(rt!(SetBorderWarningDelay { warning_delay: 15 }), [15]);
     assert_eq!(rt!(SetBorderWarningDistance { warning_blocks: 5 }), [5]);
@@ -177,11 +189,12 @@ fn events_and_sounds() {
     );
     assert_eq!(
         rt!(DebugSample {
-            sample: vec![1, 2],
+            sample: vec![1, -2],
             sample_type: DebugSampleType::TickTime
-        })
-        .len(),
-        1 + 16 + 1
+        }),
+        [
+            2, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe, 0
+        ]
     );
     assert_eq!(
         rt!(ForgetLevelChunk {
@@ -222,8 +235,21 @@ fn stop_sound_flags() {
 }
 
 #[test]
-fn test_instance_status_size() {
-    assert_eq!(to_bytes(&Some(Vec3i { x: 1, y: 2, z: 3 })), [1, 1, 2, 3]);
+fn test_instance_block_status_bytes() {
+    assert_eq!(
+        rt!(TestInstanceBlockStatus {
+            status: Component::text("ok"),
+            size: Some(Vec3i { x: 1, y: -1, z: 3 })
+        }),
+        [8, 0, 2, b'o', b'k', 1, 1, 0xff, 0xff, 0xff, 0xff, 0x0f, 3]
+    );
+    assert_eq!(
+        rt!(TestInstanceBlockStatus {
+            status: Component::text("ok"),
+            size: None
+        }),
+        [8, 0, 2, b'o', b'k', 0]
+    );
 }
 
 fn cfg() -> WorldConfig {
@@ -314,6 +340,27 @@ fn light_update_payload_feeds_world_decoder() {
 }
 
 #[test]
+fn chunks_biomes_bytes_and_limit() {
+    let bytes = [1, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 1, 3, 7, 8, 9];
+    let packet = ChunksBiomes {
+        chunks: vec![ChunkBiomeData {
+            pos: ChunkPos { x: 1, z: -1 },
+            buffer: ByteArray(&[7, 8, 9]),
+        }],
+    };
+    assert_eq!(from_bytes_exact::<ChunksBiomes>(&bytes).unwrap(), packet);
+    assert_eq!(to_bytes(&packet), bytes);
+
+    let mut oversized = bytes[..9].to_vec();
+    oversized.extend([0x81, 0x80, 0x80, 0x01]);
+    oversized.resize(oversized.len() + 2_097_153, 0);
+    assert!(matches!(
+        from_bytes_exact::<ChunksBiomes>(&oversized),
+        Err(DecodeError::TooLong { .. })
+    ));
+}
+
+#[test]
 fn biome_buffers_feed_world_decoder() {
     let cfg = cfg();
     let chunk = sample_chunk(&cfg);
@@ -388,21 +435,34 @@ fn sounds() {
         pitch: 1.0,
         seed: 9
     });
-    rt!(SoundEntity {
-        sound: IdOr::Id(3),
-        source: SoundSource::Blocks,
-        entity_id: 1,
-        volume: 1.0,
-        pitch: 1.0,
-        seed: 9
-    });
-}
-
-#[test]
-#[ignore = "needs Component"]
-fn test_instance_block_status() {
-    rt!(TestInstanceBlockStatus {
-        status: Component::default(),
-        size: Some(Vec3i { x: 1, y: 2, z: 3 })
-    });
+    assert_eq!(
+        rt!(SoundEntity {
+            sound: IdOr::Id(3),
+            source: SoundSource::Blocks,
+            entity_id: 300,
+            volume: 1.0,
+            pitch: 0.5,
+            seed: 9
+        }),
+        [
+            4, 4, 0xac, 0x02, 0x3f, 0x80, 0, 0, 0x3f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9
+        ]
+    );
+    assert_eq!(
+        rt!(SoundEntity {
+            sound: IdOr::Inline(SoundEvent {
+                location: Identifier::parse("a:b").unwrap(),
+                fixed_range: Some(16.0),
+            }),
+            source: SoundSource::Ui,
+            entity_id: 1,
+            volume: 1.0,
+            pitch: 1.0,
+            seed: -1
+        }),
+        [
+            0, 3, b'a', b':', b'b', 1, 0x41, 0x80, 0, 0, 10, 1, 0x3f, 0x80, 0, 0, 0x3f, 0x80, 0, 0,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+        ]
+    );
 }

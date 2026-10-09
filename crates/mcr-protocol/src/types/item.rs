@@ -231,7 +231,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs Component"]
     fn named_sword_bytes() {
         use crate::types::Component;
         let stack = ItemStack {

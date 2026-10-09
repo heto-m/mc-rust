@@ -5,7 +5,7 @@ use mcr_buf::{
 
 use super::shared::{FlagByte, Rotation, Vec3i};
 use crate::packet;
-use crate::types::Component;
+use crate::types::{Component, game::SignSide};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
 pub enum CommandBlockMode {
@@ -242,12 +242,6 @@ pub struct SetTestBlock {
 
 packet!(SetTestBlock, "set_test_block", Serverbound);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
-pub enum SignSide {
-    Back,
-    Front,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct SignUpdate {
     pub pos: BlockPos,
@@ -366,7 +360,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs Component"]
     fn test_instance_roundtrip() {
         roundtrip(&TestInstanceBlockAction {
             pos: BlockPos::new(1, 2, 3),
@@ -422,13 +415,116 @@ mod tests {
     #[test]
     fn sign_has_no_line_count() {
         let packet = SignUpdate {
-            pos: BlockPos::new(0, 0, 0),
-            lines: [line("a"), line("b"), line("c"), line("d")],
-            side: SignSide::Back,
+            pos: BlockPos::new(0, 5, 0),
+            lines: [line("a"), line(""), line("c"), line("")],
+            side: SignSide::Front,
         };
-        let bytes = roundtrip(&packet);
-        assert_eq!(bytes.len(), 8 + 8 + 1);
-        assert_eq!(bytes[8], 1);
+        assert_eq!(
+            roundtrip(&packet),
+            [0, 0, 0, 0, 0, 0, 0, 5, 1, b'a', 0, 1, b'c', 0, 1]
+        );
+    }
+
+    #[test]
+    fn structure_bytes() {
+        let packet = SetStructureBlock {
+            pos: BlockPos::new(0, 5, 0),
+            seed: 300,
+            name: "n".into(),
+            ..sample_structure()
+        };
+        let expected = [
+            &[0, 0, 0, 0, 0, 0, 0, 5][..],
+            &[1, 0, 1, b'n'],
+            &[0xff, 0, 2, 4, 5, 6],
+            &[1, 1, 1, b'd'],
+            &[0x3f, 0, 0, 0],
+            &[0xac, 0x02, 1 | 4 | 8],
+        ]
+        .concat();
+        assert_eq!(roundtrip(&packet), expected);
+    }
+
+    #[test]
+    fn jigsaw_bytes() {
+        let packet = SetJigsawBlock {
+            pos: BlockPos::new(0, 0, 0),
+            name: Identifier::parse("a:b").unwrap(),
+            target: Identifier::parse("c:d").unwrap(),
+            pool: Identifier::parse("e:f").unwrap(),
+            final_state: "s".into(),
+            joint: JointType::Rollable,
+            selection_priority: 1,
+            placement_priority: 300,
+        };
+        let expected = [
+            &[0; 8][..],
+            &[
+                3, b'a', b':', b'b', 3, b'c', b':', b'd', 3, b'e', b':', b'f',
+            ],
+            &[1, b's', 8],
+            b"rollable",
+            &[1, 0xac, 0x02],
+        ]
+        .concat();
+        assert_eq!(roundtrip(&packet), expected);
+        assert_eq!(
+            roundtrip(&JigsawGenerate {
+                pos: BlockPos::new(0, 0, 0),
+                levels: 7,
+                keep_jigsaws: true
+            }),
+            [0, 0, 0, 0, 0, 0, 0, 0, 7, 1]
+        );
+    }
+
+    #[test]
+    fn small_editor_bytes() {
+        assert_eq!(
+            roundtrip(&SetCommandMinecart {
+                entity_id: 300,
+                command: "x".into(),
+                track_output: true
+            }),
+            [0xac, 0x02, 1, b'x', 1]
+        );
+        assert_eq!(
+            roundtrip(&SetTestBlock {
+                pos: BlockPos::new(0, 0, 0),
+                mode: TestBlockMode::Fail,
+                message: "m".into()
+            }),
+            [0, 0, 0, 0, 0, 0, 0, 0, 2, 1, b'm']
+        );
+        assert_eq!(
+            roundtrip(&SetBeacon {
+                primary: Some(VarInt(1)),
+                secondary: None
+            }),
+            [1, 1, 0]
+        );
+    }
+
+    #[test]
+    fn test_instance_bytes() {
+        let packet = TestInstanceBlockAction {
+            pos: BlockPos::new(0, 0, 0),
+            action: TestInstanceAction::Run,
+            data: TestInstanceData {
+                test: Some(Identifier::parse("a:b").unwrap()),
+                size: Vec3i { x: 1, y: 2, z: 300 },
+                rotation: Rotation::Clockwise180,
+                ignore_entities: true,
+                status: TestInstanceStatus::Finished,
+                error_message: None,
+            },
+        };
+        assert_eq!(
+            roundtrip(&packet),
+            [
+                0, 0, 0, 0, 0, 0, 0, 0, 6, 1, 3, b'a', b':', b'b', 1, 2, 0xac, 0x02, 2, 1, 2, 0
+            ]
+        );
     }
 
     #[test]

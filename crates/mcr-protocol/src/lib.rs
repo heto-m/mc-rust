@@ -3,12 +3,19 @@
 
 pub mod common;
 pub mod configuration;
+pub mod dispatch;
+#[cfg(test)]
+mod dispatch_tests;
+mod error;
 pub mod handshake;
+mod ids;
 pub mod login;
 pub mod play;
 pub mod status;
 pub mod types;
 
+pub use error::ProtocolError;
+pub use ids::{PacketIds, PacketSet};
 pub use mcr_data::{Direction, ProtocolState};
 
 pub trait Packet {

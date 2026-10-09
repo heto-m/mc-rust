@@ -1,11 +1,6 @@
 use mcr_buf::{Decode, DecodeError, Encode, Result, read_varint, take, write_varint};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Encode, Decode)]
-pub enum Hand {
-    #[default]
-    Main,
-    Off,
-}
+pub use crate::types::game::{Difficulty, GameType, Hand, Vec3i};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Facing {
@@ -65,37 +60,11 @@ pub(crate) mod facing_byte {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
-pub enum Difficulty {
-    Peaceful,
-    Easy,
-    Normal,
-    Hard,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
-pub enum GameMode {
-    Survival,
-    Creative,
-    Adventure,
-    Spectator,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
 pub enum Rotation {
     None,
     Clockwise90,
     Clockwise180,
     CounterClockwise90,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Encode, Decode)]
-pub struct Vec3i {
-    #[mcr(varint)]
-    pub x: i32,
-    #[mcr(varint)]
-    pub y: i32,
-    #[mcr(varint)]
-    pub z: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]

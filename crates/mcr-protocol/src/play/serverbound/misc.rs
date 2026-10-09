@@ -1,7 +1,7 @@
 use mcr_buf::{BlockPos, Decode, Encode, Identifier, LengthPrefixed, Result, VarInt, write_varint};
 use uuid::Uuid;
 
-use super::shared::{Difficulty, GameMode};
+use super::shared::{Difficulty, GameType};
 use crate::packet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
@@ -32,7 +32,7 @@ packet!(ChangeDifficulty, "change_difficulty", Serverbound);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct ChangeGameMode {
-    pub mode: GameMode,
+    pub mode: GameType,
 }
 
 packet!(ChangeGameMode, "change_game_mode", Serverbound);
@@ -83,13 +83,6 @@ packet!(
 pub struct PlayerLoaded;
 
 packet!(PlayerLoaded, "player_loaded", Serverbound);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
-pub struct PingRequest {
-    pub time: i64,
-}
-
-packet!(PingRequest, "ping_request", Serverbound);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Encode, Decode)]
 pub struct DebugSubscriptionRequest {
@@ -154,17 +147,18 @@ packet!(SetGameRule, "set_game_rule", Serverbound);
 
 #[cfg(test)]
 mod tests {
-    use mcr_buf::to_bytes;
+    use mcr_buf::{from_bytes_exact, to_bytes};
 
     use super::*;
     use crate::play::serverbound::shared::roundtrips;
+    use crate::status::PingRequest;
     use crate::test_util::roundtrip;
 
     roundtrips! {
         block_query: BlockEntityTagQuery { transaction_id: 3, pos: BlockPos::new(1, 2, 3) },
         entity_query: EntityTagQuery { transaction_id: 3, entity_id: 7 },
         difficulty: ChangeDifficulty { difficulty: Difficulty::Hard },
-        game_mode: ChangeGameMode { mode: GameMode::Spectator },
+        game_mode: ChangeGameMode { mode: GameType::Spectator },
         lock: LockDifficulty { locked: true },
         batch: ChunkBatchReceived { desired_chunks_per_tick: 7.5 },
         client_command: ClientCommand { action: ClientCommandAction::RequestStats },
@@ -205,6 +199,77 @@ mod tests {
             Identifier::parse("a:b").unwrap(),
         ));
         assert_eq!(open, [0, 3, b'a', b':', b'b']);
+    }
+
+    #[test]
+    fn small_packet_bytes() {
+        assert_eq!(
+            roundtrip(&BlockEntityTagQuery {
+                transaction_id: 3,
+                pos: BlockPos::new(0, 5, 0)
+            }),
+            [3, 0, 0, 0, 0, 0, 0, 0, 5]
+        );
+        assert_eq!(
+            roundtrip(&EntityTagQuery {
+                transaction_id: 3,
+                entity_id: 300
+            }),
+            [3, 0xac, 0x02]
+        );
+        assert_eq!(
+            roundtrip(&ChangeGameMode {
+                mode: GameType::Spectator
+            }),
+            [3]
+        );
+        assert_eq!(roundtrip(&LockDifficulty { locked: true }), [1]);
+        assert_eq!(
+            roundtrip(&ChunkBatchReceived {
+                desired_chunks_per_tick: 7.5
+            }),
+            [0x40, 0xf0, 0, 0]
+        );
+        assert_eq!(
+            roundtrip(&ClientCommand {
+                action: ClientCommandAction::RequestGameruleValues
+            }),
+            [2]
+        );
+        assert_eq!(
+            roundtrip(&PingRequest { time: -9 }),
+            [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xf7]
+        );
+        let mut uuid = [0; 16];
+        uuid[15] = 5;
+        assert_eq!(
+            roundtrip(&TeleportToEntity {
+                target: Uuid::from_u128(5)
+            }),
+            uuid
+        );
+    }
+
+    #[test]
+    fn debug_subscriptions_bytes_and_limit() {
+        let packet = DebugSubscriptionRequest {
+            subscriptions: LengthPrefixed(vec![VarInt(1), VarInt(200)]),
+        };
+        assert_eq!(roundtrip(&packet), [2, 1, 0xc8, 0x01]);
+        let mut too_many = vec![33];
+        too_many.resize(34, 0);
+        assert!(from_bytes_exact::<DebugSubscriptionRequest>(&too_many).is_err());
+    }
+
+    #[test]
+    fn game_rule_bytes() {
+        let packet = SetGameRule {
+            entries: vec![GameRuleEntry {
+                rule: Identifier::parse("a:b").unwrap(),
+                value: "1".into(),
+            }],
+        };
+        assert_eq!(roundtrip(&packet), [1, 3, b'a', b':', b'b', 1, b'1']);
     }
 
     #[test]

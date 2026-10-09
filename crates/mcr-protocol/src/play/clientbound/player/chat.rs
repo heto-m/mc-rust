@@ -1,28 +1,13 @@
 use mcr_buf::{
-    BitSet, Decode, DecodeError, Encode, IdOr, LengthPrefixed, Result, read_varint, take,
-    write_varint,
+    BitSet, Decode, DecodeError, Encode, IdOr, LengthPrefixed, Result, read_varint, write_varint,
 };
 use mcr_nbt::NetworkNbt;
 use uuid::Uuid;
 
-use crate::{packet, types::Component};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MessageSignature(pub [u8; 256]);
-
-impl Encode for MessageSignature {
-    fn encode(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.0);
-    }
-}
-
-impl Decode<'_> for MessageSignature {
-    fn decode(input: &mut &[u8]) -> Result<Self> {
-        let mut bytes = [0; 256];
-        bytes.copy_from_slice(take(input, 256)?);
-        Ok(Self(bytes))
-    }
-}
+use crate::{
+    packet,
+    types::{Component, game::MessageSignature},
+};
 
 /// A cache index into the last 128 signatures, or the full signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +168,60 @@ mod tests {
             }),
             [1]
         );
+        let mut expected = vec![0];
+        expected.extend_from_slice(&[7; 256]);
+        assert_eq!(
+            roundtrip(&DeleteChat {
+                message_signature: PackedSignature::Full(Box::new(full())),
+            }),
+            expected
+        );
+    }
+
+    #[test]
+    fn player_chat_bytes() {
+        let mut packet = PlayerChat {
+            global_index: 1,
+            sender: Uuid::from_u128(9),
+            index: 2,
+            signature: None,
+            body: SignedMessageBody {
+                content: "hi".into(),
+                timestamp_millis: 1,
+                salt: 2,
+                last_seen: LengthPrefixed(vec![]),
+            },
+            unsigned_content: None,
+            filter_mask: FilterMask::PassThrough,
+            chat_type: BoundChatType {
+                chat_type: IdOr::Id(0),
+                name: Component::text("A"),
+                target_name: Some(Component::text("B")),
+            },
+        };
+        let mut expected = vec![1];
+        expected.extend_from_slice(&[0; 15]);
+        expected.push(9);
+        #[rustfmt::skip]
+        expected.extend_from_slice(&[
+            2,
+            0,
+            2, b'h', b'i', 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0,
+            0,
+            0,
+            1, 8, 0, 1, b'A', 1, 8, 0, 1, b'B',
+        ]);
+        assert_eq!(roundtrip(&packet), expected);
+
+        packet.signature = Some(full());
+        packet.unsigned_content = Some(Component::text("u"));
+        let bytes = roundtrip(&packet);
+        assert_eq!(&bytes[18..20], [1, 7]);
+        assert_eq!(&bytes[275..295], &expected[19..39]);
+        assert_eq!(
+            &bytes[295..],
+            [&[1, 8, 0, 1, b'u'][..], &expected[40..]].concat()
+        );
     }
 
     #[test]
@@ -233,7 +272,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs text components"]
     fn signed_chat_roundtrip() {
         let chat_type = BoundChatType {
             chat_type: IdOr::Id(0),

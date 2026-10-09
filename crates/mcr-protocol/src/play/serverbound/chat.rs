@@ -1,29 +1,8 @@
-use mcr_buf::{Decode, Encode, FixedBitSet, LengthPrefixed, Result, take};
+use mcr_buf::{Decode, Encode, FixedBitSet, LengthPrefixed};
 use uuid::Uuid;
 
 use super::shared::BoundedBytes;
-use crate::packet;
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct MessageSignature(pub [u8; 256]);
-
-impl std::fmt::Debug for MessageSignature {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MessageSignature({:02x?}..)", &self.0[..4])
-    }
-}
-
-impl Encode for MessageSignature {
-    fn encode(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.0);
-    }
-}
-
-impl Decode<'_> for MessageSignature {
-    fn decode(input: &mut &[u8]) -> Result<Self> {
-        Ok(Self(take(input, 256)?.try_into().unwrap()))
-    }
-}
+use crate::{packet, types::game::MessageSignature};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct LastSeenUpdate {
@@ -182,6 +161,74 @@ mod tests {
         assert_eq!(bytes.len(), 2 + 16 + 1 + 256 + 1 + 3 + 1);
         assert_eq!(bytes[18], 1);
         assert_eq!(&bytes[bytes.len() - 5..], [3, 0x01, 0, 0x08, 7]);
+    }
+
+    #[test]
+    fn signed_command_bytes() {
+        let packet = ChatCommandSigned {
+            command: "a".into(),
+            timestamp_ms: 1,
+            salt: -1,
+            argument_signatures: LengthPrefixed(vec![ArgumentSignature {
+                name: "m".into(),
+                signature: sig(2),
+            }]),
+            last_seen: update(),
+        };
+        let expected = [
+            &[1, b'a'][..],
+            &[0, 0, 0, 0, 0, 0, 0, 1],
+            &[0xff; 8],
+            &[1, 1, b'm'],
+            &[2; 256],
+            &[3, 0x01, 0x00, 0x08, 7],
+        ]
+        .concat();
+        assert_eq!(roundtrip(&packet), expected);
+    }
+
+    #[test]
+    fn session_update_bytes() {
+        let packet = ChatSessionUpdate {
+            session_id: Uuid::from_u128(9),
+            expires_at_ms: 42,
+            public_key: BoundedBytes(vec![1, 2, 3]),
+            key_signature: BoundedBytes(vec![4]),
+        };
+        let expected = [
+            &[0; 15][..],
+            &[9],
+            &[0, 0, 0, 0, 0, 0, 0, 42],
+            &[3, 1, 2, 3],
+            &[1, 4],
+        ]
+        .concat();
+        assert_eq!(roundtrip(&packet), expected);
+
+        let mut oversized_key = [&[0; 24][..], &[0x81, 0x04]].concat();
+        oversized_key.resize(oversized_key.len() + 513, 0);
+        assert!(matches!(
+            ChatSessionUpdate::decode(&mut oversized_key.as_slice()),
+            Err(DecodeError::TooLong { len: 513, max: 512 })
+        ));
+    }
+
+    #[test]
+    fn small_packet_bytes() {
+        assert_eq!(
+            roundtrip(&CommandSuggestion {
+                id: 300,
+                command: "/g".into()
+            }),
+            [0xac, 0x02, 2, b'/', b'g']
+        );
+        assert_eq!(roundtrip(&ChatAck { offset: 5 }), [5]);
+        assert_eq!(
+            roundtrip(&ChatCommand {
+                command: "hi".into()
+            }),
+            [2, b'h', b'i']
+        );
     }
 
     #[test]

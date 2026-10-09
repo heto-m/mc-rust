@@ -1,4 +1,4 @@
-use mcr_buf::{BoundedString, Decode, Encode, LengthPrefixed};
+use mcr_buf::{BoundedString, Decode, DecodeError, Encode, LengthPrefixed, Result, read_varint};
 
 use crate::packet;
 use crate::types::{HashedStack, ItemStack};
@@ -162,12 +162,29 @@ pub struct SelectTrade {
 
 packet!(SelectTrade, "select_trade", Serverbound);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode)]
 pub struct BundleItemSelected {
     #[mcr(varint)]
     pub slot_id: i32,
     #[mcr(varint)]
     pub selected_item_index: i32,
+}
+
+impl Decode<'_> for BundleItemSelected {
+    fn decode(input: &mut &[u8]) -> Result<Self> {
+        let slot_id = read_varint(input)?;
+        let selected_item_index = read_varint(input)?;
+        if selected_item_index < -1 {
+            return Err(DecodeError::InvalidValue {
+                what: "selected bundle item index",
+                value: selected_item_index.into(),
+            });
+        }
+        Ok(Self {
+            slot_id,
+            selected_item_index,
+        })
+    }
 }
 
 packet!(BundleItemSelected, "bundle_item_selected", Serverbound);
@@ -184,11 +201,12 @@ packet!(EditBook, "edit_book", Serverbound);
 
 #[cfg(test)]
 mod tests {
-    use mcr_buf::{DecodeError, to_bytes};
+    use mcr_buf::{VarInt, to_bytes};
 
     use super::*;
     use crate::play::serverbound::shared::roundtrips;
     use crate::test_util::roundtrip;
+    use crate::types::item::{HashedComponent, HashedItem, HashedPatchMap};
 
     roundtrips! {
         button: ContainerButtonClick { container_id: 2, button_id: 300 },
@@ -209,7 +227,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs HashedStack"]
     fn click_roundtrip() {
         roundtrip(&ContainerClick::new(
             1,
@@ -226,12 +243,86 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs ItemStack"]
-    fn creative_slot_roundtrip() {
-        roundtrip(&SetCreativeModeSlot {
-            slot_num: 36,
-            item: ItemStack::default(),
+    fn click_bytes() {
+        let changed = ChangedSlot {
+            slot: 3,
+            item: HashedStack::Item(HashedItem {
+                item: 5,
+                count: 64,
+                components: HashedPatchMap {
+                    added: LengthPrefixed(vec![HashedComponent {
+                        type_id: 2,
+                        hash: 0x0102_0304,
+                    }]),
+                    removed: LengthPrefixed(vec![VarInt(7)]),
+                },
+            }),
+        };
+        let packet = ContainerClick::new(
+            1,
+            300,
+            36,
+            1,
+            ContainerInput::QuickMove,
+            vec![changed],
+            HashedStack::Empty,
+        );
+        assert_eq!(
+            roundtrip(&packet),
+            [
+                1, 0xac, 0x02, 0, 36, 1, 1, 1, 0, 3, 1, 5, 64, 1, 2, 1, 2, 3, 4, 1, 7, 0
+            ]
+        );
+    }
+
+    #[test]
+    fn creative_slot_bytes() {
+        assert_eq!(
+            roundtrip(&SetCreativeModeSlot {
+                slot_num: 36,
+                item: ItemStack::default(),
+            }),
+            [0, 36, 0]
+        );
+    }
+
+    #[test]
+    fn edit_book_bytes_and_limits() {
+        let packet = EditBook {
+            slot: 2,
+            pages: LengthPrefixed(vec![BoundedString("ab".into()), BoundedString::default()]),
+            title: Some(BoundedString("t".into())),
+        };
+        assert_eq!(roundtrip(&packet), [2, 2, 2, b'a', b'b', 0, 1, 1, b't']);
+
+        let mut too_many = vec![0, 101];
+        too_many.resize(2 + 101, 0);
+        too_many.push(0);
+        assert_eq!(
+            EditBook::decode(&mut too_many.as_slice()),
+            Err(DecodeError::TooLong { len: 101, max: 100 })
+        );
+        let long_title = to_bytes(&EditBook {
+            slot: 0,
+            pages: LengthPrefixed::default(),
+            title: Some(BoundedString("a".repeat(33))),
         });
+        assert!(EditBook::decode(&mut long_title.as_slice()).is_err());
+    }
+
+    #[test]
+    fn bundle_index_validated() {
+        assert_eq!(
+            roundtrip(&BundleItemSelected {
+                slot_id: 9,
+                selected_item_index: -1
+            }),
+            [9, 0xff, 0xff, 0xff, 0xff, 0x0f]
+        );
+        assert!(matches!(
+            BundleItemSelected::decode(&mut &[9, 0xfe, 0xff, 0xff, 0xff, 0x0f][..]),
+            Err(DecodeError::InvalidValue { value: -2, .. })
+        ));
     }
 
     #[test]
@@ -254,5 +345,33 @@ mod tests {
             [1, 0xac, 0x02]
         );
         assert_eq!(to_bytes(&SetCarriedItem { slot: 8 }), [0, 8]);
+        assert_eq!(to_bytes(&ContainerClose { container_id: 2 }), [2]);
+        assert_eq!(
+            to_bytes(&ContainerSlotStateChanged {
+                slot_id: 4,
+                container_id: 1,
+                new_state: true
+            }),
+            [4, 1, 1]
+        );
+        assert_eq!(
+            to_bytes(&PlaceRecipe {
+                container_id: 1,
+                recipe: 300,
+                use_max_items: true
+            }),
+            [1, 0xac, 0x02, 1]
+        );
+        assert_eq!(
+            to_bytes(&RecipeBookChangeSettings {
+                book_type: RecipeBookType::Smoker,
+                open: true,
+                filtering: false
+            }),
+            [3, 1, 0]
+        );
+        assert_eq!(to_bytes(&RecipeBookSeenRecipe { recipe: 5 }), [5]);
+        assert_eq!(to_bytes(&RenameItem { name: "S".into() }), [1, b'S']);
+        assert_eq!(to_bytes(&SelectTrade { item: 2 }), [2]);
     }
 }

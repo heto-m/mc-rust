@@ -101,6 +101,9 @@ mod tests {
 
     #[test]
     fn known_pack_roundtrip() {
-        roundtrip(&KnownPack::vanilla("core", "26.3"));
+        let mut expected = vec![9];
+        expected.extend(*b"minecraft");
+        expected.extend([4, b'c', b'o', b'r', b'e', 4, b'2', b'6', b'.', b'3']);
+        assert_eq!(roundtrip(&KnownPack::vanilla("core", "26.3")), expected);
     }
 }

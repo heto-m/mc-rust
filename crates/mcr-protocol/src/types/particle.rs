@@ -1,6 +1,6 @@
 use mcr_buf::{BlockPos, Decode, DecodeError, Encode, Result, read_varint, write_varint};
 
-use super::math::Vec3d;
+use super::{item::ItemStackTemplate, math::Vec3d};
 
 pub const PARTICLE_TYPE_COUNT: i32 = 128;
 
@@ -82,39 +82,6 @@ pub const VIBRATION: i32 = 58;
 pub const TRAIL: i32 = 59;
 pub const SHRIEK: i32 = 115;
 
-/// Component patch of an item template; only the empty patch is supported until the shared
-/// component codec exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct EmptyComponentPatch;
-
-impl Encode for EmptyComponentPatch {
-    fn encode(&self, out: &mut Vec<u8>) {
-        write_varint(out, 0);
-        write_varint(out, 0);
-    }
-}
-
-impl Decode<'_> for EmptyComponentPatch {
-    fn decode(input: &mut &[u8]) -> Result<Self> {
-        if read_varint(input)? != 0 || read_varint(input)? != 0 {
-            return Err(DecodeError::Other(
-                "non-empty component patch in particle item".into(),
-            ));
-        }
-        Ok(Self)
-    }
-}
-
-/// Item, count, patch: the order differs from `ItemStack`.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-pub struct ItemTemplate {
-    #[mcr(varint)]
-    pub item: i32,
-    #[mcr(varint)]
-    pub count: i32,
-    pub components: EmptyComponentPatch,
-}
-
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
 #[repr(u8)]
 pub enum PositionSource {
@@ -166,7 +133,7 @@ pub enum Particle {
     SculkCharge {
         roll: f32,
     },
-    Item(ItemTemplate),
+    Item(ItemStackTemplate),
     Vibration {
         source: PositionSource,
         arrival_ticks: i32,
@@ -306,7 +273,7 @@ impl Decode<'_> for Particle {
             SCULK_CHARGE => Self::SculkCharge {
                 roll: f32::decode(input)?,
             },
-            ITEM => Self::Item(ItemTemplate::decode(input)?),
+            ITEM => Self::Item(ItemStackTemplate::decode(input)?),
             VIBRATION => Self::Vibration {
                 source: PositionSource::decode(input)?,
                 arrival_ticks: read_varint(input)?,
@@ -350,10 +317,10 @@ mod tests {
                 scale: 2.0,
             },
             Particle::SculkCharge { roll: 1.5 },
-            Particle::Item(ItemTemplate {
+            Particle::Item(ItemStackTemplate {
                 item: 800,
                 count: 1,
-                components: EmptyComponentPatch,
+                components: Default::default(),
             }),
             Particle::Vibration {
                 source: PositionSource::Block(BlockPos::new(1, 2, 3)),
@@ -456,12 +423,116 @@ mod tests {
     }
 
     #[test]
+    fn java_layout_fixtures() {
+        let mut trail = vec![59, 0x3F, 0xF0, 0, 0, 0, 0, 0, 0];
+        trail.extend([0; 8]);
+        trail.extend([0xC0, 0, 0, 0, 0, 0, 0, 0]);
+        trail.extend([0, 0, 0xFF, 0, 0xAC, 0x02]);
+        let cases: Vec<(Particle, Vec<u8>)> = vec![
+            (
+                Particle::DustColorTransition {
+                    from: 0x00FF_0000,
+                    to: 0x0000_00FF,
+                    scale: 0.5,
+                },
+                vec![22, 0, 0xFF, 0, 0, 0, 0, 0, 0xFF, 0x3F, 0, 0, 0],
+            ),
+            (
+                Particle::Spell {
+                    kind: SpellParticleKind::InstantEffect,
+                    color: -1,
+                    power: 1.0,
+                },
+                vec![56, 0xFF, 0xFF, 0xFF, 0xFF, 0x3F, 0x80, 0, 0],
+            ),
+            (
+                Particle::Color {
+                    kind: ColorParticleKind::Flash,
+                    argb: 0x80FF_FFFFu32 as i32,
+                },
+                vec![52, 0x80, 0xFF, 0xFF, 0xFF],
+            ),
+            (
+                Particle::Geyser {
+                    kind: GeyserParticleKind::GeyserPlume,
+                    water_blocks: 7,
+                },
+                vec![10, 0, 0, 0, 7],
+            ),
+            (
+                Particle::GeyserBase {
+                    kind: GeyserBaseParticleKind::GeyserPoof,
+                    water_blocks: 3,
+                    burst_impulse_base: 0.5,
+                },
+                vec![9, 0, 0, 0, 3, 0x3F, 0, 0, 0],
+            ),
+            (
+                Particle::SculkCharge { roll: 1.0 },
+                vec![48, 0x3F, 0x80, 0, 0],
+            ),
+            (
+                Particle::Item(ItemStackTemplate {
+                    item: 800,
+                    count: 1,
+                    components: Default::default(),
+                }),
+                vec![57, 0xA0, 0x06, 1, 0, 0],
+            ),
+            (
+                Particle::Vibration {
+                    source: PositionSource::Block(BlockPos::new(1, 0, 0)),
+                    arrival_ticks: 20,
+                },
+                vec![58, 0, 0, 0, 0, 0x40, 0, 0, 0, 0, 20],
+            ),
+            (
+                Particle::Vibration {
+                    source: PositionSource::Entity {
+                        entity_id: 300,
+                        y_offset: 0.5,
+                    },
+                    arrival_ticks: 20,
+                },
+                vec![58, 1, 0xAC, 0x02, 0x3F, 0, 0, 0, 20],
+            ),
+            (
+                Particle::Trail {
+                    target: Vec3d {
+                        x: 1.0,
+                        y: 0.0,
+                        z: -2.0,
+                    },
+                    color: 0x00FF00,
+                    duration: 300,
+                },
+                trail,
+            ),
+            (Particle::Shriek { delay: 300 }, vec![115, 0xAC, 0x02]),
+            (
+                Particle::BlockState {
+                    kind: BlockParticleKind::BlockCrumble,
+                    state: 1,
+                },
+                vec![125, 1],
+            ),
+        ];
+        for (particle, bytes) in cases {
+            assert_eq!(roundtrip(&particle), bytes, "{particle:?}");
+            assert_eq!(
+                mcr_buf::from_bytes_exact::<Particle>(&bytes).unwrap(),
+                particle
+            );
+        }
+    }
+
+    #[test]
     fn rejects_unknown_type() {
         assert!(Particle::decode(&mut &[0x80, 0x01][..]).is_err());
     }
 
     #[test]
-    fn rejects_non_empty_item_patch() {
+    fn rejects_truncated_item_patch() {
         assert!(Particle::decode(&mut &[57, 1, 1, 1, 0][..]).is_err());
     }
 
