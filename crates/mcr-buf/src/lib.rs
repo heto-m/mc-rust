@@ -1,7 +1,14 @@
 //! Wire-format primitives shared by every protocol version.
 
 mod impls;
+mod types;
 mod varint;
+
+#[cfg(feature = "derive")]
+pub use mcr_buf_derive::{Decode, Encode};
+pub use types::{
+    Angle, BitSet, BlockPos, DEFAULT_NAMESPACE, FixedBitSet, IdOr, Identifier, LengthPrefixed,
+};
 
 pub use varint::{
     VarInt, VarLong, read_varint, read_varlong, varint_len, write_varint, write_varlong,
@@ -56,6 +63,11 @@ pub fn read_len(input: &mut &[u8], max: usize) -> Result<usize> {
 
 pub const MAX_STRING_CHARS: usize = 32767;
 
+/// Caps up-front reservation so a hostile length times a large `T` can't reserve gigabytes.
+pub fn prealloc_capacity<T>(len: usize) -> usize {
+    len.min(64 * 1024 / size_of::<T>().max(1))
+}
+
 /// VarInt-length-prefixed bytes, borrowed from the input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ByteArray<'a>(pub &'a [u8]);
@@ -84,6 +96,27 @@ pub fn decode_str<'a>(input: &mut &'a [u8], max_chars: usize) -> Result<&'a str>
 pub fn encode_str(s: &str, out: &mut Vec<u8>) {
     write_varint(out, s.len() as i32);
     out.extend_from_slice(s.as_bytes());
+}
+
+#[doc(hidden)]
+pub mod __private {
+    use crate::{Result, decode_str};
+
+    pub trait StrField<'a>: Sized {
+        fn decode_field(input: &mut &'a [u8], max_chars: usize) -> Result<Self>;
+    }
+
+    impl<'a> StrField<'a> for &'a str {
+        fn decode_field(input: &mut &'a [u8], max_chars: usize) -> Result<Self> {
+            decode_str(input, max_chars)
+        }
+    }
+
+    impl StrField<'_> for String {
+        fn decode_field(input: &mut &[u8], max_chars: usize) -> Result<Self> {
+            decode_str(input, max_chars).map(str::to_owned)
+        }
+    }
 }
 
 pub fn to_bytes<T: Encode + ?Sized>(value: &T) -> Vec<u8> {

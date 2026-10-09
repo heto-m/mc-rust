@@ -12,6 +12,11 @@ publish = false
 mcr-buf = { path = "crates/mcr-buf" }
 thiserror = "2"
 tracing = "0.1"
+syn = "2"
+quote = "1"
+proc-macro2 = "1"
+criterion = { version = "0.5", default-features = false }
+mcr-buf-derive = { path = "crates/mcr-buf-derive" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

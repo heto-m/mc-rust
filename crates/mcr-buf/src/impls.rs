@@ -1,10 +1,8 @@
 use uuid::Uuid;
 
-const MAX_PREALLOC_BYTES: usize = 64 * 1024;
-
 use crate::{
     BoundedString, ByteArray, Decode, DecodeError, Encode, MAX_STRING_CHARS, RestBytes, Result,
-    decode_str, encode_str, read_len, take, write_varint,
+    decode_str, encode_str, prealloc_capacity, read_len, take, write_varint,
 };
 
 macro_rules! impl_be {
@@ -159,8 +157,7 @@ impl<T: Encode> Encode for Vec<T> {
 impl<'a, T: Decode<'a>> Decode<'a> for Vec<T> {
     fn decode(input: &mut &'a [u8]) -> Result<Self> {
         let len = read_len(input, input.len())?;
-        // A hostile length times a large `T` must not reserve gigabytes up front.
-        let mut v = Vec::with_capacity(len.min(MAX_PREALLOC_BYTES / size_of::<T>().max(1)));
+        let mut v = Vec::with_capacity(prealloc_capacity::<T>(len));
         for _ in 0..len {
             v.push(T::decode(input)?);
         }
