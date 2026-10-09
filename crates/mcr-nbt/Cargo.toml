@@ -1,0 +1,21 @@
+[package]
+name = "mcr-nbt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcr-buf.workspace = true
+thiserror.workspace = true
+flate2 = "1"
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "decode"
+harness = false
+
+[lints]
+workspace = true
