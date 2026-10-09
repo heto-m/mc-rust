@@ -1,0 +1,5 @@
+/target
+/.cache
+/run
+*.jar
+.DS_Store

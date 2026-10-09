@@ -1,0 +1,48 @@
+# mc-rust
+
+From-scratch Rust client for Minecraft: Java Edition. Joins vanilla servers; built for performance with
+GPU-driven rendering on wgpu and a custom engine (no Bevy, no OpenGL).
+
+## Fixed decisions
+
+- First target: Minecraft **26.3** (protocol from the vanilla data generator). Older versions come later
+  as translators onto the latest canonical packet set (ViaVersion-style), so never hard-code
+  version-specific behavior outside `mcr-protocol`'s version layer.
+- Renderer: wgpu. Drop to raw Vulkan only through wgpu-hal interop, never a second backend.
+- Networking: dedicated I/O threads with blocking sockets + channels to the game thread. No tokio.
+- **Never commit Mojang assets, jars, or decompiled code.** Assets load at runtime from the user's own
+  client jar. Decompiled sources under `.cache/` are reference only; reimplement behavior, don't
+  transliterate it.
+
+## Layout
+
+| Path | Purpose |
+|---|---|
+| `crates/mcr-buf` | `Encode`/`Decode<'a>` traits, VarInt, primitives (zero-copy decode) |
+| `crates/mcr-*` | One crate per subsystem (protocol, net, auth, nbt, world, assets, render, client) |
+| `crates/mcr-app` | The `mcr` binary |
+| `xtask` | Dev tooling: `cargo xtask <cmd>` (download jars/JDK, data generator, codegen, decompile) |
+| `.cache/` | Gitignored downloads and generated reference data |
+| `openspec/` | Specs and change proposals |
+
+## Workflow
+
+- Every feature is an OpenSpec change (`openspec/changes/<name>/`: proposal, design, specs delta,
+  tasks). Validate with `openspec validate <name> --strict`; archive it (`openspec archive <name> -y`)
+  on the branch before the PR merges.
+- Branch per change (`feat/<name>`, `fix/<name>`, `chore/<name>`), PR into `main`, squash-merge.
+- Commits: Conventional Commits, short subject (`feat(protocol): add login packets`), no body unless
+  needed.
+- Before pushing: `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings &&
+  cargo test --workspace`.
+- `Cargo.lock` conflicts on rebase: take `main`'s copy, then run `cargo check` to regenerate.
+- Add dependencies to the crate's own `Cargo.toml`; shared ones go in `[workspace.dependencies]`.
+
+## Code standards
+
+- Performance is a feature: avoid per-packet/per-block allocation in hot paths, prefer flat arrays and
+  borrowed decoding, measure with `criterion` benches before optimizing.
+- `unsafe` only with a `// SAFETY:` line and a benchmark proving it pays.
+- Errors: `thiserror` in libraries, `anyhow` only in binaries and xtask.
+- Tests: unit tests next to code; protocol codecs get round-trip tests plus byte fixtures captured
+  from the real vanilla server/client.
