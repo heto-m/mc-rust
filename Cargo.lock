@@ -799,6 +799,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcr-protocol"
+version = "0.1.0"
+dependencies = [
+ "mcr-buf",
+ "mcr-data",
+ "mcr-nbt",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "mcr-world"
 version = "0.1.0"
 dependencies = [
