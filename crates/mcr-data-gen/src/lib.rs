@@ -1,0 +1,551 @@
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail, ensure};
+use serde::Deserialize;
+use serde_json::{Map, Value};
+
+#[path = "../../mcr-data/src/tables.rs"]
+pub mod tables;
+
+use tables::{
+    Aabb, DIRECTION_NAMES, PacketEntry, PropDef, Registry, STATE_NAMES, Tables, flag, fluid_bits,
+};
+
+#[derive(Deserialize)]
+struct ExtractedBlocks {
+    blocks: Vec<ExtractedBlock>,
+}
+
+#[derive(Deserialize)]
+struct ExtractedBlock {
+    name: String,
+    friction: f32,
+    speed_factor: f32,
+    jump_factor: f32,
+    destroy_time: f32,
+    explosion_resistance: f32,
+    sound_type: String,
+    states: Vec<ExtractedState>,
+}
+
+#[derive(Deserialize)]
+struct ExtractedFluid {
+    amount: u16,
+    source: bool,
+    falling: bool,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct ExtractedState {
+    id: u32,
+    collision: Vec<[f64; 6]>,
+    outline: Vec<[f64; 6]>,
+    occlusion: Vec<[f64; 6]>,
+    light_emission: u8,
+    light_block: u8,
+    propagates_skylight_down: bool,
+    can_occlude: bool,
+    use_shape_for_light_occlusion: bool,
+    solid_render: bool,
+    full_collision: bool,
+    sturdy_faces: u8,
+    occlusion_faces: u8,
+    air: bool,
+    liquid: bool,
+    replaceable: bool,
+    has_block_entity: bool,
+    redstone_conductor: bool,
+    map_color: u8,
+    fluid: Option<ExtractedFluid>,
+}
+
+#[derive(Deserialize)]
+struct ExtractedItem {
+    id: u32,
+    name: String,
+    max_stack_size: u16,
+    max_damage: u32,
+    block: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExtractedEntity {
+    id: u32,
+    name: String,
+    width: f32,
+    height: f32,
+    eye_height: f32,
+    category: String,
+}
+
+#[derive(Deserialize)]
+struct ExtractedFluidType {
+    id: u32,
+    name: String,
+    source: bool,
+}
+
+#[derive(Default)]
+struct Interner {
+    strings: Vec<String>,
+    index: HashMap<String, u32>,
+}
+
+impl Interner {
+    fn intern(&mut self, s: &str) -> u32 {
+        if let Some(&i) = self.index.get(s) {
+            return i;
+        }
+        let i = u32::try_from(self.strings.len()).expect("string count");
+        self.strings.push(s.to_owned());
+        self.index.insert(s.to_owned(), i);
+        i
+    }
+}
+
+#[derive(Default)]
+struct ShapePool {
+    starts: Vec<u32>,
+    boxes: Vec<Aabb>,
+    index: HashMap<Vec<[u32; 6]>, u16>,
+}
+
+impl ShapePool {
+    fn intern(&mut self, shape: &[[f64; 6]]) -> Result<u16> {
+        if self.starts.is_empty() {
+            self.starts.push(0);
+        }
+        let key: Vec<[u32; 6]> = shape
+            .iter()
+            .map(|b| b.map(|v| (v as f32).to_bits()))
+            .collect();
+        if let Some(&i) = self.index.get(&key) {
+            return Ok(i);
+        }
+        let i = u16::try_from(self.index.len()).context("more than 65535 distinct shapes")?;
+        for b in shape {
+            let f = b.map(|v| v as f32);
+            self.boxes.push(Aabb {
+                min: [f[0], f[1], f[2]],
+                max: [f[3], f[4], f[5]],
+            });
+        }
+        self.starts
+            .push(u32::try_from(self.boxes.len()).expect("box count"));
+        self.index.insert(key, i);
+        Ok(i)
+    }
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+}
+
+#[derive(Debug)]
+pub struct Inputs {
+    pub reports: PathBuf,
+    pub extracted: PathBuf,
+    pub version_json: PathBuf,
+}
+
+impl Inputs {
+    pub fn in_cache(cache: &Path, version: &str) -> Self {
+        let root = cache.join("versions").join(version);
+        Self {
+            reports: root.join("generated/reports"),
+            extracted: root.join("extracted"),
+            version_json: root.join("src/version.json"),
+        }
+    }
+}
+
+pub fn generate(inputs: &Inputs) -> Result<Vec<u8>> {
+    let mut strings = Interner::default();
+    let mut t = Tables::default();
+
+    let version: Value = read_json(&inputs.version_json)?;
+    t.version_name = version["id"].as_str().context("version id")?.to_owned();
+    t.protocol = u32::try_from(
+        version["protocol_version"]
+            .as_u64()
+            .context("protocol_version")?,
+    )?;
+
+    let registries: Map<String, Value> = read_json(&inputs.reports.join("registries.json"))?;
+    for (name, reg) in &registries {
+        let entries = reg["entries"].as_object().context("registry entries")?;
+        let mut by_id = vec![None; entries.len()];
+        for (entry, v) in entries {
+            let id = v["protocol_id"].as_u64().context("protocol_id")? as usize;
+            ensure!(
+                id < by_id.len() && by_id[id].is_none(),
+                "{name}: ids not dense"
+            );
+            by_id[id] = Some(entry.as_str());
+        }
+        let entries: Vec<u32> = by_id
+            .into_iter()
+            .map(|e| e.map(|e| strings.intern(e)).context("registry hole"))
+            .collect::<Result<_>>()?;
+        let mut sorted: Vec<u32> = (0..entries.len() as u32).collect();
+        sorted.sort_by(|&a, &b| {
+            strings.strings[entries[a as usize] as usize]
+                .cmp(&strings.strings[entries[b as usize] as usize])
+        });
+        t.registries.push(Registry {
+            name: strings.intern(name),
+            entries,
+            sorted,
+        });
+    }
+    let reg_names = |key: &str| -> Result<Vec<String>> {
+        let r = t
+            .registries
+            .iter()
+            .find(|r| strings.strings[r.name as usize] == key)
+            .with_context(|| format!("registry {key}"))?;
+        Ok(r.entries
+            .iter()
+            .map(|&e| strings.strings[e as usize].clone())
+            .collect())
+    };
+    let block_names = reg_names("minecraft:block")?;
+    let item_names = reg_names("minecraft:item")?;
+    let entity_names = reg_names("minecraft:entity_type")?;
+    let fluid_names = reg_names("minecraft:fluid")?;
+    let block_ids: HashMap<&str, u32> = block_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i as u32))
+        .collect();
+
+    let report: Map<String, Value> = read_json(&inputs.reports.join("blocks.json"))?;
+    let extracted: ExtractedBlocks = read_json(&inputs.extracted.join("blocks.json"))?;
+    ensure!(
+        extracted.blocks.len() == block_names.len(),
+        "block count mismatch"
+    );
+
+    let mut shapes = ShapePool::default();
+    let empty = shapes.intern(&[])?;
+    ensure!(empty == 0);
+    let mut next_state = 0u32;
+    t.blocks.prop_start.push(0);
+    t.blocks.first_state.push(0);
+    for (bid, block) in extracted.blocks.iter().enumerate() {
+        ensure!(
+            block.name == block_names[bid],
+            "block order mismatch at {bid}"
+        );
+        let rep = report
+            .get(&block.name)
+            .with_context(|| format!("{} missing in blocks report", block.name))?;
+        let b = &mut t.blocks;
+        b.friction.push(block.friction);
+        b.speed_factor.push(block.speed_factor);
+        b.jump_factor.push(block.jump_factor);
+        b.destroy_time.push(block.destroy_time);
+        b.explosion_resistance.push(block.explosion_resistance);
+        b.sound_type.push(strings.intern(&block.sound_type));
+
+        let mut counts = Vec::new();
+        if let Some(props) = rep.get("properties").and_then(Value::as_object) {
+            let mut sorted: Vec<_> = props.iter().collect();
+            sorted.sort_by_key(|(name, _)| name.as_str());
+            for (pname, values) in sorted {
+                let values = values.as_array().context("property values")?;
+                let value_start = u32::try_from(b.prop_values.len())?;
+                for v in values {
+                    b.prop_values
+                        .push(strings.intern(v.as_str().context("value")?));
+                }
+                counts.push(values.len() as u32);
+                b.props.push(PropDef {
+                    name: strings.intern(pname),
+                    value_start,
+                    value_count: values.len() as u32,
+                });
+            }
+        }
+        b.prop_start.push(u32::try_from(b.props.len())?);
+
+        let rep_states = rep["states"].as_array().context("report states")?;
+        ensure!(
+            rep_states.len() == block.states.len(),
+            "{}: state count",
+            block.name
+        );
+        let expected: u32 = counts.iter().product();
+        ensure!(
+            expected as usize == block.states.len(),
+            "{}: radix size",
+            block.name
+        );
+        let first = next_state;
+        let mut default = None;
+        for (k, (s, rs)) in block.states.iter().zip(rep_states).enumerate() {
+            ensure!(
+                s.id == next_state,
+                "{}: non-contiguous state ids",
+                block.name
+            );
+            ensure!(
+                rs["id"].as_u64() == Some(u64::from(s.id)),
+                "{}: report id",
+                block.name
+            );
+            if rs["default"].as_bool() == Some(true) {
+                default = Some(s.id);
+            }
+            check_properties(&block.name, rs, &t, &strings, bid, k as u32)?;
+            push_state(&mut t, &mut shapes, bid as u16, s, &fluid_names)?;
+            next_state += 1;
+        }
+        t.blocks
+            .default_state
+            .push(default.with_context(|| format!("{} has no default state", block.name))?);
+        t.blocks.first_state.push(next_state);
+        ensure!(first < next_state, "{} has no states", block.name);
+    }
+    let report_states: usize = report
+        .values()
+        .map(|b| b["states"].as_array().map_or(0, Vec::len))
+        .sum();
+    ensure!(
+        report_states == next_state as usize,
+        "state coverage mismatch"
+    );
+    t.shape_starts = shapes.starts;
+    t.shape_boxes = shapes.boxes;
+
+    let items: Vec<ExtractedItem> = read_json(&inputs.extracted.join("items.json"))?;
+    ensure!(items.len() == item_names.len(), "item count mismatch");
+    for item in &items {
+        ensure!(
+            item_names[item.id as usize] == item.name,
+            "item order mismatch"
+        );
+        t.items.max_stack_size.push(item.max_stack_size);
+        t.items.max_damage.push(item.max_damage);
+        let block = match &item.block {
+            Some(b) => i32::try_from(*block_ids.get(b.as_str()).context("item block")?)?,
+            None => -1,
+        };
+        t.items.block.push(block);
+    }
+
+    let entities: Vec<ExtractedEntity> = read_json(&inputs.extracted.join("entity_types.json"))?;
+    ensure!(
+        entities.len() == entity_names.len(),
+        "entity count mismatch"
+    );
+    for e in &entities {
+        ensure!(
+            entity_names[e.id as usize] == e.name,
+            "entity order mismatch"
+        );
+        t.entities.width.push(e.width);
+        t.entities.height.push(e.height);
+        t.entities.eye_height.push(e.eye_height);
+        t.entities.category.push(strings.intern(&e.category));
+    }
+
+    let fluids: Vec<ExtractedFluidType> = read_json(&inputs.extracted.join("fluids.json"))?;
+    ensure!(fluids.len() == fluid_names.len(), "fluid count mismatch");
+    for f in &fluids {
+        ensure!(fluid_names[f.id as usize] == f.name, "fluid order mismatch");
+        t.fluid_source.push(u8::from(f.source));
+    }
+
+    let packets: Map<String, Value> = read_json(&inputs.reports.join("packets.json"))?;
+    for (state, dirs) in &packets {
+        let state_idx = STATE_NAMES
+            .iter()
+            .position(|n| n == state)
+            .with_context(|| format!("unknown protocol state {state}"))?;
+        for (dir, entries) in dirs.as_object().context("direction map")? {
+            let dir_idx = DIRECTION_NAMES
+                .iter()
+                .position(|n| n == dir)
+                .with_context(|| format!("unknown direction {dir}"))?;
+            for (name, v) in entries.as_object().context("packet map")? {
+                t.packets.push(PacketEntry {
+                    state: state_idx as u8,
+                    direction: dir_idx as u8,
+                    id: u32::try_from(v["protocol_id"].as_u64().context("packet id")?)?,
+                    name: strings.intern(name),
+                });
+            }
+        }
+    }
+    t.packets.sort_by(|a, b| {
+        (a.state, a.direction)
+            .cmp(&(b.state, b.direction))
+            .then_with(|| strings.strings[a.name as usize].cmp(&strings.strings[b.name as usize]))
+    });
+
+    t.strings = strings.strings;
+    Ok(t.encode())
+}
+
+fn check_properties(
+    name: &str,
+    rep_state: &Value,
+    t: &Tables,
+    strings: &Interner,
+    bid: usize,
+    k: u32,
+) -> Result<()> {
+    let blocks = &t.blocks;
+    let props = &blocks.props[blocks.prop_start[bid] as usize..blocks.prop_start[bid + 1] as usize];
+    let actual = rep_state.get("properties").and_then(Value::as_object);
+    ensure!(
+        actual.map_or(0, Map::len) == props.len(),
+        "{name}: property count mismatch"
+    );
+    let mut stride: u32 = props.iter().map(|p| p.value_count).product();
+    for p in props {
+        stride /= p.value_count;
+        let idx = k / stride % p.value_count;
+        let want = &strings.strings[blocks.prop_values[(p.value_start + idx) as usize] as usize];
+        let key = &strings.strings[p.name as usize];
+        let got = actual.and_then(|a| a.get(key)).and_then(Value::as_str);
+        ensure!(
+            got == Some(want.as_str()),
+            "{name}: state {k} property {key} not in radix order"
+        );
+    }
+    Ok(())
+}
+
+fn push_state(
+    t: &mut Tables,
+    shapes: &mut ShapePool,
+    block: u16,
+    s: &ExtractedState,
+    fluid_names: &[String],
+) -> Result<()> {
+    let st = &mut t.states;
+    st.block.push(block);
+    let mut flags = 0;
+    for (on, bit) in [
+        (s.air, flag::AIR),
+        (s.liquid, flag::LIQUID),
+        (s.replaceable, flag::REPLACEABLE),
+        (s.has_block_entity, flag::HAS_BLOCK_ENTITY),
+        (s.can_occlude, flag::CAN_OCCLUDE),
+        (
+            s.use_shape_for_light_occlusion,
+            flag::USE_SHAPE_FOR_LIGHT_OCCLUSION,
+        ),
+        (s.solid_render, flag::SOLID_RENDER),
+        (s.full_collision, flag::FULL_COLLISION),
+        (s.propagates_skylight_down, flag::PROPAGATES_SKYLIGHT_DOWN),
+        (s.redstone_conductor, flag::REDSTONE_CONDUCTOR),
+    ] {
+        if on {
+            flags |= bit;
+        }
+    }
+    st.flags.push(flags);
+    st.light_emission.push(s.light_emission);
+    st.light_block.push(s.light_block);
+    st.collision.push(shapes.intern(&s.collision)?);
+    st.outline.push(shapes.intern(&s.outline)?);
+    st.occlusion.push(shapes.intern(&s.occlusion)?);
+    st.map_color.push(s.map_color);
+    st.sturdy_faces.push(s.sturdy_faces);
+    st.occlusion_faces.push(s.occlusion_faces);
+    let fluid = match &s.fluid {
+        None => 0,
+        Some(f) => {
+            let Some(id) = fluid_names.iter().position(|n| *n == f.kind) else {
+                bail!("unknown fluid {}", f.kind);
+            };
+            ensure!(id <= fluid_bits::ID_MASK as usize && f.amount <= fluid_bits::AMOUNT_MASK);
+            fluid_bits::PRESENT
+                | id as u16
+                | f.amount << fluid_bits::AMOUNT_SHIFT
+                | if f.source { fluid_bits::SOURCE } else { 0 }
+                | if f.falling { fluid_bits::FALLING } else { 0 }
+        }
+    };
+    st.fluid.push(fluid);
+    Ok(())
+}
+
+pub fn write_module(out_dir: &Path, blob: &[u8]) -> Result<()> {
+    fs::create_dir_all(out_dir)?;
+    fs::write(out_dir.join("data.bin"), blob)?;
+    fs::write(
+        out_dir.join("mod.rs"),
+        "pub static BLOB: &[u8] = include_bytes!(\"data.bin\");\n",
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inputs() -> Option<Inputs> {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cache = manifest
+            .ancestors()
+            .map(|p| p.join(".cache"))
+            .find(|p| p.is_dir())?;
+        let inputs = Inputs::in_cache(&cache, "26.3");
+        inputs
+            .extracted
+            .join("blocks.json")
+            .is_file()
+            .then_some(inputs)
+    }
+
+    fn committed_blob() -> Vec<u8> {
+        fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../mcr-data/src/generated/v26_3/data.bin"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn generation_is_deterministic_and_current() {
+        let Some(inputs) = inputs() else { return };
+        let first = generate(&inputs).unwrap();
+        assert_eq!(first, generate(&inputs).unwrap());
+        assert!(
+            first == committed_blob(),
+            "committed tables are stale; rerun mcr-data-gen"
+        );
+    }
+
+    #[test]
+    fn every_report_state_is_covered() {
+        let Some(inputs) = inputs() else { return };
+        let report: Map<String, Value> = read_json(&inputs.reports.join("blocks.json")).unwrap();
+        let v = mcr_data::v26_3();
+        let mut count = 0;
+        for (name, block) in &report {
+            let id = v.block_by_name(name).unwrap();
+            for state in block["states"].as_array().unwrap() {
+                let sid = state["id"].as_u64().unwrap() as u32;
+                let info = v.block_state(sid).unwrap();
+                assert_eq!(info.block, id);
+                let props = state["properties"].as_object();
+                assert_eq!(v.state_properties(sid).count(), props.map_or(0, Map::len));
+                for (k, val) in v.state_properties(sid) {
+                    assert_eq!(props.unwrap()[k].as_str(), Some(val));
+                }
+                count += 1;
+            }
+        }
+        assert_eq!(count, v.state_count());
+    }
+}
