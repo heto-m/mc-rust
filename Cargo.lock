@@ -1563,6 +1563,7 @@ dependencies = [
  "mcr-buf",
  "mcr-data",
  "mcr-nbt",
+ "mcr-world",
  "thiserror 2.0.21",
  "uuid",
 ]
