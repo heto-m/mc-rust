@@ -9,6 +9,8 @@ GPU-driven rendering on wgpu and a custom engine (no Bevy, no OpenGL).
   as translators onto the latest canonical packet set (ViaVersion-style), so never hard-code
   version-specific behavior outside `mcr-protocol`'s version layer.
 - Renderer: wgpu. Drop to raw Vulkan only through wgpu-hal interop, never a second backend.
+- Singleplayer: the vanilla server jar runs as a managed child process (offline mode, loopback,
+  `/tick freeze` for pause, vanilla world format). Client code must not assume a remote server.
 - Networking: dedicated I/O threads with blocking sockets + channels to the game thread. No tokio.
 - **Never commit Mojang assets, jars, or decompiled code.** Assets load at runtime from the user's own
   client jar. Decompiled sources under `.cache/` are reference only; reimplement behavior, don't
