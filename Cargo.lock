@@ -1494,6 +1494,7 @@ dependencies = [
 name = "mcr-protocol"
 version = "0.1.0"
 dependencies = [
+ "criterion 0.5.1",
  "mcr-buf",
  "mcr-data",
  "mcr-nbt",

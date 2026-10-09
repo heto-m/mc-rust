@@ -12,5 +12,12 @@ mcr-nbt = { path = "../mcr-nbt" }
 thiserror.workspace = true
 uuid = "1"
 
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "move_player"
+harness = false
+
 [lints]
 workspace = true
