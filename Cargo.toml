@@ -17,6 +17,15 @@ quote = "1"
 proc-macro2 = "1"
 criterion = { version = "0.5", default-features = false }
 mcr-buf-derive = { path = "crates/mcr-buf-derive" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "3"
+rsa = "0.9"
+rand = "0.8"
+sha1 = "0.10"
+md-5 = "0.10"
+base64 = "0.22"
+time = { version = "0.3", features = ["parsing"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
