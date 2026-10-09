@@ -27,6 +27,8 @@ sha1 = "0.10"
 md-5 = "0.10"
 base64 = "0.22"
 time = { version = "0.3", features = ["parsing"] }
+png = "0.18"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
