@@ -1632,6 +1632,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcr-mesh"
+version = "0.1.0"
+dependencies = [
+ "criterion 0.5.1",
+ "mcr-assets",
+ "mcr-data",
+ "mcr-render",
+ "mcr-world",
+ "png",
+ "rustc-hash 2.1.3",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "mcr-nbt"
 version = "0.1.0"
 dependencies = [

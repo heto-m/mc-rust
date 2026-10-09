@@ -51,7 +51,7 @@ fn cull(@builtin(global_invocation_id) gid: vec3<u32>) {
         if n > 0u && facing[d] {
             let slot = atomicAdd(&counters[0], 1u);
             cube_cmds[slot] = DrawIndirect(n * 6u, 1u, 0u, slot);
-            cube_draws[slot] = DrawData(lo, offset);
+            cube_draws[slot] = DrawData(lo, offset, s.bases.w, 0u, 0u, 0u);
         }
         offset += n;
     }
@@ -59,6 +59,6 @@ fn cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     if s.bases.z > 0u {
         let slot = atomicAdd(&counters[1], 1u);
         model_cmds[slot] = DrawIndirect(s.bases.z * 6u, 1u, 0u, slot);
-        model_draws[slot] = DrawData(lo, s.bases.y);
+        model_draws[slot] = DrawData(lo, s.bases.y, s.bases.w, 0u, 0u, 0u);
     }
 }

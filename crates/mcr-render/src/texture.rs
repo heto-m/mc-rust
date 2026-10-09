@@ -1,3 +1,30 @@
+/// One size class of block textures: every layer shares `width x height`, and each mip level holds all
+/// layers back to back as RGBA8 in gamma space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextureGroupData {
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    pub mips: Vec<Vec<u8>>,
+}
+
+pub const MAX_TEXTURE_GROUPS: usize = 4;
+
+impl TextureGroupData {
+    pub fn mip_size(&self, level: usize) -> (u32, u32) {
+        ((self.width >> level).max(1), (self.height >> level).max(1))
+    }
+
+    pub fn single_pixel() -> Self {
+        Self {
+            width: 1,
+            height: 1,
+            layers: 1,
+            mips: vec![vec![255; 4]],
+        }
+    }
+}
+
 /// RGBA8 base-level block textures; the renderer builds the mip chain.
 #[derive(Debug, Clone)]
 pub struct TextureArrayData {
@@ -8,6 +35,27 @@ pub struct TextureArrayData {
 impl TextureArrayData {
     pub fn mip_levels(&self) -> u32 {
         self.size.ilog2() + 1
+    }
+
+    pub fn into_group(self) -> TextureGroupData {
+        let mut mips = vec![self.layers.concat()];
+        let (mut size, count) = (self.size, self.layers.len());
+        for _ in 1..self.mip_levels() {
+            let prev = mips.last().expect("base level");
+            let layer_len = (size * size * 4) as usize;
+            let next: Vec<u8> = prev
+                .chunks_exact(layer_len)
+                .flat_map(|l| downsample(l, size))
+                .collect();
+            size = (size / 2).max(1);
+            mips.push(next);
+        }
+        TextureGroupData {
+            width: self.size,
+            height: self.size,
+            layers: count as u32,
+            mips,
+        }
     }
 
     /// Procedural stand-in: noisy tinted tiles with darker borders.

@@ -17,6 +17,10 @@ struct SectionMeta {
 struct DrawData {
     origin: vec3<f32>,
     first_quad: u32,
+    tint_base: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
 }
 
 struct DrawIndirect {

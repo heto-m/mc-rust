@@ -85,6 +85,7 @@ fn shader_decoder_matches_rust_encoder() {
             layer,
             ao,
             light,
+            tint: 0,
         })
         .unwrap()
     })
@@ -102,6 +103,8 @@ fn shader_decoder_matches_rust_encoder() {
         shade_face: Face::NegZ,
         flags: 17,
         ao: [3, 2, 1, 0],
+        tint: 0,
+        cell: [0, 0],
     };
     let models = [ModelQuad::encode(&model_desc).unwrap()];
 
@@ -305,6 +308,7 @@ fn one_quad_per_face() -> SectionMesh {
                 layer: 3,
                 ao: [3; 4],
                 light: 0xf0,
+                tint: 0,
             })
             .unwrap(),
         );
@@ -359,4 +363,161 @@ fn arena_exhaustion_keeps_existing_sections() {
     r.set_section([0, 0, 0], &SectionMesh::default()).unwrap();
     assert_eq!(r.cube_quads_used(), 0);
     r.set_section([1, 0, 0], &one_quad_per_face()).unwrap();
+}
+
+fn flat_group(layers: &[[u8; 4]]) -> mcr_render::TextureGroupData {
+    let mips = (0..5)
+        .map(|m| {
+            let texels = (16usize >> m).pow(2);
+            layers
+                .iter()
+                .flat_map(|c| std::iter::repeat_n(*c, texels).flatten())
+                .collect()
+        })
+        .collect();
+    mcr_render::TextureGroupData {
+        width: 16,
+        height: 16,
+        layers: layers.len() as u32,
+        mips,
+    }
+}
+
+fn translucent_scene(with_glass: bool) -> Option<[u8; 4]> {
+    let mut r = renderer(64, 64)?;
+    r.set_texture_groups(&[flat_group(&[[255, 0, 0, 255], [0, 0, 255, 128]])]);
+    let mut m = SectionMesh::default();
+    m.push_cube(
+        PackedQuad::encode(&CubeQuad {
+            x: 4,
+            y: 4,
+            z: 4,
+            face: Face::PosZ,
+            width: 8,
+            height: 8,
+            layer: 0,
+            ao: [3; 4],
+            light: 0xf0,
+            tint: 0,
+        })
+        .unwrap(),
+    );
+    if with_glass {
+        m.translucent.push(
+            ModelQuad::encode(&ModelQuadDesc {
+                corners: [
+                    [4.0, 4.0, 10.0],
+                    [12.0, 4.0, 10.0],
+                    [4.0, 12.0, 10.0],
+                    [12.0, 12.0, 10.0],
+                ],
+                uvs: [[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+                layer: 1,
+                light: 0xf0,
+                shade_face: Face::PosZ,
+                flags: 0,
+                ao: [3; 4],
+                tint: 0,
+                cell: [0, 0],
+            })
+            .unwrap(),
+        );
+    }
+    r.set_section([0, 0, 0], &m).unwrap();
+    let cam = Camera {
+        position: DVec3::new(8.0, 8.0, 20.0),
+        ..Camera::default()
+    };
+    frame(&mut r, &cam);
+    let px = r.read_offscreen().unwrap();
+    let i = (32 * 64 + 32) * 4;
+    Some([px[i], px[i + 1], px[i + 2], px[i + 3]])
+}
+
+#[test]
+fn translucent_pass_blends_over_opaque() {
+    let Some(plain) = translucent_scene(false) else {
+        return;
+    };
+    let blended = translucent_scene(true).unwrap();
+    assert!(plain[0] > 150 && plain[2] < 10, "{plain:?}");
+    assert!(blended[2] > 60, "glass shows: {blended:?}");
+    assert!(blended[0] > 60, "opaque shows through: {blended:?}");
+}
+
+fn wall(layer: u16, tint: u8) -> SectionMesh {
+    let mut m = SectionMesh::default();
+    m.push_cube(
+        PackedQuad::encode(&CubeQuad {
+            x: 4,
+            y: 4,
+            z: 4,
+            face: Face::PosZ,
+            width: 8,
+            height: 8,
+            layer,
+            ao: [3; 4],
+            light: 0xf0,
+            tint,
+        })
+        .unwrap(),
+    );
+    m
+}
+
+fn center_pixel(
+    groups: &[mcr_render::TextureGroupData],
+    mesh: &SectionMesh,
+    palette: &[u32],
+) -> Option<[u8; 4]> {
+    let mut r = renderer(64, 64)?;
+    r.set_texture_groups(groups);
+    r.set_tint_palette(palette);
+    r.set_section([0, 0, 0], mesh).unwrap();
+    let cam = Camera {
+        position: DVec3::new(8.0, 8.0, 20.0),
+        ..Camera::default()
+    };
+    frame(&mut r, &cam);
+    let px = r.read_offscreen().unwrap();
+    let i = (32 * 64 + 32) * 4;
+    Some([px[i], px[i + 1], px[i + 2], px[i + 3]])
+}
+
+#[test]
+fn texture_groups_are_addressed_by_layer_high_bits() {
+    let groups = [
+        flat_group(&[[255, 0, 0, 255]]),
+        flat_group(&[[0, 255, 0, 255]]),
+    ];
+    let Some(first) = center_pixel(&groups, &wall(0, 0), &[]) else {
+        return;
+    };
+    let second = center_pixel(&groups, &wall(1 << 14, 0), &[]).unwrap();
+    assert!(first[0] > 150 && first[1] < 10, "{first:?}");
+    assert!(second[1] > 150 && second[0] < 10, "{second:?}");
+}
+
+#[test]
+fn tint_tables_and_constant_palette_colour_quads() {
+    let white = [flat_group(&[[255, 255, 255, 255]])];
+    let mut table = Box::new([0u32; mcr_render::TINT_TABLE_WORDS]);
+    table[..256].fill(0x00ff00);
+    let mut tinted = wall(0, 1);
+    tinted.tints = Some(table);
+    let Some(green) = center_pixel(&white, &tinted, &[]) else {
+        return;
+    };
+    assert!(
+        green[1] > 150 && green[0] < 10 && green[2] < 10,
+        "{green:?}"
+    );
+
+    let constant = center_pixel(&white, &wall(0, 8), &[0xff0000]).unwrap();
+    assert!(constant[2] > 150 && constant[0] < 10, "{constant:?}");
+    let plain = center_pixel(&white, &wall(0, 0), &[]).unwrap();
+    assert!(
+        plain[0] > 150 && plain[1] > 150 && plain[2] > 150,
+        "{plain:?}"
+    );
 }

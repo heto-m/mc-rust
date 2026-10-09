@@ -3,6 +3,7 @@ pub(crate) enum Dest {
     Cube,
     Model,
     Sections,
+    Tints,
 }
 
 #[derive(Debug)]

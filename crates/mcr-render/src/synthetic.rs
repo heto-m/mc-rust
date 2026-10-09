@@ -152,6 +152,8 @@ fn model_box(min: [f32; 3], max: [f32; 3], layer: u16) -> Vec<ModelQuad> {
             shade_face: face,
             flags: 0,
             ao: [3; 4],
+            tint: 0,
+            cell: [0, 0],
         };
         out.push(ModelQuad::encode(&desc).expect("box within section bounds"));
     }
@@ -179,6 +181,7 @@ pub fn mesh_section(terrain: &Terrain, sx: i32, sy: i32, sz: i32) -> SectionMesh
                 layer,
                 ao: ao_corners(&heights, [x, y, z], face),
                 light,
+                tint: 0,
             };
             mesh.push_cube(PackedQuad::encode(&q).expect("quad fields in range"));
         };

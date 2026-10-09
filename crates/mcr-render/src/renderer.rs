@@ -8,20 +8,21 @@ use bytemuck::{Pod, Zeroable};
 use crate::arena::Arena;
 use crate::camera::Camera;
 use crate::mesh::SectionMesh;
+use crate::mesh::TINT_TABLE_WORDS;
 use crate::quad::{ModelQuad, PackedQuad};
 use crate::staging::{Dest, Uploader};
-use crate::texture::{TextureArrayData, downsample};
+use crate::texture::{MAX_TEXTURE_GROUPS, TextureArrayData, TextureGroupData};
 
 const QUAD_SRC: &str = include_str!("shaders/quad.wgsl");
 const GLOBALS_SRC: &str = include_str!("shaders/globals.wgsl");
 const TERRAIN_SRC: &str = include_str!("shaders/terrain.wgsl");
 const CULL_SRC: &str = include_str!("shaders/cull.wgsl");
 
-pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SKY_CLEAR: wgpu::Color = wgpu::Color {
-    r: 0.17,
-    g: 0.42,
+    r: 0.45,
+    g: 0.68,
     b: 1.0,
     a: 1.0,
 };
@@ -29,7 +30,9 @@ const READBACK_SLOTS: usize = 3;
 const STATS_COUNTER_OFFSET: u64 = 256;
 const STATS_SIZE: u64 = 512;
 const DRAW_CMD_SIZE: u64 = 16;
-const DRAW_DATA_SIZE: u64 = 16;
+const DRAW_DATA_SIZE: u64 = 32;
+const TINT_PALETTE_WORDS: usize = 64;
+const NO_TINT_TABLE: u32 = u32::MAX;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
@@ -72,6 +75,8 @@ pub struct RendererConfig {
     pub vsync: bool,
     pub upload_budget_bytes: usize,
     pub allow_draw_count: bool,
+    pub tint_tables: u32,
+    pub max_translucent_sections: u32,
 }
 
 impl Default for RendererConfig {
@@ -83,6 +88,8 @@ impl Default for RendererConfig {
             vsync: true,
             upload_budget_bytes: 64 << 20,
             allow_draw_count: true,
+            tint_tables: 8192,
+            max_translucent_sections: 16384,
         }
     }
 }
@@ -151,11 +158,22 @@ struct SectionMetaGpu {
     counts_b: [u32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct DrawDataGpu {
+    origin: [f32; 3],
+    first_quad: u32,
+    tint_base: u32,
+    pad: [u32; 3],
+}
+
 #[derive(Debug)]
 struct SectionSlot {
     index: u32,
     cube: Option<(u32, u32)>,
     model: Option<(u32, u32)>,
+    translucent: Option<(u32, u32)>,
+    tint: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -187,6 +205,9 @@ struct Geometry {
     model_cmds: wgpu::Buffer,
     model_draws: wgpu::Buffer,
     counters: wgpu::Buffer,
+    tints: wgpu::Buffer,
+    trans_cmds: wgpu::Buffer,
+    trans_draws: wgpu::Buffer,
 }
 
 pub struct Renderer {
@@ -207,11 +228,15 @@ pub struct Renderer {
     cull_bg: wgpu::BindGroup,
     cube_pipeline: wgpu::RenderPipeline,
     model_pipeline: wgpu::RenderPipeline,
+    trans_pipeline: wgpu::RenderPipeline,
+    trans_geom_bg: wgpu::BindGroup,
     globals_bgl: wgpu::BindGroupLayout,
     globals_bg: wgpu::BindGroup,
     geom_bg: wgpu::BindGroup,
     sampler: wgpu::Sampler,
-    texture: wgpu::Texture,
+    textures: Vec<wgpu::Texture>,
+    dummy_texture: wgpu::Texture,
+    tint_arena: Arena,
 
     cube_arena: Arena,
     model_arena: Arena,
@@ -299,60 +324,60 @@ fn depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
         .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
-fn create_block_texture(
+fn create_group_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    data: &TextureArrayData,
+    data: &TextureGroupData,
 ) -> wgpu::Texture {
-    let mips = data.mip_levels();
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("block textures"),
         size: wgpu::Extent3d {
-            width: data.size,
-            height: data.size,
-            depth_or_array_layers: data.layers.len() as u32,
+            width: data.width,
+            height: data.height,
+            depth_or_array_layers: data.layers,
         },
-        mip_level_count: mips,
+        mip_level_count: data.mips.len() as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: COLOR_FORMAT,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    for (layer, base) in data.layers.iter().enumerate() {
-        let mut level = base.clone();
-        let mut size = data.size;
-        for mip in 0..mips {
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: mip,
-                    origin: wgpu::Origin3d {
-                        x: 0,
-                        y: 0,
-                        z: layer as u32,
-                    },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &level,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(size * 4),
-                    rows_per_image: Some(size),
-                },
-                wgpu::Extent3d {
-                    width: size,
-                    height: size,
-                    depth_or_array_layers: 1,
-                },
-            );
-            if size > 1 {
-                level = downsample(&level, size);
-                size /= 2;
-            }
-        }
+    for (mip, bytes) in data.mips.iter().enumerate() {
+        let (w, h) = data.mip_size(mip);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: mip as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: data.layers,
+            },
+        );
     }
     texture
+}
+
+fn group_textures(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    groups: &[TextureGroupData],
+) -> Vec<wgpu::Texture> {
+    groups
+        .iter()
+        .take(MAX_TEXTURE_GROUPS)
+        .map(|g| create_group_texture(device, queue, g))
+        .collect()
 }
 
 impl Renderer {
@@ -489,6 +514,26 @@ impl Renderer {
                 8,
                 wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_SRC,
             ),
+            tints: storage_buffer(
+                &device,
+                "tints",
+                (TINT_PALETTE_WORDS as u64
+                    + u64::from(config.tint_tables) * TINT_TABLE_WORDS as u64)
+                    * 4,
+                wgpu::BufferUsages::empty(),
+            ),
+            trans_cmds: storage_buffer(
+                &device,
+                "translucent cmds",
+                u64::from(config.max_translucent_sections) * DRAW_CMD_SIZE,
+                wgpu::BufferUsages::INDIRECT,
+            ),
+            trans_draws: storage_buffer(
+                &device,
+                "translucent draws",
+                u64::from(config.max_translucent_sections) * DRAW_DATA_SIZE,
+                wgpu::BufferUsages::empty(),
+            ),
         };
 
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
@@ -543,6 +588,16 @@ impl Renderer {
             cache: None,
         });
 
+        let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        };
         let globals_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals"),
             entries: &[
@@ -550,19 +605,13 @@ impl Renderer {
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                texture_entry(2),
+                texture_entry(3),
+                texture_entry(4),
+                texture_entry(5),
             ],
         });
         let vs = wgpu::ShaderStages::VERTEX;
@@ -573,6 +622,7 @@ impl Renderer {
                 storage_entry(1, vs, true),
                 storage_entry(2, vs, true),
                 storage_entry(3, vs, true),
+                storage_entry(4, vs | wgpu::ShaderStages::FRAGMENT, true),
             ],
         });
         let geom_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -583,6 +633,18 @@ impl Renderer {
                 bind(1, &geo.model_arena),
                 bind(2, &geo.cube_draws),
                 bind(3, &geo.model_draws),
+                bind(4, &geo.tints),
+            ],
+        });
+        let trans_geom_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("translucent geometry"),
+            layout: &geom_bgl,
+            entries: &[
+                bind(0, &geo.cube_arena),
+                bind(1, &geo.model_arena),
+                bind(2, &geo.trans_draws),
+                bind(3, &geo.trans_draws),
+                bind(4, &geo.tints),
             ],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -595,8 +657,21 @@ impl Renderer {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        let texture = create_block_texture(&device, &queue, &TextureArrayData::placeholder(16));
-        let globals_bg = make_globals_bg(&device, &globals_bgl, &globals, &texture, &sampler);
+        let dummy_texture =
+            create_group_texture(&device, &queue, &TextureGroupData::single_pixel());
+        let textures = group_textures(
+            &device,
+            &queue,
+            &[TextureArrayData::placeholder(16).into_group()],
+        );
+        let globals_bg = make_globals_bg(
+            &device,
+            &globals_bgl,
+            &globals,
+            &textures,
+            &dummy_texture,
+            &sampler,
+        );
 
         let terrain_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("terrain"),
@@ -607,40 +682,47 @@ impl Renderer {
             bind_group_layouts: &[Some(&globals_bgl), Some(&geom_bgl)],
             immediate_size: 0,
         });
-        let make_pipeline = |label: &str, vs_entry: &str, cull: Option<wgpu::Face>| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&draw_layout),
-                vertex: wgpu::VertexState {
-                    module: &terrain_module,
-                    entry_point: Some(vs_entry),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: cull,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Greater),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &terrain_module,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(color_format.into())],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-        let cube_pipeline = make_pipeline("cube", "vs_cube", Some(wgpu::Face::Back));
-        let model_pipeline = make_pipeline("model", "vs_model", None);
+        let make_pipeline =
+            |label: &str, vs_entry: &str, fs_entry: &str, cull: Option<wgpu::Face>, blend: bool| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&draw_layout),
+                    vertex: wgpu::VertexState {
+                        module: &terrain_module,
+                        entry_point: Some(vs_entry),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        cull_mode: cull,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: Some(!blend),
+                        depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &terrain_module,
+                        entry_point: Some(fs_entry),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: color_format,
+                            blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
+        let cube_pipeline =
+            make_pipeline("cube", "vs_cube", "fs_main", Some(wgpu::Face::Back), false);
+        let model_pipeline = make_pipeline("model", "vs_model", "fs_main", None, false);
+        let trans_pipeline = make_pipeline("translucent", "vs_model", "fs_translucent", None, true);
 
         let timestamps = features
             .contains(wgpu::Features::TIMESTAMP_QUERY)
@@ -676,6 +758,7 @@ impl Renderer {
         Ok(Self {
             draw_count_supported: config.allow_draw_count
                 && features.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
+            tint_arena: Arena::new(config.tint_tables),
             cube_arena: Arena::new(cube_quads),
             model_arena: Arena::new(model_quads),
             depth_view: depth_view(&device, width, height),
@@ -692,11 +775,14 @@ impl Renderer {
             cull_bg,
             cube_pipeline,
             model_pipeline,
+            trans_pipeline,
+            trans_geom_bg,
             globals_bgl,
             globals_bg,
             geom_bg,
             sampler,
-            texture,
+            textures,
+            dummy_texture,
             sections: HashMap::new(),
             free_slots: Vec::new(),
             slot_count: 0,
@@ -770,20 +856,43 @@ impl Renderer {
     }
 
     pub fn set_block_textures(&mut self, data: &TextureArrayData) {
-        self.texture = create_block_texture(&self.device, &self.queue, data);
+        self.set_texture_groups(&[data.clone().into_group()]);
+    }
+
+    /// Up to four size groups; a quad's layer field is `group << 14 | layer`.
+    pub fn set_texture_groups(&mut self, groups: &[TextureGroupData]) {
+        self.textures = group_textures(&self.device, &self.queue, groups);
         self.globals_bg = make_globals_bg(
             &self.device,
             &self.globals_bgl,
             &self.globals,
-            &self.texture,
+            &self.textures,
+            &self.dummy_texture,
             &self.sampler,
         );
     }
 
+    /// Colours (`r | g << 8 | b << 16`) for constant tint kinds 8 and up, indexed `kind - 8`.
+    pub fn set_tint_palette(&mut self, colors: &[u32]) {
+        let mut words = [0u32; TINT_PALETTE_WORDS];
+        let n = colors.len().min(TINT_PALETTE_WORDS);
+        words[..n].copy_from_slice(&colors[..n]);
+        self.queue
+            .write_buffer(&self.geo.tints, 0, bytemuck::cast_slice(&words));
+    }
+
     pub fn memory_stats(&self) -> MemoryStats {
-        let tex = &self.texture;
-        let texels: u64 = (0..tex.mip_level_count())
-            .map(|m| u64::from((tex.width() >> m).max(1)).pow(2))
+        let texture_bytes: u64 = self
+            .textures
+            .iter()
+            .map(|tex| {
+                let texels: u64 = (0..tex.mip_level_count())
+                    .map(|m| {
+                        u64::from((tex.width() >> m).max(1)) * u64::from((tex.height() >> m).max(1))
+                    })
+                    .sum();
+                texels * 4 * u64::from(tex.depth_or_array_layers())
+            })
             .sum();
         let (w, h) = self.size;
         let g = &self.geo;
@@ -798,11 +907,14 @@ impl Renderer {
                 &g.cube_draws,
                 &g.model_cmds,
                 &g.model_draws,
+                &g.tints,
+                &g.trans_cmds,
+                &g.trans_draws,
             ]
             .iter()
             .map(|b| b.size())
             .sum(),
-            texture_bytes: texels * 4 * u64::from(tex.depth_or_array_layers()),
+            texture_bytes,
             target_bytes: u64::from(w) * u64::from(h) * 8,
         }
     }
@@ -818,7 +930,9 @@ impl Renderer {
             return Ok(());
         }
         let cube_total = mesh.cube_count() as u32;
-        let model_total = mesh.model.len() as u32;
+        let model_main = mesh.model.len() as u32;
+        let translucent_total = mesh.translucent.len() as u32;
+        let model_total = model_main + translucent_total;
 
         let cube = if cube_total > 0 {
             Some((
@@ -830,18 +944,34 @@ impl Renderer {
         } else {
             None
         };
+        let free_cube = |this: &mut Self| {
+            if let Some((o, n)) = cube {
+                this.cube_arena.free(o, n);
+            }
+        };
         let model = if model_total > 0 {
             match self.model_arena.alloc(model_total) {
                 Some(o) => Some((o, model_total)),
                 None => {
-                    if let Some((o, n)) = cube {
-                        self.cube_arena.free(o, n);
-                    }
+                    free_cube(self);
                     return Err(RenderError::ArenaFull("model"));
                 }
             }
         } else {
             None
+        };
+        let tint = match &mesh.tints {
+            Some(_) => match self.tint_arena.alloc(1) {
+                Some(i) => Some(i),
+                None => {
+                    free_cube(self);
+                    if let Some((o, n)) = model {
+                        self.model_arena.free(o, n);
+                    }
+                    return Err(RenderError::ArenaFull("tint"));
+                }
+            },
+            None => None,
         };
 
         let old = self.sections.remove(&key);
@@ -854,23 +984,19 @@ impl Renderer {
                     self.slot_count - 1
                 }
                 None => {
-                    if let Some((o, n)) = cube {
-                        self.cube_arena.free(o, n);
-                    }
+                    free_cube(self);
                     if let Some((o, n)) = model {
                         self.model_arena.free(o, n);
+                    }
+                    if let Some(t) = tint {
+                        self.tint_arena.free(t, 1);
                     }
                     return Err(RenderError::TooManySections);
                 }
             },
         };
         if let Some(old) = old {
-            if let Some((o, n)) = old.cube {
-                self.cube_arena.free(o, n);
-            }
-            if let Some((o, n)) = old.model {
-                self.model_arena.free(o, n);
-            }
+            self.release(&old);
         }
 
         let mut counts = [0u32; 6];
@@ -884,10 +1010,23 @@ impl Renderer {
             }
         }
         if let Some((base, _)) = model {
+            let at = u64::from(base) * ModelQuad::SIZE as u64;
+            self.uploader
+                .push(Dest::Model, at, bytemuck::cast_slice(&mesh.model));
             self.uploader.push(
                 Dest::Model,
-                u64::from(base) * ModelQuad::SIZE as u64,
-                bytemuck::cast_slice(&mesh.model),
+                at + u64::from(model_main) * ModelQuad::SIZE as u64,
+                bytemuck::cast_slice(&mesh.translucent),
+            );
+        }
+        let tint_base = tint.map_or(NO_TINT_TABLE, |t| {
+            (TINT_PALETTE_WORDS + t as usize * TINT_TABLE_WORDS) as u32
+        });
+        if let (Some(t), Some(table)) = (tint, &mesh.tints) {
+            self.uploader.push(
+                Dest::Tints,
+                (TINT_PALETTE_WORDS + t as usize * TINT_TABLE_WORDS) as u64 * 4,
+                bytemuck::cast_slice(table.as_slice()),
             );
         }
         let meta = SectionMetaGpu {
@@ -895,8 +1034,8 @@ impl Renderer {
             bases: [
                 cube.map_or(0, |c| c.0),
                 model.map_or(0, |m| m.0),
-                model_total,
-                0,
+                model_main,
+                tint_base,
             ],
             counts_a: [counts[0], counts[1], counts[2], counts[3]],
             counts_b: [counts[4], counts[5], 0, 0],
@@ -907,21 +1046,39 @@ impl Renderer {
             bytemuck::bytes_of(&meta),
         );
         self.uploader.end_batch();
-        self.sections
-            .insert(key, SectionSlot { index, cube, model });
+        let translucent = model
+            .filter(|_| translucent_total > 0)
+            .map(|(base, _)| (base + model_main, translucent_total));
+        self.sections.insert(
+            key,
+            SectionSlot {
+                index,
+                cube,
+                model,
+                translucent,
+                tint,
+            },
+        );
         Ok(())
     }
 
-    pub fn remove_section(&mut self, key: [i32; 3]) {
-        let Some(slot) = self.sections.remove(&key) else {
-            return;
-        };
+    fn release(&mut self, slot: &SectionSlot) {
         if let Some((o, n)) = slot.cube {
             self.cube_arena.free(o, n);
         }
         if let Some((o, n)) = slot.model {
             self.model_arena.free(o, n);
         }
+        if let Some(t) = slot.tint {
+            self.tint_arena.free(t, 1);
+        }
+    }
+
+    pub fn remove_section(&mut self, key: [i32; 3]) {
+        let Some(slot) = self.sections.remove(&key) else {
+            return;
+        };
+        self.release(&slot);
         self.uploader.push(
             Dest::Sections,
             u64::from(slot.index) * 64,
@@ -940,10 +1097,67 @@ impl Renderer {
                     Dest::Cube => &geo.cube_arena,
                     Dest::Model => &geo.model_arena,
                     Dest::Sections => &geo.sections,
+                    Dest::Tints => &geo.tints,
                 };
                 queue.write_buffer(buffer, offset, bytes);
             });
         (f.bytes, f.writes)
+    }
+
+    /// Writes back-to-front draws for sections with translucent quads and returns their count.
+    fn build_translucent(
+        &mut self,
+        frustum: &crate::Frustum,
+        cam_int: [i32; 3],
+        cam_frac: glam::Vec3,
+    ) -> u32 {
+        let mut visible: Vec<(f32, glam::Vec3, u32, u32, u32)> = Vec::new();
+        for (key, slot) in &self.sections {
+            let Some((base, count)) = slot.translucent else {
+                continue;
+            };
+            let lo = glam::Vec3::new(
+                (key[0] * 16 - cam_int[0]) as f32,
+                (key[1] * 16 - cam_int[1]) as f32,
+                (key[2] * 16 - cam_int[2]) as f32,
+            ) - cam_frac;
+            if !frustum.intersects_aabb(lo, lo + glam::Vec3::splat(16.0)) {
+                continue;
+            }
+            let tint_base = slot.tint.map_or(NO_TINT_TABLE, |t| {
+                (TINT_PALETTE_WORDS + t as usize * TINT_TABLE_WORDS) as u32
+            });
+            visible.push((
+                (lo + glam::Vec3::splat(8.0)).length_squared(),
+                lo,
+                base,
+                count,
+                tint_base,
+            ));
+        }
+        visible.sort_by(|a, b| b.0.total_cmp(&a.0));
+        visible.truncate(self.config.max_translucent_sections as usize);
+        let cmds: Vec<[u32; 4]> = visible
+            .iter()
+            .enumerate()
+            .map(|(i, v)| [v.3 * 6, 1, 0, i as u32])
+            .collect();
+        let draws: Vec<DrawDataGpu> = visible
+            .iter()
+            .map(|v| DrawDataGpu {
+                origin: v.1.to_array(),
+                first_quad: v.2,
+                tint_base: v.4,
+                pad: [0; 3],
+            })
+            .collect();
+        if !cmds.is_empty() {
+            self.queue
+                .write_buffer(&self.geo.trans_cmds, 0, bytemuck::cast_slice(&cmds));
+            self.queue
+                .write_buffer(&self.geo.trans_draws, 0, bytemuck::cast_slice(&draws));
+        }
+        cmds.len() as u32
     }
 
     pub fn pending_upload_bytes(&self) -> usize {
@@ -1006,6 +1220,7 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        let trans_n = self.build_translucent(&frustum, [ci.x, ci.y, ci.z], cf);
 
         let mut surface_tex = None;
         let color_view = match (&self.surface, &self.offscreen) {
@@ -1114,6 +1329,11 @@ impl Renderer {
                 );
             } else {
                 pass.multi_draw_indirect(&self.geo.model_cmds, 0, model_max);
+            }
+            if trans_n > 0 {
+                pass.set_pipeline(&self.trans_pipeline);
+                pass.set_bind_group(1, &self.trans_geom_bg, &[]);
+                pass.multi_draw_indirect(&self.geo.trans_cmds, 0, trans_n);
             }
         }
 
@@ -1229,27 +1449,36 @@ fn make_globals_bg(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     globals: &wgpu::Buffer,
-    texture: &wgpu::Texture,
+    textures: &[wgpu::Texture],
+    dummy: &wgpu::Texture,
     sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
-    let view = texture.create_view(&wgpu::TextureViewDescriptor {
-        dimension: Some(wgpu::TextureViewDimension::D2Array),
-        ..Default::default()
-    });
+    let views: Vec<wgpu::TextureView> = (0..MAX_TEXTURE_GROUPS)
+        .map(|i| {
+            textures
+                .get(i)
+                .unwrap_or(dummy)
+                .create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                })
+        })
+        .collect();
+    let mut entries = vec![
+        bind(0, globals),
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::Sampler(sampler),
+        },
+    ];
+    entries.extend(views.iter().enumerate().map(|(i, v)| wgpu::BindGroupEntry {
+        binding: 2 + i as u32,
+        resource: wgpu::BindingResource::TextureView(v),
+    }));
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("globals"),
         layout,
-        entries: &[
-            bind(0, globals),
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-        ],
+        entries: &entries,
     })
 }
 

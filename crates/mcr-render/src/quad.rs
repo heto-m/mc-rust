@@ -2,14 +2,14 @@
 //!
 //! Cube quad, 8 bytes (`[w0, w1]`):
 //! - `w0`: x `[0,5)`, y `[5,10)`, z `[10,15)` block coords inside the section, face `[15,18)`,
-//!   width-1 `[18,22)`, height-1 `[22,26)`, bits `[26,32)` reserved.
+//!   width-1 `[18,22)`, height-1 `[22,26)`, tint kind `[26,32)`.
 //! - `w1`: texture layer `[0,16)`, AO `[16,24)` as four 2-bit corners, light `[24,32)` (sky<<4 | block).
 //!
 //! Model quad, 32 bytes (eight `u32`):
 //! - `w0..w3`: corner positions, `x[0,10) y[10,20) z[20,30)` in 1/32 block with a -1 block bias.
 //! - `w4,w5`: corner UVs, 16 bits each (`u[0,8) v[8,16)`, 1/16 tile units), corners 0,1 and 2,3.
 //! - `w6`: layer `[0,16)`, light `[16,24)`, shading face `[24,27)`, flags `[27,32)`.
-//! - `w7`: AO as four 2-bit corners `[0,8)`.
+//! - `w7`: AO as four 2-bit corners `[0,8)`, tint kind `[8,14)`, tint cell x `[14,18)` and z `[18,22)`.
 //!
 //! Corners are ordered (0,0), (1,0), (0,1), (1,1) in (u, v).
 
@@ -79,6 +79,7 @@ pub struct CubeQuad {
     pub layer: u16,
     pub ao: [u8; 4],
     pub light: u8,
+    pub tint: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
@@ -113,7 +114,8 @@ impl PackedQuad {
             | z << 10
             | (q.face as u32) << 15
             | u32::from(q.width - 1) << 18
-            | u32::from(q.height - 1) << 22;
+            | u32::from(q.height - 1) << 22
+            | check("tint", q.tint.into(), 63)? << 26;
         let w1 = u32::from(q.layer) | ao << 16 | u32::from(q.light) << 24;
         Ok(Self([w0, w1]))
     }
@@ -130,6 +132,7 @@ impl PackedQuad {
             layer: (w1 & 0xffff) as u16,
             ao: std::array::from_fn(|i| (w1 >> (16 + 2 * i) & 3) as u8),
             light: (w1 >> 24) as u8,
+            tint: (w0 >> 26) as u8,
         }
     }
 
@@ -147,6 +150,8 @@ pub struct ModelQuadDesc {
     pub shade_face: Face,
     pub flags: u8,
     pub ao: [u8; 4],
+    pub tint: u8,
+    pub cell: [u8; 2],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
@@ -198,6 +203,9 @@ impl ModelQuad {
         for (i, a) in q.ao.iter().enumerate() {
             w[7] |= check("ao", (*a).into(), 3)? << (2 * i);
         }
+        w[7] |= check("tint", q.tint.into(), 63)? << 8
+            | check("cell x", q.cell[0].into(), 15)? << 14
+            | check("cell z", q.cell[1].into(), 15)? << 18;
         Ok(Self(w))
     }
 
@@ -224,6 +232,8 @@ impl ModelQuad {
             shade_face: Face::ALL[(w[6] >> 24 & 7).min(5) as usize],
             flags: (w[6] >> 27) as u8,
             ao: std::array::from_fn(|i| (w[7] >> (2 * i) & 3) as u8),
+            tint: (w[7] >> 8 & 63) as u8,
+            cell: [(w[7] >> 14 & 15) as u8, (w[7] >> 18 & 15) as u8],
         }
     }
 }
@@ -243,6 +253,7 @@ mod tests {
             layer: 0xbeef,
             ao: [0, 1, 2, 3],
             light: 0xa5,
+            tint: 63,
         }
     }
 
@@ -286,6 +297,8 @@ mod tests {
             shade_face: Face::NegZ,
             flags: 17,
             ao: [3, 2, 1, 0],
+            tint: 9,
+            cell: [15, 3],
         }
     }
 
