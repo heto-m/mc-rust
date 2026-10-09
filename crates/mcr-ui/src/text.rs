@@ -113,6 +113,15 @@ impl Budget {
         self.depth += 1;
         true
     }
+
+    fn charge(&mut self, bytes: usize, out: &[Cell]) -> bool {
+        let cost = 1 + bytes / 16;
+        if self.steps < cost || out.len() >= MAX_CELLS {
+            return false;
+        }
+        self.steps -= cost;
+        true
+    }
 }
 
 pub fn flatten_into(lang: &Lang, component: &Component, parent: Style, out: &mut Vec<Cell>) {
@@ -136,7 +145,11 @@ fn flatten_bounded(
     }
     let style = merge(parent, &component.style);
     match &component.content {
-        Content::Text(text) => push_legacy(out, text, style),
+        Content::Text(text) => {
+            if budget.charge(text.len(), out) {
+                push_legacy(out, text, style);
+            }
+        }
         Content::Translatable {
             key,
             fallback,
@@ -172,6 +185,9 @@ fn expand_template(
     out: &mut Vec<Cell>,
     budget: &mut Budget,
 ) {
+    if !budget.charge(template.len(), out) {
+        return;
+    }
     let mut literal = String::new();
     let mut next_arg = 0usize;
     let mut rest = template;
@@ -219,7 +235,11 @@ fn expand_template(
 
 fn push_arg(lang: &Lang, arg: &Arg, style: Style, out: &mut Vec<Cell>, budget: &mut Budget) {
     match arg {
-        Arg::Str(s) => push_legacy(out, s, style),
+        Arg::Str(s) => {
+            if budget.charge(s.len(), out) {
+                push_legacy(out, s, style);
+            }
+        }
         Arg::Number(n) => push_legacy(out, &number_text(n), style),
         Arg::Component(c) => flatten_bounded(lang, c, style, out, budget),
     }
@@ -344,6 +364,19 @@ mod tests {
         let start = std::time::Instant::now();
         let cells = flatten(&lang, &c);
         assert!(cells.len() <= MAX_CELLS);
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+
+        let long = format!("{}{}", "%s".repeat(10_000), "x".repeat(10_000));
+        let mut c = Component::text("ab");
+        for _ in 0..8 {
+            c = Component::from_content(Content::Translatable {
+                key: "missing".into(),
+                fallback: Some(long.clone()),
+                args: vec![Arg::Component(c)],
+            });
+        }
+        let start = std::time::Instant::now();
+        assert!(flatten(&lang, &c).len() <= MAX_CELLS);
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
     }
 
