@@ -10,6 +10,9 @@ name = "mcr"
 path = "src/main.rs"
 
 [dependencies]
+mcr-render = { path = "../mcr-render" }
+winit = "0.30"
+anyhow = "1"
 
 [lints]
 workspace = true
