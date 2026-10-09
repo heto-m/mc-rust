@@ -1449,6 +1449,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcr-capture"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "mcr-auth",
+ "mcr-buf",
+ "mcr-data",
+ "mcr-net",
+ "serde_json",
+]
+
+[[package]]
 name = "mcr-data"
 version = "0.1.0"
 dependencies = [

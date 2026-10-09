@@ -1,0 +1,92 @@
+# Console commands fed to the server after the player joins. `sleep N` pauses; {name} is the player.
+sleep 3
+op {name}
+gamemode creative {name}
+give {name} diamond_sword[enchantments={sharpness:5},custom_name='"Sharp"',lore=['"line one"']] 1
+give {name} written_book[written_book_content={title:"T",author:"A",pages:['"page one"']}] 1
+give {name} firework_rocket[fireworks={flight_duration:2,explosions:[{shape:"star",colors:[I;16711680],has_twinkle:true}]}] 16
+give {name} player_head[profile="Notch"] 1
+give {name} potion[potion_contents={potion:"minecraft:swiftness"}] 1
+give {name} shield 1
+give {name} crossbow 1
+give {name} bundle 1
+give {name} netherite_chestplate[trim={material:"minecraft:gold",pattern:"minecraft:coast"}] 1
+execute at {name} run summon zombie ~2 ~ ~ {CustomName:'"Bob"',CustomNameVisible:1b}
+execute at {name} run summon pig ~-2 ~ ~
+execute at {name} run summon sheep ~ ~ ~2 {Color:5b}
+execute at {name} run summon cat ~ ~ ~-2 {variant:"minecraft:tabby"}
+execute at {name} run summon villager ~3 ~ ~3
+execute at {name} run summon armor_stand ~-3 ~ ~3 {ShowArms:1b}
+execute at {name} run summon item ~ ~2 ~ {Item:{id:"minecraft:diamond",count:3}}
+execute at {name} run summon creeper ~4 ~ ~
+execute at {name} run summon item_display ~ ~2 ~3 {item:{id:"minecraft:stone",count:1}}
+execute at {name} run summon text_display ~ ~2 ~-3 {text:'{"text":"hi","color":"red"}'}
+execute at {name} run summon block_display ~3 ~2 ~ {block_state:"minecraft:stone"}
+execute at {name} run summon tnt ~ ~5 ~
+execute at {name} run summon experience_orb ~1 ~1 ~1
+execute at {name} run summon arrow ~ ~3 ~
+execute at {name} run summon painting ~ ~1 ~6
+execute at {name} run summon horse ~6 ~ ~
+execute at {name} run summon wolf ~-6 ~ ~
+execute at {name} run summon bee ~ ~3 ~5
+sleep 1
+execute at {name} run particle dust{color:[1.0,0.0,0.0],scale:1.0} ~ ~2 ~ 0.5 0.5 0.5 0 20
+execute at {name} run particle block{block_state:"minecraft:stone"} ~ ~1 ~ 0.5 0.5 0.5 0 20
+execute at {name} run particle item{item:"minecraft:diamond"} ~ ~1 ~ 0.5 0.5 0.5 0 20
+execute at {name} run particle dust_color_transition{from_color:[1.0,0.0,0.0],to_color:[0.0,0.0,1.0],scale:1.0} ~ ~2 ~ 0.5 0.5 0.5 0 20
+execute at {name} run particle entity_effect{color:[1.0,0.5,0.0,1.0]} ~ ~2 ~ 0.5 0.5 0.5 0 5
+execute at {name} run particle flame ~ ~1 ~ 0.2 0.2 0.2 0.01 20
+execute at {name} run particle sculk_charge{roll:1.0} ~ ~1 ~ 0 0 0 0 5
+execute at {name} run particle shriek{delay:10} ~ ~1 ~ 0 0 0 0 1
+execute at {name} run particle vibration{destination:{type:"block",pos:[0.0,80.0,0.0]},arrival_in_ticks:20} ~ ~1 ~ 0 0 0 0 1
+title {name} times 5 40 5
+title {name} title {"text":"Hello","color":"gold","bold":true}
+title {name} subtitle {"text":"sub","italic":true}
+title {name} actionbar {"text":"bar"}
+bossbar add test:one {"text":"Boss"}
+bossbar set test:one players {name}
+bossbar set test:one color red
+bossbar set test:one style notched_10
+bossbar set test:one value 40
+scoreboard objectives add obj dummy {"text":"Obj"}
+scoreboard objectives setdisplay sidebar obj
+scoreboard players set {name} obj 7
+scoreboard players set Other obj 3
+scoreboard objectives add hearts health
+scoreboard objectives setdisplay list hearts
+team add red
+team modify red color red
+team modify red prefix {"text":"[R] "}
+team join red {name}
+weather rain
+time set 6000
+playsound minecraft:entity.experience_orb.pickup master {name}
+effect give {name} speed 30 1
+effect give {name} night_vision 30 0 true
+sleep 2
+execute at {name} run setblock ~2 ~ ~2 minecraft:chest[facing=north]
+execute at {name} run setblock ~3 ~ ~2 minecraft:oak_sign
+execute at {name} run setblock ~4 ~ ~2 minecraft:spawner
+execute at {name} run setblock ~5 ~ ~2 minecraft:furnace
+execute at {name} run setblock ~6 ~ ~2 minecraft:white_bed
+execute at {name} run setblock ~ ~ ~7 minecraft:lectern
+execute at {name} run setblock ~1 ~ ~7 minecraft:beacon
+execute at {name} run setblock ~2 ~ ~7 minecraft:jukebox
+execute at {name} run fill ~-3 ~-1 ~-3 ~3 ~-1 ~3 minecraft:glass
+execute at {name} run fill ~-8 ~-1 ~8 ~8 ~3 ~12 minecraft:stone_bricks hollow
+execute at {name} run fill ~-4 ~-2 ~-4 ~4 ~-2 ~4 minecraft:oak_planks
+worldborder set 200
+worldborder warning distance 20
+worldborder center 0 0
+tellraw {name} [{"text":"Rich ","color":"aqua","bold":true},{"text":"text","color":"#ff8800","underlined":true,"hover_event":{"action":"show_text","value":"tip"},"click_event":{"action":"suggest_command","command":"/help"}},{"translate":"death.attack.generic","with":[{"selector":"@a"}]},{"score":{"name":"{name}","objective":"obj"}}]
+say hello from the server
+advancement grant {name} everything
+sleep 4
+gamerule advance_time false
+difficulty hard
+kill @e[type=pig]
+execute at {name} run tp {name} ~ ~10 ~
+sleep 3
+clear {name}
+weather clear
+bossbar remove test:one
