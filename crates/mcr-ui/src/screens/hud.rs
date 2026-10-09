@@ -175,7 +175,10 @@ impl HudSprites {
         right: i32,
         base_y: i32,
     ) {
-        let max_health = s.max_health.max(s.displayed_health).max(s.health);
+        // Server-controlled values; clamp to vanilla's attribute maxima so loops stay bounded.
+        let max_health = s.max_health.max(s.displayed_health).max(s.health).clamp(0, 2048);
+        let absorption = s.absorption.clamp(0, 4096);
+        let s = &HudState { absorption, ..*s };
         let rows = (max_health + s.absorption + 19) / 20;
         let row_height = (10 - (rows - 2)).max(3);
         if s.armor > 0 {
