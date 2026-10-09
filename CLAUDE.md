@@ -5,6 +5,9 @@ GPU-driven rendering on wgpu and a custom engine (no Bevy, no OpenGL).
 
 ## Fixed decisions
 
+- **Milestone 1: full functionality against a vanilla server** (offline mode). Singleplayer and
+  everything else come after it.
+
 - First target: Minecraft **26.3** (protocol from the vanilla data generator). Older versions come later
   as translators onto the latest canonical packet set (ViaVersion-style), so never hard-code
   version-specific behavior outside `mcr-protocol`'s version layer.
