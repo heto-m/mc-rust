@@ -451,15 +451,17 @@ impl Version {
 
     pub fn packet_id(&self, state: ProtocolState, direction: Direction, name: &str) -> Option<u32> {
         let key = self.packet_key(state, direction);
-        let packets = &self.tables.packets;
-        let pos = packets
-            .binary_search_by(|p| {
-                (p.state, p.direction)
-                    .cmp(&key)
-                    .then_with(|| self.string(p.name).cmp(name))
+        let name = name.strip_prefix("minecraft:").unwrap_or(name);
+        self.tables
+            .packets
+            .iter()
+            .find(|p| {
+                (p.state, p.direction) == key && {
+                    let n = self.string(p.name);
+                    n.strip_prefix("minecraft:").unwrap_or(n) == name
+                }
             })
-            .ok()?;
-        Some(packets[pos].id)
+            .map(|p| p.id)
     }
 
     pub fn packet_name(&self, state: ProtocolState, direction: Direction, id: u32) -> Option<&str> {

@@ -98,6 +98,28 @@ mod tests {
             Some("minecraft:login_finished")
         );
         assert_eq!(v.protocol(), 777);
+        assert_eq!(
+            v.packet_id(
+                ProtocolState::Play,
+                Direction::Clientbound,
+                "level_chunk_with_light"
+            ),
+            v.packet_id(
+                ProtocolState::Play,
+                Direction::Clientbound,
+                "minecraft:level_chunk_with_light"
+            )
+        );
+        for state in [ProtocolState::Configuration, ProtocolState::Play] {
+            for dir in [Direction::Clientbound, Direction::Serverbound] {
+                let mut id = 0;
+                while let Some(name) = v.packet_name(state, dir, id) {
+                    assert_eq!(v.packet_id(state, dir, name), Some(id), "{name}");
+                    id += 1;
+                }
+                assert!(id > 5);
+            }
+        }
     }
 
     #[test]
