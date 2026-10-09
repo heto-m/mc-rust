@@ -30,7 +30,8 @@ GPU-driven rendering on wgpu and a custom engine (no Bevy, no OpenGL).
 - Every feature is an OpenSpec change (`openspec/changes/<name>/`: proposal, design, specs delta,
   tasks). Validate with `openspec validate <name> --strict`; archive it (`openspec archive <name> -y`)
   on the branch before the PR merges.
-- Branch per change (`feat/<name>`, `fix/<name>`, `chore/<name>`), PR into `main`, squash-merge.
+- Branch per change (`feat/<name>`, `fix/<name>`, `chore/<name>`), merged locally into `main`. Local
+  only for now: no pushes, PRs or CI work until the client runs.
 - Commits: Conventional Commits, short subject (`feat(protocol): add login packets`), no body unless
   needed.
 - Before pushing: `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings &&
