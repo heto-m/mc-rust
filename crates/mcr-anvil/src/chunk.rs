@@ -270,11 +270,13 @@ impl Converter {
         let entries: Vec<(&str, Option<&Compound>)> = match states.get_list("palette") {
             Some(List::Compound(p)) if !p.is_empty() => p
                 .iter()
-                .map(|e| {
-                    (
+                .map(|e| match (e.get_str("id"), e.get_str("")) {
+                    (Some(id), _) => (id, e.get_compound("properties")),
+                    (None, Some(name)) => (name, Some(e)),
+                    (None, None) => (
                         e.get_str("Name").unwrap_or("minecraft:air"),
                         e.get_compound("Properties"),
-                    )
+                    ),
                 })
                 .collect(),
             Some(List::String(p)) if !p.is_empty() => {
@@ -516,6 +518,43 @@ mod tests {
         assert_eq!(col.sections()[4].non_empty_count(), 2);
         assert_eq!(conv.stats.snapshot().unknown_blocks, 1);
         assert_eq!(conv.stats.snapshot().chunks_loaded, 1);
+    }
+
+    #[test]
+    fn palette_entries_in_the_26_3_layouts() {
+        let conv = converter(ChunkStatus::Full);
+        let mut idx = vec![0u16; 4096];
+        idx[0] = 1;
+        idx[1] = 2;
+        let mut keyed = Compound::new();
+        keyed.insert("", "minecraft:stone");
+        let mut props = Compound::new();
+        for (k, v) in [
+            ("facing", "south"),
+            ("half", "top"),
+            ("shape", "straight"),
+            ("waterlogged", "false"),
+        ] {
+            props.insert(k, v);
+        }
+        let mut stairs = Compound::new();
+        stairs.insert("id", "minecraft:oak_stairs");
+        stairs.insert("properties", props.clone());
+        let mut air = Compound::new();
+        air.insert("", "minecraft:air");
+        let c = chunk(
+            "minecraft:full",
+            vec![section(0, vec![air, keyed, stairs], &idx)],
+        );
+        let (_, col) = conv.convert(&c).unwrap().unwrap();
+        let expected = match conv.resolver.resolve("minecraft:oak_stairs", Some(&props)) {
+            Resolved::Exact(s) => s,
+            r => panic!("{r:?}"),
+        };
+        assert_eq!(col.block(0, 0, 0).map(|b| b.0), Some(1));
+        assert_eq!(col.block(1, 0, 0).map(|b| b.0), Some(expected));
+        assert_eq!(conv.stats.snapshot().bad_properties, 0);
+        assert_eq!(conv.stats.snapshot().unknown_blocks, 0);
     }
 
     #[test]

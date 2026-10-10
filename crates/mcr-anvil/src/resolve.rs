@@ -95,6 +95,9 @@ impl BlockResolver {
         let mut ordinal = i64::from(spec.default - spec.first);
         let mut exact = true;
         for (key, value) in properties.into_iter().flat_map(Compound::iter) {
+            if key.is_empty() {
+                continue;
+            }
             let found = spec.props.iter().find(|p| p.name == key).and_then(|p| {
                 let Value::String(v) = value else { return None };
                 p.values.iter().position(|x| x == v).map(|i| (p, i as i64))

@@ -152,7 +152,7 @@ impl World {
         Ok(out)
     }
 
-    fn open_region(&self, rx: i32, rz: i32) -> Result<Option<RegionFile>> {
+    pub fn open_region(&self, rx: i32, rz: i32) -> Result<Option<RegionFile>> {
         let path = self.region_dir.join(format!("r.{rx}.{rz}.mca"));
         match RegionFile::open(&path, rx, rz) {
             Ok(r) => Ok(Some(r)),
@@ -192,6 +192,11 @@ impl World {
             .filter(|&s| region.has_chunk(s % 32, s / 32))
             .filter_map(|s| self.load_one(&region, s % 32, s / 32))
             .collect())
+    }
+
+    /// Like [`Self::load_chunk`] with the region already opened by [`Self::open_region`].
+    pub fn load_chunk_in(&self, region: &RegionFile, cx: i32, cz: i32) -> Option<LoadedChunk> {
+        self.load_one(region, (cx & 31) as usize, (cz & 31) as usize)
     }
 
     pub fn load_chunk(&self, cx: i32, cz: i32) -> Result<Option<LoadedChunk>> {

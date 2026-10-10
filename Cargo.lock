@@ -1532,7 +1532,15 @@ name = "mcr-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "mcr-anvil",
+ "mcr-assets",
+ "mcr-data",
+ "mcr-mesh",
  "mcr-render",
+ "mcr-world",
+ "png",
+ "rustc-hash 2.1.3",
+ "tracing",
  "winit",
 ]
 

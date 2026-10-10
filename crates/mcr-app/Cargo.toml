@@ -10,7 +10,15 @@ name = "mcr"
 path = "src/main.rs"
 
 [dependencies]
+mcr-anvil = { path = "../mcr-anvil" }
+mcr-assets = { path = "../mcr-assets" }
+mcr-data = { path = "../mcr-data" }
+mcr-mesh = { path = "../mcr-mesh" }
 mcr-render = { path = "../mcr-render" }
+mcr-world = { path = "../mcr-world" }
+png.workspace = true
+rustc-hash.workspace = true
+tracing.workspace = true
 winit = "0.30"
 anyhow = "1"
 

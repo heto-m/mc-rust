@@ -1,13 +1,25 @@
+mod assets;
+mod cli;
+mod engine;
 mod fly;
+mod game;
+mod render_system;
+mod screenshot;
+mod source;
+mod stats;
+mod world_setup;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
+use cli::Options;
+use engine::Engine;
 use fly::FlyController;
 use mcr_render::glam::DVec3;
 use mcr_render::synthetic::{Terrain, generate_world};
 use mcr_render::{Camera, FrameInputs, Renderer, RendererConfig, Target};
+use stats::StatWindow;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseScrollDelta, WindowEvent};
@@ -15,72 +27,56 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-struct Options {
-    vsync: bool,
-    radius: i32,
+struct SyntheticScene {
+    renderer: Renderer,
+    camera: Camera,
 }
 
-fn parse_args() -> Options {
-    let mut opts = Options {
-        vsync: true,
-        radius: 24,
-    };
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--no-vsync" => opts.vsync = false,
-            "--radius" => {
-                opts.radius = args
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(opts.radius);
-            }
-            other => eprintln!("ignoring unknown argument {other}"),
+enum Scene {
+    Synthetic(Box<SyntheticScene>),
+    World(Box<Engine>),
+}
+
+impl Scene {
+    fn camera_mut(&mut self) -> &mut Camera {
+        match self {
+            Self::Synthetic(s) => &mut s.camera,
+            Self::World(engine) => &mut engine.game.camera,
         }
     }
-    opts
-}
 
-#[derive(Debug, Default)]
-struct StatWindow {
-    frames: u32,
-    frame_ms: f32,
-    cpu_ms: f32,
-    gpu_draw_ms: f32,
-    gpu_cull_ms: f32,
-    gpu_samples: u32,
-    draws: u32,
+    fn renderer_mut(&mut self) -> &mut Renderer {
+        match self {
+            Self::Synthetic(s) => &mut s.renderer,
+            Self::World(engine) => &mut engine.render.renderer,
+        }
+    }
 }
 
 struct App {
     opts: Options,
+    launched: Instant,
     window: Option<Arc<Window>>,
-    renderer: Option<Renderer>,
-    camera: Camera,
+    scene: Option<Scene>,
     fly: FlyController,
     grabbed: bool,
     last_frame: Instant,
-    last_report: Instant,
     stats: StatWindow,
+    ready_reported: bool,
 }
 
 impl App {
-    fn new(opts: Options) -> Self {
+    fn new(opts: Options, launched: Instant) -> Self {
         Self {
             opts,
+            launched,
             window: None,
-            renderer: None,
-            camera: Camera {
-                position: DVec3::new(8.5, 130.0, 8.5),
-                yaw: 0.6,
-                pitch: -0.4,
-                ..Camera::default()
-            },
+            scene: None,
             fly: FlyController::default(),
             grabbed: false,
             last_frame: Instant::now(),
-            last_report: Instant::now(),
             stats: StatWindow::default(),
+            ready_reported: false,
         }
     }
 
@@ -93,16 +89,14 @@ impl App {
             )?,
         );
         let size = window.inner_size();
-        let mut renderer = Renderer::new(
+        let config = world_setup::renderer_config(&self.opts, RendererConfig::default());
+        let renderer = Renderer::new(
             Target::Surface {
                 target: window.clone().into(),
                 width: size.width,
                 height: size.height,
             },
-            RendererConfig {
-                vsync: self.opts.vsync,
-                ..RendererConfig::default()
-            },
+            config,
         )
         .context("creating renderer")?;
         println!(
@@ -112,7 +106,26 @@ impl App {
             renderer.uses_draw_count(),
             renderer.has_timestamps()
         );
+        self.scene = Some(if self.opts.synthetic {
+            self.synthetic_scene(renderer)?
+        } else {
+            let (assets, source) = world_setup::open(&self.opts)?;
+            Scene::World(Box::new(Engine::new(
+                renderer,
+                assets,
+                source,
+                self.opts.camera,
+                self.opts.render_distance,
+            )))
+        });
+        println!(
+            "controls: WASD move, Space/Shift up/down, Ctrl sprint, scroll speed, click grabs mouse, Esc releases, V toggles vsync"
+        );
+        self.window = Some(window);
+        Ok(())
+    }
 
+    fn synthetic_scene(&self, mut renderer: Renderer) -> Result<Scene> {
         let start = Instant::now();
         let threads = std::thread::available_parallelism().map_or(4, usize::from);
         for (key, mesh) in generate_world(&Terrain { seed: 7 }, self.opts.radius, threads) {
@@ -126,12 +139,15 @@ impl App {
             renderer.section_count(),
             start.elapsed().as_secs_f32()
         );
-        println!(
-            "controls: WASD move, Space/Shift up/down, Ctrl sprint, scroll speed, click grabs mouse, Esc releases, V toggles vsync"
-        );
-        self.window = Some(window);
-        self.renderer = Some(renderer);
-        Ok(())
+        Ok(Scene::Synthetic(Box::new(SyntheticScene {
+            renderer,
+            camera: Camera {
+                position: DVec3::new(8.5, 130.0, 8.5),
+                yaw: 0.6,
+                pitch: -0.4,
+                ..Camera::default()
+            },
+        })))
     }
 
     fn set_grab(&mut self, grab: bool) {
@@ -162,8 +178,8 @@ impl App {
             KeyCode::Escape if pressed => self.set_grab(false),
             KeyCode::KeyV if pressed => {
                 self.opts.vsync = !self.opts.vsync;
-                if let Some(r) = &mut self.renderer {
-                    r.set_vsync(self.opts.vsync);
+                if let Some(scene) = &mut self.scene {
+                    scene.renderer_mut().set_vsync(self.opts.vsync);
                 }
                 println!("vsync {}", if self.opts.vsync { "on" } else { "off" });
             }
@@ -175,46 +191,57 @@ impl App {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
-        self.fly.update(&mut self.camera, dt);
-
-        let Some(renderer) = &mut self.renderer else {
-            return;
-        };
-        let Ok(s) = renderer.render(&FrameInputs {
-            camera: &self.camera,
-            sky_light: 1.0,
-        }) else {
-            return;
-        };
-        let st = &mut self.stats;
-        st.frames += 1;
-        st.frame_ms += dt * 1000.0;
-        st.cpu_ms += s.cpu_ms;
-        if let Some(g) = s.gpu {
-            st.gpu_cull_ms += g.cull_ms;
-            st.gpu_draw_ms += g.draw_ms;
-            st.gpu_samples += 1;
-            st.draws = g.cube_draws + g.model_draws;
+        let Some(scene) = &mut self.scene else { return };
+        self.fly.update(scene.camera_mut(), dt);
+        if let Some(speed) = self.opts.autofly {
+            let camera = scene.camera_mut();
+            let f = camera.forward();
+            camera.position += DVec3::new(f64::from(f.x), 0.0, f64::from(f.z)).normalize_or_zero()
+                * speed
+                * f64::from(dt);
         }
 
-        if self.last_report.elapsed() >= Duration::from_secs(1) && st.frames > 0 {
-            let n = st.frames as f32;
-            let g = st.gpu_samples.max(1) as f32;
-            let p = self.camera.position;
-            println!(
-                "{:.0} fps | frame {:.2} ms | cpu {:.2} ms | gpu cull {:.3} ms draw {:.2} ms | draws {} | pos {:.1} {:.1} {:.1}",
-                1000.0 / (st.frame_ms / n),
-                st.frame_ms / n,
-                st.cpu_ms / n,
-                st.gpu_cull_ms / g,
-                st.gpu_draw_ms / g,
-                st.draws,
-                p.x,
-                p.y,
-                p.z
-            );
-            *st = StatWindow::default();
-            self.last_report = Instant::now();
+        let frame = match scene {
+            Scene::Synthetic(s) => s
+                .renderer
+                .render(&FrameInputs {
+                    camera: &s.camera,
+                    sky_light: 1.0,
+                })
+                .ok(),
+            Scene::World(engine) => {
+                if let Err(e) = engine.tick() {
+                    eprintln!("tick failed: {e:#}");
+                }
+                if !self.ready_reported && engine.settled() {
+                    self.ready_reported = true;
+                    let p = engine.pipeline_stats();
+                    println!(
+                        "world ready: {} columns, {} sections meshed, {:.2}M quads, {:.2}s since launch",
+                        engine.game.store.len(),
+                        p.meshed,
+                        f64::from(p.quads) / 1e6,
+                        self.launched.elapsed().as_secs_f32()
+                    );
+                }
+                engine.draw()
+            }
+        };
+        let Some(frame) = frame else { return };
+        self.stats.record(dt, &frame);
+        let pipeline = match scene {
+            Scene::World(engine) => Some((
+                engine.pipeline_stats(),
+                engine.render.renderer.memory_stats(),
+            )),
+            Scene::Synthetic(s) => Some((
+                render_system::PipelineStats::default(),
+                s.renderer.memory_stats(),
+            )),
+        };
+        if let Some(line) = self.stats.report(pipeline) {
+            let p = scene.camera_mut().position;
+            println!("{line} | pos {:.1} {:.1} {:.1}", p.x, p.y, p.z);
         }
     }
 }
@@ -233,8 +260,8 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if let Some(r) = &mut self.renderer {
-                    r.resize(size.width, size.height);
+                if let Some(scene) = &mut self.scene {
+                    scene.renderer_mut().resize(size.width, size.height);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -261,8 +288,9 @@ impl ApplicationHandler for App {
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta } = event
             && self.grabbed
+            && let Some(scene) = &mut self.scene
         {
-            self.fly.look(&mut self.camera, delta.0, delta.1);
+            self.fly.look(scene.camera_mut(), delta.0, delta.1);
         }
     }
 
@@ -274,8 +302,19 @@ impl ApplicationHandler for App {
 }
 
 fn main() -> Result<()> {
+    let launched = Instant::now();
+    let opts = match cli::parse(std::env::args().skip(1)) {
+        Ok(opts) => opts,
+        Err(e) => {
+            eprintln!("{e}\n{}", cli::USAGE);
+            std::process::exit(2);
+        }
+    };
+    if let Some(out) = opts.screenshot.clone() {
+        return screenshot::run(&opts, &out, launched);
+    }
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    event_loop.run_app(&mut App::new(parse_args()))?;
+    event_loop.run_app(&mut App::new(opts, launched))?;
     Ok(())
 }
