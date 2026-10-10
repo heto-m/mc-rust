@@ -45,7 +45,7 @@ fn live_item_use() {
     live.client.select_hotbar(0).unwrap();
     assert_eq!(
         live.client.start_use(UseTarget::Air).unwrap(),
-        UseResult::Success
+        UseResult::Consume
     );
     let using = *live.client.using_item().expect("eating");
     assert_eq!(using.kind, UseKind::Consume);

@@ -95,8 +95,8 @@ impl Preview {
     ) {
         let (matrix, ax, ay) = preview_matrix(rect, gui_scale, mouse, fb);
         view.pos = [0.0; 3];
-        view.body_yaw = 180.0 + ax * 20.0;
-        view.yaw = 180.0 + ax * 40.0;
+        view.body_yaw = ax * 20.0;
+        view.yaw = ax * 40.0;
         view.head_yaw = view.yaw;
         view.pitch = -ay * 20.0;
         view.light = [15, 15];

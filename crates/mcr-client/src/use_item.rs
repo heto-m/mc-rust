@@ -13,6 +13,7 @@ use mcr_world::BlockState;
 
 use crate::client::Client;
 use crate::error::Result;
+use crate::interaction::{entity_interact_swings, item_use_on_swings, item_use_swings};
 use crate::inventory::OFFHAND_MENU_SLOT;
 
 const LIVING_FLAGS: u8 = 8;
@@ -36,7 +37,17 @@ pub enum UseTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UseResult {
     Pass,
+    /// Consumed without a hand swing (eating, drawing a bow, a failed placement).
+    Consume,
+    /// Consumed with the swing animation.
     Success,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    NotABlock,
+    Failed,
+    Placed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,40 +143,6 @@ fn block_consumes_use(name: &str) -> bool {
         || n.ends_with("_candle_cake")
 }
 
-/// Items whose `useOn` succeeds on a block independent of placement.
-fn item_use_on_consumes(name: &str) -> bool {
-    let n = short(name);
-    n.ends_with("_hoe")
-        || n.ends_with("_axe")
-        || n.ends_with("_shovel")
-        || n.ends_with("_spawn_egg")
-        || n.ends_with("_dye")
-        || matches!(
-            n,
-            "flint_and_steel"
-                | "fire_charge"
-                | "bone_meal"
-                | "honeycomb"
-                | "glow_ink_sac"
-                | "ink_sac"
-                | "brush"
-                | "lead"
-                | "item_frame"
-                | "glow_item_frame"
-                | "painting"
-                | "armor_stand"
-                | "end_crystal"
-                | "minecart"
-                | "chest_minecart"
-                | "tnt_minecart"
-                | "hopper_minecart"
-                | "furnace_minecart"
-                | "ender_eye"
-                | "shears"
-                | "name_tag_placeholder"
-        )
-}
-
 fn is_instant_item(name: &str) -> bool {
     let n = short(name);
     n.ends_with("_bucket") && n != "milk_bucket"
@@ -221,10 +198,23 @@ impl Client {
         }
         for hand in [Hand::Main, Hand::Off] {
             let held = self.hand_stack(hand);
+            let held_name = u32::try_from(held.item)
+                .ok()
+                .filter(|_| !held.is_empty())
+                .and_then(|i| self.state.data.item_name(i));
+            let mut block_target = false;
             match target {
                 UseTarget::Entity { id, location } => {
                     self.send_interact(id, hand, location)?;
-                    return Ok(UseResult::Success);
+                    let entity = self
+                        .state
+                        .entities
+                        .get(id)
+                        .and_then(|e| u32::try_from(e.kind).ok())
+                        .and_then(|k| self.state.data.entity_type_name(k));
+                    if entity.is_some_and(|e| entity_interact_swings(e, held_name)) {
+                        return Ok(UseResult::Success);
+                    }
                 }
                 UseTarget::Block {
                     pos,
@@ -232,27 +222,26 @@ impl Client {
                     cursor,
                     inside,
                 } => {
+                    block_target = true;
                     let sneaking = self.state.player.physics.keys_sneak();
                     let hands_busy = !self.hand_stack(Hand::Main).is_empty()
                         || !self.hand_stack(Hand::Off).is_empty();
                     let suppress = sneaking && hands_busy;
                     self.use_item_on(hand, pos, face, cursor, inside)?;
-                    let by_block = !suppress
-                        && hand == Hand::Main
-                        && self.block_name_at(pos).is_some_and(block_consumes_use);
-                    if by_block {
+                    let block = self.block_name_at(pos);
+                    if !suppress && hand == Hand::Main && block.is_some_and(block_consumes_use) {
                         return Ok(UseResult::Success);
                     }
-                    if self.try_place(hand, &held, pos, face) {
-                        return Ok(UseResult::Success);
+                    match self.try_place(hand, &held, pos, face) {
+                        Placement::Placed => return Ok(UseResult::Success),
+                        Placement::Failed => return Ok(UseResult::Consume),
+                        Placement::NotABlock => {}
                     }
-                    let uses_on = !held.is_empty()
-                        && !self.state.is_on_cooldown(&held)
-                        && u32::try_from(held.item)
-                            .ok()
-                            .and_then(|i| self.state.data.item_name(i))
-                            .is_some_and(item_use_on_consumes);
-                    if uses_on {
+                    let on_cooldown = self.state.is_on_cooldown(&held);
+                    if let (Some(item), Some(block)) = (held_name, block)
+                        && !on_cooldown
+                        && item_use_on_swings(item, block)
+                    {
                         return Ok(UseResult::Success);
                     }
                 }
@@ -266,9 +255,18 @@ impl Client {
                     self.push_event(crate::events::ClientEvent::BookOpened { hand });
                     return Ok(UseResult::Success);
                 }
-                if let Some((kind, ticks)) = kind {
-                    self.begin_using(hand, kind, ticks, &held);
-                    return Ok(UseResult::Success);
+                match kind {
+                    Some((UseKind::Instant, _)) => {
+                        let gliding = self.state.player.physics.fall_flying;
+                        if held_name.is_some_and(|n| item_use_swings(n, block_target, gliding)) {
+                            return Ok(UseResult::Success);
+                        }
+                    }
+                    Some((kind, ticks)) => {
+                        self.begin_using(hand, kind, ticks, &held);
+                        return Ok(UseResult::Consume);
+                    }
+                    None => {}
                 }
             }
         }
@@ -289,20 +287,26 @@ impl Client {
         }))
     }
 
-    fn try_place(&mut self, hand: Hand, held: &ItemStack, pos: BlockPos, face: Facing) -> bool {
+    fn try_place(
+        &mut self,
+        hand: Hand,
+        held: &ItemStack,
+        pos: BlockPos,
+        face: Facing,
+    ) -> Placement {
         if held.is_empty() || self.state.is_on_cooldown(held) {
-            return false;
+            return Placement::NotABlock;
         }
         let Some(block) = u32::try_from(held.item)
             .ok()
             .and_then(|i| self.state.data.item_info(i))
             .and_then(|i| i.block)
         else {
-            return false;
+            return Placement::NotABlock;
         };
         let data = self.state.data;
         let Some(clicked) = self.state.chunks.block(pos.x, pos.y, pos.z) else {
-            return false;
+            return Placement::NotABlock;
         };
         let replaceable = data
             .block_state(u32::from(clicked.0))
@@ -314,20 +318,20 @@ impl Client {
             BlockPos::new(pos.x + o[0], pos.y + o[1], pos.z + o[2])
         };
         let Some(existing) = self.state.chunks.block(at.x, at.y, at.z) else {
-            return false;
+            return Placement::NotABlock;
         };
         let free = data
             .block_state(u32::from(existing.0))
             .is_some_and(|i| i.is_air() || i.is_replaceable());
         if !free {
-            return true;
+            return Placement::Failed;
         }
         let Some(info) = data.block_info(block) else {
-            return true;
+            return Placement::Placed;
         };
         let state = info.default_state;
         if data.state_properties(state).count() != 0 {
-            return true;
+            return Placement::Placed;
         }
         let bb = self.state.player.physics.bounding_box();
         let blocked = data.collision_shape(state).iter().any(|b| {
@@ -346,7 +350,7 @@ impl Client {
             shape.intersects(&bb)
         });
         if blocked {
-            return true;
+            return Placement::Failed;
         }
         let sequence = self.sequence;
         self.state
@@ -365,7 +369,7 @@ impl Client {
                 }
             }
         }
-        true
+        Placement::Placed
     }
 
     fn begin_using(&mut self, hand: Hand, kind: UseKind, ticks: i32, stack: &ItemStack) {

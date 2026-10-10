@@ -3,12 +3,11 @@ use std::time::Instant;
 
 use mcr_buf::BlockPos;
 use mcr_client::{
-    ChatKind, Client, ClientError, ClientEvent, PlayerInput, UseTarget, sanitize_for_log,
+    ChatKind, Client, ClientError, ClientEvent, PlayerInput, UseResult, UseTarget, sanitize_for_log,
 };
 use mcr_particles::ParticleEngine;
 use mcr_physics::Pose;
 use mcr_protocol::play::serverbound::Facing;
-use mcr_protocol::types::game::Hand;
 use mcr_render::glam::DVec3;
 use mcr_render::{Camera, Environment, FrameStats, Overlay, OverlayCtx, Renderer, wgpu};
 use mcr_settings::bindings::mapping_index;
@@ -914,35 +913,44 @@ impl Play {
     }
 
     fn use_target(&mut self, click: bool) {
-        match self.target {
-            Some(Target::Entity { id, .. }) => {
-                if click {
-                    self.net(|c| c.interact(id, Hand::Main));
-                    self.swing();
-                }
+        let target = match self.target {
+            Some(Target::Entity { id, .. }) if click => UseTarget::Entity {
+                id,
+                location: [0.0; 3],
+            },
+            Some(Target::Entity { .. }) => return,
+            Some(Target::Block(hit)) => UseTarget::Block {
+                pos: hit.pos,
+                face: hit.face,
+                cursor: hit.cursor,
+                inside: hit.inside,
+            },
+            None => UseTarget::Air,
+        };
+        let predicted = match self.target {
+            Some(Target::Block(hit)) => self.predict_place(hit),
+            _ => None,
+        };
+        let Some(result) = self.net(|c| c.start_use(target)) else {
+            return;
+        };
+        if result == UseResult::Success {
+            if let Some(hand) = &mut self.hand {
+                hand.swing();
             }
-            Some(Target::Block(hit)) => {
-                let predicted = self.predict_place(hit);
-                self.net(|c| {
-                    c.start_use(UseTarget::Block {
-                        pos: hit.pos,
-                        face: hit.face,
-                        cursor: hit.cursor,
-                        inside: hit.inside,
-                    })
-                });
-                self.swing();
-                if let Some(state) = predicted {
-                    let at = neighbour(hit.pos, hit.face);
-                    self.play_block(state, BlockSound::Place, center(at));
-                }
-                self.use_delay = USE_DELAY;
-            }
-            None => {
-                self.net(|c| c.use_item(Hand::Main));
-                self.using_item = true;
-                self.use_delay = USE_DELAY;
-            }
+            self.net(Client::swing);
+        }
+        if self.world.client.using_item().is_some() {
+            self.using_item = true;
+        }
+        if let (Some(state), Some(Target::Block(hit))) = (predicted, self.target)
+            && result == UseResult::Success
+        {
+            let at = neighbour(hit.pos, hit.face);
+            self.play_block(state, BlockSound::Place, center(at));
+        }
+        if !matches!(target, UseTarget::Entity { .. }) {
+            self.use_delay = USE_DELAY;
         }
     }
 

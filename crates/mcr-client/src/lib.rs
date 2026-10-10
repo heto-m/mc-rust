@@ -20,6 +20,7 @@ mod handler;
 pub mod hashing;
 #[cfg(test)]
 mod hashing_tests;
+mod interaction;
 mod inventory;
 mod menu;
 #[cfg(test)]
