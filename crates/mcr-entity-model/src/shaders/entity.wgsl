@@ -5,6 +5,8 @@ struct Globals {
     params: vec4<f32>,
     fog: vec4<f32>,
     fog_color: vec4<f32>,
+    // Indexed `sky * 16 + block`.
+    lightmap: array<vec4<f32>, 256>,
 }
 
 struct Instance {
@@ -50,9 +52,8 @@ fn unpack_rgba(c: u32) -> vec4<f32> {
     ) / 255.0;
 }
 
-fn light_curve(level: f32) -> f32 {
-    let v = level / 15.0;
-    return max(v / (4.0 - 3.0 * v), 0.04);
+fn lightmap_at(block: u32, sky: u32) -> vec3<f32> {
+    return globals.lightmap[sky * 16u + block].xyz;
 }
 
 fn to_linear(c: vec3<f32>) -> vec3<f32> {
@@ -73,12 +74,12 @@ fn vs_main(v: VertexIn) -> VertexOut {
     out.clip = globals.view_proj * world;
     out.uv = v.uv * inst.uv_scale + inst.uv_offset;
     let fullbright = (inst.flags & 1u) != 0u;
-    let block = f32((inst.flags >> 8u) & 15u);
-    let sky = f32((inst.flags >> 12u) & 15u) * globals.params.x;
+    let block = (inst.flags >> 8u) & 15u;
+    let sky = (inst.flags >> 12u) & 15u;
     var lit = vec3<f32>(1.0);
     if !fullbright {
         let acc = max(dot(n, globals.light0.xyz), 0.0) + max(dot(n, globals.light1.xyz), 0.0);
-        lit = vec3<f32>(min(acc * 0.6 + 0.4, 1.0)) * light_curve(max(block, sky));
+        lit = vec3<f32>(min(acc * 0.6 + 0.4, 1.0)) * lightmap_at(block, sky);
     }
     out.shade = lit;
     out.layer = inst.layer;

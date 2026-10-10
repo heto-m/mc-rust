@@ -89,7 +89,11 @@ struct Globals {
     params: [f32; 4],
     fog: [f32; 4],
     fog_color: [f32; 4],
+    lightmap: Lightmap,
 }
+
+/// The world's 16x16 lightmap, indexed `sky * 16 + block`, as the terrain samples it.
+pub type Lightmap = [[f32; 4]; 256];
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -107,8 +111,7 @@ struct GpuInstance {
 /// Per-frame lighting inputs.
 #[derive(Debug, Clone, Copy)]
 pub struct LightInfo {
-    /// 0..1 scale applied to sky light (night and weather darkening).
-    pub sky_brightness: f32,
+    pub lightmap: Lightmap,
     /// Spherical fog (start, end) then cylindrical fog (start, end); the default disables it.
     pub fog: [f32; 4],
     pub fog_color: [f32; 3],
@@ -116,20 +119,33 @@ pub struct LightInfo {
 
 impl Default for LightInfo {
     fn default() -> Self {
-        Self {
-            sky_brightness: 1.0,
-            fog: [1.0e9; 4],
-            fog_color: [0.0; 3],
-        }
+        Self::with_brightness(1.0)
     }
 }
 
 impl LightInfo {
-    pub fn with_brightness(sky_brightness: f32) -> Self {
+    /// Every light level maps to `brightness`; 1 is vanilla's UI lightmap.
+    pub fn with_brightness(brightness: f32) -> Self {
         Self {
-            sky_brightness,
-            ..Self::default()
+            lightmap: [[brightness, brightness, brightness, 1.0]; 256],
+            fog: [1.0e9; 4],
+            fog_color: [0.0; 3],
         }
+    }
+
+    /// Uses the world lightmap; missing entries stay fully bright.
+    pub fn with_lightmap(lightmap: &[[f32; 4]]) -> Self {
+        let mut out = Self::default();
+        for (dst, src) in out.lightmap.iter_mut().zip(lightmap) {
+            *dst = *src;
+        }
+        out
+    }
+
+    /// The lightmap colour for light levels `[block, sky]`.
+    pub fn color(&self, light: [u8; 2]) -> [f32; 3] {
+        let c = self.lightmap[usize::from(light[1].min(15)) * 16 + usize::from(light[0].min(15))];
+        [c[0], c[1], c[2]]
     }
 }
 
@@ -685,12 +701,7 @@ impl EntityRenderer {
                 view_proj: view_proj.to_cols_array(),
                 light0: light0.extend(0.0).to_array(),
                 light1: light1.extend(0.0).to_array(),
-                params: [
-                    light.sky_brightness.clamp(0.0, 1.0),
-                    if self.output_srgb { 1.0 } else { 0.0 },
-                    0.0,
-                    0.0,
-                ],
+                params: [0.0, if self.output_srgb { 1.0 } else { 0.0 }, 0.0, 0.0],
                 fog: light.fog,
                 fog_color: [
                     light.fog_color[0],
@@ -698,6 +709,7 @@ impl EntityRenderer {
                     light.fog_color[2],
                     1.0,
                 ],
+                lightmap: light.lightmap,
             }),
         );
     }

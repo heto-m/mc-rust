@@ -536,9 +536,9 @@ impl EntityLayer {
             view_proj: camera.view_proj(aspect),
             camera: camera.position.to_array(),
             light: LightInfo {
-                sky_brightness: env.sky_factor,
                 fog: [env.fog_start, env.fog_end, rd_start, rd_end],
                 fog_color: env.fog_color,
+                ..LightInfo::with_lightmap(&env.lightmap(1.0))
             },
         }
     }

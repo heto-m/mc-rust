@@ -56,13 +56,21 @@ impl ParticleAssets for AppParticleAssets {
         let cache = &self.assets.cache;
         let model = cache.state(u16::try_from(state).ok()?);
         let quads = cache.quads(model);
-        let (layer, tinted) = match model.cube.iter().find(|f| f.layer != mcr_mesh::LAYER_NONE) {
+        let (face_layer, tinted) = match model.cube.iter().find(|f| f.layer != mcr_mesh::LAYER_NONE)
+        {
             Some(face) => (face.layer, face.tint != mcr_mesh::TINT_NONE),
             None => {
                 let q = quads.iter().find(|q| q.normal == 0).or(quads.first())?;
                 (q.layer, q.tint != 0)
             }
         };
+        let layer = if model.particle == mcr_mesh::LAYER_NONE {
+            face_layer
+        } else {
+            model.particle
+        };
+        let block = mcr_data::v26_3().state_block_name(u32::try_from(state).ok()?);
+        let tinted = tinted && block != Some("minecraft:grass_block");
         let group = cache.textures.groups.get(usize::from(layer >> 14))?;
         let size = (group.width * group.height * 4) as usize;
         let start = usize::from(layer & 0x3FFF) * size;
@@ -570,6 +578,33 @@ mod tests {
         fx.particles
             .block_break([0, 0, 0], state, &mcr_particles::OpenWorld);
         assert!(fx.particles.count() > 0);
+    }
+
+    #[test]
+    fn grass_block_breaks_into_untinted_dirt_particles() {
+        let jar = std::path::Path::new("../../.cache/versions/26.3/client.jar");
+        if !jar.exists() {
+            return;
+        }
+        let provider = AppParticleAssets::new(Arc::new(Assets::load(jar).unwrap()));
+        let data = mcr_data::v26_3();
+        let state = |name: &str| {
+            let block = data.block_by_name(name).unwrap();
+            data.block_info(block).unwrap().default_state as i32
+        };
+        let (grass, tint) = provider
+            .block_texture(state("minecraft:grass_block"))
+            .unwrap();
+        let (dirt, _) = provider.block_texture(state("minecraft:dirt")).unwrap();
+        assert!(
+            grass.rgba == dirt.rgba,
+            "grass block particles must use block/dirt"
+        );
+        assert_eq!(tint, [1.0; 3]);
+        let (_, leaves) = provider
+            .block_texture(state("minecraft:oak_leaves"))
+            .unwrap();
+        assert_ne!(leaves, [1.0; 3]);
     }
 
     #[test]

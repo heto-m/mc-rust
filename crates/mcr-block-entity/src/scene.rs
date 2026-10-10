@@ -93,17 +93,11 @@ fn frac(x: f32) -> f32 {
     x - x.floor()
 }
 
-fn light_curve(level: f32) -> f32 {
-    let v = level / 15.0;
-    (v / (4.0 - 3.0 * v)).max(0.04)
-}
-
-fn shade(color: [u8; 4], level: f32) -> [u8; 4] {
-    let k = light_curve(level);
+fn shade(color: [u8; 4], light: [f32; 3]) -> [u8; 4] {
     [
-        (f32::from(color[0]) * k) as u8,
-        (f32::from(color[1]) * k) as u8,
-        (f32::from(color[2]) * k) as u8,
+        (f32::from(color[0]) * light[0]) as u8,
+        (f32::from(color[1]) * light[1]) as u8,
+        (f32::from(color[2]) * light[2]) as u8,
         color[3],
     ]
 }
@@ -1495,8 +1489,7 @@ impl BlockEntityScene {
             let side = if back { &sign.back } else { &sign.front };
             let outline = layout.glowing && (layout.black_text || near_outline);
             let lt = if layout.glowing { [15, 15] } else { light };
-            let level =
-                f32::from(lt[0]).max(f32::from(lt[1]) * ctx.frame.params.light.sky_brightness);
+            let level = ctx.frame.params.light.color(lt);
             let _ = side;
             if outline {
                 self.push_text(&layout.outline, &m, 0.0, level, layout.glowing);
@@ -1505,7 +1498,14 @@ impl BlockEntityScene {
         }
     }
 
-    fn push_text(&mut self, quads: &[TextQuad], m: &Mat4, z: f32, level: f32, fullbright: bool) {
+    fn push_text(
+        &mut self,
+        quads: &[TextQuad],
+        m: &Mat4,
+        z: f32,
+        level: [f32; 3],
+        fullbright: bool,
+    ) {
         for q in quads {
             let color = if fullbright {
                 q.color

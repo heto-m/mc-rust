@@ -1599,7 +1599,6 @@ impl Play {
 
     fn prepare_visuals(&mut self, camera: &Camera, partial: f32, aspect: f32, env: &Environment) {
         let state = &self.world.client.state;
-        let sky = env.sky_factor;
         let size = self.render.renderer.size();
         if let Some(layer) = &mut self.entities {
             let cull = Cull {
@@ -1633,7 +1632,7 @@ impl Play {
             }
         }
         if let Some(hand) = &mut self.hand {
-            let eye = self.cur_eye;
+            let eye = lerp3(self.prev_eye, self.cur_eye, f64::from(partial));
             let frame = HandFrame {
                 state,
                 options: &self.options,
@@ -1641,7 +1640,7 @@ impl Play {
                 aspect,
                 pitch: self.pitch,
                 yaw: self.yaw,
-                sky_brightness: sky,
+                lightmap: &env.lightmap(1.0),
                 light: crate::entities::light_at(&state.chunks, eye, 0.0),
                 invisible: false,
             };

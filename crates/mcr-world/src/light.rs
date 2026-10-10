@@ -518,6 +518,35 @@ mod tests {
     }
 
     #[test]
+    fn dug_corridor_darkens_one_level_per_block_and_goes_dark_when_sealed() {
+        let mut s = open_world(&[(0, 0), (1, 0)]);
+        for x in 0..32 {
+            for z in 0..15 {
+                for y in 10..=40 {
+                    s.set_block_deferred(x, y, z, STONE);
+                }
+            }
+        }
+        s.run_light_updates();
+        let corridor = |s: &ChunkStore| (1..15).map(|z| sky(s, 8, 20, z)).collect::<Vec<_>>();
+        for z in (1..14).rev() {
+            s.set_block(8, 20, z, AIR);
+            s.set_block(8, 21, z, AIR);
+        }
+        assert!(corridor(&s).iter().all(|&l| l == 0), "sealed corridor lit");
+        s.set_block(8, 21, 14, AIR);
+        s.set_block(8, 20, 14, AIR);
+        assert_eq!(corridor(&s), (1..15).collect::<Vec<u8>>());
+        assert_eq!(sky(&s, 8, 21, 4), 4);
+        s.set_block(8, 20, 14, STONE);
+        s.set_block(8, 21, 14, STONE);
+        assert!(
+            corridor(&s).iter().all(|&l| l == 0),
+            "resealed corridor lit"
+        );
+    }
+
+    #[test]
     fn leaves_dampen_light_by_one_per_block() {
         let mut s = open_world(&[(0, 0)]);
         s.set_block(8, 30, 8, LEAVES);

@@ -122,6 +122,8 @@ pub struct StateModel {
     pub random: u32,
     pub offset: OffsetSpec,
     pub emission: u8,
+    /// Layer of the model's `particle` texture; `LAYER_NONE` when it has none.
+    pub particle: u16,
 }
 
 impl StateModel {
@@ -141,6 +143,7 @@ impl StateModel {
         random: 0,
         offset: OffsetSpec::NONE,
         emission: 0,
+        particle: LAYER_NONE,
     };
 }
 
@@ -587,6 +590,10 @@ impl ModelCache {
                     RenderLayer::from_transparency(transparency_of(q.sprite), q.force_translucent)
                 };
                 let first: Vec<_> = model.parts.iter().map(|p| &p.variants[0]).collect();
+                sm.particle = first
+                    .first()
+                    .and_then(|v| v.particle)
+                    .map_or(LAYER_NONE, layer_of);
                 let ao = first.iter().all(|v| v.ambient_occlusion)
                     && info.is_none_or(|i| i.light_emission == 0);
                 let random = model.parts.iter().any(|p| p.variants.len() > 1);

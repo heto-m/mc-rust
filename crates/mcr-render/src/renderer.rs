@@ -200,6 +200,20 @@ struct Timestamps {
 struct Surface {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
+    view_format: wgpu::TextureFormat,
+}
+
+/// Shaders write gamma-encoded colour like vanilla, so the target must not re-encode it as sRGB.
+fn surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat> {
+    use wgpu::TextureFormat as F;
+    [
+        F::Rgba8Unorm,
+        F::Bgra8Unorm,
+        F::Rgba8UnormSrgb,
+        F::Bgra8UnormSrgb,
+    ]
+    .into_iter()
+    .find(|f| formats.contains(f))
 }
 
 struct Geometry {
@@ -458,11 +472,13 @@ impl Renderer {
                 .get_default_config(&adapter, width, height)
                 .expect("adapter supports surface");
             let formats = surface.get_capabilities(&adapter).formats;
-            cfg.format = formats
-                .iter()
-                .copied()
-                .find(|f| *f == COLOR_FORMAT || *f == wgpu::TextureFormat::Bgra8UnormSrgb)
-                .unwrap_or(cfg.format);
+            cfg.format = surface_format(&formats).unwrap_or(cfg.format);
+            let view_format = cfg.format.remove_srgb_suffix();
+            cfg.view_formats = if view_format == cfg.format {
+                Vec::new()
+            } else {
+                vec![view_format]
+            };
             cfg.present_mode = if config.vsync {
                 wgpu::PresentMode::AutoVsync
             } else {
@@ -473,9 +489,10 @@ impl Renderer {
             Surface {
                 surface,
                 config: cfg,
+                view_format,
             }
         });
-        let color_format = surface.as_ref().map_or(COLOR_FORMAT, |s| s.config.format);
+        let color_format = surface.as_ref().map_or(COLOR_FORMAT, |s| s.view_format);
         let offscreen = surface
             .is_none()
             .then(|| create_offscreen(&device, width, height));
@@ -1402,7 +1419,7 @@ impl Renderer {
     pub fn target_format(&self) -> wgpu::TextureFormat {
         self.surface
             .as_ref()
-            .map_or(COLOR_FORMAT, |s| s.config.format)
+            .map_or(COLOR_FORMAT, |s| s.view_format)
     }
 
     /// `overlay` records into the frame's encoder after the world pass; depth is kept for it.
@@ -1474,9 +1491,10 @@ impl Renderer {
                     }
                     _ => return Err(RenderError::SurfaceUnavailable),
                 };
-                let view = tex
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
+                let view = tex.texture.create_view(&wgpu::TextureViewDescriptor {
+                    format: Some(s.view_format),
+                    ..Default::default()
+                });
                 surface_tex = Some(tex);
                 view
             }
@@ -1601,7 +1619,7 @@ impl Renderer {
                 format: self
                     .surface
                     .as_ref()
-                    .map_or(COLOR_FORMAT, |s| s.config.format),
+                    .map_or(COLOR_FORMAT, |s| s.view_format),
                 size: self.size,
                 camera: frame.camera,
             });
@@ -1775,4 +1793,24 @@ fn create_offscreen(device: &wgpu::Device, w: u32, h: u32) -> wgpu::Texture {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wgpu::TextureFormat as F;
+
+    #[test]
+    fn surface_prefers_a_non_srgb_format_even_when_srgb_is_listed_first() {
+        let listed = [
+            F::Rgba8UnormSrgb,
+            F::Bgra8UnormSrgb,
+            F::Rgb10a2Unorm,
+            F::Bgra8Unorm,
+        ];
+        assert_eq!(surface_format(&listed), Some(F::Bgra8Unorm));
+        let only_srgb = [F::Bgra8UnormSrgb];
+        let picked = surface_format(&only_srgb).unwrap();
+        assert!(!picked.remove_srgb_suffix().is_srgb());
+    }
 }

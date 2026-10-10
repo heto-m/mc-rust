@@ -254,8 +254,10 @@ impl Autopilot {
                 Step::Report => {
                     if let Some(play) = &sh.play {
                         let p = play.feet();
+                        let state = &play.world.client.state;
+                        let [block, sky] = crate::entities::light_at(&state.chunks, p, 1.62);
                         println!(
-                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} teleports {} chunks {} screen {} container_updates {}",
+                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {}",
                             play.ticks,
                             p[0],
                             p[1],

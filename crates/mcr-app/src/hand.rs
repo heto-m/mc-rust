@@ -165,7 +165,7 @@ pub struct HandFrame<'a> {
     pub aspect: f32,
     pub pitch: f32,
     pub yaw: f32,
-    pub sky_brightness: f32,
+    pub lightmap: &'a [[f32; 4]],
     pub light: [u8; 2],
     pub invisible: bool,
 }
@@ -714,7 +714,7 @@ impl Hand {
         self.scene.prepare(&FrameParams {
             view_proj: hand_view_proj(f.aspect),
             camera: [0.0; 3],
-            light: LightInfo::with_brightness(f.sky_brightness),
+            light: LightInfo::with_lightmap(f.lightmap),
         });
     }
 
