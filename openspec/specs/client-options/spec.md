@@ -14,7 +14,7 @@ value range.
 #### Scenario: Defaults match vanilla
 
 - **WHEN** `Options::default()` is created
-- **THEN** `renderDistance` is 12, `maxFps` is 120, `fov` is 70, `guiScale` is 0 (auto), `mouseSensitivity` is 0.5 and `chatOpacity` is 1.0
+- **THEN** `renderDistance` is 32, `maxFps` is 120, `fov` is 70, `guiScale` is 0 (auto), `mouseSensitivity` is 0.5 and `chatOpacity` is 1.0
 
 #### Scenario: Numeric values are clamped
 
@@ -34,7 +34,7 @@ SHALL apply each recognized key. Blank lines and lines without `:` SHALL be skip
 #### Scenario: Malformed value falls back to default
 
 - **WHEN** `options.txt` contains `renderDistance:far`
-- **THEN** render distance keeps its default of 12 and a warning is recorded, and loading does not fail
+- **THEN** render distance keeps its default of 32 and a warning is recorded, and loading does not fail
 
 #### Scenario: Arbitrary input never panics
 
@@ -66,3 +66,10 @@ visibility flag per player model part (`modelPart_<id>`, default true).
 
 - **WHEN** `soundCategory_music:0.25` is loaded
 - **THEN** the music volume is 0.25
+
+### Requirement: Default render distance
+The default render distance SHALL be 32 chunks and SHALL be sent in client information; the server MAY cap it.
+
+#### Scenario: Fresh options
+- **WHEN** no `options.txt` exists
+- **THEN** render distance is 32 and simulation distance keeps its vanilla default

@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use mcr_entity_model::{AnimationSet, BoundAnimation, LayerSet, Model};
+use mcr_entity_model::glam::{Mat4, Quat};
+use mcr_entity_model::{
+    AnimIn, AnimationSet, Binding, BoundAnimation, LayerSet, Model, Rig, animate, evaluate,
+};
 
 fn cache() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.cache/versions/26.3")
@@ -79,4 +82,34 @@ fn bat_resting_animation_samples_its_keyframe() {
     anim.apply(0.0, 1.0, &mut pose);
     let head = bat.bone("head").unwrap() as usize;
     assert!((pose[head].rot.x - std::f32::consts::PI).abs() < 1e-5);
+}
+
+#[test]
+fn chicken_head_beak_and_wattle_turn_together() {
+    let Some(set) = layers() else { return };
+    for layer in ["minecraft:chicken#main", "minecraft:cold_chicken#main"] {
+        let chicken = model(&set, layer);
+        let head = chicken.bone("head").unwrap();
+        for part in ["beak", "red_thing"] {
+            let bone = chicken.bone(part).unwrap();
+            assert_eq!(chicken.bones[bone as usize].parent, Some(head), "{part}");
+        }
+        let mut pose = chicken.rest_pose();
+        let input = AnimIn {
+            head_yaw: 50.0,
+            head_pitch: 30.0,
+            on_ground: true,
+            ..AnimIn::default()
+        };
+        animate(Rig::Chicken, &input, &Binding::new(&chicken), &mut pose);
+        let mut world = vec![Mat4::IDENTITY; chicken.bones.len()];
+        evaluate(&chicken, &pose, &mut world);
+        let rotation = |m: Mat4| Quat::from_mat4(&m).normalize();
+        let head_rot = rotation(world[head as usize]);
+        for part in ["beak", "red_thing"] {
+            let bone = chicken.bone(part).unwrap();
+            assert!(rotation(world[bone as usize]).angle_between(head_rot) < 1.0e-4);
+        }
+        assert!(head_rot.angle_between(Quat::IDENTITY) > 0.5);
+    }
 }

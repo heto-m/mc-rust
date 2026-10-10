@@ -1,7 +1,10 @@
 use mcr_buf::BlockPos;
-use mcr_client::Entities;
+use mcr_client::{Entities, Entity, PlayerList};
 use mcr_data::Version;
+use mcr_entity_model::idx::ARMOR_STAND_FLAGS;
 use mcr_protocol::play::serverbound::Facing;
+use mcr_protocol::types::entity_data::EntityDataValue;
+use mcr_protocol::types::game::GameType;
 use mcr_world::ChunkStore;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -152,54 +155,112 @@ pub fn raycast_block(
     None
 }
 
-pub fn raycast_entity(
-    entities: &Entities,
-    data: &Version,
-    origin: [f64; 3],
-    dir: [f64; 3],
-    max: f64,
-) -> Option<(i32, f64)> {
-    let mut best: Option<(i32, f64)> = None;
-    for e in entities.iter() {
-        let Some(info) = u32::try_from(e.kind)
-            .ok()
-            .and_then(|k| data.entity_type_info(k))
-        else {
-            continue;
-        };
-        let half = f64::from(info.width) / 2.0;
-        let min = [e.pos[0] - half, e.pos[1], e.pos[2] - half];
-        let top = [
-            e.pos[0] + half,
-            e.pos[1] + f64::from(info.height),
-            e.pos[2] + half,
-        ];
-        if let Some(s) = slab(origin, dir, min, top) {
+const REDIRECTABLE_PROJECTILES: [&str; 3] = [
+    "minecraft:fireball",
+    "minecraft:wind_charge",
+    "minecraft:breeze_wind_charge",
+];
+
+const ARMOR_STAND_MARKER: i8 = 0x10;
+
+/// `Entity.isPickable` for the entity types the server can send; `misc` mixes living and non-living types.
+fn pickable(name: &str, category: &str, e: &Entity, players: &PlayerList) -> bool {
+    match name {
+        "minecraft:player" => players
+            .get(e.uuid)
+            .is_none_or(|p| p.game_mode != GameType::Spectator),
+        "minecraft:armor_stand" => !matches!(
+            e.data.get(&ARMOR_STAND_FLAGS),
+            Some(EntityDataValue::Byte(f)) if f & ARMOR_STAND_MARKER != 0
+        ),
+        "minecraft:falling_block"
+        | "minecraft:tnt"
+        | "minecraft:end_crystal"
+        | "minecraft:interaction"
+        | "minecraft:shulker_bullet"
+        | "minecraft:item_frame"
+        | "minecraft:glow_item_frame"
+        | "minecraft:painting"
+        | "minecraft:leash_knot"
+        | "minecraft:cushion"
+        | "minecraft:mannequin"
+        | "minecraft:copper_golem"
+        | "minecraft:iron_golem"
+        | "minecraft:snow_golem"
+        | "minecraft:villager"
+        | "minecraft:minecart" => true,
+        _ if REDIRECTABLE_PROJECTILES.contains(&name) => true,
+        _ if category != "misc" => true,
+        _ => name.ends_with("_boat") || name.ends_with("_raft") || name.ends_with("_minecart"),
+    }
+}
+
+fn pick_radius(name: &str) -> f64 {
+    if REDIRECTABLE_PROJECTILES.contains(&name) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+pub struct EntityPicker<'a> {
+    pub entities: &'a Entities,
+    pub players: &'a PlayerList,
+    pub data: &'a Version,
+    pub own_id: i32,
+    pub own_vehicle: Option<i32>,
+}
+
+impl EntityPicker<'_> {
+    /// Nearest pickable entity strictly closer than `max`.
+    pub fn raycast(&self, origin: [f64; 3], dir: [f64; 3], max: f64) -> Option<(i32, f64)> {
+        let mut best: Option<(i32, f64)> = None;
+        for e in self.entities.iter() {
+            if e.id == self.own_id || Some(e.id) == self.own_vehicle {
+                continue;
+            }
+            let Some(kind) = u32::try_from(e.kind).ok() else {
+                continue;
+            };
+            let (Some(info), Some(name)) = (
+                self.data.entity_type_info(kind),
+                self.data.entity_type_name(kind),
+            ) else {
+                continue;
+            };
+            if !pickable(name, info.category, e, self.players) {
+                continue;
+            }
+            let grow = pick_radius(name);
+            let half = f64::from(info.width) / 2.0 + grow;
+            let min = [e.pos[0] - half, e.pos[1] - grow, e.pos[2] - half];
+            let top = [
+                e.pos[0] + half,
+                e.pos[1] + f64::from(info.height) + grow,
+                e.pos[2] + half,
+            ];
+            let Some(s) = slab(origin, dir, min, top) else {
+                continue;
+            };
             let t = s.t_min.max(0.0);
-            if t <= max && best.is_none_or(|(_, bt)| t < bt) {
+            if t < max && best.is_none_or(|(_, bt)| t < bt) {
                 best = Some((e.id, t));
             }
         }
+        best
     }
-    best
 }
 
+/// `GameRenderer.pick`: an entity wins only when strictly nearer than the block hit.
 pub fn pick(
     store: &ChunkStore,
-    entities: &Entities,
-    data: &Version,
+    picker: &EntityPicker<'_>,
     origin: [f64; 3],
     dir: [f64; 3],
     max: f64,
 ) -> Option<Target> {
-    let block = raycast_block(store, data, origin, dir, max);
-    let entity = raycast_entity(
-        entities,
-        data,
-        origin,
-        dir,
-        block.map_or(max, |b| b.distance),
-    );
+    let block = raycast_block(store, picker.data, origin, dir, max);
+    let entity = picker.raycast(origin, dir, block.map_or(max, |b| b.distance));
     match (block, entity) {
         (_, Some((id, distance))) => Some(Target::Entity { id, distance }),
         (Some(b), None) => Some(Target::Block(b)),
@@ -263,5 +324,87 @@ mod tests {
         let (store, _) = world_with((5, 64, 5), "minecraft:stone");
         let hit = raycast_block(&store, data, [5.5, 66.0, 5.5], [0.0, -1.0, 0.0], 4.5).unwrap();
         assert_eq!(hit.face, Facing::Up);
+    }
+
+    fn entity(id: i32, name: &str, pos: [f64; 3]) -> Entity {
+        let kind = mcr_data::v26_3().entity_type_by_name(name).unwrap();
+        Entity::new(id, uuid::Uuid::from_u128(id as u128), kind as i32, pos)
+    }
+
+    fn pick_with(store: &ChunkStore, list: Vec<Entity>) -> Option<Target> {
+        let mut entities = Entities::default();
+        for e in list {
+            entities.insert(e);
+        }
+        let players = PlayerList::default();
+        let picker = EntityPicker {
+            entities: &entities,
+            players: &players,
+            data: mcr_data::v26_3(),
+            own_id: 0,
+            own_vehicle: None,
+        };
+        pick(store, &picker, [5.5, 65.0, 0.5], [0.0, 0.0, 1.0], 4.5)
+    }
+
+    #[test]
+    fn non_pickable_entities_are_ignored() {
+        let (store, _) = world_with((5, 64, 5), "minecraft:air");
+        for name in [
+            "minecraft:item",
+            "minecraft:experience_orb",
+            "minecraft:arrow",
+            "minecraft:area_effect_cloud",
+            "minecraft:marker",
+            "minecraft:snowball",
+        ] {
+            assert_eq!(
+                pick_with(&store, vec![entity(7, name, [5.5, 64.0, 3.0])]),
+                None,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn pickable_entities_are_targeted() {
+        let (store, _) = world_with((5, 64, 5), "minecraft:air");
+        for name in [
+            "minecraft:cow",
+            "minecraft:oak_boat",
+            "minecraft:minecart",
+            "minecraft:item_frame",
+        ] {
+            let hit = pick_with(&store, vec![entity(7, name, [5.5, 64.5, 3.0])]);
+            assert!(matches!(hit, Some(Target::Entity { id: 7, .. })), "{name}");
+        }
+    }
+
+    #[test]
+    fn nearer_block_beats_entity_and_item_never_blocks_block() {
+        let (store, _) = world_with((5, 65, 2), "minecraft:stone");
+        let cow = entity(7, "minecraft:cow", [5.5, 64.0, 4.0]);
+        assert!(matches!(
+            pick_with(&store, vec![cow]),
+            Some(Target::Block(_))
+        ));
+        let item = entity(8, "minecraft:item", [5.5, 65.0, 1.5]);
+        assert!(matches!(
+            pick_with(&store, vec![item]),
+            Some(Target::Block(_))
+        ));
+    }
+
+    #[test]
+    fn marker_armor_stand_and_fireball_radius() {
+        let (store, _) = world_with((5, 64, 5), "minecraft:air");
+        let mut stand = entity(7, "minecraft:armor_stand", [5.5, 64.0, 3.0]);
+        assert!(pick_with(&store, vec![stand.clone()]).is_some());
+        stand
+            .data
+            .insert(ARMOR_STAND_FLAGS, EntityDataValue::Byte(0x10));
+        assert_eq!(pick_with(&store, vec![stand]), None);
+        let fireball = entity(8, "minecraft:fireball", [6.9, 64.0, 3.0]);
+        assert!(pick_with(&store, vec![fireball]).is_some());
     }
 }

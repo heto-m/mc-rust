@@ -26,7 +26,7 @@ not an option line\n\
 #[test]
 fn defaults_match_vanilla() {
     let o = Options::default();
-    assert_eq!(o.render_distance, 12);
+    assert_eq!(o.render_distance, 32);
     assert_eq!(o.max_fps, 120);
     assert_eq!(o.fov.0, 70);
     assert_eq!(o.gui_scale, 0);
@@ -89,7 +89,7 @@ fn round_trip_is_stable() {
 fn written_formats_match_vanilla() {
     let text = OptionsFile::default().to_text();
     let line = |k: &str| text.lines().find(|l| l.starts_with(k)).unwrap().to_owned();
-    assert_eq!(line("renderDistance:"), "renderDistance:12");
+    assert_eq!(line("renderDistance:"), "renderDistance:32");
     assert_eq!(line("particles:"), "particles:0");
     assert_eq!(line("renderClouds:"), "renderClouds:\"true\"");
     assert_eq!(line("mainHand:"), "mainHand:\"right\"");
@@ -109,7 +109,7 @@ fn written_formats_match_vanilla() {
 fn invalid_values_fall_back_and_clamp() {
     let f =
         OptionsFile::parse("renderDistance:far\nmaxFps:999\nmaxFpsLow:1\nchatOpacity:-3\nfov:-9\n");
-    assert_eq!(f.options.render_distance, 12);
+    assert_eq!(f.options.render_distance, 32);
     assert_eq!(f.options.max_fps, 260);
     assert_eq!(f.options.chat_opacity, 0.0);
     assert_eq!(f.options.fov.0, 30);

@@ -103,7 +103,7 @@ options! {
     reduced_debug_info: bool = "reducedDebugInfo" => false;
     render_clouds: CloudStatus = "renderClouds" => CloudStatus::Fancy;
     cloud_range: i32 = "cloudRange" => 128, [2, 128];
-    render_distance: i32 = "renderDistance" => 12, [2, 32];
+    render_distance: i32 = "renderDistance" => 32, [2, 32];
     simulation_distance: i32 = "simulationDistance" => 12, [5, 32];
     screen_effect_scale: f64 = "screenEffectScale" => 1.0, [0.0, 1.0];
     sound_device: QuotedString = "soundDevice" => QuotedString::default();

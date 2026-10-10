@@ -5,6 +5,7 @@ mod column;
 mod config;
 mod container;
 mod error;
+mod light;
 mod nbt_skip;
 mod payload;
 mod section;
@@ -17,6 +18,7 @@ pub use container::{
     PalettedContainer, biome_index, block_index,
 };
 pub use error::WorldError;
+pub use light::LightTable;
 pub use payload::{ChunkData, LIGHT_BYTES, LightData, LightNibbles, LightUpdate};
 pub use section::ChunkSection;
 pub use store::{ChunkPos, ChunkStore, SectionPos};

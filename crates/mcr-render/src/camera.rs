@@ -29,12 +29,19 @@ impl Camera {
         Vec3::new(-sy * cp, sp, -cy * cp)
     }
 
+    /// Derivative of `forward` with respect to pitch, so it stays defined when looking straight up or down.
+    pub fn up(&self) -> Vec3 {
+        let (sy, cy) = self.yaw.sin_cos();
+        let (sp, cp) = self.pitch.sin_cos();
+        Vec3::new(sy * sp, cp, cy * sp)
+    }
+
     pub fn right(&self) -> Vec3 {
-        self.forward().cross(Vec3::Y).normalize_or_zero()
+        self.forward().cross(self.up()).normalize_or_zero()
     }
 
     pub fn view_rotation(&self) -> Mat4 {
-        glam::camera::rh::view::look_to_mat4(Vec3::ZERO, self.forward(), Vec3::Y)
+        glam::camera::rh::view::look_to_mat4(Vec3::ZERO, self.forward(), self.up())
     }
 
     pub fn projection(&self, aspect: f32) -> Mat4 {
@@ -90,6 +97,22 @@ mod tests {
         let c = Camera::default();
         assert!((c.forward() - Vec3::NEG_Z).length() < 1e-6);
         assert!((c.right() - Vec3::X).length() < 1e-6);
+    }
+
+    #[test]
+    fn straight_down_keeps_orientation() {
+        let down = Camera {
+            yaw: 0.7,
+            pitch: -std::f32::consts::FRAC_PI_2,
+            ..Camera::default()
+        };
+        let view = down.view_rotation();
+        let map = |v: Vec3| view.transform_vector3(v);
+        assert!((map(down.forward()) - Vec3::NEG_Z).length() < 1e-5);
+        assert!((map(down.up()) - Vec3::Y).length() < 1e-5);
+        assert!((map(down.right()) - Vec3::X).length() < 1e-5);
+        let level = Camera { pitch: 0.0, ..down };
+        assert!((down.right() - level.right()).length() < 1e-5);
     }
 
     #[test]

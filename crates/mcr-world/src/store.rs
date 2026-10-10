@@ -41,8 +41,10 @@ impl SectionPos {
 #[derive(Debug)]
 pub struct ChunkStore {
     cfg: WorldConfig,
-    columns: FxHashMap<ChunkPos, ChunkColumn>,
+    pub(crate) columns: FxHashMap<ChunkPos, ChunkColumn>,
     dirty: FxHashSet<SectionPos>,
+    pub(crate) light_table: Option<std::sync::Arc<crate::LightTable>>,
+    pub(crate) pending_light: FxHashSet<[i32; 3]>,
 }
 
 impl ChunkStore {
@@ -51,7 +53,14 @@ impl ChunkStore {
             cfg,
             columns: FxHashMap::default(),
             dirty: FxHashSet::default(),
+            light_table: None,
+            pending_light: FxHashSet::default(),
         }
+    }
+
+    /// Enables the local light engine: block changes then relight like vanilla's client does.
+    pub fn set_light_table(&mut self, table: std::sync::Arc<crate::LightTable>) {
+        self.light_table = Some(table);
     }
 
     pub fn config(&self) -> &WorldConfig {
@@ -145,6 +154,19 @@ impl ChunkStore {
 
     /// Returns the previous state, or `None` if the position is not loaded.
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, state: BlockState) -> Option<BlockState> {
+        let old = self.set_block_deferred(x, y, z, state);
+        self.run_light_updates();
+        old
+    }
+
+    /// Like [`set_block`](Self::set_block) but leaves the light update to [`run_light_updates`](Self::run_light_updates).
+    pub fn set_block_deferred(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: BlockState,
+    ) -> Option<BlockState> {
         let pos = ChunkPos::from_block(x, z);
         let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
         let old = self
@@ -153,6 +175,9 @@ impl ChunkStore {
             .set_block(lx, y, lz, state, &self.cfg)?;
         if old != state {
             self.mark_block_dirty(x, y, z);
+            if self.light_table.is_some() {
+                self.pending_light.insert([x, y, z]);
+            }
         }
         Some(old)
     }
@@ -176,14 +201,15 @@ impl ChunkStore {
                 section.y * 16 + ly,
                 section.z * 16 + lz,
             );
-            if self.set_block(x, y, z, state).is_some() {
+            if self.set_block_deferred(x, y, z, state).is_some() {
                 applied += 1;
             }
         }
+        self.run_light_updates();
         applied
     }
 
-    fn mark_block_dirty(&mut self, x: i32, y: i32, z: i32) {
+    pub(crate) fn mark_block_dirty(&mut self, x: i32, y: i32, z: i32) {
         let (sx, sy, sz) = (x >> 4, y >> 4, z >> 4);
         self.dirty.insert(SectionPos::new(sx, sy, sz));
         let edge = |v: i32| match v & 15 {
@@ -192,7 +218,12 @@ impl ChunkStore {
             _ => 0,
         };
         let (ex, ey, ez) = (edge(x), edge(y), edge(z));
-        for (dx, dy, dz) in [(ex, 0, 0), (0, ey, 0), (0, 0, ez)] {
+        for mask in 1..8 {
+            let (dx, dy, dz) = (
+                if mask & 1 != 0 { ex } else { 0 },
+                if mask & 2 != 0 { ey } else { 0 },
+                if mask & 4 != 0 { ez } else { 0 },
+            );
             if (dx, dy, dz) == (0, 0, 0) {
                 continue;
             }

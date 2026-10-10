@@ -120,6 +120,23 @@ impl LightSlot {
             Self::Data(n) => Some(n.get(x, y, z)),
         }
     }
+
+    fn set(&mut self, (x, y, z): (usize, usize, usize), level: u8) -> bool {
+        match self {
+            Self::Absent => return false,
+            Self::Dark => {
+                if level == 0 {
+                    return true;
+                }
+                *self = Self::Data(LightNibbles::default());
+            }
+            Self::Data(_) => {}
+        }
+        if let Self::Data(n) = self {
+            n.set(x, y, z, level);
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,6 +259,25 @@ impl ChunkColumn {
     pub fn block_light(&self, x: usize, y: i32, z: usize) -> Option<u8> {
         let slot = self.block.get(self.light_index(y)?)?;
         slot.get(x, (y & 15) as usize, z)
+    }
+
+    /// Writes one nibble; `false` when the light section has not arrived.
+    pub fn set_sky_light(&mut self, x: usize, y: i32, z: usize, level: u8) -> bool {
+        let Some(index) = self.light_index(y) else {
+            return false;
+        };
+        self.sky
+            .get_mut(index)
+            .is_some_and(|s| s.set((x, (y & 15) as usize, z), level))
+    }
+
+    pub fn set_block_light(&mut self, x: usize, y: i32, z: usize, level: u8) -> bool {
+        let Some(index) = self.light_index(y) else {
+            return false;
+        };
+        self.block
+            .get_mut(index)
+            .is_some_and(|s| s.set((x, (y & 15) as usize, z), level))
     }
 
     fn light_index(&self, y: i32) -> Option<usize> {

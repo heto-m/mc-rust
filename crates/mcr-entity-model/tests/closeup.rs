@@ -59,6 +59,7 @@ fn closeup() {
         v.attack_time = env_f("CU_ATTACK", 0.0);
         v.age_ticks = env_f("CU_AGE", 10.0);
         v.pitch = env_f("CU_PITCH", 0.0);
+        v.head_yaw = env_f("CU_HEADYAW", 0.0);
         v.on_ground = env_f("CU_GROUND", 1.0) > 0.5;
         v.death_time = env_f("CU_DEATH", 0.0);
         h.scene.update(&reg, std::iter::once(v));

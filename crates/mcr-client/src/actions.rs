@@ -28,6 +28,9 @@ fn now_millis() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
+/// The server skips the breaker when it broadcasts this event, so the client raises it for its own breaks.
+const LEVEL_EVENT_DESTROY_BLOCK: i32 = 2001;
+
 impl Client {
     pub(crate) fn next_sequence(&mut self) -> i32 {
         self.sequence = self.sequence.wrapping_add(1);
@@ -262,6 +265,12 @@ impl Client {
         }
         let after = self.state.state_after_break(old);
         self.state.predict_block(pos, after, sequence);
+        self.push_event(crate::events::ClientEvent::LevelEvent {
+            event: LEVEL_EVENT_DESTROY_BLOCK,
+            pos,
+            data: i32::from(old.0),
+            global: false,
+        });
     }
 
     /// Starts breaking; stays in the digging state unless the block breaks instantly.

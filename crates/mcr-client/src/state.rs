@@ -7,7 +7,7 @@ use mcr_physics::{Attributes, Effects};
 use mcr_protocol::common::{ResourcePackAction, ResourcePackResponse, ServerLink};
 use mcr_protocol::dispatch::PlayServerbound;
 use mcr_protocol::types::Component;
-use mcr_world::{BlockState, ChunkStore, WorldConfig};
+use mcr_world::{BlockState, ChunkStore, LightTable, WorldConfig};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
@@ -329,7 +329,7 @@ impl ClientState {
 
     pub fn new(config: &ClientConfig, uuid: Uuid) -> Self {
         let data = mcr_data::v26_3();
-        let chunks = ChunkStore::new(
+        let chunks = new_store(
             default_world_config(data, 1, -64, 384).expect("default world config is valid"),
         );
         Self {
@@ -379,7 +379,7 @@ impl ClientState {
         let height = u32::try_from(height)
             .map_err(|_| ClientError::Invalid(format!("dimension height {height}")))?;
         let cfg = default_world_config(self.data, biomes, min_y, height)?;
-        self.chunks = ChunkStore::new(cfg);
+        self.chunks = new_store(cfg);
         self.block_entities.clear();
         self.entities.clear();
         self.dimension = Dimension {
@@ -467,11 +467,37 @@ pub fn resource_pack_responses(policy: ResourcePackPolicy, id: Uuid) -> Vec<Reso
         .collect()
 }
 
+fn light_table() -> std::sync::Arc<LightTable> {
+    static TABLE: std::sync::OnceLock<std::sync::Arc<LightTable>> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(|| {
+            let data = mcr_data::v26_3();
+            std::sync::Arc::new(LightTable::new(data.state_count(), |state| {
+                let Some(info) = data.block_state(state) else {
+                    return (0, 15, 0);
+                };
+                let shaped = info.can_occlude() && info.use_shape_for_light_occlusion();
+                (
+                    info.light_emission,
+                    info.light_block,
+                    if shaped { info.occlusion_faces } else { 0 },
+                )
+            }))
+        })
+        .clone()
+}
+
+pub(crate) fn new_store(cfg: WorldConfig) -> ChunkStore {
+    let mut store = ChunkStore::new(cfg);
+    store.set_light_table(light_table());
+    store
+}
+
 impl ClientState {
     /// Drops world and entity state ahead of a re-configuration; registries are replaced by the server.
     pub fn reset_for_reconfiguration(&mut self) {
         let cfg = *self.chunks.config();
-        self.chunks = ChunkStore::new(cfg);
+        self.chunks = new_store(cfg);
         self.block_entities.clear();
         self.entities.clear();
         self.boss_bars.clear();

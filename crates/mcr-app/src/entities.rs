@@ -412,7 +412,10 @@ impl EntityLayer {
                 using_item: cx.local_using,
                 ..PlayerView::default()
             };
-            v.light = light_at(&cx.state.chunks, v.pos, 1.8);
+            v.light = light_at(&cx.state.chunks, v.pos, eye_height(data, *player_type));
+            if v.shared_flag(0) {
+                v.light[0] = 15;
+            }
             v
         });
         let views = tracks
@@ -455,6 +458,7 @@ impl EntityLayer {
                 let mut view = make_view(e.id, e.uuid, e.kind, t, cx.partial, &e.data, scale);
                 view.pos = pos;
                 view.passenger = e.vehicle.is_some();
+                view.on_ground = e.on_ground || (t.pos[1] - t.prev_pos[1]).abs() < 1.0e-3;
                 view.object_data = e.object_data;
                 view.equipment = Some(&e.equipment);
                 if e.kind == *player_type {
@@ -465,7 +469,10 @@ impl EntityLayer {
                         ..PlayerView::default()
                     };
                 }
-                view.light = light_at(&cx.state.chunks, pos, h * scale);
+                view.light = light_at(&cx.state.chunks, pos, eye_height(data, e.kind) * scale);
+                if view.shared_flag(0) {
+                    view.light[0] = 15;
+                }
                 Some(view)
             })
             .chain(local_view);
@@ -557,6 +564,13 @@ fn health(e: &Entity) -> Option<f32> {
     }
 }
 
+fn eye_height(data: &'static mcr_data::Version, kind: i32) -> f32 {
+    u32::try_from(kind)
+        .ok()
+        .and_then(|k| data.entity_type_info(k))
+        .map_or(1.62, |i| i.eye_height)
+}
+
 fn type_size(data: &'static mcr_data::Version, kind: i32) -> (f32, f32) {
     u32::try_from(kind)
         .ok()
@@ -600,9 +614,10 @@ fn visible(cx: &FrameCtx<'_>, chunks: &ChunkStore, pos: [f64; 3], w: f32, h: f32
     cx.cull.frustum.intersects_aabb(min, max)
 }
 
-pub fn light_at(chunks: &ChunkStore, pos: [f64; 3], height: f32) -> [u8; 2] {
+/// `[block, sky]` at the entity's eye, which is where vanilla probes the light.
+pub fn light_at(chunks: &ChunkStore, pos: [f64; 3], eye_height: f32) -> [u8; 2] {
     let x = pos[0].floor() as i32;
-    let y = (pos[1] + f64::from(height) * 0.5).floor() as i32;
+    let y = (pos[1] + f64::from(eye_height)).floor() as i32;
     let z = pos[2].floor() as i32;
     let Some(column) = chunks.column(ChunkPos::new(x >> 4, z >> 4)) else {
         return [0, 15];

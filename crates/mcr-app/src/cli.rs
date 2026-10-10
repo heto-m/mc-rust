@@ -33,7 +33,7 @@ impl Default for Options {
             world: None,
             synthetic: false,
             radius: 24,
-            render_distance: 16,
+            render_distance: 32,
             vsync: true,
             jar: PathBuf::from(DEFAULT_JAR),
             screenshot: None,

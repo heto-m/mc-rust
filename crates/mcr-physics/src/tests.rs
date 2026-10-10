@@ -412,3 +412,49 @@ fn sprint_command_follows_state() {
     assert_eq!(p.tick(&run, &w).sprint_command, None);
     assert_eq!(p.tick(&idle(), &w).sprint_command, Some(false));
 }
+
+#[test]
+fn idle_on_leaves_never_moves_or_resends_early() {
+    let mut w = TestWorld::flat("minecraft:stone", 50);
+    w.fill(
+        [-2, 50, -2],
+        [2, 50, 2],
+        default_state("minecraft:oak_leaves"),
+    );
+    let mut p = PlayerPhysics::new([0.5, 51.0, 0.5]);
+    let mut sent = 0;
+    for _ in 0..600 {
+        if matches!(p.tick(&idle(), &w).kind, MoveKind::Pos | MoveKind::PosRot) {
+            sent += 1;
+        }
+    }
+    assert_eq!(p.pos, [0.5, 51.0, 0.5]);
+    assert!(p.on_ground);
+    assert_eq!((p.vel[0], p.vel[2]), (0.0, 0.0));
+    assert_eq!(sent, 30);
+}
+
+#[test]
+fn idle_on_leaf_edge_has_no_horizontal_drift() {
+    let mut w = TestWorld::flat("minecraft:air", 0);
+    w.set(0, 50, 0, default_state("minecraft:oak_leaves"));
+    let mut p = PlayerPhysics::new([0.95, 51.0, 0.5]);
+    for _ in 0..600 {
+        p.tick(&idle(), &w);
+    }
+    assert_eq!(p.pos, [0.95, 51.0, 0.5]);
+}
+
+#[test]
+fn idle_in_still_water_only_moves_vertically() {
+    let mut w = TestWorld::flat("minecraft:stone", 40);
+    w.fill([-6, 40, -6], [6, 63, 6], default_state("minecraft:water"));
+    let mut p = PlayerPhysics::new([0.5, 62.0, 0.5]);
+    for _ in 0..600 {
+        p.tick(&idle(), &w);
+    }
+    assert_eq!(p.pos[0], 0.5);
+    assert_eq!(p.pos[2], 0.5);
+    assert_eq!(p.vel[0], 0.0);
+    assert_eq!(p.vel[2], 0.0);
+}

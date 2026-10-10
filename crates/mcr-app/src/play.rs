@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use mcr_buf::BlockPos;
-use mcr_client::{ChatKind, Client, ClientError, ClientEvent, PlayerInput, sanitize_for_log};
+use mcr_client::{
+    ChatKind, Client, ClientError, ClientEvent, PlayerInput, UseTarget, sanitize_for_log,
+};
 use mcr_particles::ParticleEngine;
 use mcr_physics::Pose;
 use mcr_protocol::play::serverbound::Facing;
@@ -34,7 +36,7 @@ use crate::overlays::Overlays;
 use crate::preview::Preview;
 use crate::render_system::{PipelineStats, RenderSystem};
 use crate::settings::{OptionsScreen, SharedSettings};
-use crate::target::{BlockHit, Target, pick, raycast_block, reach};
+use crate::target::{BlockHit, EntityPicker, Target, pick, raycast_block, reach};
 use crate::view::{StateView, SuggestEngine};
 
 pub const TICK_SECONDS: f32 = 0.05;
@@ -824,10 +826,17 @@ impl Play {
     fn do_attack(&mut self) {
         let click = std::mem::take(&mut self.attack_click);
         let active = self.held.is_active(self.keys.attack);
-        if !active {
+        if !active && !click {
             self.abort_dig();
             return;
         }
+        self.attack_target(click);
+        if !active {
+            self.abort_dig();
+        }
+    }
+
+    fn attack_target(&mut self, click: bool) {
         match self.target {
             Some(Target::Entity { id, .. }) => {
                 self.abort_dig();
@@ -858,7 +867,6 @@ impl Play {
             if click || self.attack_delay == 0 {
                 self.net(|c| c.break_instantly(hit.pos, hit.face));
                 self.swing();
-                self.play_block(hit.state, BlockSound::Break, center(hit.pos));
                 self.attack_delay = CLICK_DELAY;
             }
             return;
@@ -871,7 +879,6 @@ impl Play {
             }
             if dig.progress >= dig.total {
                 self.net(Client::finish_digging);
-                self.play_block(hit.state, BlockSound::Break, center(hit.pos));
                 self.dig = None;
                 self.attack_delay = CLICK_DELAY;
             } else {
@@ -898,15 +905,15 @@ impl Play {
     fn do_use(&mut self) {
         let click = std::mem::take(&mut self.use_click);
         let active = self.held.is_active(self.keys.use_item);
-        if !active {
-            if std::mem::take(&mut self.using_item) {
-                self.net(Client::release_use_item);
-            }
-            return;
+        if click || (active && self.use_delay == 0) {
+            self.use_target(click);
         }
-        if !click && self.use_delay > 0 {
-            return;
+        if !active && std::mem::take(&mut self.using_item) {
+            self.net(Client::release_use_item);
         }
+    }
+
+    fn use_target(&mut self, click: bool) {
         match self.target {
             Some(Target::Entity { id, .. }) => {
                 if click {
@@ -916,7 +923,14 @@ impl Play {
             }
             Some(Target::Block(hit)) => {
                 let predicted = self.predict_place(hit);
-                self.net(|c| c.use_item_on(Hand::Main, hit.pos, hit.face, hit.cursor, hit.inside));
+                self.net(|c| {
+                    c.start_use(UseTarget::Block {
+                        pos: hit.pos,
+                        face: hit.face,
+                        cursor: hit.cursor,
+                        inside: hit.inside,
+                    })
+                });
                 self.swing();
                 if let Some(state) = predicted {
                     let at = neighbour(hit.pos, hit.face);
@@ -992,10 +1006,16 @@ impl Play {
     fn pick_from(&self, eye: [f64; 3]) -> Option<Target> {
         let state = &self.world.client.state;
         let dir = view_direction(self.yaw, self.pitch);
+        let picker = EntityPicker {
+            entities: &state.entities,
+            players: &state.players,
+            data: self.data,
+            own_id: state.player.entity_id,
+            own_vehicle: state.player.vehicle,
+        };
         pick(
             &state.chunks,
-            &state.entities,
-            self.data,
+            &picker,
             eye,
             dir,
             reach(state.player.instabuild),
@@ -1614,11 +1634,7 @@ impl Play {
                 pitch: self.pitch,
                 yaw: self.yaw,
                 sky_brightness: sky,
-                light: crate::entities::light_at(
-                    &state.chunks,
-                    [eye[0], eye[1] - 0.9, eye[2]],
-                    1.8,
-                ),
+                light: crate::entities::light_at(&state.chunks, eye, 0.0),
                 invisible: false,
             };
             let visible = self.perspective == Perspective::First
