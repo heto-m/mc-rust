@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 mcr-anvil = { path = "../mcr-anvil" }
+mcr-block-entity = { path = "../mcr-block-entity" }
+mcr-nbt = { path = "../mcr-nbt" }
 mcr-assets = { path = "../mcr-assets" }
 mcr-data = { path = "../mcr-data" }
 mcr-entity-model = { path = "../mcr-entity-model" }

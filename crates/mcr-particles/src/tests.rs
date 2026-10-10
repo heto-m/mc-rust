@@ -195,3 +195,17 @@ fn far_particles_are_skipped_unless_forced() {
     e.emit_inner(&simple("flame"), far, [0.0; 3], [0.0; 3], 0, true);
     assert_eq!(e.count(), 1);
 }
+
+#[test]
+fn explosion_emitter_works_without_sprites_like_the_real_jar() {
+    let images = vec![img(), img(), img()];
+    let emitter = sim::type_id("explosion_emitter") as usize;
+    let sets = (0..PARTICLE_NAMES.len())
+        .map(|i| if i == emitter { vec![] } else { vec![0, 1, 2] })
+        .collect();
+    let mut e = ParticleEngine::new(ParticleAtlas::pack(images, sets), Box::new(Tex));
+    e.emit(&simple("explosion_emitter"), [0.0; 3], [0.0; 3], 0.0, 0);
+    assert_eq!(e.count(), 1);
+    e.tick(&OpenWorld);
+    assert!(e.count() > 6);
+}

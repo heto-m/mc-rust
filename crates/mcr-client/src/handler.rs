@@ -249,6 +249,7 @@ impl ClientState {
                 out.event(ClientEvent::Explosion {
                     center: v3(&p.center),
                     radius: p.radius,
+                    particle: p.particle.clone(),
                 });
             }
             P::SetTime(p) => {
@@ -552,6 +553,8 @@ impl ClientState {
                 if self.player.health <= 0.0 && !self.player.dead {
                     self.player.dead = true;
                     out.event(ClientEvent::Died { message: None });
+                } else if self.player.health > 0.0 {
+                    self.player.dead = false;
                 }
             }
             P::SetExperience(p) => {

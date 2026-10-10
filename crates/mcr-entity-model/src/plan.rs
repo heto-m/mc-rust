@@ -230,6 +230,11 @@ pub enum FreeGeo {
         id: String,
         local: Mat4,
     },
+    /// A filled map (image and markers registered through `EntityScene::set_map`).
+    Map {
+        id: i32,
+        local: Mat4,
+    },
     Quad {
         texture: String,
         size: [f32; 2],

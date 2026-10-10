@@ -22,12 +22,13 @@ use rustc_hash::FxHashMap;
 
 use crate::assets::Assets;
 
+const MAX_TRACKERS: usize = 64;
+const TRACKER_TICKS: u8 = 30;
 const BIOME_REGISTRY: &str = "minecraft:worldgen/biome";
 const SNOW_TEMPERATURE: f32 = 0.15;
 const MAX_DECALS: usize = 128;
 const LIGHTNING_FLASH_TICKS: u32 = 2;
 const TREE_LINE: f32 = 80.0;
-const MAX_SEEDS: usize = 64;
 
 pub fn effect_assets(assets: &Assets) -> EffectAssets {
     EffectAssets::load(&|path| assets.read(path))
@@ -213,7 +214,7 @@ pub struct WorldEffects {
     lightning_type: i32,
     status: ParticleStatus,
     counter: u32,
-    seeds: Vec<([f64; 3], u8)>,
+    trackers: Vec<(i32, u8)>,
 }
 
 impl std::fmt::Debug for WorldEffects {
@@ -239,14 +240,13 @@ impl WorldEffects {
                 .map_or(-1, |id| id as i32),
             status: ParticleStatus::All,
             counter: 0,
-            seeds: Vec::new(),
+            trackers: Vec::new(),
         }
     }
 
     pub fn clear(&mut self) {
         self.particles.clear();
         self.breaking.clear();
-        self.seeds.clear();
         self.flash_ticks = 0;
     }
 
@@ -392,45 +392,77 @@ impl WorldEffects {
     }
 
     /// The vanilla seed emitter has no sprites, so its 8 ticks of `explosion` bursts are driven here.
-    pub fn explosion(&mut self, center: [f64; 3]) {
-        if self.seeds.len() < MAX_SEEDS && center.iter().all(|c| c.is_finite()) {
-            self.seeds.push((center, 0));
+    /// Emits the packet's own particle (an emitter for big blasts) the way vanilla's `addParticle` does.
+    pub fn totem(&mut self, entity_id: i32) {
+        if self.trackers.len() < MAX_TRACKERS {
+            self.trackers.push((entity_id, 0));
         }
     }
 
-    fn tick_seeds(&mut self) {
-        let mut seeds = std::mem::take(&mut self.seeds);
-        for (center, life) in &mut seeds {
-            for _ in 0..6 {
-                let mut spread = || (self.noise() - self.noise()) * 4.0;
-                let offset = DVec3::new(spread(), spread(), spread());
-                self.particles.add_simple(
-                    "explosion",
-                    DVec3::from_array(*center) + offset,
-                    DVec3::new(f64::from(*life) / 8.0, 0.0, 0.0),
+    fn tick_trackers(&mut self, state: &ClientState) {
+        let Some(id) = mcr_data::v26_3()
+            .registry("minecraft:particle_type")
+            .and_then(|r| r.id_of("minecraft:totem_of_undying"))
+        else {
+            self.trackers.clear();
+            return;
+        };
+        let particle = Particle::Simple(id as i32);
+        let mut trackers = std::mem::take(&mut self.trackers);
+        for (entity, age) in &mut trackers {
+            let (pos, height) = if *entity == state.player.entity_id {
+                (state.player.pos(), 1.8)
+            } else if let Some(e) = state.entities.get(*entity) {
+                (e.pos, 1.0)
+            } else {
+                *age = TRACKER_TICKS;
+                continue;
+            };
+            for _ in 0..16 {
+                let mut r = || {
+                    self.counter = self
+                        .counter
+                        .wrapping_mul(1_664_525)
+                        .wrapping_add(1_013_904_223);
+                    f64::from(self.counter >> 8) / f64::from(1u32 << 24) * 2.0 - 1.0
+                };
+                let (x, y, z) = (r(), r(), r());
+                if x * x + y * y + z * z > 1.0 {
+                    continue;
+                }
+                let at = [
+                    pos[0] + x / 4.0,
+                    pos[1] + height * (0.5 + y / 4.0),
+                    pos[2] + z / 4.0,
+                ];
+                self.emit(
+                    &particle,
+                    at,
+                    [x as f32, y as f32 + 0.2, z as f32],
+                    [1.0; 3],
+                    0,
+                    true,
                 );
             }
-            *life += 1;
+            *age += 1;
         }
-        seeds.retain(|(_, life)| *life < 8);
-        self.seeds = seeds;
+        trackers.retain(|(_, age)| *age < TRACKER_TICKS);
+        self.trackers = trackers;
     }
 
-    fn noise(&mut self) -> f64 {
-        self.counter = self
-            .counter
-            .wrapping_mul(1_664_525)
-            .wrapping_add(1_013_904_223);
-        f64::from(self.counter >> 8) / f64::from(1u32 << 24)
+    pub fn explosion(&mut self, center: [f64; 3], particle: &Particle) {
+        if center.iter().all(|c| c.is_finite()) {
+            self.emit(particle, center, [1.0, 0.0, 0.0], [1.0; 3], 0, true);
+        }
     }
 
     /// One 20 Hz step: simulation, rain splashes and the lightning flash timer.
     pub fn tick(&mut self, state: &ClientState, camera: DVec3, options: &Options) {
         self.flash_ticks = self.flash_ticks.saturating_sub(1);
         self.particles.set_camera(camera);
-        self.tick_seeds();
         let world = ClientParticleWorld(state);
         self.particles.tick(&world);
+        self.tick_trackers(state);
         let rain = state.world.rain_level;
         if rain > 0.0 && self.status != ParticleStatus::Minimal {
             self.refresh_biomes(state);
@@ -456,7 +488,44 @@ pub fn cloud_settings(options: &Options) -> CloudSettings {
     }
 }
 
-pub fn environment(state: &ClientState, render_distance: i32, flash: bool) -> Environment {
+/// Whether `eye` is below the surface of a water block.
+pub fn eye_in_water(chunks: &mcr_world::ChunkStore, eye: [f64; 3]) -> bool {
+    let (x, y, z) = (
+        eye[0].floor() as i32,
+        eye[1].floor() as i32,
+        eye[2].floor() as i32,
+    );
+    let data = mcr_data::v26_3();
+    let Some(info) = chunks
+        .block(x, y, z)
+        .and_then(|s| data.block_state(u32::from(s.0)))
+    else {
+        return false;
+    };
+    let Some(fluid) = info.fluid else {
+        return false;
+    };
+    let height = f64::from(fluid.amount.min(8)) / 9.0;
+    data.fluid_name(fluid.fluid)
+        .is_some_and(|n| n.contains("water"))
+        && eye[1] - f64::from(y) < height.max(if fluid.falling { 1.0 } else { 0.0 })
+}
+
+/// Vanilla's underwater fog: dark blue, starting behind the camera, opening up over 30 seconds.
+pub fn apply_underwater(env: &mut Environment, ticks_under: u32, sky_light: f32) {
+    let vision = (ticks_under.min(600) as f32 / 600.0).max(0.25);
+    let light = 0.1 + 0.9 * (sky_light / 15.0).clamp(0.0, 1.0) * env.sky_factor;
+    env.fog_color = [0.02 * light, 0.02 * light, 0.2 * light];
+    env.fog_start = -8.0;
+    env.fog_end = 96.0 * vision;
+}
+
+pub fn environment(
+    state: &ClientState,
+    render_distance: i32,
+    flash: bool,
+    brightness: f32,
+) -> Environment {
     let mut env = match state.dimension.name.as_str() {
         "minecraft:the_nether" => Environment::nether(),
         "minecraft:the_end" => Environment::end(),
@@ -472,29 +541,17 @@ pub fn environment(state: &ClientState, render_distance: i32, flash: bool) -> En
     };
     env = env.with_lightning_flash(flash);
     env.set_render_distance_chunks(render_distance.max(2) as u32);
+    env.brightness = if brightness.is_finite() {
+        brightness.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
     env
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn explosion_seed_spawns_particles_with_real_atlas() {
-        let jar = std::path::Path::new("../../.cache/versions/26.3/client.jar");
-        if !jar.exists() {
-            return;
-        }
-        let assets = Arc::new(Assets::load(jar).unwrap());
-        let mut fx = WorldEffects::new(assets);
-        fx.explosion([0.0; 3]);
-        fx.tick_seeds();
-        assert!(fx.particles.count() >= 6);
-        for _ in 0..10 {
-            fx.tick_seeds();
-        }
-        assert!(fx.seeds.is_empty());
-    }
 
     #[test]
     fn block_particles_spawn_with_real_assets() {
@@ -526,5 +583,20 @@ mod tests {
         assert_eq!(cloud_settings(&o).mode, CloudMode::Flat);
         o.cloud_range = 9999;
         assert_eq!(cloud_settings(&o).range_chunks, 128);
+    }
+}
+
+#[cfg(test)]
+mod underwater_tests {
+    use super::*;
+
+    #[test]
+    fn underwater_fog_opens_over_thirty_seconds() {
+        let mut env = Environment::overworld(6000, 0.0, 0.0);
+        apply_underwater(&mut env, 0, 15.0);
+        assert!((env.fog_end - 24.0).abs() < 1e-3 && env.fog_start < 0.0);
+        apply_underwater(&mut env, u32::MAX, 15.0);
+        assert!((env.fog_end - 96.0).abs() < 1e-3);
+        assert!(env.fog_color[2] > env.fog_color[0]);
     }
 }

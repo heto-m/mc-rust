@@ -18,6 +18,7 @@ use mcr_ui::{
 
 use crate::assets::Assets;
 use crate::audio::{Audio, BlockSound, wire_category};
+use crate::block_entities::BlockEntities;
 use crate::debug::{self, DebugInput};
 use crate::effects::{self, WorldEffects};
 use crate::entities::{Cull, EntityLayer, FrameCtx, LocalSample};
@@ -29,6 +30,7 @@ use crate::mesh_world::MeshWorld;
 use crate::nametags::{self, TagParams};
 use crate::net_world::NetworkWorld;
 use crate::outline::{OutlineRenderer, WorldBox};
+use crate::overlays::Overlays;
 use crate::preview::Preview;
 use crate::render_system::{PipelineStats, RenderSystem};
 use crate::settings::{OptionsScreen, SharedSettings};
@@ -126,6 +128,7 @@ struct FrameOverlay<'a> {
     ui_renderer: &'a mut UiRenderer,
     ui: &'a mut Ui,
     entities: Option<&'a EntityLayer>,
+    block_entities: Option<&'a BlockEntities>,
     hand: Option<&'a HeldHand>,
     preview: Option<&'a Preview>,
     particles: &'a mut ParticleEngine,
@@ -134,9 +137,18 @@ struct FrameOverlay<'a> {
 }
 
 impl Overlay for FrameOverlay<'_> {
+    fn opaque(&mut self, pass: &mut wgpu::RenderPass<'_>) {
+        if let Some(entities) = self.entities {
+            entities.draw_opaque(pass);
+        }
+        if let Some(block_entities) = self.block_entities {
+            block_entities.draw_opaque(pass);
+        }
+    }
+
     fn record(&mut self, ctx: &mut OverlayCtx<'_>) {
         self.outline.record(ctx);
-        if let Some(entities) = self.entities {
+        if self.entities.is_some() || self.block_entities.is_some() {
             let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("entities"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -160,7 +172,12 @@ impl Overlay for FrameOverlay<'_> {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            entities.draw(&mut pass);
+            if let Some(entities) = self.entities {
+                entities.draw_blended(&mut pass);
+            }
+            if let Some(block_entities) = self.block_entities {
+                block_entities.draw_blended(&mut pass);
+            }
         }
         self.particles.record(ctx, self.partial, self.env);
         if let Some(hand) = self.hand {
@@ -218,6 +235,10 @@ pub struct Play {
     hud: Hud,
     outline: OutlineRenderer,
     entities: Option<EntityLayer>,
+    block_entities: Option<BlockEntities>,
+    overlays: Overlays,
+    water_ticks: u32,
+    assets: Arc<Assets>,
     hand: Option<HeldHand>,
     preview: Option<Preview>,
     effects: WorldEffects,
@@ -312,14 +333,16 @@ impl Play {
         effects.set_options(&options);
         let mut renderer = renderer;
         renderer.set_effect_assets(&effects::effect_assets(&assets));
-        let (entities, hand, preview) = match scene_assets {
+        let (entities, block_entities, hand, preview) = match scene_assets {
             Some(sa) => (
                 EntityLayer::new(renderer.device(), renderer.queue(), format, sa.clone()),
+                BlockEntities::new(renderer.device(), renderer.queue(), format, sa.clone()),
                 HeldHand::new(renderer.device(), renderer.queue(), format, sa.clone()),
                 Preview::new(renderer.device(), renderer.queue(), format, sa),
             ),
-            None => (None, None, None),
+            None => (None, None, None, None),
         };
+        let overlay_assets = assets.clone();
         let render = RenderSystem::new(renderer, assets, &world);
         let now = Instant::now();
         Self {
@@ -329,6 +352,10 @@ impl Play {
             hud,
             outline,
             entities,
+            block_entities,
+            overlays: Overlays::new(),
+            water_ticks: 0,
+            assets: overlay_assets,
             hand,
             preview,
             effects,
@@ -518,6 +545,16 @@ impl Play {
         if let Some(entities) = &mut self.entities {
             entities.tick(state, sample);
         }
+        if let Some(block_entities) = &mut self.block_entities {
+            block_entities.tick(state, self.ticks);
+        }
+        let scoping = self.scoping();
+        self.overlays.tick(scoping);
+        self.water_ticks = if self.eye_in_water(self.cur_eye) {
+            (self.water_ticks + 1).min(600)
+        } else {
+            0
+        };
         if let Some(hand) = &mut self.hand {
             let server_using = matches!(
                 state.player.data.get(&8),
@@ -564,6 +601,14 @@ impl Play {
         }
     }
 
+    fn eye_in_water(&self, eye: [f64; 3]) -> bool {
+        effects::eye_in_water(&self.world.client.state.chunks, eye)
+    }
+
+    fn scoping(&self) -> bool {
+        self.perspective == Perspective::First && self.hand.as_ref().is_some_and(HeldHand::scoping)
+    }
+
     fn update_fov(&mut self) {
         let player = &self.world.client.state.player;
         let p = &player.physics;
@@ -574,7 +619,9 @@ impl Play {
         let speed = p.attributes.movement_speed as f32 * if p.sprinting { 1.3 } else { 1.0 };
         f *= (speed / player.walking_speed.max(1.0e-4) + 1.0) / 2.0;
         let scale = self.options.fov_effect_scale as f32;
-        let target = if f.is_finite() {
+        let target = if self.scoping() {
+            0.1
+        } else if f.is_finite() {
             1.0 + (f - 1.0) * scale
         } else {
             1.0
@@ -582,12 +629,37 @@ impl Play {
         self.fov_mod += (target - self.fov_mod) * 0.5;
     }
 
+    fn sync_map(&mut self, id: i32) {
+        let Some(map) = self.world.client.state.gameplay.maps.get(&id) else {
+            return;
+        };
+        let (image, deco) = (crate::map::image(&map.colors), crate::map::decorations(map));
+        if let Some(entities) = &mut self.entities {
+            entities.scene.set_map(id, image.clone(), deco.clone());
+        }
+        if let Some(hand) = &mut self.hand {
+            hand.set_map(id, image, deco);
+        }
+    }
+
     fn on_event(&mut self, event: ClientEvent) {
         let local_id = self.world.client.state.player.entity_id;
         if let Some(entities) = &mut self.entities {
             entities.on_event(&event, local_id);
         }
+        if let Some(block_entities) = &mut self.block_entities {
+            block_entities.on_event(&event, &self.world.client.state);
+        }
         match event {
+            ClientEvent::EntityEvent {
+                entity_id,
+                event: 35,
+            } => {
+                if entity_id == local_id {
+                    self.overlays.start_totem();
+                }
+                self.effects.totem(entity_id);
+            }
             ClientEvent::EntityAdded(id) => {
                 self.effects.on_entity_added(&self.world.client.state, id);
             }
@@ -606,7 +678,10 @@ impl Play {
                 pos,
                 progress,
             } => self.effects.destruction(entity_id, pos, progress),
-            ClientEvent::Explosion { center, .. } => self.effects.explosion(center),
+            ClientEvent::Explosion {
+                center, particle, ..
+            } => self.effects.explosion(center, &particle),
+            ClientEvent::MapUpdated(id) => self.sync_map(id),
             ClientEvent::Respawned => {
                 self.effects.clear();
                 if let Some(entities) = &mut self.entities {
@@ -1380,11 +1455,20 @@ impl Play {
 
         let partial = self.partial();
         let aspect = size.0 as f32 / size.1.max(1) as f32;
-        let env = effects::environment(
+        let mut env = effects::environment(
             &self.world.client.state,
             self.world.render_distance(),
             self.effects.flash(),
+            self.options.gamma as f32,
         );
+        if self.water_ticks > 0 || self.eye_in_water(camera.position.to_array()) {
+            let sky = crate::entities::light_at(
+                &self.world.client.state.chunks,
+                camera.position.to_array(),
+                0.0,
+            )[1];
+            effects::apply_underwater(&mut env, self.water_ticks, f32::from(sky));
+        }
         self.prepare_visuals(&camera, partial, aspect, &env);
 
         self.update_gui_size();
@@ -1448,6 +1532,17 @@ impl Play {
                 );
             }
             self.hud.draw(&mut frame, &mut self.gui.icons, &input);
+            if !self.hud_hidden {
+                let scoping = self.perspective == Perspective::First
+                    && self.hand.as_ref().is_some_and(HeldHand::scoping);
+                self.overlays.draw(
+                    &mut frame,
+                    &mut self.gui.icons,
+                    &self.assets,
+                    scoping,
+                    partial,
+                );
+            }
             if !self.stack.is_empty() {
                 let mut cx =
                     RenderCx::new(&mut frame, &mut self.gui.icons, &self.gui.assets, &view);
@@ -1464,6 +1559,7 @@ impl Play {
             ui_renderer: &mut self.gui.ui_renderer,
             ui: &mut self.gui.ui,
             entities: self.entities.as_ref(),
+            block_entities: self.block_entities.as_ref(),
             hand: self.hand.as_ref(),
             preview: self.preview.as_ref(),
             particles: &mut self.effects.particles,
@@ -1495,8 +1591,18 @@ impl Play {
                 local_swing: swing,
                 local_using: self.using_item,
             });
-            let params = layer.frame_params(camera, aspect, sky);
+            let params = layer.frame_params(camera, aspect, env);
             layer.scene.prepare(&params);
+            if let Some(block_entities) = &mut self.block_entities {
+                block_entities.update(
+                    state,
+                    params,
+                    camera,
+                    partial,
+                    f64::from(self.world.render_distance()) * 16.0,
+                    &mut self.gui.ui,
+                );
+            }
         }
         if let Some(hand) = &mut self.hand {
             let eye = self.cur_eye;

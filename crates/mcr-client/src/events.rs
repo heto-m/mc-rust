@@ -125,6 +125,7 @@ pub enum ClientEvent {
     Explosion {
         center: [f64; 3],
         radius: f32,
+        particle: Particle,
     },
     Title {
         title: Option<Component>,

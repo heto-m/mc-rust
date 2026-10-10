@@ -33,6 +33,8 @@ pub enum FlatBind {
 struct Globals {
     view_proj: [f32; 16],
     params: [f32; 4],
+    fog: [f32; 4],
+    fog_color: [f32; 4],
 }
 
 #[derive(Debug)]
@@ -84,6 +86,8 @@ pub struct FlatRenderer {
     indices: wgpu::Buffer,
     index_quads: usize,
     portal_layers: f32,
+    fog: [f32; 4],
+    fog_color: [f32; 4],
 }
 
 fn index_data(quads: usize) -> Vec<u32> {
@@ -348,6 +352,8 @@ impl FlatRenderer {
             indices,
             index_quads,
             portal_layers: 15.0,
+            fog: [1.0e9; 4],
+            fog_color: [0.0; 4],
         }
     }
 
@@ -466,6 +472,11 @@ impl FlatRenderer {
         self.groups[group].vertices.extend_from_slice(&quad);
     }
 
+    pub fn set_fog(&mut self, fog: [f32; 4], color: [f32; 3]) {
+        self.fog = fog;
+        self.fog_color = [color[0], color[1], color[2], 1.0];
+    }
+
     pub fn prepare(&mut self, view_proj: Mat4, time: f32, portal_gateway: bool) {
         self.portal_layers = if portal_gateway { 16.0 } else { 15.0 };
         let mut order: Vec<usize> = (0..self.groups.len())
@@ -517,6 +528,8 @@ impl FlatRenderer {
                     self.portal_layers,
                     0.0,
                 ],
+                fog: self.fog,
+                fog_color: self.fog_color,
             }),
         );
     }
@@ -532,6 +545,20 @@ impl FlatRenderer {
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_filtered(pass, |_| true);
+    }
+
+    pub fn draw_opaque(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_filtered(pass, |k| {
+            matches!(k, FlatKind::Portal | FlatKind::BeamSolid)
+        });
+    }
+
+    pub fn draw_blended(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_filtered(pass, |k| matches!(k, FlatKind::BeamGlow | FlatKind::Text));
+    }
+
+    fn draw_filtered(&self, pass: &mut wgpu::RenderPass<'_>, keep: impl Fn(FlatKind) -> bool) {
         if self.draws.is_empty() {
             return;
         }
@@ -539,7 +566,7 @@ impl FlatRenderer {
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
         let mut current = None;
-        for d in &self.draws {
+        for d in self.draws.iter().filter(|d| keep(d.kind)) {
             let Some(group) = self.group_for(d.bind) else {
                 continue;
             };

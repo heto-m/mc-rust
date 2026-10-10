@@ -438,16 +438,18 @@ impl Hud {
             let alpha = (alpha.clamp(0.0, 1.0) * 255.0) as u32;
             if alpha > 8 {
                 let argb = alpha << 24 | 0xFF_FFFF;
-                for (component, dy) in [(&t.title, -14.0), (&t.subtitle, 0.0)] {
+                let (cx, cy) = (gui_w as f32 / 2.0, gui_h as f32 / 2.0);
+                for (component, scale, dy) in [(&t.title, 4.0, -10.0), (&t.subtitle, 2.0, 5.0)] {
                     if let Some(c) = component {
                         let cells = frame.ui().flatten(c);
                         let w = frame.ui().width(&cells);
-                        frame.cells(
+                        frame.cells_scaled(
                             &cells,
-                            (gui_w as f32 - w) / 2.0,
-                            gui_h as f32 / 2.0 - 20.0 + dy + 14.0,
+                            cx - w * scale / 2.0,
+                            cy + dy * scale,
                             argb,
                             true,
+                            scale,
                         );
                     }
                 }

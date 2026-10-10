@@ -256,7 +256,7 @@ fn set_from_age(p: &mut P, atlas: &ParticleAtlas) {
 pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut Rng) -> Option<P> {
     let (pos, aux) = (s.pos, s.aux);
     let set = atlas.set(usize::from(s.type_id));
-    if set.is_empty() && kind != Kind::Terrain {
+    if set.is_empty() && !matches!(kind, Kind::Terrain | Kind::Seed) {
         return None;
     }
     let mut p = match kind {
@@ -636,7 +636,7 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
     p.kind = kind;
     p.type_id = s.type_id;
     p.life = p.life.max(1);
-    if kind != Kind::Terrain {
+    if !matches!(kind, Kind::Terrain | Kind::Seed) {
         p.sprite = set[0];
         set_from_age(&mut p, atlas);
     }

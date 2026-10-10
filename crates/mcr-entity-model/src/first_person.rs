@@ -123,6 +123,17 @@ impl EntityScene {
     /// Draws a textured quad of `size` blocks facing -Z at `matrix`; `texture` is a path under
     /// `textures/` or a registered dynamic key.
     pub fn emit_quad(&mut self, texture: &str, size: [f32; 2], matrix: Mat4, light: [u8; 2]) {
+        self.emit_quad_at(texture, size, matrix, light, [0.0; 3]);
+    }
+
+    pub fn emit_quad_at(
+        &mut self,
+        texture: &str,
+        size: [f32; 2],
+        matrix: Mat4,
+        light: [u8; 2],
+        origin: [f64; 3],
+    ) {
         let tex = self.textures.resolve(texture, &mut self.gpu, &self.assets);
         let model_id = self.quad_model();
         let Some((base, out)) = self.gpu.alloc_bones(1) else {
@@ -140,7 +151,7 @@ impl EntityScene {
             block_light: light[0],
             sky_light: light[1],
             uv_offset: [0.0; 2],
-            origin: [0.0; 3],
+            origin,
         });
         self.stats.parts += 1;
     }

@@ -95,10 +95,10 @@ impl Preview {
     ) {
         let (matrix, ax, ay) = preview_matrix(rect, gui_scale, mouse, fb);
         view.pos = [0.0; 3];
-        view.body_yaw = 180.0 + ax.to_degrees() * 20.0 / 57.295_78 * 57.295_78;
-        view.yaw = 180.0 + ax.to_degrees() * 40.0 / 57.295_78 * 57.295_78 / 1.0;
+        view.body_yaw = 180.0 + ax * 20.0;
+        view.yaw = 180.0 + ax * 40.0;
         view.head_yaw = view.yaw;
-        view.pitch = -ay.to_degrees() * 20.0 / 57.295_78 * 57.295_78 / 1.0;
+        view.pitch = -ay * 20.0;
         view.light = [15, 15];
         view.limb_swing = 0.0;
         view.limb_amount = 0.0;
@@ -107,9 +107,7 @@ impl Preview {
         self.scene.prepare(&FrameParams {
             view_proj: matrix,
             camera: [0.0; 3],
-            light: LightInfo {
-                sky_brightness: 1.0,
-            },
+            light: LightInfo::with_brightness(1.0),
         });
         let gs = gui_scale as i32;
         let clamp = |v: i32, max: u32| v.clamp(0, max as i32) as u32;
@@ -154,7 +152,7 @@ impl Preview {
 }
 
 #[cfg(test)]
-mod tests {
+mod follow_tests {
     use super::*;
 
     #[test]
@@ -174,5 +172,19 @@ mod tests {
         let feet = m * Vec4::new(0.0, 0.0, 0.0, 1.0);
         let head = m * Vec4::new(0.0, 1.8, 0.0, 1.0);
         assert!(head.y > feet.y);
+    }
+}
+
+#[cfg(test)]
+mod follow_bounds {
+    use super::*;
+
+    #[test]
+    fn follow_angles_are_bounded_like_vanilla() {
+        for mouse in [(0.0, 0.0), (1.0e9, -1.0e9), (f32::MAX, f32::MIN)] {
+            let (_, ax, ay) = preview_matrix([0, 0, 50, 70], 2, mouse, (1280, 720));
+            assert!((180.0 + ax * 40.0 - 180.0).abs() <= 63.0);
+            assert!((ay * 20.0).abs() <= 32.0);
+        }
     }
 }

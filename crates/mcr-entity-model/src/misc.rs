@@ -268,20 +268,31 @@ fn item_frame(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         5 => -90.0,
         _ => yrot,
     };
-    let base = Mat4::from_translation(step(dir) * 0.46875)
+    let base = Mat4::from_translation(Vec3::splat(0.5))
         * Mat4::from_rotation_x(xrot.to_radians())
         * Mat4::from_rotation_y(yrot.to_radians());
-    let model = if glow {
-        "minecraft:block/glow_item_frame"
-    } else {
-        "minecraft:block/item_frame"
+    let map = v.stack(idx::FRAME_ITEM).and_then(crate::maps::stack_map_id);
+    let model = match (glow, map.is_some()) {
+        (true, true) => "minecraft:block/glow_item_frame_map",
+        (true, false) => "minecraft:block/glow_item_frame",
+        (false, true) => "minecraft:block/item_frame_map",
+        (false, false) => "minecraft:block/item_frame",
     };
     let _ = has_item;
     plan.free_geo.push(FreeGeo::Model {
         id: model.to_owned(),
         local: base,
     });
-    if v.stack(idx::FRAME_ITEM).is_some() {
+    if let Some(id) = map {
+        let rotation = (v.int(idx::FRAME_ROTATION).unwrap_or(0) % 4) as f32;
+        plan.free_geo.push(FreeGeo::Map {
+            id,
+            local: base
+                * Mat4::from_translation(Vec3::new(0.0, 0.0, 0.4375 - 1.0 / 128.0))
+                * Mat4::from_rotation_z((rotation * 90.0).to_radians())
+                * Mat4::from_rotation_z(180f32.to_radians()),
+        });
+    } else if v.stack(idx::FRAME_ITEM).is_some() {
         let rotation = v.int(idx::FRAME_ROTATION).unwrap_or(0) as f32;
         plan.free_items.push(FreeItem {
             source: ItemSource::Data(idx::FRAME_ITEM),
@@ -326,7 +337,13 @@ fn painting(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         2 => 2,
         _ => 3,
     };
-    let rot = Mat4::from_rotation_y((180.0 - data2d as f32 * 90.0).to_radians());
+    let toward = step(dir);
+    let left = Vec3::new(toward.z, 0.0, -toward.x);
+    let shift = |n: u8| if n.is_multiple_of(2) { 0.5 } else { 0.0 };
+    let centre =
+        Vec3::splat(0.5) - toward * 0.46875 + left * shift(w) + Vec3::new(0.0, shift(h), 0.0);
+    let rot = Mat4::from_translation(centre)
+        * Mat4::from_rotation_y((180.0 - data2d as f32 * 90.0).to_radians());
     let size = [f32::from(w), f32::from(h)];
     plan.free_geo.push(FreeGeo::Quad {
         texture: format!("painting/{name}"),

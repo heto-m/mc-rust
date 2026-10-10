@@ -3,6 +3,8 @@ struct Globals {
     light0: vec4<f32>,
     light1: vec4<f32>,
     params: vec4<f32>,
+    fog: vec4<f32>,
+    fog_color: vec4<f32>,
 }
 
 struct Instance {
@@ -36,6 +38,7 @@ struct VertexOut {
     @location(2) @interpolate(flat) layer: u32,
     @location(3) @interpolate(flat) tint: vec4<f32>,
     @location(4) @interpolate(flat) hurt: f32,
+    @location(5) fog_dist: vec2<f32>,
 }
 
 fn unpack_rgba(c: u32) -> vec4<f32> {
@@ -81,7 +84,17 @@ fn vs_main(v: VertexIn) -> VertexOut {
     out.layer = inst.layer;
     out.tint = unpack_rgba(inst.tint);
     out.hurt = f32((inst.flags >> 1u) & 1u);
+    out.fog_dist = vec2<f32>(length(p + inst.origin), max(length((p + inst.origin).xz), abs(p.y + inst.origin.y)));
     return out;
+}
+
+fn fog_factor(d: f32, start: f32, end: f32) -> f32 {
+    return clamp((d - start) / max(end - start, 0.001), 0.0, 1.0);
+}
+
+fn fogged(rgb: vec3<f32>, d: vec2<f32>) -> vec3<f32> {
+    let f = max(fog_factor(d.x, globals.fog.x, globals.fog.y), fog_factor(d.y, globals.fog.z, globals.fog.w));
+    return mix(rgb, globals.fog_color.rgb, f);
 }
 
 fn finish(rgb: vec3<f32>) -> vec3<f32> {
@@ -99,7 +112,7 @@ fn fs_cutout(in: VertexOut) -> @location(0) vec4<f32> {
     }
     var rgb = c.rgb * in.tint.rgb;
     rgb = mix(rgb, vec3<f32>(1.0, 0.0, 0.0), in.hurt * 0.3);
-    return vec4<f32>(finish(rgb * in.shade), 1.0);
+    return vec4<f32>(finish(fogged(rgb * in.shade, in.fog_dist)), 1.0);
 }
 
 @fragment
@@ -110,11 +123,12 @@ fn fs_blend(in: VertexOut) -> @location(0) vec4<f32> {
     }
     var rgb = c.rgb * in.tint.rgb;
     rgb = mix(rgb, vec3<f32>(1.0, 0.0, 0.0), in.hurt * 0.3);
-    return vec4<f32>(finish(rgb * in.shade), c.a * in.tint.a);
+    return vec4<f32>(finish(fogged(rgb * in.shade, in.fog_dist)), c.a * in.tint.a);
 }
 
 @fragment
 fn fs_additive(in: VertexOut) -> @location(0) vec4<f32> {
     let c = textureSample(entity_textures, entity_sampler, in.uv, in.layer);
-    return vec4<f32>(finish(c.rgb * in.tint.rgb), c.a * in.tint.a);
+    let f = max(fog_factor(in.fog_dist.x, globals.fog.x, globals.fog.y), fog_factor(in.fog_dist.y, globals.fog.z, globals.fog.w));
+    return vec4<f32>(finish(c.rgb * in.tint.rgb), c.a * in.tint.a * (1.0 - f));
 }

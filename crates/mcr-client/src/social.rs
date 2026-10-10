@@ -169,7 +169,7 @@ pub struct TabList {
     pub footer: Component,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Titles {
     pub title: Option<Component>,
     pub subtitle: Option<Component>,
@@ -177,6 +177,19 @@ pub struct Titles {
     pub fade_in: i32,
     pub stay: i32,
     pub fade_out: i32,
+}
+
+impl Default for Titles {
+    fn default() -> Self {
+        Self {
+            title: None,
+            subtitle: None,
+            action_bar: None,
+            fade_in: 10,
+            stay: 70,
+            fade_out: 20,
+        }
+    }
 }
 
 impl Titles {

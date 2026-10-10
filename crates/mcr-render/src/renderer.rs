@@ -1409,7 +1409,7 @@ impl Renderer {
     pub fn render_with_overlay(
         &mut self,
         frame: &FrameInputs,
-        overlay: Option<&mut dyn Overlay>,
+        mut overlay: Option<&mut dyn Overlay>,
     ) -> Result<FrameStats, RenderError> {
         let start = Instant::now();
         let (uploaded_bytes, uploaded_writes) = self.flush_uploads();
@@ -1578,6 +1578,10 @@ impl Renderer {
                 );
             } else {
                 pass.multi_draw_indirect(&self.geo.model_cmds, 0, model_max);
+            }
+            if let Some(overlay) = overlay.as_deref_mut() {
+                overlay.opaque(&mut pass);
+                pass.set_bind_group(0, &self.globals_bg, &[]);
             }
             if trans_n > 0 {
                 pass.set_pipeline(&self.trans_pipeline);

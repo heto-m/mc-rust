@@ -198,6 +198,19 @@ impl ItemIcons {
 
     /// Draws the item at the 16x16 slot whose top-left is `(x, y)` in GUI pixels.
     pub fn draw(&mut self, frame: &mut UiFrame<'_>, view: &ItemView, x: i32, y: i32) {
+        self.draw_sized(frame, view, x, y, SLOT, SLOT);
+    }
+
+    /// Like [`Self::draw`] but stretches the icon to `w` by `h` GUI pixels.
+    pub fn draw_sized(
+        &mut self,
+        frame: &mut UiFrame<'_>,
+        view: &ItemView,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+    ) {
         let scale = frame.scale();
         if scale != self.icon_scale {
             self.icons.clear();
@@ -238,7 +251,7 @@ impl ItemIcons {
             }
         }
         if let Some(id) = self.icons[&key].sprite {
-            frame.sprite(id, x, y, SLOT, SLOT);
+            frame.sprite(id, x, y, w, h);
         }
     }
 

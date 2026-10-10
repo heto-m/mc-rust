@@ -44,6 +44,7 @@ struct Key {
     model_hash: u64,
     context: ItemContext,
     using: u8,
+    variant: u64,
 }
 
 #[derive(Debug)]
@@ -347,6 +348,7 @@ impl ItemGeometry {
                 model_hash: 0,
                 context,
                 using: 0,
+                variant: 0,
             };
             if let Some(hit) = self.cache.get(&key) {
                 return hit.clone();
@@ -376,6 +378,7 @@ impl ItemGeometry {
             model_hash,
             context,
             using: using.map_or(0, |(ticks, _)| 1 + ticks.clamp(0.0, 120.0) as u8),
+            variant: crate::special::variant_hash(stack),
         };
         if let Some(hit) = self.cache.get(&key) {
             return hit.clone();
@@ -394,7 +397,7 @@ impl ItemGeometry {
             .assets
             .items
             .evaluate(&Identifier::parse(name), &props, &ctx);
-        let geo = self.build(&layers, context).map(Arc::new);
+        let geo = self.build(&layers, context, Some(stack)).map(Arc::new);
         self.cache.insert(key, geo.clone());
         geo
     }
@@ -445,7 +448,67 @@ impl ItemGeometry {
         model
     }
 
-    fn build(&mut self, layers: &[ItemLayer], context: ItemContext) -> Option<ItemGeo> {
+    fn special_model(
+        &mut self,
+        base: &Identifier,
+        kind: &mcr_assets::SpecialKind,
+    ) -> Option<Arc<BakedItemModel>> {
+        let base = self.baked(base)?;
+        self.baker
+            .bake_special(&self.assets.resources, &base, kind)
+            .ok()
+    }
+
+    /// Shield and trident draw their entity models; returns whether `kind` was one of them.
+    fn push_entity_special(
+        &mut self,
+        geo: &mut ItemGeo,
+        layer: &ItemLayer,
+        base: &Identifier,
+        kind: &mcr_assets::SpecialKind,
+        context: ItemContext,
+        stack: Option<&ItemStack>,
+    ) -> bool {
+        if !matches!(
+            kind,
+            mcr_assets::SpecialKind::Shield | mcr_assets::SpecialKind::Trident
+        ) {
+            return false;
+        }
+        let left = matches!(
+            context,
+            ItemContext::LeftHand | ItemContext::FirstPersonLeft
+        );
+        let display = self
+            .baked(base)
+            .and_then(|m| m.display(display_context(context)));
+        let centred = match &display {
+            Some(t) => display_matrix(t, left) * Mat4::from_translation(Vec3::splat(0.5)),
+            None => Mat4::IDENTITY,
+        };
+        let local = centred * mat_from_rows(&layer.transform);
+        let layers = &self.assets.layers;
+        let parts =
+            crate::special::parts(kind, |name| layers.get(name).map(Model::from_layer), stack);
+        for p in parts {
+            geo.parts.push(GeoPart {
+                mesh: p.mesh,
+                model_id: OnceLock::new(),
+                texture: p.texture,
+                local,
+                tint: p.tint,
+                pipeline: p.pipeline,
+            });
+        }
+        true
+    }
+
+    fn build(
+        &mut self,
+        layers: &[ItemLayer],
+        context: ItemContext,
+        stack: Option<&ItemStack>,
+    ) -> Option<ItemGeo> {
         let mut geo = ItemGeo::default();
         let left = matches!(
             context,
@@ -454,10 +517,17 @@ impl ItemGeometry {
         let mut min_y = f32::MAX;
         let mut ground_scale = 1.0f32;
         for layer in layers {
-            let LayerKind::Model(id) = &layer.kind else {
-                continue;
+            let model = match &layer.kind {
+                LayerKind::Model(id) => self.baked(id),
+                LayerKind::Special { base, kind } => {
+                    if self.push_entity_special(&mut geo, layer, base, kind, context, stack) {
+                        continue;
+                    }
+                    self.special_model(base, kind)
+                }
+                _ => None,
             };
-            let Some(model) = self.baked(id) else {
+            let Some(model) = model else {
                 continue;
             };
             let display = model.display(display_context(context));
@@ -558,6 +628,7 @@ mod cache_tests {
             dyed: dyed & 0x00FF_FFFF,
             model_hash: 0,
             context: ItemContext::Ground,
+            variant: 0,
         };
         assert_eq!(key(0x0100_0000), key(0));
         assert_eq!(key(i32::MIN), key(0));

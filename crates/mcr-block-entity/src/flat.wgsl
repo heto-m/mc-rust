@@ -1,6 +1,8 @@
 struct Globals {
     view_proj: mat4x4<f32>,
     params: vec4<f32>,
+    fog: vec4<f32>,
+    fog_color: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -19,6 +21,7 @@ struct VsOut {
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) proj: vec4<f32>,
+    @location(3) fog_dist: vec2<f32>,
 }
 
 @vertex
@@ -29,7 +32,12 @@ fn vs_main(v: VsIn) -> VsOut {
     out.uv = v.uv;
     out.color = v.color;
     out.proj = vec4<f32>(clip.x * 0.5 + clip.w * 0.5, clip.y * 0.5 + clip.w * 0.5, clip.z, clip.w);
+    out.fog_dist = vec2<f32>(length(v.pos), max(length(v.pos.xz), abs(v.pos.y)));
     return out;
+}
+
+fn fog_factor(d: f32, start: f32, end: f32) -> f32 {
+    return clamp((d - start) / max(end - start, 0.001), 0.0, 1.0);
 }
 
 fn to_linear(c: vec3<f32>) -> vec3<f32> {
@@ -49,7 +57,8 @@ fn fs_tex(in: VsOut) -> @location(0) vec4<f32> {
     if c.a < 0.004 {
         discard;
     }
-    return vec4<f32>(finish(c.rgb), c.a);
+    let f = max(fog_factor(in.fog_dist.x, globals.fog.x, globals.fog.y), fog_factor(in.fog_dist.y, globals.fog.z, globals.fog.w));
+    return vec4<f32>(finish(mix(c.rgb, globals.fog_color.rgb, f)), c.a);
 }
 
 var<private> COLORS = array<vec3<f32>, 16>(

@@ -194,6 +194,7 @@ pub struct EntityScene {
     bolts: FxHashMap<u32, ModelId>,
     block_top: Option<BlockTop>,
     shadows: bool,
+    pub(crate) maps: crate::maps::MapTable,
     tags: Vec<TagSource>,
     pub(crate) stats: SceneStats,
 }
@@ -234,6 +235,7 @@ impl EntityScene {
             bolts: FxHashMap::default(),
             block_top: None,
             shadows: true,
+            maps: Default::default(),
             tags: Vec::new(),
             stats: SceneStats::default(),
         })
@@ -681,6 +683,9 @@ impl EntityScene {
                     );
                 }
                 crate::plan::FreeGeo::Bolt { seed } => self.push_bolt(*seed, v),
+                crate::plan::FreeGeo::Map { id, local } => {
+                    self.emit_map(*id, *local, v.light, false, v.pos);
+                }
                 crate::plan::FreeGeo::Quad {
                     texture,
                     size,
@@ -934,6 +939,14 @@ impl EntityScene {
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         self.gpu.draw(pass);
+    }
+
+    pub fn draw_opaque(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.gpu.draw_opaque(pass);
+    }
+
+    pub fn draw_blended(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.gpu.draw_blended(pass);
     }
 }
 

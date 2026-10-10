@@ -425,10 +425,15 @@ impl EntityLayer {
                 let mut pos = lerp3(t.prev_pos, t.pos, f64::from(cx.partial));
                 if let Some(vehicle) = e.vehicle.and_then(|v| cx.state.entities.get(v)) {
                     let (_, vh) = type_size(data, vehicle.kind);
+                    let names = (
+                        data.entity_type_name(vehicle.kind as u32).unwrap_or(""),
+                        data.entity_type_name(e.kind as u32).unwrap_or(""),
+                    );
+                    let seat = crate::seats::offset(names.0, vh, vehicle.yaw, names.1);
                     pos = [
-                        vehicle.pos[0],
-                        vehicle.pos[1] + f64::from(vh) * 0.75,
-                        vehicle.pos[2],
+                        vehicle.pos[0] + seat[0],
+                        vehicle.pos[1] + seat[1],
+                        vehicle.pos[2] + seat[2],
                     ];
                 }
                 if !visible(cx, state_chunks(cx.state), pos, w * scale, h * scale) {
@@ -468,9 +473,19 @@ impl EntityLayer {
         self.last_culled = culled;
     }
 
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        if self.last_drawn > 0 || self.scene.stats().parts > 0 {
-            self.scene.draw(pass);
+    fn has_parts(&self) -> bool {
+        self.last_drawn > 0 || self.scene.stats().parts > 0
+    }
+
+    pub fn draw_opaque(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.has_parts() {
+            self.scene.draw_opaque(pass);
+        }
+    }
+
+    pub fn draw_blended(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.has_parts() {
+            self.scene.draw_blended(pass);
         }
     }
 
@@ -501,11 +516,21 @@ impl EntityLayer {
         self.drawn_list.iter().copied()
     }
 
-    pub fn frame_params(&self, camera: &Camera, aspect: f32, sky_brightness: f32) -> FrameParams {
+    pub fn frame_params(
+        &self,
+        camera: &Camera,
+        aspect: f32,
+        env: &mcr_render::Environment,
+    ) -> FrameParams {
+        let (rd_start, rd_end) = env.render_fog_range();
         FrameParams {
             view_proj: camera.view_proj(aspect),
             camera: camera.position.to_array(),
-            light: LightInfo { sky_brightness },
+            light: LightInfo {
+                sky_brightness: env.sky_factor,
+                fog: [env.fog_start, env.fog_end, rd_start, rd_end],
+                fog_color: env.fog_color,
+            },
         }
     }
 }

@@ -19,7 +19,6 @@ use crate::entities::{SyncedRegistries, hand_view_proj};
 const MAX_HEIGHT_STEP: f32 = 0.4;
 const DEFAULT_SWING_TICKS: f32 = 6.0;
 const DEFAULT_ATTACK_SPEED: f32 = 4.0;
-const MAP_SIZE: f32 = 142.0 / 128.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UseKind {
@@ -504,10 +503,11 @@ impl Hand {
             return;
         }
         if is_map {
+            let id = mcr_entity_model::stack_map_id(item).unwrap_or(-1);
             if is_main && self.off_item.is_empty() {
-                self.two_handed_map(f, pose, x_rot, height, attack);
+                self.two_handed_map(f, pose, x_rot, height, attack, id);
             } else {
-                self.one_handed_map(f, pose, side, height, attack);
+                self.one_handed_map(f, pose, side, height, attack, id);
             }
             return;
         }
@@ -639,6 +639,7 @@ impl Hand {
         side: Side,
         height: f32,
         attack: f32,
+        id: i32,
     ) {
         let mut pose = base;
         let inv = side.sign();
@@ -658,7 +659,7 @@ impl Hand {
         );
         pose.rot_x(x_swing * -45.0);
         pose.rot_y(inv * x_swing * -30.0);
-        self.map_quad(f, pose);
+        self.map_quad(f, pose, id);
     }
 
     fn two_handed_map(
@@ -668,6 +669,7 @@ impl Hand {
         x_rot: f32,
         height: f32,
         attack: f32,
+        id: i32,
     ) {
         let mut pose = base;
         let sqrt_attack = attack.sqrt();
@@ -688,14 +690,22 @@ impl Hand {
         }
         pose.rot_x((sqrt_attack * PI).sin() * 20.0);
         pose.scale(2.0, 2.0, 2.0);
-        self.map_quad(f, pose);
+        self.map_quad(f, pose, id);
     }
 
-    fn map_quad(&mut self, f: &HandFrame<'_>, mut pose: Pose) {
+    fn map_quad(&mut self, f: &HandFrame<'_>, mut pose: Pose, id: i32) {
         pose.rot_y(180.0);
         pose.scale(0.38, 0.38, 0.38);
-        self.scene
-            .emit_quad("map/map_background", [MAP_SIZE; 2], pose.0, f.light);
+        self.scene.emit_map(id, pose.0, f.light, true, [0.0; 3]);
+    }
+
+    pub fn set_map(
+        &mut self,
+        id: i32,
+        image: mcr_entity_model::ImageRgba,
+        deco: Vec<mcr_entity_model::MapDecoration>,
+    ) {
+        self.scene.set_map(id, image, deco);
     }
 
     /// Uploads the instances; call after [`Self::prepare`].
@@ -704,9 +714,7 @@ impl Hand {
         self.scene.prepare(&FrameParams {
             view_proj: hand_view_proj(f.aspect),
             camera: [0.0; 3],
-            light: LightInfo {
-                sky_brightness: f.sky_brightness,
-            },
+            light: LightInfo::with_brightness(f.sky_brightness),
         });
     }
 

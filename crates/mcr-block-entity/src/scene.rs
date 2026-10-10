@@ -1764,6 +1764,8 @@ impl BlockEntityScene {
             frame.params.light,
         );
         self.display.prepare(&frame.params);
+        let l = &frame.params.light;
+        self.flat.set_fog(l.fog, l.fog_color);
         self.flat
             .prepare(frame.params.view_proj, self.time, self.has_gateway);
         self.stats.draw_calls =
@@ -1774,6 +1776,18 @@ impl BlockEntityScene {
         self.gpu.draw(pass);
         self.display.draw(pass);
         self.flat.draw(pass);
+    }
+
+    pub fn draw_opaque(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.gpu.draw_opaque(pass);
+        self.display.draw_opaque(pass);
+        self.flat.draw_opaque(pass);
+    }
+
+    pub fn draw_blended(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.gpu.draw_blended(pass);
+        self.display.draw_blended(pass);
+        self.flat.draw_blended(pass);
     }
 
     pub fn render(&mut self, pass: &mut wgpu::RenderPass<'_>, frame: &BlockEntityFrame) {

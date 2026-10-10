@@ -13,6 +13,7 @@ mod humanoids;
 pub mod idx;
 mod items;
 mod kf;
+mod maps;
 mod misc;
 mod mobs;
 mod model;
@@ -23,6 +24,7 @@ mod rig_humanoid;
 mod rig_mobs;
 mod scene;
 mod skin;
+mod special;
 mod texcache;
 mod view;
 
@@ -43,6 +45,7 @@ pub use gpu::{
 };
 pub use humanoids::default_skin;
 pub use items::clone_count;
+pub use maps::{MapDecoration, stack_map_id};
 pub use model::{Bone, BoneId, Model};
 pub use plan::{Attach, AttachKind, ItemContext, ItemSource, Part, Plan};
 pub use pose::{Pose, evaluate};

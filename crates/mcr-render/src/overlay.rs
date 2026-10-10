@@ -15,5 +15,8 @@ pub struct OverlayCtx<'a> {
 }
 
 pub trait Overlay {
+    /// Runs inside the world pass between opaque and translucent terrain; bind groups are restored afterwards.
+    fn opaque(&mut self, _pass: &mut wgpu::RenderPass<'_>) {}
+
     fn record(&mut self, ctx: &mut OverlayCtx<'_>);
 }

@@ -87,6 +87,8 @@ struct Globals {
     light0: [f32; 4],
     light1: [f32; 4],
     params: [f32; 4],
+    fog: [f32; 4],
+    fog_color: [f32; 4],
 }
 
 #[repr(C)]
@@ -107,12 +109,26 @@ struct GpuInstance {
 pub struct LightInfo {
     /// 0..1 scale applied to sky light (night and weather darkening).
     pub sky_brightness: f32,
+    /// Spherical fog (start, end) then cylindrical fog (start, end); the default disables it.
+    pub fog: [f32; 4],
+    pub fog_color: [f32; 3],
 }
 
 impl Default for LightInfo {
     fn default() -> Self {
         Self {
             sky_brightness: 1.0,
+            fog: [1.0e9; 4],
+            fog_color: [0.0; 3],
+        }
+    }
+}
+
+impl LightInfo {
+    pub fn with_brightness(sky_brightness: f32) -> Self {
+        Self {
+            sky_brightness,
+            ..Self::default()
         }
     }
 }
@@ -675,13 +691,34 @@ impl EntityRenderer {
                     0.0,
                     0.0,
                 ],
+                fog: light.fog,
+                fog_color: [
+                    light.fog_color[0],
+                    light.fog_color[1],
+                    light.fog_color[2],
+                    1.0,
+                ],
             }),
         );
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_filtered(pass, |_| true);
+    }
+
+    /// Depth-writing parts only; draw before translucent terrain.
+    pub fn draw_opaque(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_filtered(pass, |p| p == Pipeline::Cutout);
+    }
+
+    /// Blended, decal and additive parts; draw after translucent terrain.
+    pub fn draw_blended(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_filtered(pass, |p| p != Pipeline::Cutout);
+    }
+
+    fn draw_filtered(&self, pass: &mut wgpu::RenderPass<'_>, keep: impl Fn(Pipeline) -> bool) {
         let mut current: Option<(Pipeline, u8)> = None;
-        for run in &self.runs {
+        for run in self.runs.iter().filter(|r| keep(r.pipeline)) {
             if current != Some((run.pipeline, run.class)) {
                 if current.map(|c| c.0) != Some(run.pipeline) {
                     pass.set_pipeline(&self.pipelines[run.pipeline as usize]);
