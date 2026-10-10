@@ -9,6 +9,7 @@ use mcr_ui::{CommandSuggester, GameView, Suggestion, SuggestionSet};
 
 pub struct StateView<'a> {
     pub state: &'a ClientState,
+    pub operator_items: bool,
 }
 
 impl StateView<'_> {
@@ -43,6 +44,30 @@ impl GameView for StateView<'_> {
 
     fn xp_level(&self) -> i32 {
         self.state.player.xp_level
+    }
+
+    fn enabled_features(&self) -> &[String] {
+        &self.state.registries.enabled_features
+    }
+
+    fn operator_tab(&self) -> bool {
+        self.operator_items && self.state.player.can_use_game_master_blocks()
+    }
+
+    fn item_tags_matching(&self, query: &str) -> Vec<(String, Vec<i32>)> {
+        let matches = |tag: &str| match query.split_once(':') {
+            None => tag.split_once(':').map_or(tag, |t| t.1).contains(query),
+            Some((ns, path)) => {
+                let (tag_ns, tag_path) = tag.split_once(':').unwrap_or(("minecraft", tag));
+                tag_ns.contains(ns.trim()) && tag_path.contains(path.trim())
+            }
+        };
+        let registries = &self.state.registries;
+        registries
+            .tag_names("minecraft:item")
+            .filter(|t| matches(t))
+            .filter_map(|t| Some((t.to_owned(), registries.tag("minecraft:item", t)?.to_vec())))
+            .collect()
     }
 }
 

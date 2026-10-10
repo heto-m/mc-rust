@@ -77,6 +77,13 @@ impl Registries {
         self.tags.get(registry)?.get(tag).map(Vec::as_slice)
     }
 
+    pub fn tag_names<'a>(&'a self, registry: &str) -> impl Iterator<Item = &'a str> + use<'a> {
+        self.tags
+            .get(registry)
+            .into_iter()
+            .flat_map(|tags| tags.keys().map(String::as_str))
+    }
+
     pub fn is_in_tag(&self, registry: &str, tag: &str, id: i32) -> bool {
         self.tag(registry, tag).is_some_and(|ids| ids.contains(&id))
     }

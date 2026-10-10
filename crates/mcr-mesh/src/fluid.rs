@@ -11,7 +11,7 @@ use crate::tint::{TINT_NONE, TINT_WATER};
 const UP: [i32; 3] = [0, 1, 0];
 const DOWN: [i32; 3] = [0, -1, 0];
 const MAX_FLUID_HEIGHT: f32 = 0.888_888_9;
-const INSET: f32 = 1.0 / 128.0;
+const INSET: f32 = 0.001;
 
 fn add(a: [i32; 3], b: [i32; 3]) -> [i32; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
@@ -58,12 +58,16 @@ pub(crate) fn corner_height(
     b: f32,
     corner: [i32; 3],
 ) -> f32 {
+    average_height(own, a, b, || height_at(ctx, kind, corner))
+}
+
+fn average_height(own: f32, a: f32, b: f32, corner: impl FnOnce() -> f32) -> f32 {
     if a >= 1.0 || b >= 1.0 {
         return 1.0;
     }
     let mut acc = [0.0; 2];
     if a > 0.0 || b > 0.0 {
-        let h = height_at(ctx, kind, corner);
+        let h = corner();
         if h >= 1.0 {
             return 1.0;
         }
@@ -349,6 +353,49 @@ pub(crate) fn mesh_fluid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SOURCE: f32 = 8.0 / 9.0;
+
+    fn avg(own: f32, a: f32, b: f32, corner: f32) -> f32 {
+        average_height(own, a, b, || corner)
+    }
+
+    #[test]
+    fn lone_source_corner_averages_with_air() {
+        let want = SOURCE * 10.0 / 12.0;
+        assert!((avg(SOURCE, 0.0, 0.0, 0.0) - want).abs() < 1e-6);
+    }
+
+    #[test]
+    fn source_next_to_source_pulls_the_corner_up() {
+        let got = avg(SOURCE, SOURCE, 0.0, 0.0);
+        assert!((got - SOURCE * 20.0 / 22.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn low_levels_weigh_one_each() {
+        let got = avg(2.0 / 9.0, 1.0 / 9.0, 0.0, 0.0);
+        assert!((got - 3.0 / 9.0 / 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fluid_above_a_neighbour_or_the_corner_makes_the_corner_full() {
+        assert_eq!(avg(0.5, 1.0, 0.0, 0.0), 1.0);
+        assert_eq!(avg(0.5, 0.0, 1.0, 0.0), 1.0);
+        assert_eq!(avg(0.5, 0.3, 0.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn solid_neighbours_are_ignored() {
+        let got = avg(SOURCE, -1.0, -1.0, -1.0);
+        assert!((got - SOURCE).abs() < 1e-6);
+    }
+
+    #[test]
+    fn corner_is_only_sampled_beside_fluid() {
+        let got = average_height(0.5, 0.0, 0.0, || panic!("corner sampled"));
+        assert!((got - 0.5 / 3.0).abs() < 1e-6);
+    }
 
     #[test]
     fn still_water_uses_unrotated_uvs() {

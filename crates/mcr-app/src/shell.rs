@@ -217,6 +217,7 @@ impl Shell {
                 println!("joined as {}", self.cfg.name);
                 let cfg = PlayConfig {
                     render_distance: self.cfg.render_distance,
+                    game_dir: self.cfg.game_dir.clone(),
                 };
                 self.play = Some(Play::new(parts, &cfg, client));
                 self.stack.pop();

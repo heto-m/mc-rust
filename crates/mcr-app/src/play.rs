@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -8,13 +10,15 @@ use mcr_client::{
 use mcr_particles::ParticleEngine;
 use mcr_physics::Pose;
 use mcr_protocol::play::serverbound::Facing;
+use mcr_protocol::types::ItemStack;
 use mcr_render::glam::{DVec3, Mat4};
 use mcr_render::{Camera, Environment, FrameStats, Overlay, OverlayCtx, Renderer, wgpu};
 use mcr_settings::bindings::mapping_index;
 use mcr_settings::{HeldState, InputKey, KeyBindings, MAPPINGS, Options};
 use mcr_ui::{
-    ChatScreen, ContainerScreen, DeathScreen, Env, MenuKind, Modifiers, MouseButton, PauseScreen,
-    RenderCx, Screen, ScreenAction, ScreenStack, Ui, UiInput, UiRenderer,
+    ChatScreen, ContainerScreen, CreativeScreen, DeathScreen, Env, HotbarStore, MenuKind,
+    Modifiers, MouseButton, PauseScreen, RenderCx, Screen, ScreenAction, ScreenStack, Ui, UiInput,
+    UiRenderer,
 };
 
 use crate::assets::Assets;
@@ -49,6 +53,7 @@ const STEP_STRIDE: f32 = 0.6;
 #[derive(Debug, Clone)]
 pub struct PlayConfig {
     pub render_distance: Option<i32>,
+    pub game_dir: std::path::PathBuf,
 }
 
 /// What the shell lends to a session.
@@ -72,6 +77,8 @@ struct Keys {
     sneak: usize,
     sprint: usize,
     drop: usize,
+    save_hotbar: usize,
+    load_hotbar: usize,
     chat: usize,
     command: usize,
     inventory: usize,
@@ -97,6 +104,8 @@ impl Keys {
             sneak: i("key.sneak"),
             sprint: i("key.sprint"),
             drop: i("key.drop"),
+            save_hotbar: i("key.saveToolbarActivator"),
+            load_hotbar: i("key.loadToolbarActivator"),
             chat: i("key.chat"),
             command: i("key.command"),
             inventory: i("key.inventory"),
@@ -252,6 +261,9 @@ pub struct Play {
     mouse: (f32, f32),
     mods: Modifiers,
     container_open: bool,
+    creative_open: bool,
+    hotbars: Rc<RefCell<HotbarStore>>,
+    hotbar_path: std::path::PathBuf,
     death_shown: bool,
     death_message: Option<mcr_protocol::types::text::Component>,
     pub leave: bool,
@@ -326,6 +338,12 @@ impl Play {
             .unwrap_or(options.render_distance)
             .clamp(2, 64);
         let hud = Hud::new(&gui.ui, data);
+        let hotbar_path = cfg.game_dir.join("hotbar.txt");
+        let hotbars = Rc::new(RefCell::new(
+            std::fs::read_to_string(&hotbar_path)
+                .map(|t| HotbarStore::from_text(&t))
+                .unwrap_or_default(),
+        ));
         let world = NetworkWorld::new(client, render_distance);
         let format = renderer.target_format();
         let outline = OutlineRenderer::new(renderer.device(), format);
@@ -369,6 +387,9 @@ impl Play {
             mouse: (0.0, 0.0),
             mods: Modifiers::NONE,
             container_open: false,
+            creative_open: false,
+            hotbars,
+            hotbar_path,
             death_shown: false,
             death_message: None,
             leave: false,
@@ -1152,6 +1173,7 @@ impl Play {
         {
             let view = StateView {
                 state: &self.world.client.state,
+                operator_items: self.options.operator_items_tab,
             };
             let mut env = Env {
                 view: &view,
@@ -1215,10 +1237,34 @@ impl Play {
     }
 
     pub fn open_inventory(&mut self) {
-        if !self.busy() {
+        if self.busy() {
+            return;
+        }
+        let creative = self.world.client.state.player.instabuild;
+        if creative {
+            self.push_screen(Box::new(CreativeScreen::new(self.hotbars.clone())));
+        } else {
             self.push_screen(Box::new(ContainerScreen::player_inventory()));
-            self.container_open = true;
-            self.player_inventory = true;
+        }
+        self.creative_open = creative;
+        self.container_open = true;
+        self.player_inventory = true;
+    }
+
+    fn hotbar_load_or_save(&mut self, index: usize, load: bool) {
+        if load {
+            let saved = self.hotbars.borrow().get(index).cloned();
+            for (i, stack) in saved.unwrap_or_default().into_iter().enumerate() {
+                self.net(|c| c.set_creative_slot(36 + i as i16, stack));
+            }
+        } else {
+            let slots = &self.world.client.state.inventory.player.slots;
+            let hotbar: [ItemStack; 9] = std::array::from_fn(|i| slots[36 + i].clone());
+            let mut store = self.hotbars.borrow_mut();
+            store.save(index, hotbar);
+            if let Err(e) = std::fs::write(&self.hotbar_path, store.to_text()) {
+                tracing::warn!("saving hotbars: {e}");
+            }
         }
     }
 
@@ -1265,6 +1311,7 @@ impl Play {
         {
             let view = StateView {
                 state: &self.world.client.state,
+                operator_items: self.options.operator_items_tab,
             };
             let mut env = Env {
                 view: &view,
@@ -1323,6 +1370,32 @@ impl Play {
                     self.net(Client::close_container);
                     self.stack.pop();
                     self.container_open = false;
+                    if std::mem::take(&mut self.creative_open) {
+                        self.world.client.set_cursor(ItemStack::default());
+                    }
+                }
+                ScreenAction::CreativeSetCarried(stack) => self.world.client.set_cursor(stack),
+                ScreenAction::CreativeClick(c) => {
+                    let mode = match c.mode {
+                        Ct::Pickup => In::Pickup,
+                        Ct::QuickMove => In::QuickMove,
+                        Ct::Swap => In::Swap,
+                        Ct::Clone => In::Clone,
+                        Ct::Throw => In::Throw,
+                        Ct::QuickCraft => In::QuickCraft,
+                        Ct::PickupAll => In::PickupAll,
+                    };
+                    let (slot, button) = (c.slot as i16, c.button as i8);
+                    self.net(|cl| cl.creative_menu_click(slot, button, mode));
+                }
+                ScreenAction::CreativeSetSlot { slot, stack } => {
+                    self.net(|c| c.set_creative_slot(slot as i16, stack));
+                }
+                ScreenAction::CreativeDrop(stack) => {
+                    self.net(|c| c.creative_drop(stack));
+                }
+                ScreenAction::CreativeClearInventory => {
+                    self.net(Client::creative_clear_inventory);
                 }
                 ScreenAction::CrafterSlotState { slot, enabled } => {
                     self.net(|c| c.set_crafter_slot_state(slot as i32, enabled));
@@ -1448,7 +1521,16 @@ impl Play {
         } else if let Some(n) = name.strip_prefix("key.hotbar.")
             && let Ok(n) = n.parse::<u8>()
         {
-            self.net(|c| c.select_hotbar(n - 1));
+            let (save, load) = (
+                self.held.is_active(k.save_hotbar),
+                self.held.is_active(k.load_hotbar),
+            );
+            if self.world.client.state.player.instabuild && self.stack.is_empty() && (save || load)
+            {
+                self.hotbar_load_or_save(usize::from(n - 1), load);
+            } else {
+                self.net(|c| c.select_hotbar(n - 1));
+            }
         }
     }
 
@@ -1585,6 +1667,7 @@ impl Play {
         {
             let view = StateView {
                 state: &self.world.client.state,
+                operator_items: self.options.operator_items_tab,
             };
             let max_scale = u32::try_from(self.options.gui_scale).unwrap_or(0);
             let mut frame = self.gui.ui.frame_scaled(size.0, size.1, max_scale);

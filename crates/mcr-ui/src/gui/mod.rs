@@ -1,6 +1,7 @@
 mod assets;
 mod chat_screen;
 mod container;
+mod creative;
 mod edit_box;
 mod env;
 mod input;
@@ -16,6 +17,7 @@ pub use chat_screen::{
     ChatScreen, CommandSuggester, NoSuggestions, SharedChat, Suggestion, SuggestionSet,
 };
 pub use container::*;
+pub use creative::{CreativeScreen, HotbarStore, TabKind, creative_tabs};
 pub use edit_box::{EditBox, is_allowed_char};
 pub use env::{
     Clipboard, Env, GameView, MemoryClipboard, MerchantInfo, NoView, RenderCx, TradeOffer,

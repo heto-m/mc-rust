@@ -59,6 +59,14 @@ pub enum ScreenAction {
     CopyToClipboard(String),
     ClickSound,
     Quit,
+    CreativeSetCarried(mcr_protocol::types::item::ItemStack),
+    CreativeClick(ContainerClick),
+    CreativeSetSlot {
+        slot: usize,
+        stack: mcr_protocol::types::item::ItemStack,
+    },
+    CreativeDrop(mcr_protocol::types::item::ItemStack),
+    CreativeClearInventory,
 }
 
 impl std::fmt::Debug for ScreenAction {
@@ -95,6 +103,15 @@ impl std::fmt::Debug for ScreenAction {
             Self::CopyToClipboard(t) => f.debug_tuple("CopyToClipboard").field(t).finish(),
             Self::ClickSound => f.write_str("ClickSound"),
             Self::Quit => f.write_str("Quit"),
+            Self::CreativeSetCarried(s) => f.debug_tuple("CreativeSetCarried").field(s).finish(),
+            Self::CreativeClick(c) => f.debug_tuple("CreativeClick").field(c).finish(),
+            Self::CreativeSetSlot { slot, stack } => f
+                .debug_struct("CreativeSetSlot")
+                .field("slot", slot)
+                .field("stack", stack)
+                .finish(),
+            Self::CreativeDrop(s) => f.debug_tuple("CreativeDrop").field(s).finish(),
+            Self::CreativeClearInventory => f.write_str("CreativeClearInventory"),
         }
     }
 }
@@ -102,7 +119,7 @@ impl std::fmt::Debug for ScreenAction {
 impl ScreenAction {
     pub fn click(&self) -> Option<ContainerClick> {
         match self {
-            Self::ContainerClick(c) => Some(*c),
+            Self::ContainerClick(c) | Self::CreativeClick(c) => Some(*c),
             _ => None,
         }
     }

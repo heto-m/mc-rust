@@ -493,10 +493,15 @@ impl ClientState {
                     apply(&mut |id, state| e.upsert_attribute(id, state));
                 }
             }
-            P::EntityEvent(p) => out.event(ClientEvent::EntityEvent {
-                entity_id: p.entity_id,
-                event: p.event_id,
-            }),
+            P::EntityEvent(p) => {
+                if p.entity_id == self.player.entity_id && (24..=28).contains(&p.event_id) {
+                    self.player.permission_level = (p.event_id - 24) as u8;
+                }
+                out.event(ClientEvent::EntityEvent {
+                    entity_id: p.entity_id,
+                    event: p.event_id,
+                });
+            }
             P::Animate(p) => out.event(ClientEvent::EntityAnimation {
                 entity_id: p.entity_id,
                 action: p.action,

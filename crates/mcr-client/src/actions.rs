@@ -6,7 +6,7 @@ use mcr_protocol::dispatch::PlayServerbound as S;
 use mcr_protocol::play::serverbound as sb;
 use mcr_protocol::play::serverbound::{ContainerInput, Facing};
 use mcr_protocol::types::game::Hand;
-use mcr_protocol::types::{ItemStack, Vec3d, Vec3f};
+use mcr_protocol::types::{ItemStack, UntrustedItemStack, Vec3d, Vec3f};
 
 use crate::client::Client;
 use crate::error::Result;
@@ -429,10 +429,68 @@ impl Client {
         {
             *target = item.clone();
         }
+        self.send_creative_slot(slot, item)
+    }
+
+    fn send_creative_slot(&mut self, slot: i16, item: ItemStack) -> Result<()> {
         self.send_play(&S::SetCreativeModeSlot(sb::SetCreativeModeSlot {
             slot_num: slot,
-            item,
+            item: UntrustedItemStack(item),
         }))
+    }
+
+    /// Replaces the cursor stack locally; the server never learns about creative cursors.
+    pub fn set_cursor(&mut self, stack: ItemStack) {
+        self.state.inventory.cursor = stack;
+    }
+
+    pub fn creative_clear_inventory(&mut self) -> Result<()> {
+        for slot in 1..=45 {
+            self.set_creative_slot(slot, ItemStack::default())?;
+        }
+        Ok(())
+    }
+
+    /// Throws `item` out of a creative inventory the way vanilla's `handleCreativeModeItemDrop` does.
+    pub fn creative_drop(&mut self, item: ItemStack) -> Result<()> {
+        if item.is_empty() {
+            return Ok(());
+        }
+        self.send_creative_slot(-1, item)
+    }
+
+    /// Runs a click on the player menu locally and tells the server about every slot it changed
+    /// with creative slot packets, as vanilla's creative screens do instead of container clicks.
+    pub fn creative_menu_click(
+        &mut self,
+        slot: i16,
+        button: i8,
+        input: ContainerInput,
+    ) -> Result<()> {
+        let before = self.state.inventory.player.slots.clone();
+        let cx = crate::hashing::HashCx::new(self.state.data, &self.state.registries);
+        self.state
+            .inventory
+            .predict_click(&cx, true, PLAYER_MENU_ID, slot, button, input);
+        self.sync_creative_slots(&before)
+    }
+
+    /// Sends creative slot packets for the inventory slots (5..=45) that differ from `before`.
+    pub fn sync_creative_slots(&mut self, before: &[ItemStack]) -> Result<()> {
+        let changed: Vec<(i16, ItemStack)> = self
+            .state
+            .inventory
+            .player
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| (5..=45).contains(i) && before.get(*i) != Some(*s))
+            .map(|(i, s)| (i as i16, s.clone()))
+            .collect();
+        for (slot, item) in changed {
+            self.send_creative_slot(slot, item)?;
+        }
+        Ok(())
     }
 
     /// Updates the render distance the server streams and re-announces client information.

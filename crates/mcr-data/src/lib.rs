@@ -20,6 +20,12 @@ pub fn v26_3() -> &'static Version {
     })
 }
 
+/// Creative tab contents dumped by `tools/extractor/run-creative.sh`: `tab` header lines followed by
+/// `p`/`s` lines (parent-tab and search-tab stacks) carrying required features and network-encoded stacks.
+pub fn creative_tabs_26_3() -> &'static str {
+    generated::v26_3::CREATIVE_TABS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

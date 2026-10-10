@@ -34,6 +34,16 @@ impl TooltipLines {
         }
     }
 
+    pub fn insert_text(&mut self, index: usize, text: impl Into<String>) {
+        if self.lines.len() < MAX_LINES {
+            let text: String = text.into();
+            self.lines.insert(
+                index.min(self.lines.len()),
+                TooltipLine::Legacy(text.chars().take(MAX_LINE_CHARS).collect()),
+            );
+        }
+    }
+
     pub fn push_component(&mut self, component: Component) {
         if self.lines.len() < MAX_LINES {
             self.lines.push(TooltipLine::Component(component));

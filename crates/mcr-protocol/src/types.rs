@@ -10,7 +10,7 @@ pub mod sound;
 pub mod text;
 
 pub use entity_data::EntityDataValues;
-pub use item::{HashedStack, ItemStack};
+pub use item::{HashedStack, ItemStack, UntrustedItemStack};
 pub use math::{ChunkPos, Vec3d, Vec3f};
 pub use particle::Particle;
 pub use sound::SoundEvent;

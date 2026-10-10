@@ -1285,7 +1285,7 @@ mod tests {
             .map(|q| q.decode())
             .find(|q| q.shade_face == F::PosY)
             .unwrap();
-        let expect = 3.0 + (8.0 / 9.0 * 10.0) / 12.0 - 1.0 / 128.0;
+        let expect = 3.0 + (8.0 / 9.0 * 10.0) / 12.0;
         for c in top.corners {
             assert!((c[1] - expect).abs() < 1.0 / 128.0, "{} vs {expect}", c[1]);
         }

@@ -1,7 +1,7 @@
 use mcr_buf::{BoundedString, Decode, DecodeError, Encode, LengthPrefixed, Result, read_varint};
 
 use crate::packet;
-use crate::types::{HashedStack, ItemStack};
+use crate::types::{HashedStack, UntrustedItemStack};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
 pub enum ContainerInput {
@@ -95,7 +95,7 @@ packet!(
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct SetCreativeModeSlot {
     pub slot_num: i16,
-    pub item: ItemStack,
+    pub item: UntrustedItemStack,
 }
 
 packet!(SetCreativeModeSlot, "set_creative_mode_slot", Serverbound);
@@ -280,9 +280,28 @@ mod tests {
         assert_eq!(
             roundtrip(&SetCreativeModeSlot {
                 slot_num: 36,
-                item: ItemStack::default(),
+                item: UntrustedItemStack::default(),
             }),
             [0, 36, 0]
+        );
+    }
+
+    #[test]
+    fn creative_slot_component_payloads_are_length_prefixed() {
+        use crate::types::ItemStack;
+        use crate::types::component::DataComponent;
+        use mcr_buf::VarInt;
+        let mut stack = ItemStack::new(5, 1);
+        stack
+            .components
+            .added
+            .push(DataComponent::Damage(VarInt(7)));
+        assert_eq!(
+            roundtrip(&SetCreativeModeSlot {
+                slot_num: 36,
+                item: UntrustedItemStack(stack),
+            }),
+            [0, 36, 1, 5, 1, 0, 3, 1, 7]
         );
     }
 

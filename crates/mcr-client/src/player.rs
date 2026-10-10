@@ -24,6 +24,8 @@ pub struct LocalPlayer {
     pub instabuild: bool,
     pub walking_speed: f32,
     pub held_slot: u8,
+    /// Operator level 0-4 from entity events 24-28.
+    pub permission_level: u8,
     pub dead: bool,
     pub show_death_screen: bool,
     pub vehicle: Option<i32>,
@@ -65,6 +67,7 @@ impl Default for LocalPlayer {
             instabuild: false,
             walking_speed: 0.1,
             held_slot: 0,
+            permission_level: 0,
             dead: false,
             show_death_screen: true,
             vehicle: None,
@@ -87,6 +90,10 @@ impl Default for LocalPlayer {
 }
 
 impl LocalPlayer {
+    pub fn can_use_game_master_blocks(&self) -> bool {
+        self.instabuild && self.permission_level >= 2
+    }
+
     pub fn pos(&self) -> [f64; 3] {
         self.physics.pos
     }
@@ -95,9 +102,11 @@ impl LocalPlayer {
     pub fn reset_for_spawn(&mut self, game_mode: GameType, previous: Option<GameType>) {
         let entity_id = self.entity_id;
         let held = self.held_slot;
+        let permission_level = self.permission_level;
         *self = Self {
             entity_id,
             held_slot: held,
+            permission_level,
             game_mode,
             previous_game_mode: previous,
             ..Self::default()

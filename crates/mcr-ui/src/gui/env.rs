@@ -110,6 +110,21 @@ pub trait GameView {
     fn single_player(&self) -> bool {
         false
     }
+
+    /// Feature flags the server enabled, such as `minecraft:vanilla`.
+    fn enabled_features(&self) -> &[String] {
+        &[]
+    }
+
+    /// Whether the creative operator-items tab applies: operator in creative with the option on.
+    fn operator_tab(&self) -> bool {
+        false
+    }
+
+    /// Item tags whose id contains `query` (or `namespace:path` parts) with their item ids.
+    fn item_tags_matching(&self, _query: &str) -> Vec<(String, Vec<i32>)> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Default)]

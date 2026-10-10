@@ -257,7 +257,7 @@ impl Autopilot {
                         let state = &play.world.client.state;
                         let [block, sky] = crate::entities::light_at(&state.chunks, p, 1.62);
                         println!(
-                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {}",
+                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?}",
                             play.ticks,
                             p[0],
                             p[1],
@@ -268,6 +268,14 @@ impl Autopilot {
                             play.world.client.state.chunks.len(),
                             play.screen_open(),
                             play.container_updates,
+                            state.inventory.corrections,
+                            (36..45)
+                                .map(|i| {
+                                    let s = &state.inventory.player.slots[i];
+                                    (s.item, s.count)
+                                })
+                                .collect::<Vec<_>>(),
+                            (state.inventory.cursor.item, state.inventory.cursor.count),
                         );
                     }
                 }
