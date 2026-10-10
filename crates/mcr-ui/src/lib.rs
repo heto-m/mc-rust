@@ -2,6 +2,7 @@ mod assets;
 mod atlas;
 mod error;
 mod font;
+mod gui;
 mod items;
 mod renderer;
 mod screens;
@@ -14,6 +15,7 @@ pub use assets::{AssetIndexSource, vanilla_resources};
 pub use atlas::{Atlas, Slot};
 pub use error::{Result, UiError};
 pub use font::{Baked, FontOptions, Fonts, GlyphInfo};
+pub use gui::*;
 pub use items::{IconStats, ItemIcons, ItemView, StackView, durability_bar};
 pub use renderer::{UiRenderer, UiStats};
 pub use screens::{
@@ -21,7 +23,9 @@ pub use screens::{
 };
 pub use sprites::{Scaling, SpriteId, SpriteInfo, SpriteQuad, Sprites};
 pub use style::{Cell, Flags, FontId, Style};
-pub use text::{Lang, flatten, parse_legacy, push_legacy, wrap};
+pub use text::{
+    ClickSpan, Lang, click_at, flatten, flatten_events, parse_legacy, push_legacy, wrap,
+};
 pub use ui::{Batch, DrawCmd, LINE_HEIGHT, PageKind, PageRef, Ui, UiFrame, Vertex, gui_scale};
 
 pub use wgpu;

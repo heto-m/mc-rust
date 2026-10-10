@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod harness;
+
 use std::path::{Path, PathBuf};
 
 use mcr_ui::{Ui, UiRenderer, vanilla_resources};

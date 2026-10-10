@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use mcr_assets::ResourceManager;
 use mcr_nbt::Value;
-use mcr_protocol::types::text::{Arg, Component, Content};
+use mcr_protocol::types::text::{Arg, ClickEvent, Component, Content};
 use rustc_hash::FxHashMap;
 
 use crate::error::{Result, UiError};
@@ -94,6 +94,38 @@ pub fn flatten(lang: &Lang, component: &Component) -> Vec<Cell> {
     out
 }
 
+/// Cells covered by a component carrying a click event; inner spans come before the spans enclosing them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClickSpan {
+    pub range: Range<usize>,
+    pub event: ClickEvent,
+}
+
+const MAX_SPANS: usize = 256;
+
+pub fn flatten_events(lang: &Lang, component: &Component) -> (Vec<Cell>, Vec<ClickSpan>) {
+    let mut out = Vec::new();
+    let mut budget = Budget {
+        steps: MAX_STEPS,
+        depth: 0,
+        spans: Some(Vec::new()),
+    };
+    flatten_bounded(lang, component, Style::default(), &mut out, &mut budget);
+    out.truncate(MAX_CELLS);
+    let mut spans = budget.spans.unwrap_or_default();
+    spans.retain(|s| s.range.start < out.len());
+    (out, spans)
+}
+
+/// The innermost click event covering `index`.
+pub fn click_at(spans: &[ClickSpan], index: usize) -> Option<&ClickEvent> {
+    spans
+        .iter()
+        .filter(|s| s.range.contains(&index))
+        .min_by_key(|s| s.range.len())
+        .map(|s| &s.event)
+}
+
 const MAX_CELLS: usize = 65_536;
 const MAX_STEPS: usize = 100_000;
 const MAX_DEPTH: usize = 64;
@@ -102,6 +134,7 @@ const MAX_DEPTH: usize = 64;
 struct Budget {
     steps: usize,
     depth: usize,
+    spans: Option<Vec<ClickSpan>>,
 }
 
 impl Budget {
@@ -128,6 +161,7 @@ pub fn flatten_into(lang: &Lang, component: &Component, parent: Style, out: &mut
     let mut budget = Budget {
         steps: MAX_STEPS,
         depth: 0,
+        spans: None,
     };
     flatten_bounded(lang, component, parent, out, &mut budget);
     out.truncate(MAX_CELLS);
@@ -144,6 +178,7 @@ fn flatten_bounded(
         return;
     }
     let style = merge(parent, &component.style);
+    let start = out.len();
     match &component.content {
         Content::Text(text) => {
             if budget.charge(text.len(), out) {
@@ -173,6 +208,15 @@ fn flatten_bounded(
     }
     for extra in &component.extra {
         flatten_bounded(lang, extra, style, out, budget);
+    }
+    if let (Some(spans), Some(event)) = (&mut budget.spans, &component.style.click_event)
+        && spans.len() < MAX_SPANS
+        && out.len() > start
+    {
+        spans.push(ClickSpan {
+            range: start..out.len(),
+            event: (**event).clone(),
+        });
     }
     budget.depth -= 1;
 }
@@ -463,5 +507,54 @@ mod tests {
     #[test]
     fn wrap_drops_the_space_at_the_break_only() {
         assert_eq!(lines("aaaa  bb", 5.0), ["aaaa ", "bb"]);
+    }
+
+    #[test]
+    fn click_spans_cover_their_cells_and_nest() {
+        use mcr_protocol::types::text::{ClickEvent, Style as ProtoStyle};
+        let on = |event| ProtoStyle {
+            click_event: Some(Box::new(event)),
+            ..Default::default()
+        };
+        let inner = Component::text("bc").styled(on(ClickEvent::RunCommand("/in".into())));
+        let outer = Component::text("a")
+            .with(inner)
+            .with(Component::text("d"))
+            .styled(on(ClickEvent::OpenUrl("https://x".into())));
+        let (cells, spans) = flatten_events(&Lang::default(), &Component::text("-").with(outer));
+        assert_eq!(plain(&cells), "-abcd");
+        assert_eq!(click_at(&spans, 0), None);
+        assert_eq!(
+            click_at(&spans, 1),
+            Some(&ClickEvent::OpenUrl("https://x".into()))
+        );
+        assert_eq!(
+            click_at(&spans, 2),
+            Some(&ClickEvent::RunCommand("/in".into()))
+        );
+        assert_eq!(
+            click_at(&spans, 3),
+            Some(&ClickEvent::RunCommand("/in".into()))
+        );
+        assert_eq!(
+            click_at(&spans, 4),
+            Some(&ClickEvent::OpenUrl("https://x".into()))
+        );
+        assert_eq!(click_at(&spans, 5), None);
+    }
+
+    #[test]
+    fn click_spans_are_bounded() {
+        use mcr_protocol::types::text::{ClickEvent, Style as ProtoStyle};
+        let style = ProtoStyle {
+            click_event: Some(Box::new(ClickEvent::CopyToClipboard("x".into()))),
+            ..Default::default()
+        };
+        let mut root = Component::text("");
+        for _ in 0..2000 {
+            root = root.with(Component::text("y").styled(style.clone()));
+        }
+        let (_, spans) = flatten_events(&Lang::default(), &root);
+        assert!(spans.len() <= 256);
     }
 }

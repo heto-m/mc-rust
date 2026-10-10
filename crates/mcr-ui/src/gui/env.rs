@@ -1,0 +1,278 @@
+use mcr_protocol::types::item::ItemStack;
+use mcr_protocol::types::text::Component;
+
+use super::assets::ScreenAssets;
+use super::tooltip::TooltipLines;
+use crate::items::{ItemIcons, StackView};
+use crate::sprites::SpriteId;
+use crate::ui::UiFrame;
+
+pub trait Clipboard {
+    fn get(&mut self) -> String;
+    fn set(&mut self, text: &str);
+}
+
+#[derive(Debug, Default)]
+pub struct MemoryClipboard(pub String);
+
+impl Clipboard for MemoryClipboard {
+    fn get(&mut self) -> String {
+        self.0.clone()
+    }
+
+    fn set(&mut self, text: &str) {
+        self.0 = text.to_owned();
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TradeOffer {
+    pub base_cost_a: ItemStack,
+    pub cost_a: ItemStack,
+    pub cost_b: ItemStack,
+    pub result: ItemStack,
+    pub out_of_stock: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MerchantInfo {
+    pub offers: Vec<TradeOffer>,
+    pub level: i32,
+    pub xp: i32,
+    pub future_xp: i32,
+    pub show_progress: bool,
+    pub can_restock: bool,
+}
+
+/// Live game state the screens read; the app implements it over its own state.
+pub trait GameView {
+    fn slot(&self, _index: usize) -> Option<&ItemStack> {
+        None
+    }
+
+    fn carried(&self) -> Option<&ItemStack> {
+        None
+    }
+
+    /// Container data property `index` (furnace progress, enchant costs, beacon levels, ...).
+    fn data(&self, _index: usize) -> i32 {
+        0
+    }
+
+    fn creative(&self) -> bool {
+        false
+    }
+
+    fn spectator(&self) -> bool {
+        false
+    }
+
+    fn xp_level(&self) -> i32 {
+        0
+    }
+
+    fn merchant(&self) -> Option<&MerchantInfo> {
+        None
+    }
+
+    fn stonecutter_options(&self) -> &[ItemStack] {
+        &[]
+    }
+
+    fn loom_pattern_count(&self) -> usize {
+        0
+    }
+
+    fn book_pages(&self) -> &[Component] {
+        &[]
+    }
+
+    fn enchant_clue(&self, _option: usize) -> Option<(String, i32)> {
+        None
+    }
+
+    fn item_tooltip(&self, _stack: &ItemStack) -> Option<TooltipLines> {
+        None
+    }
+
+    fn trim_materials(&self) -> &[String] {
+        &[]
+    }
+
+    fn score(&self) -> i32 {
+        0
+    }
+
+    fn hardcore(&self) -> bool {
+        false
+    }
+
+    fn single_player(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct NoView;
+
+impl GameView for NoView {}
+
+pub fn is_empty(stack: Option<&ItemStack>) -> bool {
+    stack.is_none_or(ItemStack::is_empty)
+}
+
+impl std::fmt::Debug for Env<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Env").field("now_ms", &self.now_ms).finish()
+    }
+}
+
+impl std::fmt::Debug for RenderCx<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RenderCx")
+            .field("mouse", &self.mouse)
+            .finish()
+    }
+}
+
+pub struct Env<'a> {
+    pub view: &'a dyn GameView,
+    pub clipboard: &'a mut dyn Clipboard,
+    pub now_ms: u64,
+}
+
+pub struct RenderCx<'a, 'f> {
+    pub frame: &'a mut UiFrame<'f>,
+    pub icons: &'a mut ItemIcons,
+    pub assets: &'a ScreenAssets,
+    pub view: &'a dyn GameView,
+    pub mouse: (f32, f32),
+    pub now_ms: u64,
+    pub tooltip: Option<(TooltipLines, f32, f32)>,
+}
+
+impl<'a, 'f> RenderCx<'a, 'f> {
+    pub fn new(
+        frame: &'a mut UiFrame<'f>,
+        icons: &'a mut ItemIcons,
+        assets: &'a ScreenAssets,
+        view: &'a dyn GameView,
+    ) -> Self {
+        Self {
+            frame,
+            icons,
+            assets,
+            view,
+            mouse: (0.0, 0.0),
+            now_ms: 0,
+            tooltip: None,
+        }
+    }
+
+    pub fn gui_size(&self) -> (i32, i32) {
+        self.frame.gui_size()
+    }
+
+    pub fn sprite(&mut self, name: &str, x: i32, y: i32, w: i32, h: i32) {
+        if let Some(id) = self.sprite_id(name) {
+            self.frame.sprite(id, x, y, w, h);
+        }
+    }
+
+    /// A GUI sprite, falling back to the whole-image textures such as mob effect icons.
+    pub fn sprite_id(&mut self, name: &str) -> Option<SpriteId> {
+        self.frame
+            .ui()
+            .sprite_id(name)
+            .or_else(|| self.assets.texture(name))
+    }
+
+    pub fn texture(&mut self, name: &str, (u, v): (i32, i32), rect: (i32, i32, i32, i32)) {
+        if let Some(id) = self.assets.texture(name) {
+            self.frame.sprite_region(id, (u, v), rect);
+        }
+    }
+
+    pub fn text_width(&mut self, text: &str) -> i32 {
+        self.frame.ui().text_width(text).ceil() as i32
+    }
+
+    pub fn text(&mut self, text: &str, x: i32, y: i32, argb: u32, shadow: bool) {
+        self.frame.text(text, x as f32, y as f32, argb, shadow);
+    }
+
+    pub fn centered_text(&mut self, text: &str, cx: i32, y: i32, argb: u32, shadow: bool) {
+        let w = self.frame.ui().text_width(text);
+        self.frame
+            .text(text, (cx as f32 - w / 2.0).floor(), y as f32, argb, shadow);
+    }
+
+    pub fn lang(&mut self, key: &str) -> String {
+        self.frame
+            .ui()
+            .lang()
+            .get(key)
+            .map_or_else(|| key.to_owned(), str::to_owned)
+    }
+
+    pub fn lang_fmt(&mut self, key: &str, args: &[&str]) -> String {
+        let mut out = self.lang(key);
+        for (i, arg) in args.iter().enumerate() {
+            out = out
+                .replace(&format!("%{}$s", i + 1), arg)
+                .replace(&format!("%{}$d", i + 1), arg);
+        }
+        for arg in args {
+            if let Some(pos) = out.find("%s").or_else(|| out.find("%d")) {
+                out.replace_range(pos..pos + 2, arg);
+            }
+        }
+        out
+    }
+
+    pub fn stack(&mut self, stack: &ItemStack, x: i32, y: i32) {
+        let Some(view) = StackView::new(stack) else {
+            return;
+        };
+        let view = view.with_trim_materials(self.view.trim_materials());
+        let item = view.view(0.0);
+        self.icons.draw_with_decorations(self.frame, &item, x, y);
+    }
+
+    pub fn stack_opt(&mut self, stack: Option<&ItemStack>, x: i32, y: i32) {
+        if let Some(stack) = stack {
+            self.stack(stack, x, y);
+        }
+    }
+
+    pub fn item_tooltip(&mut self, stack: &ItemStack) -> TooltipLines {
+        if let Some(lines) = self.view.item_tooltip(stack) {
+            return lines;
+        }
+        let mut lines = TooltipLines::default();
+        if let Some(view) = StackView::new(stack) {
+            let name = view
+                .name()
+                .strip_prefix("minecraft:")
+                .unwrap_or(view.name());
+            let ui = self.frame.ui();
+            let text = ["item", "block"]
+                .iter()
+                .find_map(|kind| ui.lang().get(&format!("{kind}.minecraft.{name}")))
+                .map_or_else(|| name.to_owned(), str::to_owned);
+            lines.push_text(text);
+        }
+        lines
+    }
+
+    pub fn set_tooltip(&mut self, lines: TooltipLines) {
+        let (x, y) = self.mouse;
+        self.tooltip = Some((lines, x, y));
+    }
+
+    pub fn finish(&mut self) {
+        if let Some((lines, x, y)) = self.tooltip.take() {
+            super::tooltip::draw_tooltip(self, &lines, x as i32, y as i32);
+        }
+    }
+}

@@ -194,6 +194,7 @@ impl Ui {
             gui_height: height.div_ceil(scale) as i32,
             scale,
             scissors: Vec::new(),
+            text_xf: None,
             ui: self,
         }
     }
@@ -206,6 +207,7 @@ pub struct UiFrame<'a> {
     gui_width: i32,
     gui_height: i32,
     scissors: Vec<[i32; 4]>,
+    text_xf: Option<(f32, f32, f32)>,
 }
 
 fn color_bytes(argb: u32) -> [u8; 4] {
@@ -354,6 +356,51 @@ impl UiFrame<'_> {
         self.cells(&cells, x, y, argb, shadow)
     }
 
+    /// Draws text scaled around `(x, y)`; returns the scaled width.
+    pub fn cells_scaled(
+        &mut self,
+        cells: &[Cell],
+        x: f32,
+        y: f32,
+        argb: u32,
+        shadow: bool,
+        scale: f32,
+    ) -> f32 {
+        self.text_xf = Some((x, y, scale));
+        let width = self.cells(cells, x, y, argb, shadow);
+        self.text_xf = None;
+        width * scale
+    }
+
+    fn xf(&self, p: [f32; 2]) -> [f32; 2] {
+        match self.text_xf {
+            Some((ox, oy, s)) => [ox + (p[0] - ox) * s, oy + (p[1] - oy) * s],
+            None => p,
+        }
+    }
+
+    /// Vertical gradient from `top` to `bottom` (ARGB), drawn as thin strips.
+    pub fn fill_gradient(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, top: u32, bottom: u32) {
+        let height = y1 - y0;
+        if height <= 0 || x1 <= x0 {
+            return;
+        }
+        let strips = height.min(32);
+        for i in 0..strips {
+            let (a, b) = (y0 + height * i / strips, y0 + height * (i + 1) / strips);
+            let t = (i as f32 + 0.5) / strips as f32;
+            let lerp = |shift: u32| {
+                let (p, q) = (
+                    ((top >> shift) & 0xFF) as f32,
+                    ((bottom >> shift) & 0xFF) as f32,
+                );
+                ((p + (q - p) * t).round() as u32) << shift
+            };
+            let color = lerp(24) | lerp(16) | lerp(8) | lerp(0);
+            self.fill_rect(x0, a, x1, b, color);
+        }
+    }
+
     pub fn component(
         &mut self,
         component: &Component,
@@ -455,13 +502,10 @@ impl UiFrame<'_> {
                     x1 + offset,
                     y + bottom + offset,
                 ];
-                self.ui.batch.push(
-                    page,
-                    scissor,
-                    rect_corners(rect),
-                    [w; 4],
-                    color_bytes(color),
-                );
+                let corners = rect_corners(rect).map(|c| self.xf(c));
+                self.ui
+                    .batch
+                    .push(page, scissor, corners, [w; 4], color_bytes(color));
             }
         }
     }
@@ -483,6 +527,7 @@ impl UiFrame<'_> {
             [x1 + shear_bottom + extra, y1 + extra],
             [x1 + shear_top + extra, y0 - extra],
         ];
+        let corners = corners.map(|c| self.xf(c));
         let scissor = self.scissor_px();
         let page = PageRef {
             kind: PageKind::Glyph,
