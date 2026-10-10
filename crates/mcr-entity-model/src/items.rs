@@ -43,6 +43,7 @@ struct Key {
     dyed: i32,
     model_hash: u64,
     context: ItemContext,
+    using: u8,
 }
 
 #[derive(Debug)]
@@ -174,6 +175,8 @@ fn display_context(c: ItemContext) -> DisplayContext {
     match c {
         ItemContext::RightHand => DisplayContext::ThirdPersonRightHand,
         ItemContext::LeftHand => DisplayContext::ThirdPersonLeftHand,
+        ItemContext::FirstPersonRight => DisplayContext::FirstPersonRightHand,
+        ItemContext::FirstPersonLeft => DisplayContext::FirstPersonLeftHand,
         ItemContext::Head => DisplayContext::Head,
         ItemContext::Ground => DisplayContext::Ground,
         ItemContext::Fixed => DisplayContext::Fixed,
@@ -327,12 +330,23 @@ impl ItemGeometry {
     }
 
     pub fn item(&mut self, stack: &ItemStack, context: ItemContext) -> Option<Arc<ItemGeo>> {
-        if stack.components.is_empty() {
+        self.item_using(stack, context, None)
+    }
+
+    /// Like [`Self::item`] while the holder is using the item: `(ticks used, ticks remaining)`.
+    pub fn item_using(
+        &mut self,
+        stack: &ItemStack,
+        context: ItemContext,
+        using: Option<(f32, f32)>,
+    ) -> Option<Arc<ItemGeo>> {
+        if stack.components.is_empty() && using.is_none() {
             let key = Key {
                 item: stack.item,
                 dyed: 0,
                 model_hash: 0,
                 context,
+                using: 0,
             };
             if let Some(hit) = self.cache.get(&key) {
                 return hit.clone();
@@ -361,6 +375,7 @@ impl ItemGeometry {
             dyed: props.dyed_color().map_or(0, |c| c & 0x00FF_FFFF),
             model_hash,
             context,
+            using: using.map_or(0, |(ticks, _)| 1 + ticks.clamp(0.0, 120.0) as u8),
         };
         if let Some(hit) = self.cache.get(&key) {
             return hit.clone();
@@ -370,6 +385,9 @@ impl ItemGeometry {
         }
         let ctx = AssetCtx {
             display: display_context(context),
+            using_item: using.is_some(),
+            ticks_using_item: using.map_or(0.0, |u| u.0),
+            use_remaining_ticks: using.map_or(0.0, |u| u.1),
             ..AssetCtx::default()
         };
         let layers = self
@@ -429,7 +447,10 @@ impl ItemGeometry {
 
     fn build(&mut self, layers: &[ItemLayer], context: ItemContext) -> Option<ItemGeo> {
         let mut geo = ItemGeo::default();
-        let left = context == ItemContext::LeftHand;
+        let left = matches!(
+            context,
+            ItemContext::LeftHand | ItemContext::FirstPersonLeft
+        );
         let mut min_y = f32::MAX;
         let mut ground_scale = 1.0f32;
         for layer in layers {
@@ -532,6 +553,7 @@ mod cache_tests {
     #[test]
     fn hostile_variants_collapse_into_few_keys() {
         let key = |dyed: i32| Key {
+            using: 0,
             item: 1,
             dyed: dyed & 0x00FF_FFFF,
             model_hash: 0,

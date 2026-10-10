@@ -112,6 +112,9 @@ pub enum ClientEvent {
         particle: Particle,
         pos: [f64; 3],
         count: i32,
+        delta: [f32; 3],
+        speed: [f32; 3],
+        always_show: bool,
     },
     LevelEvent {
         event: i32,

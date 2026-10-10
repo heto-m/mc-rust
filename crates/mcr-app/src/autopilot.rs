@@ -12,6 +12,8 @@ pub enum Step {
     WaitReady,
     Hold(Vec<InputKey>, u32),
     Tap(InputKey),
+    Press(Vec<InputKey>),
+    Release(Vec<InputKey>),
     Look { yaw: f32, pitch: f32 },
     Turn { yaw: f32, pitch: f32 },
     Chat(String),
@@ -65,6 +67,17 @@ pub fn parse(text: &str) -> Result<Vec<Step>, String> {
                     .map(|k| key_by_name(k.trim()).ok_or_else(|| err("unknown key")))
                     .collect::<Result<Vec<_>, _>>()?;
                 Step::Hold(keys, ticks.trim().parse().map_err(|_| err("bad ticks"))?)
+            }
+            "press" | "release" => {
+                let keys = rest
+                    .split('+')
+                    .map(|k| key_by_name(k.trim()).ok_or_else(|| err("unknown key")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if cmd == "press" {
+                    Step::Press(keys)
+                } else {
+                    Step::Release(keys)
+                }
             }
             "tap" => Step::Tap(key_by_name(rest).ok_or_else(|| err("unknown key"))?),
             "look" | "turn" => {
@@ -172,6 +185,16 @@ impl Autopilot {
                     self.holding = keys;
                     self.waiting = ticks.max(1);
                     return;
+                }
+                Step::Press(keys) => {
+                    for key in keys {
+                        sh.key_event(key, true, None);
+                    }
+                }
+                Step::Release(keys) => {
+                    for key in keys {
+                        sh.key_event(key, false, None);
+                    }
                 }
                 Step::Tap(key) => {
                     sh.key_event(key, true, None);

@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use mcr_buf::BlockPos;
 use mcr_client::{ChatKind, Client, ClientError, ClientEvent, PlayerInput, sanitize_for_log};
+use mcr_particles::ParticleEngine;
 use mcr_physics::Pose;
 use mcr_protocol::play::serverbound::Facing;
 use mcr_protocol::types::game::Hand;
@@ -18,12 +19,17 @@ use mcr_ui::{
 use crate::assets::Assets;
 use crate::audio::{Audio, BlockSound, wire_category};
 use crate::debug::{self, DebugInput};
+use crate::effects::{self, WorldEffects};
+use crate::entities::{Cull, EntityLayer, FrameCtx, LocalSample};
 use crate::gui::{self, Gui};
+use crate::hand::{Hand as HeldHand, HandFrame, HandTick};
 use crate::hud::{Hud, HudInput};
 use crate::input::{KEY_ESCAPE, KEY_LEFT_CTRL, track_modifiers, ui_inputs};
 use crate::mesh_world::MeshWorld;
+use crate::nametags::{self, TagParams};
 use crate::net_world::NetworkWorld;
 use crate::outline::{OutlineRenderer, WorldBox};
+use crate::preview::Preview;
 use crate::render_system::{PipelineStats, RenderSystem};
 use crate::settings::{OptionsScreen, SharedSettings};
 use crate::target::{BlockHit, Target, pick, raycast_block, reach};
@@ -119,29 +125,70 @@ struct FrameOverlay<'a> {
     outline: &'a OutlineRenderer,
     ui_renderer: &'a mut UiRenderer,
     ui: &'a mut Ui,
+    entities: Option<&'a EntityLayer>,
+    hand: Option<&'a HeldHand>,
+    preview: Option<&'a Preview>,
+    particles: &'a mut ParticleEngine,
+    env: &'a Environment,
+    partial: f32,
 }
 
 impl Overlay for FrameOverlay<'_> {
     fn record(&mut self, ctx: &mut OverlayCtx<'_>) {
         self.outline.record(ctx);
+        if let Some(entities) = self.entities {
+            let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("entities"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: ctx.color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: ctx.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            entities.draw(&mut pass);
+        }
+        self.particles.record(ctx, self.partial, self.env);
+        if let Some(hand) = self.hand {
+            hand.record(ctx);
+        }
         self.ui_renderer.prepare(ctx.device, ctx.queue, self.ui);
-        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("ui"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: ctx.color,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        self.ui_renderer.draw(&mut pass);
+        {
+            let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ui"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: ctx.color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.ui_renderer.draw(&mut pass);
+        }
+        if let Some(preview) = self.preview {
+            preview.record(ctx);
+        }
     }
 }
 
@@ -170,6 +217,11 @@ pub struct Play {
     gui: Gui,
     hud: Hud,
     outline: OutlineRenderer,
+    entities: Option<EntityLayer>,
+    hand: Option<HeldHand>,
+    preview: Option<Preview>,
+    effects: WorldEffects,
+    player_inventory: bool,
     settings: SharedSettings,
     settings_seen: u64,
     stack: ScreenStack,
@@ -255,6 +307,19 @@ impl Play {
         let world = NetworkWorld::new(client, render_distance);
         let format = renderer.target_format();
         let outline = OutlineRenderer::new(renderer.device(), format);
+        let scene_assets = assets.scene.clone();
+        let mut effects = WorldEffects::new(assets.clone());
+        effects.set_options(&options);
+        let mut renderer = renderer;
+        renderer.set_effect_assets(&effects::effect_assets(&assets));
+        let (entities, hand, preview) = match scene_assets {
+            Some(sa) => (
+                EntityLayer::new(renderer.device(), renderer.queue(), format, sa.clone()),
+                HeldHand::new(renderer.device(), renderer.queue(), format, sa.clone()),
+                Preview::new(renderer.device(), renderer.queue(), format, sa),
+            ),
+            None => (None, None, None),
+        };
         let render = RenderSystem::new(renderer, assets, &world);
         let now = Instant::now();
         Self {
@@ -263,6 +328,11 @@ impl Play {
             gui,
             hud,
             outline,
+            entities,
+            hand,
+            preview,
+            effects,
+            player_inventory: false,
             settings,
             settings_seen: seen,
             stack: ScreenStack::new(0, 0),
@@ -424,6 +494,7 @@ impl Play {
         for event in self.world.take_events() {
             self.on_event(event);
         }
+        self.tick_visuals();
         if self.world.client.state.player.loaded && self.closed.is_none() {
             self.target = self.pick_from(self.cur_eye);
             self.gameplay();
@@ -433,6 +504,48 @@ impl Play {
         self.screens_tick();
         if let Some(audio) = &mut self.audio {
             audio.set_listener(self.cur_eye, self.yaw);
+        }
+    }
+
+    fn tick_visuals(&mut self) {
+        let state = &self.world.client.state;
+        let sample = LocalSample {
+            feet: state.player.pos(),
+            yaw: self.yaw,
+            pitch: self.pitch,
+            dead: state.player.dead,
+        };
+        if let Some(entities) = &mut self.entities {
+            entities.tick(state, sample);
+        }
+        if let Some(hand) = &mut self.hand {
+            let server_using = matches!(
+                state.player.data.get(&8),
+                Some(mcr_protocol::types::entity_data::EntityDataValue::Byte(f)) if f & 1 != 0
+            );
+            hand.tick(&HandTick {
+                state,
+                yaw: self.yaw,
+                pitch: self.pitch,
+                local_using: self.using_item,
+                server_using,
+            });
+        }
+        self.effects
+            .tick(state, DVec3::from(self.cur_eye), &self.options);
+        if let (Some(dig), Some(Target::Block(hit))) = (self.dig, self.target)
+            && dig.pos == hit.pos
+        {
+            let face = match hit.face {
+                Facing::Down => 0,
+                Facing::Up => 1,
+                Facing::North => 2,
+                Facing::South => 3,
+                Facing::West => 4,
+                Facing::East => 5,
+            };
+            self.effects
+                .block_crack(&self.world.client.state, hit.pos, face, hit.state as i32);
         }
     }
 
@@ -470,7 +583,36 @@ impl Play {
     }
 
     fn on_event(&mut self, event: ClientEvent) {
+        let local_id = self.world.client.state.player.entity_id;
+        if let Some(entities) = &mut self.entities {
+            entities.on_event(&event, local_id);
+        }
         match event {
+            ClientEvent::EntityAdded(id) => {
+                self.effects.on_entity_added(&self.world.client.state, id);
+            }
+            ClientEvent::Particle {
+                particle,
+                pos,
+                count,
+                delta,
+                speed,
+                always_show,
+            } => self
+                .effects
+                .emit(&particle, pos, delta, speed, count, always_show),
+            ClientEvent::BlockDestruction {
+                entity_id,
+                pos,
+                progress,
+            } => self.effects.destruction(entity_id, pos, progress),
+            ClientEvent::Explosion { center, .. } => self.effects.explosion(center),
+            ClientEvent::Respawned => {
+                self.effects.clear();
+                if let Some(entities) = &mut self.entities {
+                    entities.clear();
+                }
+            }
             ClientEvent::Chat { kind, message, .. } => {
                 println!("chat: {}", sanitize_for_log(&message.to_plain_string()));
                 if kind == ChatKind::ActionBar {
@@ -549,6 +691,8 @@ impl Play {
                 data,
                 ..
             } => {
+                self.effects
+                    .block_break(&self.world.client.state, pos, data);
                 if let (Ok(state), Some(audio)) = (u32::try_from(data), &mut self.audio) {
                     audio.play_block(state, BlockSound::Break, center(pos));
                 }
@@ -569,6 +713,9 @@ impl Play {
     }
 
     fn swing(&mut self) {
+        if let Some(hand) = &mut self.hand {
+            hand.swing();
+        }
         self.net(Client::swing);
     }
 
@@ -612,10 +759,21 @@ impl Play {
                 if click {
                     self.net(|c| c.attack(id));
                     self.swing();
+                    if let Some(hand) = &mut self.hand {
+                        hand.reset_attack_strength();
+                    }
                 }
             }
             Some(Target::Block(hit)) => self.mine(hit, click),
-            None => self.abort_dig(),
+            None => {
+                self.abort_dig();
+                if click {
+                    self.swing();
+                    if let Some(hand) = &mut self.hand {
+                        hand.reset_attack_strength();
+                    }
+                }
+            }
         }
     }
 
@@ -927,6 +1085,7 @@ impl Play {
         if !self.busy() {
             self.push_screen(Box::new(ContainerScreen::player_inventory()));
             self.container_open = true;
+            self.player_inventory = true;
         }
     }
 
@@ -1197,24 +1356,6 @@ impl Play {
         camera
     }
 
-    fn environment(&self, render_distance: i32) -> Environment {
-        let state = &self.world.client.state;
-        let mut env = match state.dimension.name.as_str() {
-            "minecraft:the_nether" => Environment::nether(),
-            "minecraft:overworld" => {
-                let w = &state.world;
-                Environment::overworld(
-                    w.day_time().unwrap_or(6000).max(0) as u64,
-                    w.rain_level,
-                    w.thunder_level,
-                )
-            }
-            _ => Environment::default(),
-        };
-        env.set_render_distance_chunks(render_distance.max(2) as u32);
-        env
-    }
-
     pub fn frame(&mut self) -> Option<FrameStats> {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32().max(1.0e-6);
@@ -1236,6 +1377,15 @@ impl Play {
         let size = self.render.renderer.size();
         let boxes = self.outline_boxes();
         self.outline.build(&boxes, &camera, size);
+
+        let partial = self.partial();
+        let aspect = size.0 as f32 / size.1.max(1) as f32;
+        let env = effects::environment(
+            &self.world.client.state,
+            self.world.render_distance(),
+            self.effects.flash(),
+        );
+        self.prepare_visuals(&camera, partial, aspect, &env);
 
         self.update_gui_size();
         let chat_open = self.chat_open();
@@ -1274,6 +1424,29 @@ impl Play {
             };
             let max_scale = u32::try_from(self.options.gui_scale).unwrap_or(0);
             let mut frame = self.gui.ui.frame_scaled(size.0, size.1, max_scale);
+            if let Some(layer) = &self.entities {
+                let crosshair = match self.target {
+                    Some(Target::Entity { id, .. }) => Some(id),
+                    _ => None,
+                };
+                let tags = nametags::collect(
+                    layer,
+                    &self.world.client.state,
+                    camera.position.to_array(),
+                    partial,
+                    crosshair,
+                );
+                nametags::draw(
+                    &mut frame,
+                    &tags,
+                    &TagParams {
+                        camera: &camera,
+                        framebuffer: size,
+                        opacity: self.options.text_background_opacity,
+                        state: &self.world.client.state,
+                    },
+                );
+            }
             self.hud.draw(&mut frame, &mut self.gui.icons, &input);
             if !self.stack.is_empty() {
                 let mut cx =
@@ -1284,15 +1457,108 @@ impl Play {
             }
         }
 
-        let env = self.environment(self.world.render_distance());
         self.render.renderer.set_environment(&env);
         self.render.renderer.set_animation_tick(self.ticks);
         let mut overlay = FrameOverlay {
             outline: &self.outline,
             ui_renderer: &mut self.gui.ui_renderer,
             ui: &mut self.gui.ui,
+            entities: self.entities.as_ref(),
+            hand: self.hand.as_ref(),
+            preview: self.preview.as_ref(),
+            particles: &mut self.effects.particles,
+            env: &env,
+            partial,
         };
         self.render.draw_with(&camera, 1.0, Some(&mut overlay))
+    }
+
+    fn prepare_visuals(&mut self, camera: &Camera, partial: f32, aspect: f32, env: &Environment) {
+        let state = &self.world.client.state;
+        let sky = env.sky_factor;
+        let size = self.render.renderer.size();
+        if let Some(layer) = &mut self.entities {
+            let cull = Cull {
+                camera_pos: camera.position.to_array(),
+                frustum: camera.frustum(aspect),
+                distance_scale: self.options.entity_distance_scaling,
+            };
+            let swing = self
+                .hand
+                .as_ref()
+                .map_or(0.0, |h| h.swing_progress(partial));
+            layer.update(&FrameCtx {
+                state,
+                partial,
+                cull: &cull,
+                show_local: self.perspective != Perspective::First,
+                local_swing: swing,
+                local_using: self.using_item,
+            });
+            let params = layer.frame_params(camera, aspect, sky);
+            layer.scene.prepare(&params);
+        }
+        if let Some(hand) = &mut self.hand {
+            let eye = self.cur_eye;
+            let frame = HandFrame {
+                state,
+                options: &self.options,
+                partial,
+                aspect,
+                pitch: self.pitch,
+                yaw: self.yaw,
+                sky_brightness: sky,
+                light: crate::entities::light_at(
+                    &state.chunks,
+                    [eye[0], eye[1] - 0.9, eye[2]],
+                    1.8,
+                ),
+                invisible: false,
+            };
+            let visible = self.perspective == Perspective::First
+                && !self.hud_hidden
+                && state.player.game_mode != mcr_protocol::types::game::GameType::Spectator;
+            if visible {
+                hand.prepare(&frame);
+                hand.upload(&frame);
+            } else {
+                hand.hide();
+            }
+        }
+        if self.stack.is_empty() {
+            self.player_inventory = false;
+        }
+        let rect = self
+            .stack
+            .top()
+            .and_then(|s| s.entity_rect())
+            .filter(|_| self.player_inventory);
+        let (_, scale) = gui::gui_size(size, self.options.gui_scale);
+        match (&mut self.preview, &mut self.entities, rect) {
+            (Some(preview), Some(layer), Some(rect)) => {
+                let view = layer.local_view(state);
+                preview.prepare(view, &state.registries, rect, scale, self.mouse, size);
+            }
+            (Some(preview), _, _) => preview.hide(),
+            _ => {}
+        }
+        self.render
+            .renderer
+            .set_effect_time(state.world.game_time.max(0) as u64, partial);
+        self.render
+            .renderer
+            .set_cloud_settings(effects::cloud_settings(&self.options));
+        if env.rain_level > 0.0 {
+            let radius = self.options.weather_radius.clamp(3, 10) as u32;
+            let source = self.effects.weather(state);
+            self.render.renderer.update_weather(camera, radius, &source);
+        }
+        let own = self
+            .dig
+            .map(|d| (d.pos, (d.progress * 10 / d.total.max(1)).min(9) as u8));
+        let decals = self.effects.decals(state, own);
+        self.render.renderer.set_destroy_decals(&decals);
+        self.effects.particles.set_camera(camera.position);
     }
 
     fn outline_boxes(&self) -> Vec<WorldBox> {

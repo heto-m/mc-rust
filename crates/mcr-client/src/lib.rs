@@ -42,7 +42,9 @@ pub use events::{ChatKind, ClientEvent, DisconnectReason, sanitize_for_log};
 pub use gamestate::{
     Advancements, GameplayState, MapData, Merchant, RecipeBook, SignEditor, Waypoints,
 };
-pub use inventory::{Container, Inventory, OUTSIDE_SLOT, PLAYER_MENU_ID};
+pub use inventory::{
+    Container, Inventory, OUTSIDE_SLOT, PLAYER_MENU_ID, inventory_index_to_menu_slot,
+};
 pub use mcr_physics::PlayerInput;
 pub use player::LocalPlayer;
 pub use registry::{Dimension, Registries, Registry, RegistryItem};

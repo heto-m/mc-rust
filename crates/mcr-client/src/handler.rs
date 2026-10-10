@@ -211,6 +211,9 @@ impl ClientState {
                 particle: p.particle,
                 pos: [p.x, p.y, p.z],
                 count: p.count,
+                delta: [p.x_dist, p.y_dist, p.z_dist],
+                speed: [p.x_max_speed, p.y_max_speed, p.z_max_speed],
+                always_show: p.always_show,
             }),
             P::Sound(p) => out.event(ClientEvent::Sound {
                 sound: p.sound,

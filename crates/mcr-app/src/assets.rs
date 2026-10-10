@@ -3,10 +3,13 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use mcr_assets::ResourceManager;
+use mcr_entity_model::SceneAssets;
 use mcr_mesh::{BiomeColors, ColorMaps, ModelCache};
 
 pub struct Assets {
     pub cache: Arc<ModelCache>,
+    pub resources: Arc<ResourceManager>,
+    pub scene: Option<Arc<SceneAssets>>,
     maps: ColorMaps,
     biome_dir: PathBuf,
 }
@@ -31,14 +34,29 @@ impl Assets {
                 cache.unbaked_states
             );
         }
+        let resources = Arc::new(resources);
+        let extracted = jar.parent().unwrap_or(Path::new(".")).join("extracted");
+        let scene = match SceneAssets::load(resources.clone(), &extracted) {
+            Ok(s) => Some(Arc::new(s)),
+            Err(e) => {
+                eprintln!("assets: entity models unavailable: {e}");
+                None
+            }
+        };
         Ok(Self {
             cache: Arc::new(cache),
             maps: ColorMaps::load(&resources),
+            resources,
+            scene,
             biome_dir: jar
                 .parent()
                 .unwrap_or(Path::new("."))
                 .join("generated/data/minecraft/worldgen/biome"),
         })
+    }
+
+    pub fn read(&self, path: &str) -> Option<Vec<u8>> {
+        self.resources.read(path).ok().flatten()
     }
 
     pub fn biome_colors(&self, names: &[String]) -> Arc<BiomeColors> {

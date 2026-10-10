@@ -6,6 +6,7 @@ mod data;
 mod effects;
 mod equipment;
 mod extras;
+mod first_person;
 mod gpu;
 mod hands;
 mod humanoids;

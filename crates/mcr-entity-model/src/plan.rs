@@ -127,6 +127,8 @@ pub enum AttachKind {
 pub enum ItemContext {
     RightHand,
     LeftHand,
+    FirstPersonRight,
+    FirstPersonLeft,
     Head,
     Ground,
     Fixed,

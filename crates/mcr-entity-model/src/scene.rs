@@ -17,11 +17,11 @@ use crate::texcache::TextureCache;
 use crate::view::{EntityView, Registries};
 
 #[derive(Debug)]
-struct ModelEntry {
-    id: ModelId,
-    model: Model,
-    binding: Binding,
-    rest: Vec<Pose>,
+pub(crate) struct ModelEntry {
+    pub(crate) id: ModelId,
+    pub(crate) model: Model,
+    pub(crate) binding: Binding,
+    pub(crate) rest: Vec<Pose>,
 }
 
 /// A name tag the UI should draw: screen position in pixels (origin top-left) and text.
@@ -179,14 +179,14 @@ const MAX_BOLTS: usize = 64;
 
 pub struct EntityScene {
     pub(crate) gpu: EntityRenderer,
-    assets: Arc<SceneAssets>,
-    models: Vec<ModelEntry>,
+    pub(crate) assets: Arc<SceneAssets>,
+    pub(crate) models: Vec<ModelEntry>,
     model_index: FxHashMap<Box<str>, Option<usize>>,
-    textures: TextureCache,
+    pub(crate) textures: TextureCache,
     bound: FxHashMap<(usize, &'static str), Option<BoundAnimation>>,
     quad: Option<ModelId>,
-    catalog: Catalog,
-    items: ItemGeometry,
+    pub(crate) catalog: Catalog,
+    pub(crate) items: ItemGeometry,
     jobs: Vec<Job>,
     camera: [f64; 3],
     billboard: Mat4,
@@ -195,7 +195,7 @@ pub struct EntityScene {
     block_top: Option<BlockTop>,
     shadows: bool,
     tags: Vec<TagSource>,
-    stats: SceneStats,
+    pub(crate) stats: SceneStats,
 }
 
 pub const MODEL_SCALE: f32 = 1.0 / 16.0;
@@ -272,7 +272,7 @@ impl EntityScene {
         self.textures.replace(key, image);
     }
 
-    fn model_entry(&mut self, layer: &str) -> Option<usize> {
+    pub(crate) fn model_entry(&mut self, layer: &str) -> Option<usize> {
         if let Some(hit) = self.model_index.get(layer) {
             return *hit;
         }
@@ -300,6 +300,33 @@ impl EntityScene {
         &mut self,
         registries: &dyn Registries,
         entities: impl Iterator<Item = EntityView<'a>>,
+    ) {
+        let top = self.block_top.take();
+        self.update_with(
+            registries,
+            entities,
+            top.as_deref()
+                .map(|f| f as &dyn Fn(i32, i32, i32) -> Option<f32>),
+        );
+        self.block_top = top;
+    }
+
+    /// Like [`Self::update`] with a borrowed ground lookup, for callers whose world cannot be
+    /// moved into a [`BlockTop`].
+    pub fn update_grounded<'a>(
+        &mut self,
+        registries: &dyn Registries,
+        entities: impl Iterator<Item = EntityView<'a>>,
+        block_top: &dyn Fn(i32, i32, i32) -> Option<f32>,
+    ) {
+        self.update_with(registries, entities, Some(block_top));
+    }
+
+    fn update_with<'a>(
+        &mut self,
+        registries: &dyn Registries,
+        entities: impl Iterator<Item = EntityView<'a>>,
+        block_top: Option<&dyn Fn(i32, i32, i32) -> Option<f32>>,
     ) {
         self.gpu.begin_frame();
         self.items.begin_frame();
@@ -348,7 +375,7 @@ impl EntityScene {
             }
         }
         for (job, view) in jobs_slice.iter().zip(&views) {
-            self.finish(view, job, base);
+            self.finish(view, job, base, block_top);
         }
         self.jobs = jobs;
     }
@@ -415,7 +442,13 @@ impl EntityScene {
         }
     }
 
-    fn finish(&mut self, v: &EntityView<'_>, job: &Job, base: u32) {
+    fn finish(
+        &mut self,
+        v: &EntityView<'_>,
+        job: &Job,
+        base: u32,
+        block_top: Option<&dyn Fn(i32, i32, i32) -> Option<f32>>,
+    ) {
         let plan = &job.plan;
         let hurt = v.hurt || v.death_time > 0.0;
         for pj in &job.parts {
@@ -442,7 +475,7 @@ impl EntityScene {
             self.emit_attachments(v, plan, job, bm);
         }
         self.emit_free(v, plan);
-        self.emit_shadow(v, plan);
+        self.emit_shadow(v, plan, block_top);
         if let Some(name) = v.custom_name {
             let height = mcr_data::v26_3()
                 .entity_type_info(v.type_id as u32)
@@ -499,15 +532,17 @@ impl EntityScene {
                 .is_some_and(crate::equipment::has_glint),
                 AttachKind::Block { .. } => false,
             };
-            self.push_geo(&geo, frame, v, glint);
+            self.push_geo(&geo, frame, v.light, v.pos, v.age_ticks, glint);
         }
     }
 
-    fn push_geo(
+    pub(crate) fn push_geo(
         &mut self,
         geo: &crate::items::ItemGeo,
         matrix: Mat4,
-        v: &EntityView<'_>,
+        light: [u8; 2],
+        origin: [f64; 3],
+        age_ticks: f32,
         glint: bool,
     ) {
         for part in &geo.parts {
@@ -527,10 +562,10 @@ impl EntityScene {
                 tint: part.tint,
                 hurt: false,
                 fullbright: false,
-                block_light: v.light[0],
-                sky_light: v.light[1],
+                block_light: light[0],
+                sky_light: light[1],
                 uv_offset: [0.0; 2],
-                origin: v.pos,
+                origin,
             });
             self.stats.parts += 1;
             if glint {
@@ -549,10 +584,10 @@ impl EntityScene {
                     tint: [160, 100, 255, 150],
                     hurt: false,
                     fullbright: true,
-                    block_light: v.light[0],
-                    sky_light: v.light[1],
-                    uv_offset: glint_scroll(v.age_ticks),
-                    origin: v.pos,
+                    block_light: light[0],
+                    sky_light: light[1],
+                    uv_offset: glint_scroll(age_ticks),
+                    origin,
                 });
                 self.stats.parts += 1;
             }
@@ -578,18 +613,25 @@ impl EntityScene {
             if item.billboard {
                 m = m * self.billboard * item.post;
             }
-            self.push_geo(&geo, m, v, crate::equipment::has_glint(stack));
+            self.push_geo(
+                &geo,
+                m,
+                v.light,
+                v.pos,
+                v.age_ticks,
+                crate::equipment::has_glint(stack),
+            );
         }
         for g in &plan.free_geo {
             match g {
                 crate::plan::FreeGeo::Block { state, local } => {
                     if let Some(geo) = self.items.block(*state) {
-                        self.push_geo(&geo, *local, v, false);
+                        self.push_geo(&geo, *local, v.light, v.pos, v.age_ticks, false);
                     }
                 }
                 crate::plan::FreeGeo::Model { id, local } => {
                     if let Some(geo) = self.items.model(id) {
-                        self.push_geo(&geo, *local, v, false);
+                        self.push_geo(&geo, *local, v.light, v.pos, v.age_ticks, false);
                     }
                 }
                 crate::plan::FreeGeo::Sprite {
@@ -766,11 +808,16 @@ impl EntityScene {
         self.stats.parts += 1;
     }
 
-    fn emit_shadow(&mut self, v: &EntityView<'_>, plan: &Plan) {
+    fn emit_shadow(
+        &mut self,
+        v: &EntityView<'_>,
+        plan: &Plan,
+        top: Option<&dyn Fn(i32, i32, i32) -> Option<f32>>,
+    ) {
         if !self.shadows || v.invisible || plan.parts.is_empty() {
             return;
         }
-        let Some(top) = &self.block_top else { return };
+        let Some(top) = top else { return };
         let Some(name) = mcr_data::v26_3().entity_type_name(v.type_id as u32) else {
             return;
         };
@@ -816,7 +863,7 @@ impl EntityScene {
         );
     }
 
-    fn quad_model(&mut self) -> ModelId {
+    pub(crate) fn quad_model(&mut self) -> ModelId {
         if let Some(id) = self.quad {
             return id;
         }
