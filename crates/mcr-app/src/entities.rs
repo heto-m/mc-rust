@@ -285,6 +285,10 @@ impl EntityLayer {
         self.tracks.clear();
     }
 
+    pub fn local_death_time(&self) -> i32 {
+        self.local.death
+    }
+
     pub fn on_event(&mut self, event: &ClientEvent, local_id: i32) {
         let (id, f): (i32, Mutation) = match *event {
             ClientEvent::EntityAnimation { entity_id, action } => match action {
@@ -292,11 +296,12 @@ impl EntityLayer {
                 _ => return,
             },
             ClientEvent::EntityEvent { entity_id, event } => match event {
-                2 | 33 | 36 | 37 | 44 | 57 => (entity_id, Box::new(|t| t.hurt = HURT_TICKS)),
+                33 | 36 | 37 | 44 | 57 => (entity_id, Box::new(|t| t.hurt = HURT_TICKS)),
                 3 => (entity_id, Box::new(|t| t.death = t.death.max(1))),
                 _ => return,
             },
-            ClientEvent::EntityDamaged { entity_id, .. } => {
+            ClientEvent::EntityDamaged { entity_id, .. }
+            | ClientEvent::EntityHurt { entity_id } => {
                 (entity_id, Box::new(|t| t.hurt = HURT_TICKS))
             }
             _ => return,
@@ -330,6 +335,7 @@ impl EntityLayer {
         }
         self.local
             .advance(local.feet, local.yaw, local.yaw, local.pitch, local.dead);
+        self.local.hurt = state.player.hurt_time;
     }
 
     fn refresh_local(&mut self, state: &ClientState) {

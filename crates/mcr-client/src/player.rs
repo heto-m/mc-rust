@@ -33,6 +33,14 @@ pub struct LocalPlayer {
     pub loaded: bool,
     pub loaded_waited_ticks: u32,
     pub teleports_received: u32,
+    /// The server rotated the view this tick; the next physics step must not overwrite it with stale input.
+    pub view_snapped: bool,
+    pub hurt_time: i32,
+    pub hurt_duration: i32,
+    pub hurt_dir: f32,
+    pub damage_cooldown: i32,
+    /// Vanilla `flashOnSetHealth`: the first health packet after spawn never flashes.
+    pub flash_on_set_health: bool,
     pub last_teleport_id: Option<i32>,
     pub effects: FxHashMap<i32, MobEffect>,
     pub attributes: FxHashMap<i32, AttributeState>,
@@ -64,6 +72,12 @@ impl Default for LocalPlayer {
             loaded: false,
             loaded_waited_ticks: 0,
             teleports_received: 0,
+            view_snapped: false,
+            hurt_time: 0,
+            hurt_duration: 0,
+            hurt_dir: 0.0,
+            damage_cooldown: 0,
+            flash_on_set_health: false,
             last_teleport_id: None,
             effects: FxHashMap::default(),
             attributes: FxHashMap::default(),
@@ -89,6 +103,28 @@ impl LocalPlayer {
             ..Self::default()
         };
         self.apply_game_mode(game_mode);
+    }
+
+    pub fn start_hurt(&mut self) {
+        self.hurt_duration = 10;
+        self.hurt_time = self.hurt_duration;
+    }
+
+    pub fn hurt_to(&mut self, new_health: f32) {
+        if !self.flash_on_set_health {
+            self.flash_on_set_health = true;
+        } else if self.health - new_health > 0.0 {
+            self.damage_cooldown = 20;
+            self.start_hurt();
+        } else if self.health - new_health < 0.0 {
+            self.damage_cooldown = 10;
+        }
+        self.health = new_health;
+    }
+
+    pub fn tick_hurt(&mut self) {
+        self.hurt_time = (self.hurt_time - 1).max(0);
+        self.damage_cooldown = (self.damage_cooldown - 1).max(0);
     }
 
     pub fn apply_game_mode(&mut self, mode: GameType) {
@@ -208,6 +244,7 @@ impl LocalPlayer {
         let pos = [clamp(pos[0]), pos[1].clamp(-2.0e7, 2.0e7), clamp(pos[2])];
         self.physics
             .snap_to(pos, vel, yaw % 360.0, pitch.clamp(-90.0, 90.0));
+        self.view_snapped = true;
         self.placed = true;
     }
 }
@@ -228,6 +265,34 @@ mod tests {
 
     fn v(x: f64, y: f64, z: f64) -> Vec3d {
         Vec3d { x, y, z }
+    }
+
+    #[test]
+    fn first_health_packet_does_not_flash_but_damage_does() {
+        let mut p = LocalPlayer::default();
+        p.hurt_to(10.0);
+        assert_eq!((p.hurt_time, p.damage_cooldown), (0, 0));
+        p.hurt_to(6.0);
+        assert_eq!(
+            (p.hurt_time, p.hurt_duration, p.damage_cooldown),
+            (10, 10, 20)
+        );
+        p.hurt_to(8.0);
+        assert_eq!(p.damage_cooldown, 10);
+    }
+
+    #[test]
+    fn teleport_marks_view_for_the_next_physics_step() {
+        let mut p = LocalPlayer::default();
+        p.apply_teleport(
+            v(0.0, 0.0, 0.0),
+            v(0.0, 0.0, 0.0),
+            180.0,
+            30.0,
+            RelativeFlags::default(),
+        );
+        assert!(p.view_snapped);
+        assert_eq!((p.physics.yaw, p.physics.pitch), (180.0, 30.0));
     }
 
     #[test]

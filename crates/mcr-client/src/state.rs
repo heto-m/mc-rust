@@ -430,6 +430,7 @@ impl ClientState {
         };
         self.entities.tick(&mut cx);
         self.tick_pickups();
+        self.player.tick_hurt();
         self.world.tick();
     }
 

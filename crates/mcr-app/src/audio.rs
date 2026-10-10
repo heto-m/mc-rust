@@ -157,6 +157,11 @@ impl Audio {
         }
     }
 
+    pub fn play_voice(&mut self, event: &str) {
+        let pitch = (self.unit() - self.unit()) * 0.2 + 1.0;
+        self.play(event, None, 1.0, pitch, SoundSource::Players);
+    }
+
     fn unit(&mut self) -> f32 {
         self.seed = self
             .seed

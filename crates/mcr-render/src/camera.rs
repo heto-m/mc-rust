@@ -7,6 +7,8 @@ pub struct Camera {
     pub pitch: f32,
     pub fov_y: f32,
     pub near: f32,
+    /// Camera-space rotation applied after the look rotation (damage tilt, death roll).
+    pub roll: Mat4,
 }
 
 impl Default for Camera {
@@ -17,6 +19,7 @@ impl Default for Camera {
             pitch: 0.0,
             fov_y: 70f32.to_radians(),
             near: 0.05,
+            roll: Mat4::IDENTITY,
         }
     }
 }
@@ -41,7 +44,7 @@ impl Camera {
     }
 
     pub fn view_rotation(&self) -> Mat4 {
-        glam::camera::rh::view::look_to_mat4(Vec3::ZERO, self.forward(), self.up())
+        self.roll * glam::camera::rh::view::look_to_mat4(Vec3::ZERO, self.forward(), self.up())
     }
 
     pub fn projection(&self, aspect: f32) -> Mat4 {

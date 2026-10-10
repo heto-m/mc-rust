@@ -20,6 +20,58 @@ pub enum ChatKind {
     ActionBar,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DamageEffects {
+    Hurt,
+    Thorns,
+    Drowning,
+    Burning,
+    Poking,
+    Freezing,
+}
+
+impl DamageEffects {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "thorns" => Self::Thorns,
+            "drowning" => Self::Drowning,
+            "burning" => Self::Burning,
+            "poking" => Self::Poking,
+            "freezing" => Self::Freezing,
+            _ => Self::Hurt,
+        }
+    }
+
+    /// Known-pack entries arrive without their data, so vanilla's own types are resolved by name.
+    pub fn vanilla_default(path: &str) -> Self {
+        match path {
+            "campfire"
+            | "fireball"
+            | "hot_floor"
+            | "in_fire"
+            | "lava"
+            | "on_fire"
+            | "sulfur_cube_hot"
+            | "unattributed_fireball" => Self::Burning,
+            "drown" => Self::Drowning,
+            "freeze" => Self::Freezing,
+            "sweet_berry_bush" => Self::Poking,
+            "thorns" => Self::Thorns,
+            _ => Self::Hurt,
+        }
+    }
+
+    pub fn player_hurt_sound(self) -> &'static str {
+        match self {
+            Self::Hurt | Self::Thorns => "entity.player.hurt",
+            Self::Drowning => "entity.player.hurt_drown",
+            Self::Burning => "entity.player.hurt_on_fire",
+            Self::Poking => "entity.player.hurt_sweet_berry_bush",
+            Self::Freezing => "entity.player.hurt_freeze",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientEvent {
     Joined {
@@ -84,6 +136,10 @@ pub enum ClientEvent {
     EntityDamaged {
         entity_id: i32,
         source_type: i32,
+        effects: DamageEffects,
+    },
+    EntityHurt {
+        entity_id: i32,
     },
     ItemTaken {
         item_id: i32,
@@ -143,6 +199,7 @@ pub enum ClientEvent {
     PlayerTeleported {
         id: i32,
     },
+    PlayerRotated,
     HealthChanged,
     ExperienceChanged,
     GameModeChanged,
@@ -188,6 +245,14 @@ impl DisconnectReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vanilla_damage_types_pick_their_player_sounds() {
+        let sound = |t| DamageEffects::vanilla_default(t).player_hurt_sound();
+        assert_eq!(sound("on_fire"), "entity.player.hurt_on_fire");
+        assert_eq!(sound("drown"), "entity.player.hurt_drown");
+        assert_eq!(sound("fall"), "entity.player.hurt");
+    }
 
     #[test]
     fn escapes_csi_osc_and_newlines() {

@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::entity::{AttributeState, Entity, MAX_ENTITIES, MobEffect, end_of_delta, end_of_path};
 use crate::error::Result;
-use crate::events::{ChatKind, ClientEvent};
+use crate::events::{ChatKind, ClientEvent, DamageEffects};
 use crate::inventory::Inventory;
 use crate::registry::{CHAT_TYPE, Dimension};
 use crate::social::{BossBar, ChatMessage, Score};
@@ -505,14 +505,27 @@ impl ClientState {
                 entity_id: p.entity_id,
                 action: p.hand as u8,
             }),
-            P::HurtAnimation(p) => out.event(ClientEvent::EntityEvent {
-                entity_id: p.entity_id,
-                event: 2,
-            }),
-            P::DamageEvent(p) => out.event(ClientEvent::EntityDamaged {
-                entity_id: p.entity_id,
-                source_type: p.source_type,
-            }),
+            P::HurtAnimation(p) => {
+                if p.entity_id == self.player.entity_id && p.yaw.is_finite() {
+                    self.player.start_hurt();
+                    self.player.hurt_dir = p.yaw;
+                }
+                out.event(ClientEvent::EntityHurt {
+                    entity_id: p.entity_id,
+                });
+            }
+            P::DamageEvent(p) => {
+                let effects = self.damage_effects(p.source_type);
+                if p.entity_id == self.player.entity_id {
+                    self.player.start_hurt();
+                    self.player.damage_cooldown = 20;
+                }
+                out.event(ClientEvent::EntityDamaged {
+                    entity_id: p.entity_id,
+                    source_type: p.source_type,
+                    effects,
+                });
+            }
             P::TakeItemEntity(p) => self.take_item_entity(&p, out),
 
             P::PlayerPosition(p) => self.on_player_position(&p, out),
@@ -531,9 +544,11 @@ impl ClientState {
                 if yaw.is_finite() && pitch.is_finite() {
                     let (pos, vel) = (phys.pos, phys.vel);
                     phys.snap_to(pos, vel, yaw % 360.0, pitch.clamp(-90.0, 90.0));
+                    self.player.view_snapped = true;
+                    out.event(ClientEvent::PlayerRotated);
                 }
             }
-            P::PlayerLookAt(p) => self.on_look_at(&p),
+            P::PlayerLookAt(p) => self.on_look_at(&p, out),
             P::PlayerAbilities(p) => {
                 let abilities = Abilities {
                     flying: p.flying,
@@ -547,7 +562,8 @@ impl ClientState {
                 out.event(ClientEvent::AbilitiesChanged);
             }
             P::SetHealth(p) => {
-                self.player.health = if p.health.is_finite() { p.health } else { 0.0 };
+                self.player
+                    .hurt_to(if p.health.is_finite() { p.health } else { 0.0 });
                 self.player.set_food(p.food);
                 self.player.saturation = p.saturation;
                 out.event(ClientEvent::HealthChanged);
@@ -1186,7 +1202,21 @@ impl ClientState {
         out.event(ClientEvent::PlayerTeleported { id: p.id });
     }
 
-    fn on_look_at(&mut self, p: &PlayerLookAt) {
+    fn damage_effects(&self, source_type: i32) -> DamageEffects {
+        let Some(item) = self
+            .registries
+            .get("minecraft:damage_type")
+            .and_then(|r| r.get(source_type))
+        else {
+            return DamageEffects::Hurt;
+        };
+        match item.data.as_ref().and_then(|d| d.get_str("effects")) {
+            Some(name) => DamageEffects::from_name(name),
+            None => DamageEffects::vanilla_default(item.id.path()),
+        }
+    }
+
+    fn on_look_at(&mut self, p: &PlayerLookAt, out: &mut Outbox) {
         let phys = &self.player.physics;
         let eye = f64::from(phys.eye_height());
         let from = [
@@ -1230,6 +1260,8 @@ impl ClientState {
         self.player
             .physics
             .snap_to(pos, vel, yaw, pitch.clamp(-90.0, 90.0));
+        self.player.view_snapped = true;
+        out.event(ClientEvent::PlayerRotated);
     }
 
     fn on_boss_event(&mut self, id: Uuid, op: BossEventOperation, out: &mut Outbox) {

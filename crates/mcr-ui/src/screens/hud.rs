@@ -26,6 +26,10 @@ pub struct HudState {
     pub heart_kind: HeartKind,
     pub hardcore: bool,
     pub blink: bool,
+    /// Seeds vanilla's low-health jitter; `None` when the hearts hold still.
+    pub shake_tick: Option<u32>,
+    /// Container index lifted by the regeneration wave, or -1.
+    pub regen_index: i32,
     pub armor: i32,
     pub food: i32,
     pub hunger_effect: bool,
@@ -45,6 +49,8 @@ impl Default for HudState {
             heart_kind: HeartKind::Normal,
             hardcore: false,
             blink: false,
+            shake_tick: None,
+            regen_index: -1,
             armor: 0,
             food: 20,
             hunger_effect: false,
@@ -226,9 +232,16 @@ impl HudSprites {
         let containers = (max_health + 1) / 2;
         let absorption_containers = (s.absorption + 1) / 2;
         let kind = s.heart_kind as usize;
+        let mut shake = s.shake_tick.map(JavaLcg::seeded);
         for index in (0..containers + absorption_containers).rev() {
             let (row, column) = (index / 10, index % 10);
-            let (x, y) = (left + column * 8, base_y - row * row_height);
+            let (x, mut y) = (left + column * 8, base_y - row * row_height);
+            if let Some(lcg) = &mut shake {
+                y += lcg.next_bit();
+            }
+            if index < containers && index == s.regen_index {
+                y -= 2;
+            }
             if let Some(c) = self.heart_container[usize::from(s.hardcore)][usize::from(s.blink)] {
                 frame.sprite(c, x, y, 9, 9);
             }
@@ -298,5 +311,20 @@ impl HudSprites {
         if let Some(s) = self.hearts[heart_index(kind, hardcore, half, blink)] {
             frame.sprite(s, x, y, 9, 9);
         }
+    }
+}
+
+/// Java's `Random` reduced to what `nextInt(2)` needs, so the shake matches vanilla frame for frame.
+struct JavaLcg(i64);
+
+impl JavaLcg {
+    fn seeded(tick: u32) -> Self {
+        let seed = i64::from((tick as i32).wrapping_mul(312_871));
+        Self((seed ^ 0x5_DEEC_E66D) & ((1 << 48) - 1))
+    }
+
+    fn next_bit(&mut self) -> i32 {
+        self.0 = (self.0.wrapping_mul(0x5_DEEC_E66D).wrapping_add(0xB)) & ((1 << 48) - 1);
+        ((self.0 >> 17) >> 30) as i32 & 1
     }
 }

@@ -6,14 +6,16 @@ use mcr_protocol::types::game::GameType;
 use mcr_protocol::types::text::Component;
 use mcr_settings::Options;
 use mcr_ui::{
-    ChatOptions, DebugOverlay, HudItems, HudSprites, HudState, ItemIcons, SharedChat, SpriteId,
-    StackView, Ui, UiFrame,
+    ChatOptions, DebugOverlay, HeartKind, HudItems, HudSprites, HudState, ItemIcons, SharedChat,
+    SpriteId, StackView, Ui, UiFrame,
 };
 use uuid::Uuid;
 
 const MAX_AIR: i32 = 300;
 const AIR_DATA_INDEX: u8 = 1;
 const ABSORPTION_DATA_INDEX: u8 = 17;
+const FROZEN_DATA_INDEX: u8 = 7;
+const FULLY_FROZEN_TICKS: i32 = 140;
 const SIDEBAR_SLOT: u8 = 1;
 const MAX_SIDEBAR_ROWS: usize = 15;
 const MAX_TAB_ENTRIES: usize = 80;
@@ -50,6 +52,13 @@ pub struct Hud {
     pub chat: SharedChat,
     max_health_attr: Option<i32>,
     armor_attr: Option<i32>,
+    poison: Option<i32>,
+    wither: Option<i32>,
+    regeneration: Option<i32>,
+    last_health: i32,
+    display_health: i32,
+    last_health_millis: u64,
+    health_blink_tick: i64,
     title_ticks: i32,
     actionbar_ticks: i32,
 }
@@ -110,6 +119,12 @@ impl Hud {
                 .and_then(|r| r.id_of(name))
                 .and_then(|i| i32::try_from(i).ok())
         };
+        let effects = data.registry("minecraft:mob_effect");
+        let effect = |name: &str| {
+            effects
+                .and_then(|r| r.id_of(name))
+                .and_then(|i| i32::try_from(i).ok())
+        };
         Self {
             sprites: HudSprites::new(ui),
             own: Sprites {
@@ -131,6 +146,13 @@ impl Hud {
             chat: SharedChat::default(),
             max_health_attr: attribute("minecraft:max_health"),
             armor_attr: attribute("minecraft:armor"),
+            poison: effect("minecraft:poison"),
+            wither: effect("minecraft:wither"),
+            regeneration: effect("minecraft:regeneration"),
+            last_health: 0,
+            display_health: 0,
+            last_health_millis: 0,
+            health_blink_tick: 0,
             title_ticks: 0,
             actionbar_ticks: 0,
         }
@@ -226,11 +248,50 @@ impl Hud {
                 _ => 0,
             };
             let health = player.health.ceil().clamp(0.0, 2048.0) as i32;
+            let tick = i64::from(input.tick);
+            let blink =
+                self.health_blink_tick > tick && (self.health_blink_tick - tick) / 3 % 2 == 1;
+            if health < self.last_health && player.damage_cooldown > 0 {
+                self.last_health_millis = input.millis;
+                self.health_blink_tick = tick + 20;
+            } else if health > self.last_health && player.damage_cooldown > 0 {
+                self.last_health_millis = input.millis;
+                self.health_blink_tick = tick + 10;
+            }
+            if input.millis.saturating_sub(self.last_health_millis) > 1000 {
+                self.display_health = health;
+                self.last_health_millis = input.millis;
+            }
+            self.last_health = health;
+            let has = |id: Option<i32>| id.is_some_and(|id| player.effects.contains_key(&id));
+            let frozen = matches!(
+                player.data.get(&FROZEN_DATA_INDEX),
+                Some(EntityDataValue::Int(t)) if *t >= FULLY_FROZEN_TICKS
+            );
+            let heart_kind = if has(self.poison) {
+                HeartKind::Poisoned
+            } else if has(self.wither) {
+                HeartKind::Withered
+            } else if frozen {
+                HeartKind::Frozen
+            } else {
+                HeartKind::Normal
+            };
+            let regen_index = if has(self.regeneration) {
+                let span = (max_health.max(self.display_health).max(health) + 5).max(1);
+                (input.tick as i32).rem_euclid(span)
+            } else {
+                -1
+            };
             let hud = HudState {
+                blink,
+                displayed_health: self.display_health,
+                heart_kind,
+                regen_index,
+                shake_tick: (health + absorption <= 4).then_some(input.tick),
                 selected_slot: player.held_slot,
                 offhand: offhand.is_some(),
                 health,
-                displayed_health: health,
                 max_health,
                 absorption,
                 hardcore: state.world.hardcore,

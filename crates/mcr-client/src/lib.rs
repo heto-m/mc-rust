@@ -45,7 +45,7 @@ pub use commands::{CommandTree, Completion, SuggestSource};
 pub use config::{ClientConfig, OnlineAuth, ResourcePackPolicy};
 pub use entity::{AttributeState, Entities, Entity, MobEffect, SimShape};
 pub use error::{ClientError, Result};
-pub use events::{ChatKind, ClientEvent, DisconnectReason, sanitize_for_log};
+pub use events::{ChatKind, ClientEvent, DamageEffects, DisconnectReason, sanitize_for_log};
 pub use gamestate::{
     Advancements, GameplayState, MapData, Merchant, RecipeBook, SignEditor, Waypoints,
 };

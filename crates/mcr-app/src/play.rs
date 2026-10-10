@@ -8,7 +8,7 @@ use mcr_client::{
 use mcr_particles::ParticleEngine;
 use mcr_physics::Pose;
 use mcr_protocol::play::serverbound::Facing;
-use mcr_render::glam::DVec3;
+use mcr_render::glam::{DVec3, Mat4};
 use mcr_render::{Camera, Environment, FrameStats, Overlay, OverlayCtx, Renderer, wgpu};
 use mcr_settings::bindings::mapping_index;
 use mcr_settings::{HeldState, InputKey, KeyBindings, MAPPINGS, Options};
@@ -661,6 +661,21 @@ impl Play {
                 }
                 self.effects.totem(entity_id);
             }
+            ClientEvent::EntityDamaged {
+                entity_id, effects, ..
+            } if entity_id == local_id => {
+                if let Some(audio) = &mut self.audio {
+                    audio.play_voice(effects.player_hurt_sound());
+                }
+            }
+            ClientEvent::EntityEvent {
+                entity_id,
+                event: 3,
+            } if entity_id == local_id => {
+                if let Some(audio) = &mut self.audio {
+                    audio.play_voice("entity.player.death");
+                }
+            }
             ClientEvent::EntityAdded(id) => {
                 self.effects.on_entity_added(&self.world.client.state, id);
             }
@@ -729,6 +744,11 @@ impl Play {
                     self.stack.pop();
                     self.container_open = false;
                 }
+            }
+            ClientEvent::PlayerRotated => {
+                let p = &self.world.client.state.player;
+                self.yaw = p.physics.yaw;
+                self.pitch = p.physics.pitch;
             }
             ClientEvent::PlayerTeleported { .. } => {
                 let p = &self.world.client.state.player;
@@ -1432,6 +1452,27 @@ impl Play {
         }
     }
 
+    fn view_roll(&self, partial: f32) -> Mat4 {
+        let player = &self.world.client.state.player;
+        let mut roll = Mat4::IDENTITY;
+        if player.dead {
+            let death = self.entities.as_ref().map_or(0, |e| e.local_death_time()) as f32;
+            let duration = (death + partial).min(20.0);
+            roll *= Mat4::from_rotation_z((40.0 - 8000.0 / (duration + 200.0)).to_radians());
+        }
+        let hurt = player.hurt_time as f32 - partial;
+        if hurt >= 0.0 && player.hurt_duration > 0 {
+            let t = hurt / player.hurt_duration as f32;
+            let s = (t * t * t * t * std::f32::consts::PI).sin();
+            let tilt = -s * 14.0 * self.options.damage_tilt_strength as f32;
+            let dir = player.hurt_dir.to_radians();
+            roll *= Mat4::from_rotation_y(-dir)
+                * Mat4::from_rotation_z(tilt.to_radians())
+                * Mat4::from_rotation_y(dir);
+        }
+        roll
+    }
+
     pub fn camera(&self, partial: f32) -> Camera {
         let t = f64::from(partial);
         let eye = lerp3(self.prev_eye, self.cur_eye, t);
@@ -1443,6 +1484,7 @@ impl Play {
             pitch: -self.pitch.to_radians(),
             fov_y: fov.to_radians(),
             near: 0.05,
+            roll: self.view_roll(partial),
         };
         if self.perspective != Perspective::First {
             let forward = view_direction(self.yaw, self.pitch);

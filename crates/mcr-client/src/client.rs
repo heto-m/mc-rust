@@ -540,6 +540,10 @@ impl Client {
             return Ok(());
         }
         let mut keys = *input;
+        if std::mem::take(&mut player.view_snapped) {
+            keys.yaw = player.physics.yaw;
+            keys.pitch = player.physics.pitch;
+        }
         if player.dead {
             keys = PlayerInput {
                 yaw: input.yaw,
