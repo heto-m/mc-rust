@@ -366,7 +366,7 @@ impl Mesher {
         self.meta = meta;
         self.flush_cubes(out);
 
-        if needs_tint && !self.colors.is_empty() {
+        if needs_tint {
             let mut table = self.colors.new_table();
             self.colors
                 .fill_table_zoomed(input, &self.tint_y, &mut table);

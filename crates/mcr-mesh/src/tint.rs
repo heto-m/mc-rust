@@ -242,7 +242,14 @@ fn modify_grass(modifier: GrassModifier, base: u32) -> u32 {
 }
 
 impl BiomeColors {
+    /// An empty list yields a single plains entry, so quads of not-yet-known biomes still get tinted.
     pub fn from_climates(climates: &[BiomeClimate], maps: &ColorMaps) -> Self {
+        let plains = [BiomeClimate::default()];
+        let climates = if climates.is_empty() {
+            &plains[..]
+        } else {
+            climates
+        };
         let mut out = Self {
             grass: Vec::new(),
             foliage: Vec::new(),
