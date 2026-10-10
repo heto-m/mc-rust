@@ -368,6 +368,11 @@ impl ClientState {
                     }
                 }
             }
+            P::SetEntityData(p) if p.entity_id == self.player.entity_id => {
+                for entry in p.values.entries.into_iter().take(64) {
+                    self.player.data.insert(entry.index, entry.value);
+                }
+            }
             P::SetEntityData(p) => {
                 if let Some(e) = self.entities.get_mut(p.entity_id) {
                     for entry in p.values.entries {

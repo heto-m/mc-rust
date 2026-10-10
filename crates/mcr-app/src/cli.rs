@@ -4,6 +4,7 @@ use mcr_render::Camera;
 use mcr_render::glam::DVec3;
 
 pub const DEFAULT_JAR: &str = ".cache/versions/26.3/client.jar";
+pub const DEFAULT_ASSETS: &str = ".cache/assets";
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -17,6 +18,13 @@ pub struct Options {
     pub camera: Option<Camera>,
     pub size: (u32, u32),
     pub autofly: Option<f64>,
+    pub connect: Option<String>,
+    pub name: String,
+    pub game_dir: PathBuf,
+    pub assets_dir: PathBuf,
+    pub after_ticks: Option<u32>,
+    pub autopilot: Option<PathBuf>,
+    pub render_distance_set: bool,
 }
 
 impl Default for Options {
@@ -32,12 +40,22 @@ impl Default for Options {
             camera: None,
             size: (1920, 1080),
             autofly: None,
+            connect: None,
+            name: "Player".into(),
+            game_dir: PathBuf::from("run/client"),
+            assets_dir: PathBuf::from(DEFAULT_ASSETS),
+            after_ticks: None,
+            autopilot: None,
+            render_distance_set: false,
         }
     }
 }
 
-pub const USAGE: &str = "usage: mcr (--world <save> | --synthetic) [--render-distance N] [--no-vsync] [--jar <client.jar>]
-           [--screenshot out.png [--camera x,y,z,yaw,pitch] [--size WxH]] [--autofly blocks_per_s]
+pub const USAGE: &str = "usage: mcr (--world <save> | --synthetic | --connect host[:port]) [--render-distance N] [--no-vsync]
+           [--jar <client.jar>] [--screenshot out.png [--camera x,y,z,yaw,pitch] [--size WxH]]
+           [--autofly blocks_per_s]
+       connect mode: [--name <name>] [--game-dir dir] [--assets-dir dir] [--autopilot script]
+           [--screenshot out.png [--after-ticks N]]
 camera angles are degrees; yaw 0 looks toward -Z, positive turns left";
 
 fn parse_camera(text: &str) -> Result<Camera, String> {
@@ -85,6 +103,18 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                         .map_err(|_| "--autofly needs blocks per second")?,
                 );
             }
+            "--connect" => opts.connect = Some(value(&arg, &mut args)?),
+            "--name" => opts.name = value(&arg, &mut args)?,
+            "--game-dir" => opts.game_dir = value(&arg, &mut args)?.into(),
+            "--assets-dir" => opts.assets_dir = value(&arg, &mut args)?.into(),
+            "--autopilot" => opts.autopilot = Some(value(&arg, &mut args)?.into()),
+            "--after-ticks" => {
+                opts.after_ticks = Some(
+                    value(&arg, &mut args)?
+                        .parse()
+                        .map_err(|_| "--after-ticks needs a tick count")?,
+                );
+            }
             "--size" => opts.size = parse_size(&value(&arg, &mut args)?)?,
             "--render-distance" => {
                 opts.render_distance = value(&arg, &mut args)?
@@ -92,6 +122,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                     .ok()
                     .filter(|d| (1..=128).contains(d))
                     .ok_or("--render-distance must be 1..=128")?;
+                opts.render_distance_set = true;
             }
             "--radius" => {
                 opts.radius = value(&arg, &mut args)?
@@ -101,11 +132,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    if opts.world.is_none() && !opts.synthetic {
-        return Err("give --world <save> or --synthetic".into());
+    if opts.world.is_none() && !opts.synthetic && opts.connect.is_none() {
+        return Err("give --world <save>, --synthetic or --connect <host>".into());
     }
-    if opts.screenshot.is_some() && opts.world.is_none() {
-        return Err("--screenshot needs --world".into());
+    if opts.screenshot.is_some() && opts.world.is_none() && opts.connect.is_none() {
+        return Err("--screenshot needs --world or --connect".into());
     }
     Ok(opts)
 }
@@ -128,6 +159,19 @@ mod tests {
     }
 
     #[test]
+    fn connect_mode_options() {
+        let o = parse_str(
+            "--connect localhost:25590 --name Bot --game-dir g --autopilot s.txt --screenshot o.png --after-ticks 40",
+        )
+        .unwrap();
+        assert_eq!(o.connect.as_deref(), Some("localhost:25590"));
+        assert_eq!(o.name, "Bot");
+        assert_eq!(o.game_dir, PathBuf::from("g"));
+        assert_eq!(o.after_ticks, Some(40));
+        assert!(o.autopilot.is_some());
+    }
+
+    #[test]
     fn camera_angles_are_degrees() {
         let o = parse_str("--world w --screenshot o.png --camera 1,2,3,90,-45").unwrap();
         let c = o.camera.unwrap();
@@ -143,6 +187,7 @@ mod tests {
         assert!(parse_str("--world w --camera 1,2").is_err());
         assert!(parse_str("--world w --render-distance 0").is_err());
         assert!(parse_str("--synthetic --screenshot o.png").is_err());
+        assert!(parse_str("--connect").is_err());
         assert!(parse_str("--synthetic").is_ok());
     }
 }

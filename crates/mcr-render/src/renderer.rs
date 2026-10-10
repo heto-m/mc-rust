@@ -11,6 +11,7 @@ use crate::camera::Camera;
 use crate::environment::Environment;
 use crate::mesh::SectionMesh;
 use crate::mesh::TINT_TABLE_WORDS;
+use crate::overlay::{Overlay, OverlayCtx};
 use crate::quad::{ModelQuad, PackedQuad};
 use crate::staging::{Dest, Uploader};
 use crate::texture::{MAX_TEXTURE_GROUPS, TextureArrayData, TextureGroupData};
@@ -1355,6 +1356,21 @@ impl Renderer {
     }
 
     pub fn render(&mut self, frame: &FrameInputs) -> Result<FrameStats, RenderError> {
+        self.render_with_overlay(frame, None)
+    }
+
+    pub fn target_format(&self) -> wgpu::TextureFormat {
+        self.surface
+            .as_ref()
+            .map_or(COLOR_FORMAT, |s| s.config.format)
+    }
+
+    /// `overlay` records into the frame's encoder after the world pass; depth is kept for it.
+    pub fn render_with_overlay(
+        &mut self,
+        frame: &FrameInputs,
+        overlay: Option<&mut dyn Overlay>,
+    ) -> Result<FrameStats, RenderError> {
         let start = Instant::now();
         let (uploaded_bytes, uploaded_writes) = self.flush_uploads();
         self.collect_gpu_stats();
@@ -1468,7 +1484,7 @@ impl Renderer {
                     view: &self.depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0.0),
-                        store: wgpu::StoreOp::Discard,
+                        store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
                 }),
@@ -1517,6 +1533,22 @@ impl Renderer {
                 pass.set_bind_group(1, &self.trans_geom_bg, &[]);
                 pass.multi_draw_indirect(&self.geo.trans_cmds, 0, trans_n);
             }
+        }
+
+        if let Some(overlay) = overlay {
+            overlay.record(&mut OverlayCtx {
+                device: &self.device,
+                queue: &self.queue,
+                encoder: &mut encoder,
+                color: &color_view,
+                depth: &self.depth_view,
+                format: self
+                    .surface
+                    .as_ref()
+                    .map_or(COLOR_FORMAT, |s| s.config.format),
+                size: self.size,
+                camera: frame.camera,
+            });
         }
 
         let slot = (0..READBACK_SLOTS)

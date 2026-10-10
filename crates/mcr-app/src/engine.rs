@@ -50,7 +50,7 @@ impl Engine {
     }
 
     pub fn draw(&mut self) -> Option<FrameStats> {
-        self.render.draw(&self.game.camera)
+        self.render.draw(&self.game.camera, 1.0)
     }
 
     pub fn settled(&self) -> bool {

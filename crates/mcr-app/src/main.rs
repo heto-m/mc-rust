@@ -1,12 +1,22 @@
 mod assets;
+mod audio;
+mod autopilot;
 mod cli;
+mod debug;
 mod engine;
 mod fly;
 mod game;
+mod hud;
+mod input;
+mod mesh_world;
+mod net_world;
+mod outline;
+mod play;
 mod render_system;
 mod screenshot;
 mod source;
 mod stats;
+mod target;
 mod world_setup;
 
 use std::sync::Arc;
@@ -19,6 +29,7 @@ use fly::FlyController;
 use mcr_render::glam::DVec3;
 use mcr_render::synthetic::{Terrain, generate_world};
 use mcr_render::{Camera, FrameInputs, Renderer, RendererConfig, Target};
+use play::{Play, PlayConfig};
 use stats::StatWindow;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -35,6 +46,7 @@ struct SyntheticScene {
 enum Scene {
     Synthetic(Box<SyntheticScene>),
     World(Box<Engine>),
+    Play(Box<Play>),
 }
 
 impl Scene {
@@ -42,6 +54,7 @@ impl Scene {
         match self {
             Self::Synthetic(s) => &mut s.camera,
             Self::World(engine) => &mut engine.game.camera,
+            Self::Play(play) => &mut play.world.camera,
         }
     }
 
@@ -49,6 +62,7 @@ impl Scene {
         match self {
             Self::Synthetic(s) => &mut s.renderer,
             Self::World(engine) => &mut engine.render.renderer,
+            Self::Play(play) => &mut play.render.renderer,
         }
     }
 }
@@ -63,6 +77,7 @@ struct App {
     last_frame: Instant,
     stats: StatWindow,
     ready_reported: bool,
+    exit: bool,
 }
 
 impl App {
@@ -77,6 +92,7 @@ impl App {
             last_frame: Instant::now(),
             stats: StatWindow::default(),
             ready_reported: false,
+            exit: false,
         }
     }
 
@@ -106,7 +122,9 @@ impl App {
             renderer.uses_draw_count(),
             renderer.has_timestamps()
         );
-        self.scene = Some(if self.opts.synthetic {
+        self.scene = Some(if self.opts.connect.is_some() {
+            Scene::Play(Box::new(Play::new(renderer, &play_config(&self.opts))?))
+        } else if self.opts.synthetic {
             self.synthetic_scene(renderer)?
         } else {
             let (assets, source) = world_setup::open(&self.opts)?;
@@ -118,9 +136,15 @@ impl App {
                 self.opts.render_distance,
             )))
         });
-        println!(
-            "controls: WASD move, Space/Shift up/down, Ctrl sprint, scroll speed, click grabs mouse, Esc releases, V toggles vsync"
-        );
+        if let Some(Scene::Play(play)) = &mut self.scene {
+            if let Some(path) = &self.opts.autopilot {
+                play.set_autopilot(load_autopilot(path)?);
+            }
+        } else {
+            println!(
+                "controls: WASD move, Space/Shift up/down, Ctrl sprint, scroll speed, click grabs mouse, Esc releases, V toggles vsync"
+            );
+        }
         self.window = Some(window);
         Ok(())
     }
@@ -192,6 +216,26 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
         let Some(scene) = &mut self.scene else { return };
+        if let Scene::Play(play) = scene {
+            play.advance(dt);
+            if let Some(reason) = play.closed() {
+                println!("disconnected: {reason}");
+                self.exit = true;
+                return;
+            }
+            let Some(frame) = play.frame() else { return };
+            self.stats.record(dt, &frame);
+            let mem = play.render.renderer.memory_stats();
+            if let Some(line) = self.stats.report(Some((play.pipeline_stats(), mem))) {
+                let p = play.feet();
+                println!("{line} | pos {:.1} {:.1} {:.1}", p[0], p[1], p[2]);
+            }
+            let want = play.wants_grab();
+            if want != self.grabbed {
+                self.set_grab(want);
+            }
+            return;
+        }
         self.fly.update(scene.camera_mut(), dt);
         if let Some(speed) = self.opts.autofly {
             let camera = scene.camera_mut();
@@ -209,6 +253,7 @@ impl App {
                     sky_light: 1.0,
                 })
                 .ok(),
+            Scene::Play(_) => None,
             Scene::World(engine) => {
                 if let Err(e) = engine.tick() {
                     eprintln!("tick failed: {e:#}");
@@ -230,6 +275,7 @@ impl App {
         let Some(frame) = frame else { return };
         self.stats.record(dt, &frame);
         let pipeline = match scene {
+            Scene::Play(_) => None,
             Scene::World(engine) => Some((
                 engine.pipeline_stats(),
                 engine.render.renderer.memory_stats(),
@@ -265,20 +311,49 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let PhysicalKey::Code(code) = event.physical_key {
+                if let Some(Scene::Play(play)) = &mut self.scene {
+                    if let PhysicalKey::Code(code) = event.physical_key
+                        && (!event.repeat || play.chat_open())
+                    {
+                        let pressed = event.state == ElementState::Pressed;
+                        let text = event.text.as_deref();
+                        play.key_event(input::key_from_winit(code), pressed, text);
+                    }
+                } else if let PhysicalKey::Code(code) = event.physical_key {
                     self.key(code, event.state == ElementState::Pressed);
                 }
             }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                ..
-            } if !self.grabbed => self.set_grab(true),
+            WindowEvent::Focused(false) => {
+                if let Some(Scene::Play(play)) = &mut self.scene {
+                    play.release_all();
+                    play.paused = true;
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(Scene::Play(play)) = &mut self.scene {
+                    if state == ElementState::Pressed && play.paused {
+                        play.resume();
+                    } else if self.grabbed || !play.wants_grab() {
+                        play.key_event(
+                            input::mouse_from_winit(button),
+                            state == ElementState::Pressed,
+                            None,
+                        );
+                    }
+                } else if state == ElementState::Pressed && !self.grabbed {
+                    self.set_grab(true);
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let steps = match delta {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
                 };
-                self.fly.scale_speed(steps);
+                if let Some(Scene::Play(play)) = &mut self.scene {
+                    play.scroll(steps as f32);
+                } else {
+                    self.fly.scale_speed(steps);
+                }
             }
             WindowEvent::RedrawRequested => self.frame(),
             _ => {}
@@ -290,15 +365,40 @@ impl ApplicationHandler for App {
             && self.grabbed
             && let Some(scene) = &mut self.scene
         {
-            self.fly.look(scene.camera_mut(), delta.0, delta.1);
+            if let Scene::Play(play) = scene {
+                play.mouse_motion(delta.0, delta.1);
+            } else {
+                self.fly.look(scene.camera_mut(), delta.0, delta.1);
+            }
         }
     }
 
-    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.exit {
+            event_loop.exit();
+        }
         if let Some(w) = &self.window {
             w.request_redraw();
         }
     }
+}
+
+fn play_config(opts: &Options) -> PlayConfig {
+    PlayConfig {
+        addr: opts.connect.clone().unwrap_or_default(),
+        name: opts.name.clone(),
+        game_dir: opts.game_dir.clone(),
+        jar: opts.jar.clone(),
+        assets_dir: opts.assets_dir.clone(),
+        render_distance: opts.render_distance_set.then_some(opts.render_distance),
+    }
+}
+
+fn load_autopilot(path: &std::path::Path) -> Result<autopilot::Autopilot> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let steps = autopilot::parse(&text).map_err(anyhow::Error::msg)?;
+    Ok(autopilot::Autopilot::new(steps))
 }
 
 fn main() -> Result<()> {
@@ -311,6 +411,9 @@ fn main() -> Result<()> {
         }
     };
     if let Some(out) = opts.screenshot.clone() {
+        if opts.connect.is_some() {
+            return screenshot::run_play(&opts, &out);
+        }
         return screenshot::run(&opts, &out, launched);
     }
     let event_loop = EventLoop::new()?;

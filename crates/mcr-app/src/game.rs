@@ -5,6 +5,7 @@ use mcr_render::Camera;
 use mcr_world::{ChunkPos, ChunkStore};
 use rustc_hash::FxHashMap;
 
+use crate::mesh_world::MeshWorld;
 use crate::source::{SourceEvent, WorldSource};
 
 pub const UNLOAD_MARGIN: i32 = 2;
@@ -56,6 +57,48 @@ impl std::fmt::Debug for Game {
     }
 }
 
+impl MeshWorld for Game {
+    fn store(&self) -> &ChunkStore {
+        &self.store
+    }
+
+    fn store_mut(&mut self) -> &mut ChunkStore {
+        &mut self.store
+    }
+
+    fn camera(&self) -> &Camera {
+        &self.camera
+    }
+
+    fn render_distance(&self) -> i32 {
+        self.render_distance
+    }
+
+    fn is_pending(&self, pos: ChunkPos) -> bool {
+        self.chunks.get(&pos) == Some(&ChunkState::Requested)
+    }
+
+    fn loaded_columns(&self) -> Vec<ChunkPos> {
+        self.chunks
+            .iter()
+            .filter(|(_, s)| **s == ChunkState::Loaded)
+            .map(|(p, _)| *p)
+            .collect()
+    }
+
+    fn take_unloaded(&mut self) -> Vec<ChunkPos> {
+        std::mem::take(&mut self.unloaded)
+    }
+
+    fn biome_names(&self) -> Vec<String> {
+        self.source.biome_names()
+    }
+
+    fn streaming_idle(&self) -> bool {
+        self.arrived.is_empty() && self.source.in_flight() == 0
+    }
+}
+
 impl Game {
     pub fn new(source: Box<dyn WorldSource>, camera: Camera, render_distance: i32) -> Self {
         Self {
@@ -69,35 +112,6 @@ impl Game {
             scratch: Vec::new(),
             unloaded: Vec::new(),
         }
-    }
-
-    pub fn render_distance(&self) -> i32 {
-        self.render_distance
-    }
-
-    pub fn source(&self) -> &dyn WorldSource {
-        &*self.source
-    }
-
-    /// Whether `pos` is expected to arrive, so meshing next to it should wait.
-    pub fn is_pending(&self, pos: ChunkPos) -> bool {
-        self.chunks.get(&pos) == Some(&ChunkState::Requested)
-    }
-
-    pub fn loaded_columns(&self) -> impl Iterator<Item = ChunkPos> + '_ {
-        self.chunks
-            .iter()
-            .filter(|(_, s)| **s == ChunkState::Loaded)
-            .map(|(p, _)| *p)
-    }
-
-    pub fn streaming_idle(&self) -> bool {
-        self.arrived.is_empty() && self.source.in_flight() == 0
-    }
-
-    /// Columns removed since the last call.
-    pub fn take_unloaded(&mut self) -> Vec<ChunkPos> {
-        std::mem::take(&mut self.unloaded)
     }
 
     pub fn update(&mut self) {

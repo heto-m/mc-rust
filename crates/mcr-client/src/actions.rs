@@ -113,6 +113,17 @@ impl Client {
         }))
     }
 
+    /// Creative break: the server removes the block on the start action, no digging state is kept.
+    pub fn break_instantly(&mut self, pos: BlockPos, face: Facing) -> Result<()> {
+        let sequence = self.next_sequence();
+        self.send_play(&S::PlayerAction(sb::PlayerAction {
+            action: sb::PlayerActionKind::StartDestroyBlock,
+            pos,
+            face,
+            sequence,
+        }))
+    }
+
     pub fn finish_digging(&mut self) -> Result<()> {
         let Some(d) = self.digging.take() else {
             return Ok(());
@@ -156,6 +167,38 @@ impl Client {
             return None;
         }
         Some((hardness * 30.0).ceil() as u32 + 2)
+    }
+
+    fn simple_action(&mut self, action: sb::PlayerActionKind) -> Result<()> {
+        self.send_play(&S::PlayerAction(sb::PlayerAction {
+            action,
+            pos: BlockPos::new(0, 0, 0),
+            face: Facing::Down,
+            sequence: 0,
+        }))
+    }
+
+    pub fn drop_item(&mut self, whole_stack: bool) -> Result<()> {
+        self.simple_action(if whole_stack {
+            sb::PlayerActionKind::DropAllItems
+        } else {
+            sb::PlayerActionKind::DropItem
+        })
+    }
+
+    pub fn swap_offhand(&mut self) -> Result<()> {
+        self.simple_action(sb::PlayerActionKind::SwapItemWithOffhand)
+    }
+
+    pub fn release_use_item(&mut self) -> Result<()> {
+        self.simple_action(sb::PlayerActionKind::ReleaseUseItem)
+    }
+
+    pub fn pick_block(&mut self, pos: BlockPos, include_data: bool) -> Result<()> {
+        self.send_play(&S::PickItemFromBlock(sb::PickItemFromBlock {
+            pos,
+            include_data,
+        }))
     }
 
     pub fn attack(&mut self, entity_id: i32) -> Result<()> {

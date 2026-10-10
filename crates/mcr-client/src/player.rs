@@ -36,6 +36,8 @@ pub struct LocalPlayer {
     pub last_teleport_id: Option<i32>,
     pub effects: FxHashMap<i32, MobEffect>,
     pub attributes: FxHashMap<i32, AttributeState>,
+    /// Synched entity data of the local player (air supply, absorption).
+    pub data: FxHashMap<u8, mcr_protocol::types::entity_data::EntityDataValue>,
 }
 
 impl Default for LocalPlayer {
@@ -65,6 +67,7 @@ impl Default for LocalPlayer {
             last_teleport_id: None,
             effects: FxHashMap::default(),
             attributes: FxHashMap::default(),
+            data: FxHashMap::default(),
         }
     }
 }
