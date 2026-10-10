@@ -269,6 +269,11 @@ impl Screen for ContainerScreen {
         self.setup_widgets();
     }
 
+    fn slot_center(&self, index: usize) -> Option<(i32, i32)> {
+        let s = self.layout.slots.get(index)?;
+        Some((self.left + s.x + 8, self.top + s.y + 8))
+    }
+
     fn render(&mut self, cx: &mut RenderCx<'_, '_>) {
         self.mouse = cx.mouse;
         let (gw, gh) = cx.gui_size();

@@ -125,6 +125,11 @@ pub trait Screen {
     fn entity_rect(&self) -> Option<[i32; 4]> {
         None
     }
+
+    /// Center in GUI pixels of container slot `index`, for scripted clicks.
+    fn slot_center(&self, _index: usize) -> Option<(i32, i32)> {
+        None
+    }
 }
 
 #[derive(Default)]

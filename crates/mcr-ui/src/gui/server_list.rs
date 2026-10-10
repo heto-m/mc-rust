@@ -23,6 +23,15 @@ pub struct ServerEntry {
     pub address: String,
 }
 
+/// A decoded 64x64 RGBA server icon; `id` identifies the image so screens upload it once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Favicon {
+    pub id: u64,
+    pub rgba: Vec<u8>,
+}
+
+pub const FAVICON_SIZE: u32 = 64;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct OnlineStatus {
     pub motd: Component,
@@ -30,6 +39,7 @@ pub struct OnlineStatus {
     pub version: String,
     pub ping_ms: Option<u32>,
     pub compatible: bool,
+    pub favicon: Option<Rc<Favicon>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -145,6 +155,7 @@ pub struct ServerListScreen {
     selected: Option<usize>,
     list: ScrollList,
     mouse: (f32, f32),
+    favicons: RefCell<std::collections::HashMap<u64, Option<crate::SpriteId>>>,
 }
 
 impl std::fmt::Debug for ServerListScreen {
@@ -164,6 +175,7 @@ impl ServerListScreen {
             selected: None,
             list: ScrollList::new([0, HEADER, 0, 0], ROW_HEIGHT),
             mouse: (0.0, 0.0),
+            favicons: RefCell::default(),
         }
     }
 
@@ -312,7 +324,21 @@ impl ServerListScreen {
         }
         let entry = self.servers.borrow().servers()[index].clone();
         let status = self.servers.borrow_mut().status(index);
-        cx.frame.fill_rect(cx_, cy, cx_ + 32, cy + 32, 0xFF3A_3A3A);
+        let icon = match &status {
+            ServerStatus::Online(o) => o.favicon.as_ref().and_then(|f| {
+                *self.favicons.borrow_mut().entry(f.id).or_insert_with(|| {
+                    cx.frame
+                        .ui()
+                        .sprites_mut()
+                        .add_raw(FAVICON_SIZE, FAVICON_SIZE, &f.rgba)
+                })
+            }),
+            _ => None,
+        };
+        match icon {
+            Some(id) => cx.frame.sprite(id, cx_, cy, 32, 32),
+            None => cx.frame.fill_rect(cx_, cy, cx_ + 32, cy + 32, 0xFF3A_3A3A),
+        }
         cx.text(&entry.name, cx_ + 35, cy + 1, WHITE, true);
         let content_right = left + ROW_WIDTH - 2;
         let status_icon: String;
@@ -331,6 +357,7 @@ impl ServerListScreen {
                     version,
                     ping_ms,
                     compatible,
+                    ..
                 } = &**online;
                 motd = Some(m.clone());
                 status_icon = if *compatible {

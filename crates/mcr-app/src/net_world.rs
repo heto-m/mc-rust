@@ -48,6 +48,10 @@ impl NetworkWorld {
         }
     }
 
+    pub fn set_render_distance(&mut self, distance: i32) {
+        self.render_distance = distance.clamp(2, 64);
+    }
+
     pub fn loaded_count(&self) -> usize {
         self.loaded.len()
     }

@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mcr_buf::{BlockPos, FixedBitSet, LengthPrefixed};
+use mcr_protocol::common as c;
 use mcr_protocol::dispatch::PlayServerbound as S;
 use mcr_protocol::play::serverbound as sb;
 use mcr_protocol::play::serverbound::{ContainerInput, Facing};
@@ -280,6 +281,75 @@ impl Client {
         self.send_play(&S::SetCreativeModeSlot(sb::SetCreativeModeSlot {
             slot_num: slot,
             item,
+        }))
+    }
+
+    /// Updates the render distance the server streams and re-announces client information.
+    pub fn set_view_distance(&mut self, distance: i8) -> Result<()> {
+        self.config.view_distance = distance.clamp(2, 32);
+        self.send_play(&S::ClientInformation(c::ClientInformation {
+            language: self.config.language.clone(),
+            view_distance: self.config.view_distance,
+            chat_visibility: self.config.chat_visibility,
+            chat_colors: true,
+            model_customisation: 0x7f,
+            main_hand: self.config.main_hand,
+            text_filtering_enabled: false,
+            allows_listing: true,
+            particle_status: self.config.particle_status,
+        }))
+    }
+
+    pub fn click_container_button(&mut self, button: i32) -> Result<()> {
+        let container_id = self
+            .state
+            .inventory
+            .open
+            .as_ref()
+            .map_or(PLAYER_MENU_ID, |c| c.id);
+        self.send_play(&S::ContainerButtonClick(sb::ContainerButtonClick {
+            container_id,
+            button_id: button,
+        }))
+    }
+
+    pub fn set_crafter_slot_state(&mut self, slot: i32, enabled: bool) -> Result<()> {
+        let container_id = self
+            .state
+            .inventory
+            .open
+            .as_ref()
+            .map_or(PLAYER_MENU_ID, |c| c.id);
+        self.send_play(&S::ContainerSlotStateChanged(
+            sb::ContainerSlotStateChanged {
+                slot_id: slot,
+                container_id,
+                new_state: enabled,
+            },
+        ))
+    }
+
+    pub fn select_trade(&mut self, index: i32) -> Result<()> {
+        self.send_play(&S::SelectTrade(sb::SelectTrade { item: index }))
+    }
+
+    pub fn rename_item(&mut self, name: &str) -> Result<()> {
+        self.send_play(&S::RenameItem(sb::RenameItem {
+            name: name.chars().take(50).collect(),
+        }))
+    }
+
+    pub fn set_beacon(&mut self, primary: Option<i32>, secondary: Option<i32>) -> Result<()> {
+        self.send_play(&S::SetBeacon(sb::SetBeacon {
+            primary: primary.map(mcr_buf::VarInt),
+            secondary: secondary.map(mcr_buf::VarInt),
+        }))
+    }
+
+    pub fn request_command_suggestions(&mut self, id: i32, command: &str) -> Result<()> {
+        self.send_play(&S::CommandSuggestion(sb::CommandSuggestion {
+            id,
+            command: command.chars().take(32500).collect(),
         }))
     }
 }

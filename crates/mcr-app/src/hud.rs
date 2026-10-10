@@ -6,7 +6,7 @@ use mcr_protocol::types::game::GameType;
 use mcr_protocol::types::text::Component;
 use mcr_settings::Options;
 use mcr_ui::{
-    ChatHud, ChatOptions, DebugOverlay, HudItems, HudSprites, HudState, ItemIcons, SpriteId,
+    ChatOptions, DebugOverlay, HudItems, HudSprites, HudState, ItemIcons, SharedChat, SpriteId,
     StackView, Ui, UiFrame,
 };
 use uuid::Uuid;
@@ -39,17 +39,15 @@ pub struct HudInput<'a> {
     pub partial: f32,
     pub hidden: bool,
     pub tab_held: bool,
-    pub chat_input: Option<&'a str>,
+    pub chat_open: bool,
     pub debug: Option<&'a DebugOverlay>,
     pub millis: u64,
-    pub framebuffer: (u32, u32),
 }
 
 pub struct Hud {
     sprites: HudSprites,
     own: Sprites,
-    pub icons: ItemIcons,
-    pub chat: ChatHud,
+    pub chat: SharedChat,
     max_health_attr: Option<i32>,
     armor_attr: Option<i32>,
     title_ticks: i32,
@@ -104,7 +102,7 @@ pub fn chat_options(options: &Options, focused: bool) -> ChatOptions {
 }
 
 impl Hud {
-    pub fn new(ui: &Ui, icons: ItemIcons, data: &'static Version) -> Self {
+    pub fn new(ui: &Ui, data: &'static Version) -> Self {
         let id = |name: &str| ui.sprite_id(name);
         let attributes = data.registry("minecraft:attribute");
         let attribute = |name: &str| {
@@ -130,8 +128,7 @@ impl Hud {
                     id("icon/ping_5"),
                 ],
             },
-            icons,
-            chat: ChatHud::default(),
+            chat: SharedChat::default(),
             max_health_attr: attribute("minecraft:max_health"),
             armor_attr: attribute("minecraft:armor"),
             title_ticks: 0,
@@ -141,6 +138,7 @@ impl Hud {
 
     pub fn add_chat(&mut self, ui: &mut Ui, message: &Component, tick: u32, options: &Options) {
         self.chat
+            .borrow_mut()
             .add(ui, message, tick, &chat_options(options, false));
     }
 
@@ -162,44 +160,37 @@ impl Hud {
         self.actionbar_ticks = (self.actionbar_ticks - 1).max(0);
     }
 
-    pub fn draw(&mut self, ui: &mut Ui, input: &HudInput<'_>) {
-        let (w, h) = input.framebuffer;
-        let max_scale = u32::try_from(input.options.gui_scale).unwrap_or(0);
-        self.icons.set_time(input.millis);
-        let mut frame = ui.frame_scaled(w, h, max_scale);
+    pub fn draw(&mut self, frame: &mut UiFrame<'_>, icons: &mut ItemIcons, input: &HudInput<'_>) {
+        icons.set_time(input.millis);
         if !input.hidden {
-            self.draw_gameplay(&mut frame, input);
+            self.draw_gameplay(frame, icons, input);
         }
         if let Some(debug) = input.debug {
-            debug.draw(&mut frame);
+            debug.draw(frame);
         }
     }
 
-    fn draw_gameplay(&mut self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
+    fn draw_gameplay(
+        &mut self,
+        frame: &mut UiFrame<'_>,
+        icons: &mut ItemIcons,
+        input: &HudInput<'_>,
+    ) {
         let state = input.state;
         let (gui_w, gui_h) = frame.gui_size();
         if let Some(c) = self.own.crosshair {
             frame.sprite(c, (gui_w - 15) / 2, (gui_h - 15) / 2, 15, 15);
         }
-        self.draw_bars(frame, input);
+        self.draw_bars(frame, icons, input);
         self.draw_bosses(frame, state);
         self.draw_sidebar(frame, state);
         self.draw_titles(frame, input);
         if input.tab_held {
             self.draw_tab_list(frame, state);
         }
-        let focused = input.chat_input.is_some();
-        let opts = chat_options(input.options, focused);
-        self.chat.draw(frame, input.tick, &opts);
-        if let Some(text) = input.chat_input {
-            let blink = (input.millis / 300).is_multiple_of(2);
-            frame.fill_rect(2, gui_h - 14, gui_w - 2, gui_h - 2, 0x8000_0000);
-            let shown = if blink {
-                format!("{text}_")
-            } else {
-                text.to_owned()
-            };
-            frame.text(&shown, 4.0, (gui_h - 12) as f32, 0xFFFF_FFFF, true);
+        if !input.chat_open {
+            let opts = chat_options(input.options, false);
+            self.chat.borrow_mut().draw(frame, input.tick, &opts);
         }
     }
 
@@ -207,7 +198,7 @@ impl Hud {
         state.player.attributes.get(&id?).map(|a| a.value(None))
     }
 
-    fn draw_bars(&mut self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
+    fn draw_bars(&mut self, frame: &mut UiFrame<'_>, icons: &mut ItemIcons, input: &HudInput<'_>) {
         let state = input.state;
         let player = &state.player;
         let stacks: Vec<Option<StackView<'_>>> = (0..9u8)
@@ -256,7 +247,7 @@ impl Hud {
         } else {
             self.draw_hotbar(frame, player.held_slot, offhand.is_some());
         }
-        self.sprites.draw_items(frame, &mut self.icons, &items);
+        self.sprites.draw_items(frame, icons, &items);
     }
 
     fn draw_hotbar(&self, frame: &mut UiFrame<'_>, selected: u8, offhand: bool) {

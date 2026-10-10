@@ -132,6 +132,7 @@ fn sample_store() -> Rc<RefCell<MemoryServerStore>> {
                 version: "1.21".into(),
                 ping_ms: Some(80),
                 compatible: true,
+                favicon: None,
             }))),
             Some(ServerStatus::Online(Box::new(OnlineStatus {
                 motd: Component::text("Welcome to my local server"),
@@ -139,6 +140,7 @@ fn sample_store() -> Rc<RefCell<MemoryServerStore>> {
                 version: "26.3".into(),
                 ping_ms: Some(450),
                 compatible: true,
+                favicon: None,
             }))),
             Some(ServerStatus::Online(Box::new(OnlineStatus {
                 motd: Component::text("Legacy"),
@@ -146,6 +148,7 @@ fn sample_store() -> Rc<RefCell<MemoryServerStore>> {
                 version: "1.8.9".into(),
                 ping_ms: Some(20),
                 compatible: false,
+                favicon: None,
             }))),
             Some(ServerStatus::Unreachable {
                 message: "§4Can't connect to server".into(),

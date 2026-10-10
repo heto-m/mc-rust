@@ -161,6 +161,18 @@ impl RenderSystem {
         world.store().config().min_y() >> 4
     }
 
+    /// Drops every section of `world` from the GPU and returns the renderer for the next session.
+    pub fn into_parts(mut self, world: &dyn MeshWorld) -> (Renderer, Arc<Assets>) {
+        let base = Self::min_section(world);
+        let count = (world.store().config().height() >> 4) as i32;
+        for pos in world.loaded_columns() {
+            for y in base..base + count {
+                self.renderer.remove_section([pos.x, y, pos.z]);
+            }
+        }
+        (self.renderer, self.assets)
+    }
+
     fn remove_unloaded(&mut self, world: &mut dyn MeshWorld) {
         let base = Self::min_section(world);
         let count = (world.store().config().height() >> 4) as i32;

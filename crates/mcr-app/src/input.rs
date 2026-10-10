@@ -1,4 +1,5 @@
 use mcr_settings::InputKey;
+use mcr_ui::{Key, Modifiers, MouseButton as UiMouseButton, UiInput};
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
@@ -110,36 +111,119 @@ pub fn mouse_from_winit(button: MouseButton) -> InputKey {
     }
 }
 
-pub const MAX_CHAT_CHARS: usize = 256;
-
-/// One-line text field; the chat screen replaces it later.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct LineEditor {
-    text: String,
+pub fn track_modifiers(mods: &mut Modifiers, key: InputKey, pressed: bool) {
+    if let InputKey::Keyboard(code) = key {
+        match code {
+            224 | 228 => mods.ctrl = pressed,
+            225 | 229 => mods.shift = pressed,
+            226 | 230 => mods.alt = pressed,
+            _ => {}
+        }
+    }
 }
 
-impl LineEditor {
-    pub fn with_text(text: &str) -> Self {
-        Self {
-            text: text.chars().take(MAX_CHAT_CHARS).collect(),
+/// The UI events for one key or mouse button transition; typed text follows the key press.
+pub fn ui_inputs(
+    key: InputKey,
+    pressed: bool,
+    text: Option<&str>,
+    mods: Modifiers,
+    mouse: (f32, f32),
+) -> Vec<UiInput> {
+    let (x, y) = mouse;
+    let mut out = Vec::new();
+    match key {
+        InputKey::Mouse(n) => {
+            let button = match n {
+                1 => UiMouseButton::Left,
+                2 => UiMouseButton::Middle,
+                3 => UiMouseButton::Right,
+                n => UiMouseButton::Other(n.clamp(0, 255) as u8),
+            };
+            out.push(if pressed {
+                UiInput::MousePress {
+                    x,
+                    y,
+                    button,
+                    mods,
+                    double: false,
+                }
+            } else {
+                UiInput::MouseRelease { x, y, button, mods }
+            });
+            return out;
         }
+        InputKey::Keyboard(_) if pressed => out.push(UiInput::Key {
+            key: ui_key_from_input(key),
+            mods,
+            repeat: false,
+        }),
+        _ => {}
     }
+    if pressed && !mods.ctrl {
+        out.extend(
+            text.unwrap_or("")
+                .chars()
+                .filter(|c| !c.is_control())
+                .map(UiInput::Char),
+        );
+    }
+    out
+}
 
-    pub fn text(&self) -> &str {
-        &self.text
+/// USB HID usage of a keyboard key to the UI crate's key enum.
+pub fn ui_key_from_input(key: InputKey) -> Key {
+    let InputKey::Keyboard(hid) = key else {
+        return Key::Other(0);
+    };
+    match hid {
+        4..=29 => Key::Letter((b'a' + (hid - 4) as u8) as char),
+        30..=38 => Key::Digit((hid - 29) as u8),
+        39 => Key::Digit(0),
+        KEY_ENTER => Key::Enter,
+        KEY_ESCAPE => Key::Escape,
+        KEY_BACKSPACE => Key::Backspace,
+        43 => Key::Tab,
+        44 => Key::Space,
+        58..=69 => Key::Function((hid - 57) as u8),
+        74 => Key::Home,
+        75 => Key::PageUp,
+        76 => Key::Delete,
+        77 => Key::End,
+        78 => Key::PageDown,
+        79 => Key::Right,
+        80 => Key::Left,
+        81 => Key::Down,
+        82 => Key::Up,
+        other => Key::Other(other as u32),
     }
+}
 
-    pub fn insert(&mut self, typed: &str) {
-        for c in typed.chars().filter(|c| !c.is_control()) {
-            if self.text.chars().count() < MAX_CHAT_CHARS {
-                self.text.push(c);
-            }
-        }
-    }
-
-    pub fn backspace(&mut self) {
-        self.text.pop();
-    }
+pub fn input_key_from_ui(key: Key) -> InputKey {
+    let hid = match key {
+        Key::Letter(c) if c.is_ascii_lowercase() => 4 + (c as i32 - 'a' as i32),
+        Key::Letter(_) => return InputKey::Unbound,
+        Key::Digit(0) => 39,
+        Key::Digit(n) => 29 + i32::from(n),
+        Key::Enter => KEY_ENTER,
+        Key::Escape => KEY_ESCAPE,
+        Key::Backspace => KEY_BACKSPACE,
+        Key::Tab => 43,
+        Key::Space => 44,
+        Key::Function(n) => 57 + i32::from(n),
+        Key::Home => 74,
+        Key::PageUp => 75,
+        Key::Delete => 76,
+        Key::End => 77,
+        Key::PageDown => 78,
+        Key::Right => 79,
+        Key::Left => 80,
+        Key::Down => 81,
+        Key::Up => 82,
+        Key::Other(n) if n > 0 => n as i32,
+        Key::Other(_) => return InputKey::Unbound,
+    };
+    InputKey::Keyboard(hid)
 }
 
 #[cfg(test)]
@@ -175,13 +259,10 @@ mod tests {
     }
 
     #[test]
-    fn editor_drops_control_characters_and_bounds_length() {
-        let mut e = LineEditor::default();
-        e.insert("a\u{1b}[b\n");
-        assert_eq!(e.text(), "a[b");
-        e.insert(&"x".repeat(1000));
-        assert_eq!(e.text().chars().count(), MAX_CHAT_CHARS);
-        e.backspace();
-        assert_eq!(e.text().chars().count(), MAX_CHAT_CHARS - 1);
+    fn ui_keys_round_trip() {
+        for hid in (4..=44).chain(58..=69).chain(74..=82) {
+            let k = InputKey::Keyboard(hid);
+            assert_eq!(input_key_from_ui(ui_key_from_input(k)), k, "{hid}");
+        }
     }
 }

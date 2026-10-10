@@ -62,40 +62,49 @@ pub fn run(opts: &crate::cli::Options, out: &Path, launched: Instant) -> Result<
     Ok(())
 }
 
-pub fn run_play(opts: &crate::cli::Options, out: &Path) -> Result<()> {
-    use crate::play::{Play, PlayConfig};
+pub fn run_shell(opts: &crate::cli::Options, out: &Path) -> Result<()> {
+    use crate::shell::{Shell, ShellConfig};
     let (width, height) = opts.size;
     let renderer = Renderer::new(
         Target::Offscreen { width, height },
         world_setup::renderer_config(opts, RendererConfig::default()),
     )
     .context("creating renderer")?;
-    let config = PlayConfig {
-        addr: opts.connect.clone().unwrap_or_default(),
-        name: opts.name.clone(),
+    let config = ShellConfig {
         game_dir: opts.game_dir.clone(),
         jar: opts.jar.clone(),
         assets_dir: opts.assets_dir.clone(),
+        name: opts.name.clone(),
         render_distance: opts.render_distance_set.then_some(opts.render_distance),
+        connect: opts.connect.clone(),
     };
-    let mut play = Play::new(renderer, &config)?;
+    let mut shell = Shell::new(renderer, config)?;
+    let connecting = opts.connect.is_some();
     let mut scripted = false;
     if let Some(path) = &opts.autopilot {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let steps = crate::autopilot::parse(&text).map_err(anyhow::Error::msg)?;
-        play.set_autopilot(crate::autopilot::Autopilot::new(steps));
+        let mut steps = crate::autopilot::parse(&text).map_err(anyhow::Error::msg)?;
+        if connecting {
+            steps.insert(0, crate::autopilot::Step::WaitReady);
+        }
+        shell.set_autopilot(crate::autopilot::Autopilot::new(steps));
         scripted = true;
     }
     let started = Instant::now();
     let mut last = Instant::now();
     let mut ready_ticks: Option<u64> = None;
+    let mut frames = 0u32;
     let mut frame_times: Vec<f32> = Vec::new();
     loop {
         let now = Instant::now();
         let dt = (now - last).as_secs_f32();
         last = now;
-        if ready_ticks.is_none() && play.ready() {
+        shell.advance(dt);
+        if ready_ticks.is_none()
+            && shell.ready()
+            && let Some(play) = &shell.play
+        {
             ready_ticks = Some(play.ticks);
             println!(
                 "ready: {} ticks, {:.2}s since start",
@@ -103,43 +112,43 @@ pub fn run_play(opts: &crate::cli::Options, out: &Path) -> Result<()> {
                 started.elapsed().as_secs_f32()
             );
         }
-        let run_script = ready_ticks.is_some() || !scripted;
-        for _ in 0..play.due_ticks(dt) {
-            if run_script {
-                play.tick();
-            } else {
-                play.tick_without_script();
-            }
-        }
         let t0 = Instant::now();
-        play.frame();
+        shell.frame();
+        frames += 1;
         if ready_ticks.is_some() {
             frame_times.push(t0.elapsed().as_secs_f32() * 1000.0);
         }
-        if let Some(path) = play.shot.take() {
-            let pixels = play.render.renderer.read_offscreen()?;
+        if let Some(path) = shell.shot.take() {
+            let pixels = shell.read_offscreen()?;
             write_png(&path, width, height, &pixels)?;
             println!("wrote {}", path.display());
         }
-        if let Some(reason) = play.closed() {
-            bail!("disconnected: {reason}");
+        if connecting && shell.play.is_none() && shell.failure.is_some() {
+            bail!("disconnected: {}", shell.failure.take().unwrap_or_default());
         }
-        if let Some(start) = ready_ticks {
-            let done = match opts.after_ticks {
-                Some(n) => play.ticks >= start + u64::from(n),
-                None => scripted && play.script_finished(),
-            };
-            if done || (!scripted && opts.after_ticks.is_none()) {
-                break;
+        let done = if connecting {
+            match (ready_ticks, shell.play.as_ref()) {
+                (Some(start), Some(play)) => match opts.after_ticks {
+                    Some(n) => play.ticks >= start + u64::from(n),
+                    None => !scripted || shell.script_finished(),
+                },
+                _ => false,
             }
+        } else {
+            frames > 30 && (!scripted || shell.script_finished())
+        };
+        if done || shell.quit {
+            break;
         }
         if started.elapsed() > TIMEOUT {
             bail!("timed out");
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    play.frame();
-    let pixels = play.render.renderer.read_offscreen()?;
+    for _ in 0..3 {
+        shell.frame();
+    }
+    let pixels = shell.read_offscreen()?;
     write_png(out, width, height, &pixels)?;
     println!("wrote {}", out.display());
     if !frame_times.is_empty() {
@@ -153,12 +162,14 @@ pub fn run_play(opts: &crate::cli::Options, out: &Path) -> Result<()> {
             frame_times[n - 1]
         );
     }
-    println!(
-        "final: pos {:?} teleports {} chunks {} peak rss {} MB",
-        play.feet(),
-        play.world.client.state.player.teleports_received,
-        play.world.client.state.chunks.len(),
-        world_setup::peak_rss_mb()
-    );
+    if let Some(play) = &shell.play {
+        println!(
+            "final: pos {:?} teleports {} chunks {} peak rss {} MB",
+            play.feet(),
+            play.world.client.state.player.teleports_received,
+            play.world.client.state.chunks.len(),
+            world_setup::peak_rss_mb()
+        );
+    }
     Ok(())
 }

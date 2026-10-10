@@ -16,6 +16,7 @@ mcr-data = { path = "../mcr-data" }
 mcr-audio = { path = "../mcr-audio" }
 mcr-buf.workspace = true
 mcr-client = { path = "../mcr-client" }
+mcr-net = { path = "../mcr-net" }
 mcr-mesh = { path = "../mcr-mesh" }
 mcr-physics = { path = "../mcr-physics" }
 mcr-protocol = { path = "../mcr-protocol" }
@@ -31,6 +32,7 @@ rustc-hash.workspace = true
 tracing.workspace = true
 winit = "0.30"
 anyhow = "1"
+thiserror.workspace = true
 
 [lints]
 workspace = true

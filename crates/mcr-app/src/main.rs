@@ -6,6 +6,7 @@ mod debug;
 mod engine;
 mod fly;
 mod game;
+mod gui;
 mod hud;
 mod input;
 mod mesh_world;
@@ -14,9 +15,14 @@ mod outline;
 mod play;
 mod render_system;
 mod screenshot;
+mod servers;
+mod settings;
+mod shell;
 mod source;
 mod stats;
+mod status;
 mod target;
+mod view;
 mod world_setup;
 
 use std::sync::Arc;
@@ -29,7 +35,7 @@ use fly::FlyController;
 use mcr_render::glam::DVec3;
 use mcr_render::synthetic::{Terrain, generate_world};
 use mcr_render::{Camera, FrameInputs, Renderer, RendererConfig, Target};
-use play::{Play, PlayConfig};
+use shell::{Shell, ShellConfig};
 use stats::StatWindow;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -46,7 +52,7 @@ struct SyntheticScene {
 enum Scene {
     Synthetic(Box<SyntheticScene>),
     World(Box<Engine>),
-    Play(Box<Play>),
+    Shell(Box<Shell>),
 }
 
 impl Scene {
@@ -54,7 +60,7 @@ impl Scene {
         match self {
             Self::Synthetic(s) => &mut s.camera,
             Self::World(engine) => &mut engine.game.camera,
-            Self::Play(play) => &mut play.world.camera,
+            Self::Shell(shell) => shell.camera_mut(),
         }
     }
 
@@ -62,7 +68,7 @@ impl Scene {
         match self {
             Self::Synthetic(s) => &mut s.renderer,
             Self::World(engine) => &mut engine.render.renderer,
-            Self::Play(play) => &mut play.render.renderer,
+            Self::Shell(shell) => shell.renderer_mut().expect("renderer"),
         }
     }
 }
@@ -122,8 +128,8 @@ impl App {
             renderer.uses_draw_count(),
             renderer.has_timestamps()
         );
-        self.scene = Some(if self.opts.connect.is_some() {
-            Scene::Play(Box::new(Play::new(renderer, &play_config(&self.opts))?))
+        self.scene = Some(if self.opts.world.is_none() && !self.opts.synthetic {
+            Scene::Shell(Box::new(Shell::new(renderer, shell_config(&self.opts))?))
         } else if self.opts.synthetic {
             self.synthetic_scene(renderer)?
         } else {
@@ -136,9 +142,9 @@ impl App {
                 self.opts.render_distance,
             )))
         });
-        if let Some(Scene::Play(play)) = &mut self.scene {
+        if let Some(Scene::Shell(shell)) = &mut self.scene {
             if let Some(path) = &self.opts.autopilot {
-                play.set_autopilot(load_autopilot(path)?);
+                shell.set_autopilot(load_autopilot(path)?);
             }
         } else {
             println!(
@@ -216,23 +222,31 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
         let Some(scene) = &mut self.scene else { return };
-        if let Scene::Play(play) = scene {
-            play.advance(dt);
-            if let Some(reason) = play.closed() {
-                println!("disconnected: {reason}");
+        if let Scene::Shell(shell) = scene {
+            shell.advance(dt);
+            if shell.quit {
                 self.exit = true;
                 return;
             }
-            let Some(frame) = play.frame() else { return };
+            let Some(frame) = shell.frame() else { return };
             self.stats.record(dt, &frame);
-            let mem = play.render.renderer.memory_stats();
-            if let Some(line) = self.stats.report(Some((play.pipeline_stats(), mem))) {
-                let p = play.feet();
-                println!("{line} | pos {:.1} {:.1} {:.1}", p[0], p[1], p[2]);
+            if let Some(play) = &shell.play {
+                let mem = play.render.renderer.memory_stats();
+                if let Some(line) = self.stats.report(Some((play.pipeline_stats(), mem))) {
+                    let p = play.feet();
+                    println!("{line} | pos {:.1} {:.1} {:.1}", p[0], p[1], p[2]);
+                }
             }
-            let want = play.wants_grab();
+            let want = shell.wants_grab();
+            let cap = shell.max_fps();
             if want != self.grabbed {
                 self.set_grab(want);
+            }
+            if !self.opts.vsync && (10..260).contains(&cap) {
+                let budget = std::time::Duration::from_secs_f64(1.0 / f64::from(cap));
+                if let Some(rest) = budget.checked_sub(now.elapsed()) {
+                    std::thread::sleep(rest);
+                }
             }
             return;
         }
@@ -253,7 +267,7 @@ impl App {
                     sky_light: 1.0,
                 })
                 .ok(),
-            Scene::Play(_) => None,
+            Scene::Shell(_) => None,
             Scene::World(engine) => {
                 if let Err(e) = engine.tick() {
                     eprintln!("tick failed: {e:#}");
@@ -275,7 +289,7 @@ impl App {
         let Some(frame) = frame else { return };
         self.stats.record(dt, &frame);
         let pipeline = match scene {
-            Scene::Play(_) => None,
+            Scene::Shell(_) => None,
             Scene::World(engine) => Some((
                 engine.pipeline_stats(),
                 engine.render.renderer.memory_stats(),
@@ -311,30 +325,34 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(Scene::Play(play)) = &mut self.scene {
+                if let Some(Scene::Shell(shell)) = &mut self.scene {
                     if let PhysicalKey::Code(code) = event.physical_key
-                        && (!event.repeat || play.chat_open())
+                        && (!event.repeat || shell.accepts_repeat())
                     {
                         let pressed = event.state == ElementState::Pressed;
                         let text = event.text.as_deref();
-                        play.key_event(input::key_from_winit(code), pressed, text);
+                        shell.key_event(input::key_from_winit(code), pressed, text);
                     }
                 } else if let PhysicalKey::Code(code) = event.physical_key {
                     self.key(code, event.state == ElementState::Pressed);
                 }
             }
             WindowEvent::Focused(false) => {
-                if let Some(Scene::Play(play)) = &mut self.scene {
-                    play.release_all();
-                    play.paused = true;
+                if let Some(Scene::Shell(shell)) = &mut self.scene {
+                    shell.lose_focus();
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(Scene::Shell(shell)) = &mut self.scene {
+                    shell.cursor_moved(position.x, position.y);
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if let Some(Scene::Play(play)) = &mut self.scene {
-                    if state == ElementState::Pressed && play.paused {
-                        play.resume();
-                    } else if self.grabbed || !play.wants_grab() {
-                        play.key_event(
+                if let Some(Scene::Shell(shell)) = &mut self.scene {
+                    if state == ElementState::Pressed && shell.wants_grab() && !self.grabbed {
+                        self.set_grab(true);
+                    } else if let Some(Scene::Shell(shell)) = &mut self.scene {
+                        shell.key_event(
                             input::mouse_from_winit(button),
                             state == ElementState::Pressed,
                             None,
@@ -349,8 +367,8 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
                 };
-                if let Some(Scene::Play(play)) = &mut self.scene {
-                    play.scroll(steps as f32);
+                if let Some(Scene::Shell(shell)) = &mut self.scene {
+                    shell.scroll(steps as f32);
                 } else {
                     self.fly.scale_speed(steps);
                 }
@@ -365,8 +383,8 @@ impl ApplicationHandler for App {
             && self.grabbed
             && let Some(scene) = &mut self.scene
         {
-            if let Scene::Play(play) = scene {
-                play.mouse_motion(delta.0, delta.1);
+            if let Scene::Shell(shell) = scene {
+                shell.mouse_motion(delta.0, delta.1);
             } else {
                 self.fly.look(scene.camera_mut(), delta.0, delta.1);
             }
@@ -383,18 +401,18 @@ impl ApplicationHandler for App {
     }
 }
 
-fn play_config(opts: &Options) -> PlayConfig {
-    PlayConfig {
-        addr: opts.connect.clone().unwrap_or_default(),
-        name: opts.name.clone(),
+fn shell_config(opts: &Options) -> ShellConfig {
+    ShellConfig {
         game_dir: opts.game_dir.clone(),
         jar: opts.jar.clone(),
         assets_dir: opts.assets_dir.clone(),
+        name: opts.name.clone(),
         render_distance: opts.render_distance_set.then_some(opts.render_distance),
+        connect: opts.connect.clone(),
     }
 }
 
-fn load_autopilot(path: &std::path::Path) -> Result<autopilot::Autopilot> {
+pub(crate) fn load_autopilot(path: &std::path::Path) -> Result<autopilot::Autopilot> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let steps = autopilot::parse(&text).map_err(anyhow::Error::msg)?;
@@ -411,8 +429,8 @@ fn main() -> Result<()> {
         }
     };
     if let Some(out) = opts.screenshot.clone() {
-        if opts.connect.is_some() {
-            return screenshot::run_play(&opts, &out);
+        if opts.world.is_none() && !opts.synthetic {
+            return screenshot::run_shell(&opts, &out);
         }
         return screenshot::run(&opts, &out, launched);
     }

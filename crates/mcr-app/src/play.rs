@@ -1,32 +1,33 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
 use mcr_buf::BlockPos;
-use mcr_client::{
-    ChatKind, Client, ClientConfig, ClientError, ClientEvent, PlayerInput, sanitize_for_log,
-};
+use mcr_client::{ChatKind, Client, ClientError, ClientEvent, PlayerInput, sanitize_for_log};
 use mcr_physics::Pose;
 use mcr_protocol::play::serverbound::Facing;
 use mcr_protocol::types::game::Hand;
 use mcr_render::glam::DVec3;
 use mcr_render::{Camera, Environment, FrameStats, Overlay, OverlayCtx, Renderer, wgpu};
 use mcr_settings::bindings::mapping_index;
-use mcr_settings::{HeldState, InputKey, KeyBindings, MAPPINGS, Options, OptionsFile};
-use mcr_ui::{ItemIcons, Ui, UiRenderer, vanilla_resources};
+use mcr_settings::{HeldState, InputKey, KeyBindings, MAPPINGS, Options};
+use mcr_ui::{
+    ChatScreen, ContainerScreen, DeathScreen, Env, MenuKind, Modifiers, MouseButton, PauseScreen,
+    RenderCx, Screen, ScreenAction, ScreenStack, Ui, UiInput, UiRenderer,
+};
 
 use crate::assets::Assets;
 use crate::audio::{Audio, BlockSound, wire_category};
-use crate::autopilot::Autopilot;
 use crate::debug::{self, DebugInput};
+use crate::gui::{self, Gui};
 use crate::hud::{Hud, HudInput};
-use crate::input::{KEY_BACKSPACE, KEY_ENTER, KEY_ESCAPE, KEY_LEFT_CTRL, LineEditor};
+use crate::input::{KEY_ESCAPE, KEY_LEFT_CTRL, track_modifiers, ui_inputs};
 use crate::mesh_world::MeshWorld;
 use crate::net_world::NetworkWorld;
 use crate::outline::{OutlineRenderer, WorldBox};
 use crate::render_system::{PipelineStats, RenderSystem};
+use crate::settings::{OptionsScreen, SharedSettings};
 use crate::target::{BlockHit, Target, pick, raycast_block, reach};
+use crate::view::{StateView, SuggestEngine};
 
 pub const TICK_SECONDS: f32 = 0.05;
 const MAX_TICKS_PER_FRAME: u32 = 10;
@@ -38,12 +39,16 @@ const STEP_STRIDE: f32 = 0.6;
 
 #[derive(Debug, Clone)]
 pub struct PlayConfig {
-    pub addr: String,
-    pub name: String,
-    pub game_dir: PathBuf,
-    pub jar: PathBuf,
-    pub assets_dir: PathBuf,
     pub render_distance: Option<i32>,
+}
+
+/// What the shell lends to a session.
+pub struct Parts {
+    pub renderer: Renderer,
+    pub gui: Gui,
+    pub assets: Arc<Assets>,
+    pub audio: Option<Audio>,
+    pub settings: SharedSettings,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -60,6 +65,7 @@ struct Keys {
     drop: usize,
     chat: usize,
     command: usize,
+    inventory: usize,
     playerlist: usize,
     pick: usize,
     gui: usize,
@@ -84,6 +90,7 @@ impl Keys {
             drop: i("key.drop"),
             chat: i("key.chat"),
             command: i("key.command"),
+            inventory: i("key.inventory"),
             playerlist: i("key.playerlist"),
             pick: i("key.pickItem"),
             gui: i("key.toggleGui"),
@@ -160,10 +167,22 @@ pub fn view_direction(yaw: f32, pitch: f32) -> [f64; 3] {
 pub struct Play {
     pub world: NetworkWorld,
     pub render: RenderSystem,
-    ui: Ui,
+    gui: Gui,
     hud: Hud,
-    ui_renderer: UiRenderer,
     outline: OutlineRenderer,
+    settings: SharedSettings,
+    settings_seen: u64,
+    stack: ScreenStack,
+    gui_size: (i32, i32),
+    suggest: SuggestEngine,
+    mouse: (f32, f32),
+    mods: Modifiers,
+    container_open: bool,
+    death_shown: bool,
+    death_message: Option<mcr_protocol::types::text::Component>,
+    pub leave: bool,
+    pub quit: bool,
+    chat_depth: Option<usize>,
     pub options: Options,
     bindings: KeyBindings,
     held: HeldState,
@@ -185,8 +204,6 @@ pub struct Play {
     debug_on: bool,
     tab_held: bool,
     ctrl_held: bool,
-    chat: Option<LineEditor>,
-    pub paused: bool,
     closed: Option<String>,
     attack_click: bool,
     use_click: bool,
@@ -198,13 +215,12 @@ pub struct Play {
     step_dist: f32,
     last_feet: [f64; 3],
     placed_seen: bool,
-    pub shot: Option<PathBuf>,
-    autopilot: Option<Autopilot>,
     started: Instant,
     last_frame: Instant,
     fps: f32,
     frame_ms: f32,
     pub teleports: u32,
+    pub container_updates: u32,
 }
 
 impl std::fmt::Debug for Play {
@@ -217,66 +233,51 @@ impl std::fmt::Debug for Play {
     }
 }
 
-fn asset_index_id(jar: &std::path::Path) -> Option<String> {
-    let text = std::fs::read_to_string(jar.parent()?.join("version.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    value["assetIndex"]["id"].as_str().map(str::to_owned)
-}
-
 impl Play {
-    pub fn new(renderer: Renderer, cfg: &PlayConfig) -> Result<Self> {
+    pub fn new(parts: Parts, cfg: &PlayConfig, client: Client) -> Self {
         let data = mcr_data::v26_3();
-        let file = OptionsFile::load(&cfg.game_dir.join("options.txt")).unwrap_or_else(|e| {
-            eprintln!("options.txt unreadable: {e}");
-            OptionsFile::default()
-        });
-        let options = file.options.clone();
+        let Parts {
+            renderer,
+            gui,
+            assets,
+            audio,
+            settings,
+        } = parts;
+        let (options, bindings, seen) = {
+            let s = settings.borrow();
+            (s.file.options.clone(), s.file.bindings.clone(), s.version)
+        };
         let render_distance = cfg
             .render_distance
             .unwrap_or(options.render_distance)
             .clamp(2, 64);
-
-        let assets = Arc::new(Assets::load(&cfg.jar)?);
-        let index = asset_index_id(&cfg.jar);
-        let resources = vanilla_resources(
-            &cfg.jar,
-            index.as_deref().map(|i| (cfg.assets_dir.as_path(), i)),
-        )
-        .context("opening resources")?;
-        let ui = Ui::load(&resources).context("loading ui")?;
-        let icons = ItemIcons::load(&resources).context("loading item icons")?;
-        let hud = Hud::new(&ui, icons, data);
-
-        let mut config = ClientConfig::default().with_addr(&cfg.addr);
-        config.name = cfg.name.clone();
-        config.view_distance = render_distance.clamp(2, 32) as i8;
-        let client = Client::connect(config).context("connecting")?;
-        println!("joined {} as {}", cfg.addr, cfg.name);
-
+        let hud = Hud::new(&gui.ui, data);
         let world = NetworkWorld::new(client, render_distance);
         let format = renderer.target_format();
-        let ui_renderer = UiRenderer::new(renderer.device(), format);
         let outline = OutlineRenderer::new(renderer.device(), format);
         let render = RenderSystem::new(renderer, assets, &world);
-        let audio = Audio::start(
-            &cfg.assets_dir,
-            index.as_deref().unwrap_or("34"),
-            &options,
-            data,
-        );
-        if audio.is_none() {
-            println!("audio: disabled");
-        }
         let now = Instant::now();
-        Ok(Self {
+        Self {
             world,
             render,
-            ui,
+            gui,
             hud,
-            ui_renderer,
             outline,
+            settings,
+            settings_seen: seen,
+            stack: ScreenStack::new(0, 0),
+            gui_size: (0, 0),
+            suggest: SuggestEngine::default(),
+            mouse: (0.0, 0.0),
+            mods: Modifiers::NONE,
+            container_open: false,
+            death_shown: false,
+            death_message: None,
+            leave: false,
+            quit: false,
+            chat_depth: None,
             options,
-            bindings: file.bindings,
+            bindings,
             held: HeldState::default(),
             keys: Keys::resolve(),
             data,
@@ -296,8 +297,6 @@ impl Play {
             debug_on: false,
             tab_held: false,
             ctrl_held: false,
-            chat: None,
-            paused: false,
             closed: None,
             attack_click: false,
             use_click: false,
@@ -309,18 +308,25 @@ impl Play {
             step_dist: 0.0,
             last_feet: [0.0; 3],
             placed_seen: false,
-            shot: None,
-            autopilot: None,
             started: now,
             last_frame: now,
             fps: 0.0,
             frame_ms: 0.0,
             teleports: 0,
-        })
+            container_updates: 0,
+        }
     }
 
-    pub fn set_autopilot(&mut self, autopilot: Autopilot) {
-        self.autopilot = Some(autopilot);
+    /// Ends the session and returns what the shell lent out.
+    pub fn finish(self) -> Parts {
+        let (renderer, assets) = self.render.into_parts(&self.world);
+        Parts {
+            renderer,
+            gui: self.gui,
+            assets,
+            audio: self.audio,
+            settings: self.settings,
+        }
     }
 
     pub fn closed(&self) -> Option<&str> {
@@ -328,11 +334,11 @@ impl Play {
     }
 
     pub fn wants_grab(&self) -> bool {
-        self.closed.is_none() && !self.paused && self.chat.is_none()
+        self.closed.is_none() && self.stack.is_empty()
     }
 
-    pub fn chat_open(&self) -> bool {
-        self.chat.is_some()
+    pub fn screen_open(&self) -> bool {
+        !self.stack.is_empty()
     }
 
     pub fn ready(&self) -> bool {
@@ -377,18 +383,12 @@ impl Play {
         n
     }
 
-    pub fn advance(&mut self, dt: f32) {
-        for _ in 0..self.due_ticks(dt) {
-            self.tick();
-        }
-    }
-
     pub fn partial(&self) -> f32 {
         (self.accum / TICK_SECONDS).clamp(0.0, 1.0)
     }
 
     fn busy(&self) -> bool {
-        self.chat.is_some() || self.paused
+        !self.stack.is_empty()
     }
 
     fn player_input(&self) -> PlayerInput {
@@ -407,25 +407,12 @@ impl Play {
         }
     }
 
-    pub fn script_finished(&self) -> bool {
-        self.autopilot.as_ref().is_none_or(|a| a.finished)
-    }
-
-    pub fn tick_without_script(&mut self) {
-        let pilot = self.autopilot.take();
-        self.tick();
-        self.autopilot = pilot;
-    }
-
     pub fn tick(&mut self) {
         if self.closed.is_some() {
             return;
         }
-        if let Some(mut pilot) = self.autopilot.take() {
-            pilot.step(self);
-            self.autopilot = Some(pilot);
-        }
         self.ticks += 1;
+        self.sync_settings();
         let input = self.player_input();
         self.prev_eye = self.cur_eye;
         self.prev_fov_mod = self.fov_mod;
@@ -443,6 +430,7 @@ impl Play {
             self.step_sounds();
         }
         self.hud.tick();
+        self.screens_tick();
         if let Some(audio) = &mut self.audio {
             audio.set_listener(self.cur_eye, self.yaw);
         }
@@ -489,7 +477,7 @@ impl Play {
                     self.hud.show_actionbar();
                 } else {
                     self.hud
-                        .add_chat(&mut self.ui, &message, self.ticks as u32, &self.options);
+                        .add_chat(&mut self.gui.ui, &message, self.ticks as u32, &self.options);
                 }
             }
             ClientEvent::Title { .. } => self.hud.show_title(&self.world.client.state),
@@ -499,7 +487,31 @@ impl Play {
                     self.closed = Some(reason.to_log_string());
                 }
             }
-            ClientEvent::Died { .. } => println!("died"),
+            ClientEvent::Died { message } => {
+                println!("died");
+                self.death_message = message;
+            }
+            ClientEvent::ContainerOpened {
+                menu_type, title, ..
+            } => match MenuKind::from_registry_id(menu_type) {
+                Some(kind) => {
+                    if self.container_open {
+                        self.stack.pop();
+                    }
+                    self.push_screen(Box::new(ContainerScreen::new(kind, title)));
+                    self.container_open = true;
+                }
+                None => {
+                    self.net(Client::close_container);
+                }
+            },
+            ClientEvent::ContainerUpdated(_) => self.container_updates += 1,
+            ClientEvent::ContainerClosed(_) => {
+                if self.container_open {
+                    self.stack.pop();
+                    self.container_open = false;
+                }
+            }
             ClientEvent::PlayerTeleported { .. } => {
                 let p = &self.world.client.state.player;
                 self.yaw = p.physics.yaw;
@@ -788,7 +800,17 @@ impl Play {
     }
 
     pub fn scroll(&mut self, lines: f32) {
-        if self.busy() || !lines.is_finite() {
+        if !lines.is_finite() {
+            return;
+        }
+        if self.busy() {
+            let (x, y) = self.mouse;
+            self.ui_input(UiInput::Scroll {
+                x,
+                y,
+                dx: 0.0,
+                dy: lines,
+            });
             return;
         }
         self.scroll += lines * self.options.mouse_wheel_sensitivity as f32;
@@ -801,28 +823,19 @@ impl Play {
         }
     }
 
-    pub fn resume(&mut self) {
-        self.paused = false;
-    }
-
     pub fn key_event(&mut self, key: InputKey, pressed: bool, text: Option<&str>) {
         if self.closed.is_some() {
             return;
         }
-        if self.chat.is_some() {
-            self.chat_key(key, pressed, text);
+        track_modifiers(&mut self.mods, key, pressed);
+        if self.busy() {
+            self.screen_key(key, pressed, text);
             return;
         }
         if key == InputKey::Keyboard(KEY_ESCAPE) {
             if pressed {
-                self.paused = !self.paused;
-                if self.paused {
-                    self.release_all();
-                }
+                self.open_pause();
             }
-            return;
-        }
-        if self.paused {
             return;
         }
         if key == InputKey::Keyboard(KEY_LEFT_CTRL) {
@@ -834,31 +847,256 @@ impl Play {
         }
     }
 
-    fn chat_key(&mut self, key: InputKey, pressed: bool, text: Option<&str>) {
-        if !pressed {
+    fn screen_key(&mut self, key: InputKey, pressed: bool, text: Option<&str>) {
+        for input in ui_inputs(key, pressed, text, self.mods, self.mouse) {
+            self.ui_input(input);
+        }
+    }
+
+    pub fn ui_input(&mut self, input: UiInput) {
+        if let UiInput::MouseMove { x, y } = input {
+            self.mouse = (x, y);
+        }
+        let mut actions = Vec::new();
+        {
+            let view = StateView {
+                state: &self.world.client.state,
+            };
+            let mut env = Env {
+                view: &view,
+                clipboard: &mut self.gui.clipboard,
+                now_ms: self.started.elapsed().as_millis() as u64,
+            };
+            self.stack.input(&mut env, &input, &mut actions);
+        }
+        self.handle_actions(actions);
+    }
+
+    pub fn cursor_moved(&mut self, px: f64, py: f64) {
+        let (_, scale) = gui::gui_size(self.render.renderer.size(), self.options.gui_scale);
+        let scale = f64::from(scale);
+        let (x, y) = ((px / scale) as f32, (py / scale) as f32);
+        self.mouse = (x, y);
+        if self.busy() {
+            self.ui_input(UiInput::MouseMove { x, y });
+        }
+    }
+
+    fn update_gui_size(&mut self) {
+        let (size, _) = gui::gui_size(self.render.renderer.size(), self.options.gui_scale);
+        if size != self.gui_size {
+            self.gui_size = size;
+            self.stack.resize(size.0, size.1);
+        }
+    }
+
+    fn push_screen(&mut self, screen: Box<dyn Screen>) {
+        self.release_all();
+        self.update_gui_size();
+        self.stack.push(screen);
+    }
+
+    pub fn open_pause(&mut self) {
+        if !self.busy() && self.closed.is_none() {
+            self.push_screen(Box::new(PauseScreen::new(false, false)));
+        }
+    }
+
+    pub fn lose_focus(&mut self) {
+        self.release_all();
+        if self.options.pause_on_lost_focus {
+            self.open_pause();
+        }
+    }
+
+    pub fn open_chat(&mut self, initial: &str) {
+        if self.busy() {
             return;
         }
-        match key {
-            InputKey::Keyboard(KEY_ESCAPE) => self.chat = None,
-            InputKey::Keyboard(KEY_ENTER) => {
-                let line = self
-                    .chat
-                    .take()
-                    .map(|e| e.text().to_owned())
-                    .unwrap_or_default();
-                self.submit_chat(&line);
-            }
-            InputKey::Keyboard(KEY_BACKSPACE) => {
-                if let Some(e) = &mut self.chat {
-                    e.backspace();
+        let screen = ChatScreen::new(
+            self.hud.chat.clone(),
+            self.suggest.suggester(),
+            crate::hud::chat_options(&self.options, true),
+        )
+        .with_initial(initial);
+        self.push_screen(Box::new(screen));
+        self.chat_depth = Some(self.stack.len());
+    }
+
+    pub fn open_inventory(&mut self) {
+        if !self.busy() {
+            self.push_screen(Box::new(ContainerScreen::player_inventory()));
+            self.container_open = true;
+        }
+    }
+
+    fn chat_open(&mut self) -> bool {
+        let open = self.chat_depth.is_some_and(|d| self.stack.len() >= d);
+        if !open {
+            self.chat_depth = None;
+        }
+        open
+    }
+
+    fn sync_settings(&mut self) {
+        let version = self.settings.borrow().version;
+        if version == self.settings_seen {
+            return;
+        }
+        self.settings_seen = version;
+        let (options, bindings) = {
+            let s = self.settings.borrow();
+            (s.file.options.clone(), s.file.bindings.clone())
+        };
+        let old = std::mem::replace(&mut self.options, options);
+        self.bindings = bindings;
+        let rd = self.options.render_distance;
+        if rd != old.render_distance {
+            self.world.set_render_distance(rd);
+            self.net(|c| c.set_view_distance(rd.clamp(2, 32) as i8));
+        }
+        if self.options.enable_vsync != old.enable_vsync {
+            self.render.renderer.set_vsync(self.options.enable_vsync);
+        }
+        if let Some(audio) = &mut self.audio {
+            audio.apply_volumes(&self.options);
+        }
+    }
+
+    fn screens_tick(&mut self) {
+        self.suggest.pump(&mut self.world.client);
+        self.death_check();
+        if self.stack.is_empty() {
+            return;
+        }
+        let mut actions = Vec::new();
+        {
+            let view = StateView {
+                state: &self.world.client.state,
+            };
+            let mut env = Env {
+                view: &view,
+                clipboard: &mut self.gui.clipboard,
+                now_ms: self.started.elapsed().as_millis() as u64,
+            };
+            self.stack.tick(&mut env, &mut actions);
+        }
+        self.handle_actions(actions);
+    }
+
+    fn death_check(&mut self) {
+        let player = &self.world.client.state.player;
+        let (dead, show) = (player.dead, player.show_death_screen);
+        if dead && show && !self.death_shown {
+            self.death_shown = true;
+            self.stack.clear();
+            self.container_open = false;
+            let hardcore = self.world.client.state.world.hardcore;
+            let cause = self.death_message.take();
+            self.push_screen(Box::new(DeathScreen::new(cause, hardcore)));
+        } else if !dead && self.death_shown {
+            self.death_shown = false;
+            self.stack.clear();
+        }
+    }
+
+    fn handle_actions(&mut self, actions: Vec<ScreenAction>) {
+        use mcr_protocol::play::serverbound::ContainerInput as In;
+        use mcr_ui::ClickType as Ct;
+        for action in actions {
+            match action {
+                ScreenAction::SendChat(m) => {
+                    self.net(|c| c.send_chat(&m));
                 }
-            }
-            _ => {
-                if let (Some(e), Some(t)) = (&mut self.chat, text) {
-                    e.insert(t);
+                ScreenAction::SendCommand(m) => {
+                    self.net(|c| c.send_command(&m));
                 }
+                ScreenAction::ContainerClick(c) => {
+                    let mode = match c.mode {
+                        Ct::Pickup => In::Pickup,
+                        Ct::QuickMove => In::QuickMove,
+                        Ct::Swap => In::Swap,
+                        Ct::Clone => In::Clone,
+                        Ct::Throw => In::Throw,
+                        Ct::QuickCraft => In::QuickCraft,
+                        Ct::PickupAll => In::PickupAll,
+                    };
+                    let (slot, button) = (c.slot as i16, c.button as i8);
+                    self.net(|cl| cl.click_container(slot, button, mode));
+                }
+                ScreenAction::ContainerButton(b) => {
+                    self.net(|c| c.click_container_button(b));
+                }
+                ScreenAction::CloseContainer => {
+                    self.net(Client::close_container);
+                    self.stack.pop();
+                    self.container_open = false;
+                }
+                ScreenAction::CrafterSlotState { slot, enabled } => {
+                    self.net(|c| c.set_crafter_slot_state(slot as i32, enabled));
+                }
+                ScreenAction::SelectTrade(i) => {
+                    self.net(|c| c.select_trade(i as i32));
+                }
+                ScreenAction::RenameItem(name) => {
+                    self.net(|c| c.rename_item(&name));
+                }
+                ScreenAction::SetBeacon { primary, secondary } => {
+                    let effects = self.data.registry("minecraft:mob_effect");
+                    let id = |n: Option<String>| {
+                        n.and_then(|n| effects.as_ref()?.id_of(&n))
+                            .and_then(|i| i32::try_from(i).ok())
+                    };
+                    let (p, q) = (id(primary), id(secondary));
+                    self.net(|c| c.set_beacon(p, q));
+                }
+                ScreenAction::Respawn => {
+                    self.net(Client::respawn);
+                    self.death_shown = false;
+                    self.stack.clear();
+                }
+                ScreenAction::Disconnect => self.leave = true,
+                ScreenAction::OpenOptions => {
+                    let screen = OptionsScreen::new(self.settings.clone());
+                    self.update_gui_size();
+                    self.stack.push(Box::new(screen));
+                }
+                ScreenAction::OpenUrl(url) => gui::open_url(&url),
+                ScreenAction::CopyToClipboard(text) => {
+                    use mcr_ui::Clipboard;
+                    self.gui.clipboard.set(&text);
+                }
+                ScreenAction::ClickSound => {
+                    if let Some(audio) = &mut self.audio {
+                        audio.click();
+                    }
+                }
+                ScreenAction::Quit => self.quit = true,
+                _ => {}
             }
         }
+    }
+
+    pub fn ui_click(&mut self, x: f32, y: f32, button: MouseButton) {
+        self.ui_input(UiInput::MouseMove { x, y });
+        let mods = self.mods;
+        self.ui_input(UiInput::MousePress {
+            x,
+            y,
+            button,
+            mods,
+            double: false,
+        });
+        self.ui_input(UiInput::MouseRelease { x, y, button, mods });
+    }
+
+    /// Scripted click on container slot `index` of the open screen.
+    pub fn click_slot(&mut self, index: usize, button: MouseButton) -> bool {
+        let Some((x, y)) = self.stack.top().and_then(|s| s.slot_center(index)) else {
+            return false;
+        };
+        self.ui_click(x as f32, y as f32, button);
+        true
     }
 
     pub fn submit_chat(&mut self, line: &str) {
@@ -891,9 +1129,11 @@ impl Play {
         } else if i == k.playerlist {
             self.tab_held = true;
         } else if i == k.chat {
-            self.chat = Some(LineEditor::default());
+            self.open_chat("");
         } else if i == k.command {
-            self.chat = Some(LineEditor::with_text("/"));
+            self.open_chat("/");
+        } else if i == k.inventory {
+            self.open_inventory();
         } else if i == k.drop {
             let whole = self.ctrl_held;
             self.net(|c| c.drop_item(whole));
@@ -997,6 +1237,8 @@ impl Play {
         let boxes = self.outline_boxes();
         self.outline.build(&boxes, &camera, size);
 
+        self.update_gui_size();
+        let chat_open = self.chat_open();
         let debug = self.debug_on.then(|| {
             debug::build(&DebugInput {
                 state: &self.world.client.state,
@@ -1022,20 +1264,33 @@ impl Play {
             partial: self.partial(),
             hidden: self.hud_hidden,
             tab_held: self.tab_held,
-            chat_input: self.chat.as_ref().map(LineEditor::text),
+            chat_open,
             debug: debug.as_ref(),
             millis: self.started.elapsed().as_millis() as u64,
-            framebuffer: size,
         };
-        self.hud.draw(&mut self.ui, &input);
+        {
+            let view = StateView {
+                state: &self.world.client.state,
+            };
+            let max_scale = u32::try_from(self.options.gui_scale).unwrap_or(0);
+            let mut frame = self.gui.ui.frame_scaled(size.0, size.1, max_scale);
+            self.hud.draw(&mut frame, &mut self.gui.icons, &input);
+            if !self.stack.is_empty() {
+                let mut cx =
+                    RenderCx::new(&mut frame, &mut self.gui.icons, &self.gui.assets, &view);
+                cx.mouse = self.mouse;
+                cx.now_ms = input.millis;
+                self.stack.render(&mut cx);
+            }
+        }
 
         let env = self.environment(self.world.render_distance());
         self.render.renderer.set_environment(&env);
         self.render.renderer.set_animation_tick(self.ticks);
         let mut overlay = FrameOverlay {
             outline: &self.outline,
-            ui_renderer: &mut self.ui_renderer,
-            ui: &mut self.ui,
+            ui_renderer: &mut self.gui.ui_renderer,
+            ui: &mut self.gui.ui,
         };
         self.render.draw_with(&camera, 1.0, Some(&mut overlay))
     }

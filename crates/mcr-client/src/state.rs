@@ -229,6 +229,15 @@ impl PhysicsIds {
     }
 }
 
+/// A `command_suggestions` reply; `start` and `length` are character offsets into the request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandReply {
+    pub id: i32,
+    pub start: usize,
+    pub length: usize,
+    pub items: Vec<(String, Option<String>)>,
+}
+
 #[derive(Debug)]
 pub struct ClientState {
     pub data: &'static Version,
@@ -250,6 +259,8 @@ pub struct ClientState {
     pub scoreboard: Scoreboard,
     pub server: ServerInfo,
     pub last_command_suggestions: Option<(i32, Vec<String>)>,
+    pub commands: crate::commands::CommandTree,
+    pub command_reply: Option<CommandReply>,
     pub block_ack_sequence: i32,
     pub cooldowns: FxHashMap<String, i32>,
     pub chunk_batches: ChunkBatchSizeCalculator,
@@ -302,6 +313,8 @@ impl ClientState {
             scoreboard: Scoreboard::default(),
             server: ServerInfo::default(),
             last_command_suggestions: None,
+            commands: crate::commands::CommandTree::default(),
+            command_reply: None,
             block_ack_sequence: 0,
             cooldowns: FxHashMap::default(),
             chunk_batches: ChunkBatchSizeCalculator::default(),

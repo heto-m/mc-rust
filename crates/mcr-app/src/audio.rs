@@ -92,6 +92,19 @@ impl Audio {
         })
     }
 
+    pub fn apply_volumes(&mut self, options: &Options) {
+        for (i, name) in SOUND_CATEGORIES.iter().enumerate() {
+            if let Some(category) = SoundSource::from_name(name) {
+                self.manager
+                    .set_category_volume(category, options.sound_volumes[i] as f32);
+            }
+        }
+    }
+
+    pub fn click(&mut self) {
+        self.play("ui.button.click", None, 0.25, 1.0, SoundSource::Ui);
+    }
+
     pub fn set_listener(&mut self, position: [f64; 3], yaw_degrees: f32) {
         self.manager.set_listener(Listener {
             position: position.map(|v| v as f32),

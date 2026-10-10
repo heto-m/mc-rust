@@ -721,7 +721,26 @@ impl ClientState {
                 self.scoreboard.apply_team(&p.name, &p.action);
                 out.event(ClientEvent::ScoreboardChanged);
             }
+            P::Commands(p) => {
+                self.commands = crate::commands::CommandTree::from_packet(&p);
+            }
             P::CommandSuggestions(p) => {
+                self.command_reply = Some(crate::state::CommandReply {
+                    id: p.id,
+                    start: usize::try_from(p.start).unwrap_or(0).min(1 << 16),
+                    length: usize::try_from(p.length).unwrap_or(0).min(1 << 16),
+                    items: p
+                        .suggestions
+                        .iter()
+                        .take(1024)
+                        .map(|s| {
+                            (
+                                s.text.chars().take(256).collect(),
+                                s.tooltip.as_ref().map(|t| t.to_plain_string()),
+                            )
+                        })
+                        .collect(),
+                });
                 self.last_command_suggestions = Some((
                     p.id,
                     p.suggestions

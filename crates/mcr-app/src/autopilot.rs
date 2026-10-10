@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use mcr_settings::InputKey;
 
-use crate::play::Play;
+use crate::shell::Shell;
+use mcr_ui::{Key, MouseButton};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
@@ -14,6 +15,11 @@ pub enum Step {
     Look { yaw: f32, pitch: f32 },
     Turn { yaw: f32, pitch: f32 },
     Chat(String),
+    Type(String),
+    UiKey(Key),
+    Click { x: f32, y: f32, right: bool },
+    SlotClick { slot: usize, right: bool },
+    Sleep(u32),
     Slot(u8),
     Shot(PathBuf),
     Report,
@@ -71,6 +77,40 @@ pub fn parse(text: &str) -> Result<Vec<Step>, String> {
                 }
             }
             "chat" => Step::Chat(rest.to_owned()),
+            "type" => Step::Type(rest.to_owned()),
+            "ui" => Step::UiKey(match rest {
+                "enter" => Key::Enter,
+                "escape" => Key::Escape,
+                "tab" => Key::Tab,
+                "backspace" => Key::Backspace,
+                "up" => Key::Up,
+                "down" => Key::Down,
+                "left" => Key::Left,
+                "right" => Key::Right,
+                "space" => Key::Space,
+                _ => return Err(err("unknown ui key")),
+            }),
+            "click" => {
+                let mut it = rest.split_whitespace();
+                let x = num(it.next().ok_or_else(|| err("click x y"))?)?;
+                let y = num(it.next().ok_or_else(|| err("click x y"))?)?;
+                Step::Click {
+                    x,
+                    y,
+                    right: it.next() == Some("right"),
+                }
+            }
+            "slotclick" => {
+                let mut it = rest.split_whitespace();
+                Step::SlotClick {
+                    slot: it
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or_else(|| err("slotclick N [right]"))?,
+                    right: it.next() == Some("right"),
+                }
+            }
+            "sleep" => Step::Sleep(rest.parse().map_err(|_| err("sleep needs ticks"))?),
             "slot" => Step::Slot(rest.parse().map_err(|_| err("slot 1-9"))?),
             "shot" => Step::Shot(PathBuf::from(rest)),
             "report" => Step::Report,
@@ -100,13 +140,13 @@ impl Autopilot {
         }
     }
 
-    /// Runs at the start of every client tick.
-    pub fn step(&mut self, play: &mut Play) {
+    /// Runs at the start of every tick.
+    pub fn step(&mut self, sh: &mut Shell) {
         if self.waiting > 0 {
             self.waiting -= 1;
             if self.waiting == 0 {
                 for key in self.holding.drain(..) {
-                    play.key_event(key, false, None);
+                    sh.key_event(key, false, None);
                 }
             }
             if self.waiting > 0 || !self.holding.is_empty() {
@@ -115,69 +155,96 @@ impl Autopilot {
         }
         while let Some(step) = self.steps.pop_front() {
             match step {
-                Step::Wait(ticks) => {
+                Step::Wait(ticks) | Step::Sleep(ticks) => {
                     self.waiting = ticks.max(1);
                     return;
                 }
                 Step::WaitReady => {
-                    if !play.ready() {
+                    if !sh.ready() {
                         self.steps.push_front(Step::WaitReady);
                         return;
                     }
                 }
                 Step::Hold(keys, ticks) => {
                     for &key in &keys {
-                        play.key_event(key, true, None);
+                        sh.key_event(key, true, None);
                     }
                     self.holding = keys;
                     self.waiting = ticks.max(1);
                     return;
                 }
                 Step::Tap(key) => {
-                    play.key_event(key, true, None);
-                    play.key_event(key, false, None);
+                    sh.key_event(key, true, None);
+                    sh.key_event(key, false, None);
                 }
                 Step::Look { yaw, pitch } => {
-                    play.yaw = yaw.rem_euclid(360.0);
-                    play.pitch = pitch.clamp(-90.0, 90.0);
-                }
-                Step::Turn { yaw, pitch } => play.look(yaw, pitch),
-                Step::Chat(text) => {
-                    let t = InputKey::from_name("key.keyboard.t").unwrap_or(InputKey::Unbound);
-                    play.key_event(t, true, Some("t"));
-                    play.key_event(t, false, None);
-                    for c in text.chars() {
-                        play.key_event(InputKey::Unbound, true, Some(&c.to_string()));
+                    if let Some(play) = &mut sh.play {
+                        play.yaw = yaw.rem_euclid(360.0);
+                        play.pitch = pitch.clamp(-90.0, 90.0);
                     }
-                    let enter =
-                        InputKey::from_name("key.keyboard.enter").unwrap_or(InputKey::Unbound);
-                    play.key_event(enter, true, None);
+                }
+                Step::Turn { yaw, pitch } => {
+                    if let Some(play) = &mut sh.play {
+                        play.look(yaw, pitch);
+                    }
+                }
+                Step::Chat(text) => {
+                    if let Some(play) = &mut sh.play {
+                        play.submit_chat(&text);
+                    }
+                }
+                Step::Type(text) => sh.ui_text(&text),
+                Step::UiKey(key) => sh.ui_key(key),
+                Step::Click { x, y, right } => sh.screen_click(
+                    x,
+                    y,
+                    if right {
+                        MouseButton::Right
+                    } else {
+                        MouseButton::Left
+                    },
+                ),
+                Step::SlotClick { slot, right } => {
+                    if let Some(play) = &mut sh.play {
+                        let button = if right {
+                            MouseButton::Right
+                        } else {
+                            MouseButton::Left
+                        };
+                        if !play.click_slot(slot, button) {
+                            println!("slotclick {slot}: no such slot on screen");
+                        }
+                    }
                 }
                 Step::Slot(n) if (1..=9).contains(&n) => {
                     if let Some(key) = InputKey::from_name(&format!("key.keyboard.{n}")) {
-                        play.key_event(key, true, None);
-                        play.key_event(key, false, None);
+                        sh.key_event(key, true, None);
+                        sh.key_event(key, false, None);
                     }
                 }
                 Step::Slot(_) => {}
                 Step::Shot(path) => {
-                    play.shot = Some(path);
+                    sh.shot = Some(path);
                     self.waiting = 2;
                     return;
                 }
                 Step::Report => {
-                    let p = play.feet();
-                    println!(
-                        "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} teleports {} chunks {}",
-                        play.ticks,
-                        p[0],
-                        p[1],
-                        p[2],
-                        play.yaw,
-                        play.pitch,
-                        play.world.client.state.player.teleports_received,
-                        play.world.client.state.chunks.len(),
-                    );
+                    if let Some(play) = &sh.play {
+                        let p = play.feet();
+                        println!(
+                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} teleports {} chunks {} screen {} container_updates {}",
+                            play.ticks,
+                            p[0],
+                            p[1],
+                            p[2],
+                            play.yaw,
+                            play.pitch,
+                            play.world.client.state.player.teleports_received,
+                            play.world.client.state.chunks.len(),
+                            play.screen_open(),
+                            play.container_updates,
+                        );
+                    }
                 }
                 Step::Quit => {
                     self.finished = true;

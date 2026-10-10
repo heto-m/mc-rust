@@ -51,7 +51,7 @@ impl Default for Options {
     }
 }
 
-pub const USAGE: &str = "usage: mcr (--world <save> | --synthetic | --connect host[:port]) [--render-distance N] [--no-vsync]
+pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect host[:port]] [--render-distance N] [--no-vsync]
            [--jar <client.jar>] [--screenshot out.png [--camera x,y,z,yaw,pitch] [--size WxH]]
            [--autofly blocks_per_s]
        connect mode: [--name <name>] [--game-dir dir] [--assets-dir dir] [--autopilot script]
@@ -132,11 +132,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    if opts.world.is_none() && !opts.synthetic && opts.connect.is_none() {
-        return Err("give --world <save>, --synthetic or --connect <host>".into());
-    }
-    if opts.screenshot.is_some() && opts.world.is_none() && opts.connect.is_none() {
-        return Err("--screenshot needs --world or --connect".into());
+    if opts.synthetic && opts.screenshot.is_some() {
+        return Err("--screenshot needs --world or the menu flow".into());
     }
     Ok(opts)
 }
@@ -182,7 +179,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_input() {
-        assert!(parse_str("").is_err());
+        assert!(parse_str("").is_ok());
         assert!(parse_str("--world").is_err());
         assert!(parse_str("--world w --camera 1,2").is_err());
         assert!(parse_str("--world w --render-distance 0").is_err());

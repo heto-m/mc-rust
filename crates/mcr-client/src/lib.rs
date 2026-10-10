@@ -3,6 +3,7 @@
 mod actions;
 mod batch;
 mod client;
+pub mod commands;
 mod config;
 mod entity;
 mod error;
@@ -18,6 +19,7 @@ mod state;
 pub use actions::Digging;
 pub use batch::ChunkBatchSizeCalculator;
 pub use client::{Client, Phase};
+pub use commands::{CommandTree, Completion, SuggestSource};
 pub use config::{ClientConfig, OnlineAuth, ResourcePackPolicy};
 pub use entity::{AttributeState, Entities, Entity, MobEffect};
 pub use error::{ClientError, Result};
@@ -30,4 +32,6 @@ pub use social::{
     BossBar, ChatMessage, ChatState, Objective, PlayerInfo, PlayerList, Score, Scoreboard, TabList,
     Team, Titles,
 };
-pub use state::{ClientState, Outbox, ServerInfo, SpawnPoint, WorldBorder, WorldInfo};
+pub use state::{
+    ClientState, CommandReply, Outbox, ServerInfo, SpawnPoint, WorldBorder, WorldInfo,
+};

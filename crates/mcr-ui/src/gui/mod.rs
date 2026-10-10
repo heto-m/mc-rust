@@ -28,8 +28,8 @@ pub use menus::{
 };
 pub use screen::{ClickType, ContainerClick, Screen, ScreenAction, ScreenStack};
 pub use server_list::{
-    EditServerScreen, MemoryServerStore, OnlineStatus, ServerEntry, ServerListScreen, ServerStatus,
-    ServerStore, SharedServers,
+    EditServerScreen, FAVICON_SIZE, Favicon, MemoryServerStore, OnlineStatus, ServerEntry,
+    ServerListScreen, ServerStatus, ServerStore, SharedServers,
 };
 pub use tooltip::{TooltipLine, TooltipLines, draw_tooltip, tooltip_position};
 pub use widgets::{Button, CycleButton, Slider, Widget, WidgetEvent, WidgetEventKind, WidgetSet};
