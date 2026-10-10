@@ -105,7 +105,9 @@ impl ClientState {
                 }
             }
             P::UpdateTags(p) => self.registries.apply_tags(&p),
+            P::UpdateRecipes(p) => self.registries.apply_recipes(&p),
             P::StartConfiguration(_) => {
+                self.registries.clear();
                 out.replies
                     .push(S::ConfigurationAcknowledged(sb::ConfigurationAcknowledged));
                 out.event(ClientEvent::Reconfiguring);
@@ -402,6 +404,7 @@ impl ClientState {
                 for entry in p.values.entries.into_iter().take(64) {
                     self.player.data.insert(entry.index, entry.value);
                 }
+                crate::glide::apply_player_flags(&mut self.player);
             }
             P::SetEntityData(p) => {
                 if let Some(e) = self.entities.get_mut(p.entity_id) {
@@ -590,6 +593,14 @@ impl ClientState {
             P::MountScreenOpen(p) => {
                 self.inventory
                     .open_container(p.container_id, -1, Component::text(""));
+                let entity_type = self.entities.get(p.entity_id).map(|e| e.kind);
+                if let (Some(open), Some(entity_type)) = (self.inventory.open.as_mut(), entity_type)
+                {
+                    open.mount = Some(crate::menu::MountInfo {
+                        columns: usize::try_from(p.inventory_columns).unwrap_or(0).min(16),
+                        entity_type,
+                    });
+                }
                 out.event(ClientEvent::ContainerOpened {
                     id: p.container_id,
                     menu_type: -1,

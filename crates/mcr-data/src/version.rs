@@ -470,6 +470,16 @@ impl Version {
         NAMES.get(usize::from(slot)).copied()
     }
 
+    /// Whether the item's default components include the component type with registry id `component`.
+    pub fn item_has_default_component(&self, item: ItemId, component: u32) -> bool {
+        let words = &self.tables.items.default_components;
+        let base = item as usize * 4;
+        component < 128
+            && words
+                .get(base + (component / 32) as usize)
+                .is_some_and(|w| w >> (component % 32) & 1 != 0)
+    }
+
     /// `Some(can_always_eat)` for items with the `food` component.
     pub fn item_food(&self, item: ItemId) -> Option<bool> {
         let f = *self.tables.items.food_flags.get(item as usize)?;

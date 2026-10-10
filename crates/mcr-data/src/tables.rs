@@ -68,6 +68,8 @@ pub struct ItemTable {
     pub consume_seconds: Vec<f32>,
     pub cooldown_seconds: Vec<f32>,
     pub food_flags: Vec<u8>,
+    /// Four words per item: bit `n` is set when the item's defaults include data component type `n`.
+    pub default_components: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -245,6 +247,7 @@ impl Tables {
         w.vec(&i.consume_seconds);
         w.vec(&i.cooldown_seconds);
         w.vec(&i.food_flags);
+        w.vec(&i.default_components);
         w.vec(&self.entities.width);
         w.vec(&self.entities.height);
         w.vec(&self.entities.eye_height);
@@ -349,6 +352,7 @@ impl Tables {
             consume_seconds: r.vec()?,
             cooldown_seconds: r.vec()?,
             food_flags: r.vec()?,
+            default_components: r.vec()?,
         };
         let entities = EntityTable {
             width: r.vec()?,

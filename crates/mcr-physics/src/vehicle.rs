@@ -313,11 +313,37 @@ impl Boat {
     }
 }
 
-/// A saddled land mob the player steers (horses, donkeys, mules, pigs, striders).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountMode {
+    Horse,
+    Pig,
+    Strider,
+    Camel,
+    HappyGhast,
+}
+
+const CAMEL_DASH_COOLDOWN: i32 = 55;
+
+fn wrap_degrees(v: f32) -> f32 {
+    let mut d = v % 360.0;
+    if d >= 180.0 {
+        d -= 360.0;
+    }
+    if d < -180.0 {
+        d += 360.0;
+    }
+    d
+}
+
+/// A mob the player steers: horses, camels, pigs, striders and happy ghasts.
 #[derive(Debug, Clone)]
 pub struct Mount {
     pub body: PlayerPhysics,
     jump_pending: f32,
+    pub mode: MountMode,
+    dash_cooldown: i32,
+    /// Sitting or changing pose: the camel will not move.
+    pub refuse_to_move: bool,
 }
 
 impl Mount {
@@ -329,15 +355,31 @@ impl Mount {
         Self {
             body,
             jump_pending: 0.0,
+            mode: MountMode::Horse,
+            dash_cooldown: 0,
+            refuse_to_move: false,
         }
+    }
+
+    pub fn with_mode(mut self, mode: MountMode) -> Self {
+        self.mode = mode;
+        self.body.stand_on_lava = mode == MountMode::Strider;
+        self
     }
 
     pub fn set_attributes(&mut self, attributes: Attributes) {
         self.body.attributes = attributes;
     }
 
+    pub fn dash_cooldown(&self) -> i32 {
+        self.dash_cooldown
+    }
+
     /// Queues a rider jump (`jump_amount` is the 0-100 charge the client reports).
     pub fn rider_jump(&mut self, jump_amount: i32) {
+        if self.mode == MountMode::Camel && (self.dash_cooldown > 0 || !self.body.on_ground) {
+            return;
+        }
         self.jump_pending = if jump_amount < 0 {
             0.0
         } else if jump_amount >= 90 {
@@ -353,44 +395,166 @@ impl Mount {
         self.body.pitch = pitch;
     }
 
+    fn execute_jump<W: CollisionWorld + ?Sized>(
+        &mut self,
+        world: &W,
+        amount: f32,
+        forward: f32,
+        attr_speed: f32,
+    ) {
+        let b = &mut self.body;
+        let jump_factor = f64::from(b.block_jump_factor(world));
+        let boost = b
+            .effects
+            .jump_boost
+            .map_or(0.0, |a| 0.1 * (f32::from(a) + 1.0));
+        if self.mode == MountMode::Camel {
+            let power = b.attributes.jump_strength as f32 * jump_factor as f32 + boost;
+            let yaw = b.yaw * DEG_TO_RAD;
+            let (lx, lz) = (
+                f64::from(trig::sin(f64::from(-yaw))),
+                f64::from(trig::cos(f64::from(yaw))),
+            );
+            let len = (lx * lx + lz * lz).sqrt();
+            let scale = f64::from(22.2222f32)
+                * f64::from(amount)
+                * f64::from(attr_speed)
+                * f64::from(b.block_speed_factor(world));
+            if len > 0.0 {
+                b.vel[0] += lx / len * scale;
+                b.vel[2] += lz / len * scale;
+            }
+            b.vel[1] += f64::from(1.4285f32) * f64::from(amount) * f64::from(power);
+            self.dash_cooldown = CAMEL_DASH_COOLDOWN;
+            return;
+        }
+        let power = b.attributes.jump_strength as f32 * amount * jump_factor as f32 + boost;
+        b.vel[1] = f64::from(power);
+        if forward > 0.0 {
+            let yaw = b.yaw * DEG_TO_RAD;
+            b.vel[0] += f64::from(-0.4 * trig::sin(f64::from(yaw)) * amount);
+            b.vel[2] += f64::from(0.4 * trig::cos(f64::from(yaw)) * amount);
+        }
+    }
+
     /// `rider` carries the rider's view and key impulses; returns the vehicle's new yaw.
+    /// `attr_speed` is the mob's own movement attribute and `ridden_speed` what `getRiddenSpeed` yields.
     pub fn tick<W: CollisionWorld + ?Sized>(
         &mut self,
         world: &W,
         rider: &PlayerInput,
-        rider_speed: f32,
+        attr_speed: f32,
+        ridden_speed: f32,
     ) -> f32 {
+        if self.mode == MountMode::HappyGhast {
+            return self.tick_ghast(world, rider, ridden_speed);
+        }
         let axes = PlayerPhysics::rider_axes(rider);
-        let strafe = axes[0] * 0.5;
-        let mut forward = axes[1];
-        if forward <= 0.0 {
-            forward *= 0.25;
+        let mut input = match self.mode {
+            MountMode::Pig | MountMode::Strider => [0.0, 0.0, 1.0],
+            _ => {
+                let mut forward = axes[1];
+                if forward <= 0.0 {
+                    forward *= 0.25;
+                }
+                [f64::from(axes[0] * 0.5), 0.0, f64::from(forward)]
+            }
+        };
+        let refuse = self.mode == MountMode::Camel && self.refuse_to_move;
+        if refuse {
+            input = [0.0; 3];
         }
         let b = &mut self.body;
-        b.yaw = rider.yaw;
-        b.pitch = rider.pitch * 0.5;
+        if !refuse {
+            b.yaw = rider.yaw;
+            b.pitch = rider.pitch * 0.5;
+        }
         b.move_from = None;
         b.was_eye_in_water = b.fluid.eye_in_water;
         b.update_fluid_interaction(world);
         if b.on_ground {
-            if self.jump_pending > 0.0 {
-                let amount = self.jump_pending;
-                let jump_factor = f64::from(b.block_jump_factor(world));
-                let power = b.attributes.jump_strength as f32 * amount * jump_factor as f32
-                    + b.effects
-                        .jump_boost
-                        .map_or(0.0, |a| 0.1 * (f32::from(a) + 1.0));
-                b.vel[1] = f64::from(power);
-                if forward > 0.0 {
-                    let yaw = b.yaw * DEG_TO_RAD;
-                    b.vel[0] += f64::from(-0.4 * trig::sin(f64::from(yaw)) * amount);
-                    b.vel[2] += f64::from(0.4 * trig::cos(f64::from(yaw)) * amount);
-                }
+            let amount = self.jump_pending;
+            if amount > 0.0 && matches!(self.mode, MountMode::Horse | MountMode::Camel) {
+                self.execute_jump(world, amount, input[2] as f32, attr_speed);
             }
             self.jump_pending = 0.0;
         }
-        b.attributes.movement_speed = f64::from(rider_speed);
-        b.ridden_travel(world, [f64::from(strafe), 0.0, f64::from(forward)]);
+        let b = &mut self.body;
+        if refuse && b.on_ground {
+            b.vel[0] = 0.0;
+            b.vel[2] = 0.0;
+        }
+        b.attributes.movement_speed = f64::from(ridden_speed);
+        b.ridden_travel(world, input);
+        if self.mode == MountMode::Strider {
+            self.float_strider(world);
+        }
+        if self.dash_cooldown > 0 {
+            self.dash_cooldown -= 1;
+        }
+        self.body.yaw
+    }
+
+    fn float_strider<W: CollisionWorld + ?Sized>(&mut self, world: &W) {
+        let b = &mut self.body;
+        if !b.is_in_lava() {
+            return;
+        }
+        let p = b.block_pos();
+        let above_lava = b.state_at(world, [p[0], p[1] + 1, p[2]]).fluid == crate::data::FLUID_LAVA;
+        if b.pos[1] > f64::from(p[1]) + 0.5 - 1.0e-5 && !above_lava {
+            b.on_ground = true;
+        } else {
+            b.vel = [b.vel[0] * 0.5, b.vel[1] * 0.5 + 0.05, b.vel[2] * 0.5];
+        }
+    }
+
+    fn tick_ghast<W: CollisionWorld + ?Sized>(
+        &mut self,
+        world: &W,
+        rider: &PlayerInput,
+        flying_speed: f32,
+    ) -> f32 {
+        let axes = PlayerPhysics::rider_axes(rider);
+        let b = &mut self.body;
+        let pitch = rider.pitch * DEG_TO_RAD;
+        let (mut forward, mut up) = (0.0f32, 0.0f32);
+        if axes[1] != 0.0 {
+            let mut look_forward = trig::cos(f64::from(pitch));
+            let mut look_up = -trig::sin(f64::from(pitch));
+            if axes[1] < 0.0 {
+                look_forward *= -0.5;
+                look_up *= -0.5;
+            }
+            forward = look_forward;
+            up = look_up;
+        }
+        if rider.jump {
+            up += 0.5;
+        }
+        let scale = f64::from(3.9f32) * f64::from(flying_speed);
+        let input = [
+            f64::from(axes[0]) * scale,
+            f64::from(up) * scale,
+            f64::from(forward) * scale,
+        ];
+        b.yaw += wrap_degrees(rider.yaw - b.yaw) * 0.08;
+        b.pitch = rider.pitch * 0.5;
+        b.move_from = None;
+        b.was_eye_in_water = b.fluid.eye_in_water;
+        b.update_fluid_interaction(world);
+        let speed = flying_speed * 5.0 / 3.0;
+        b.move_relative(speed, input);
+        let v = b.vel;
+        b.do_move(world, v);
+        let drag = if b.is_in_water() {
+            f64::from(0.8f32)
+        } else if b.is_in_lava() {
+            0.5
+        } else {
+            f64::from(0.91f32)
+        };
+        b.vel = [b.vel[0] * drag, b.vel[1] * drag, b.vel[2] * drag];
         b.yaw
     }
 }

@@ -1,175 +1,24 @@
 //! Client-side container click simulation mirroring vanilla `AbstractContainerMenu#clicked`.
 
-use mcr_data::Version;
+mod layouts;
+mod rules;
+
 use mcr_protocol::play::serverbound::ContainerInput;
 use mcr_protocol::types::ItemStack;
-use mcr_protocol::types::component::{DataComponent, EquipmentSlot};
+use rustc_hash::FxHashMap;
+
+pub use layouts::{Layout, MountInfo, ResultKind, SlotKind};
+pub use rules::Rules;
 
 use crate::inventory::OUTSIDE_SLOT as OUTSIDE;
 const MAX_QUICK_MOVE_ROUNDS: usize = 4608;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SlotKind {
-    Normal,
-    Armor(EquipmentSlot),
-    /// Outputs and slots whose rules depend on recipes or block state the client lacks.
-    Unknown,
-    NoShulker,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Layout {
-    Player,
-    Crafting,
-    /// Container slots followed by the 36 player slots; quick-move shuttles between the two.
-    Simple {
-        container: usize,
-        shulker: bool,
-    },
-    /// Only the trailing 36 player slots are understood.
-    Opaque,
-}
-
-impl Layout {
-    pub fn from_menu(data: &Version, id: i32, menu_type: Option<i32>, slots: usize) -> Self {
-        match Self::classify(data, id, menu_type, slots) {
-            Self::Simple { container, .. } if container + 36 != slots => Self::Opaque,
-            l => l,
-        }
-    }
-
-    fn classify(data: &Version, id: i32, menu_type: Option<i32>, slots: usize) -> Self {
-        if id == 0 {
-            return if slots == 46 {
-                Self::Player
-            } else {
-                Self::Opaque
-            };
-        }
-        let Some(name) = menu_type
-            .and_then(|t| u32::try_from(t).ok())
-            .and_then(|t| data.registry("minecraft:menu")?.name_of(t))
-        else {
-            return Self::Opaque;
-        };
-        let name = name.strip_prefix("minecraft:").unwrap_or(name);
-        match name {
-            "crafting" if slots == 46 => Self::Crafting,
-            _ if slots < 36 => Self::Opaque,
-            "generic_3x3" => Self::Simple {
-                container: 9,
-                shulker: false,
-            },
-            "hopper" => Self::Simple {
-                container: 5,
-                shulker: false,
-            },
-            "shulker_box" => Self::Simple {
-                container: 27,
-                shulker: true,
-            },
-            n => n
-                .strip_prefix("generic_9x")
-                .and_then(|r| r.parse::<usize>().ok())
-                .filter(|r| (1..=6).contains(r))
-                .map_or(Self::Opaque, |r| Self::Simple {
-                    container: r * 9,
-                    shulker: false,
-                }),
-        }
-    }
-
-    fn kind(self, slot: usize, total: usize) -> SlotKind {
-        match self {
-            Self::Player => match slot {
-                0 => SlotKind::Unknown,
-                5 => SlotKind::Armor(EquipmentSlot::Head),
-                6 => SlotKind::Armor(EquipmentSlot::Chest),
-                7 => SlotKind::Armor(EquipmentSlot::Legs),
-                8 => SlotKind::Armor(EquipmentSlot::Feet),
-                _ => SlotKind::Normal,
-            },
-            Self::Crafting => {
-                if slot == 0 {
-                    SlotKind::Unknown
-                } else {
-                    SlotKind::Normal
-                }
-            }
-            Self::Simple { container, shulker } => {
-                if shulker && slot < container {
-                    SlotKind::NoShulker
-                } else {
-                    SlotKind::Normal
-                }
-            }
-            Self::Opaque => {
-                if slot + 36 >= total {
-                    SlotKind::Normal
-                } else {
-                    SlotKind::Unknown
-                }
-            }
-        }
-    }
-}
+const CONTAINER_MAX_STACK: i32 = 99;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct QuickCraft {
     pub status: u8,
     pub kind: u8,
     pub slots: Vec<usize>,
-}
-
-pub struct Rules<'a> {
-    pub data: &'a Version,
-    pub creative: bool,
-}
-
-impl Rules<'_> {
-    pub fn max_stack(&self, s: &ItemStack) -> i32 {
-        for c in &s.components.added {
-            if let DataComponent::MaxStackSize(v) = c {
-                return v.0.clamp(1, 99);
-            }
-        }
-        u32::try_from(s.item)
-            .ok()
-            .and_then(|i| self.data.item_info(i))
-            .map_or(64, |i| i32::from(i.max_stack_size).max(1))
-    }
-
-    fn equip_slot(&self, s: &ItemStack) -> Option<EquipmentSlot> {
-        for c in &s.components.added {
-            if let DataComponent::Equippable(e) = c {
-                return Some(e.slot);
-            }
-        }
-        let name = u32::try_from(s.item)
-            .ok()
-            .and_then(|i| self.data.item_name(i))?;
-        let name = name.strip_prefix("minecraft:").unwrap_or(name);
-        Some(if name.ends_with("_helmet") || name == "carved_pumpkin" {
-            EquipmentSlot::Head
-        } else if name.ends_with("_chestplate") || name == "elytra" {
-            EquipmentSlot::Chest
-        } else if name.ends_with("_leggings") {
-            EquipmentSlot::Legs
-        } else if name.ends_with("_boots") {
-            EquipmentSlot::Feet
-        } else if name == "shield" {
-            EquipmentSlot::OffHand
-        } else {
-            return None;
-        })
-    }
-
-    fn is_shulker(&self, s: &ItemStack) -> bool {
-        u32::try_from(s.item)
-            .ok()
-            .and_then(|i| self.data.item_name(i))
-            .is_some_and(|n| n.ends_with("shulker_box"))
-    }
 }
 
 fn same(a: &ItemStack, b: &ItemStack) -> bool {
@@ -196,6 +45,13 @@ fn with_count(stack: &ItemStack, n: i32) -> ItemStack {
     out
 }
 
+fn shrink(stack: &mut ItemStack, n: i32) {
+    stack.count -= n;
+    if stack.count <= 0 {
+        *stack = ItemStack::default();
+    }
+}
+
 pub struct Menu<'a> {
     pub rules: Rules<'a>,
     pub layout: Layout,
@@ -203,6 +59,7 @@ pub struct Menu<'a> {
     pub cursor: &'a mut ItemStack,
     pub offhand: &'a mut ItemStack,
     pub qc: &'a mut QuickCraft,
+    pub data: &'a FxHashMap<i16, i16>,
     /// Set when a touched slot's behaviour is unknown; the caller keeps its prior state.
     pub unknown: bool,
 }
@@ -213,24 +70,33 @@ impl Menu<'_> {
     }
 
     fn may_place(&self, i: usize, s: &ItemStack) -> bool {
-        match self.kind(i) {
-            SlotKind::Normal => true,
-            SlotKind::Armor(slot) => self.rules.equip_slot(s) == Some(slot),
-            SlotKind::NoShulker => !self.rules.is_shulker(s),
-            SlotKind::Unknown => false,
-        }
+        self.layout
+            .may_place(&self.rules, self.data, self.kind(i), s)
+    }
+
+    fn may_pickup(&self, i: usize) -> bool {
+        self.layout
+            .may_pickup(&self.rules, self.kind(i), &self.slots[i])
     }
 
     fn slot_max(&self, i: usize, s: &ItemStack) -> i32 {
-        let base = self.rules.max_stack(s);
+        let base = self.rules.max_stack(s).min(CONTAINER_MAX_STACK);
         match self.kind(i) {
-            SlotKind::Armor(_) => 1.min(base),
-            _ => base.min(64),
+            SlotKind::Armor(_)
+            | SlotKind::MountArmor(_)
+            | SlotKind::Beacon
+            | SlotKind::BrewPotion => 1.min(base),
+            SlotKind::EnchantItem => 1.min(base),
+            SlotKind::Fuel if self.rules.is_bucket(s) => 1.min(base),
+            _ => base,
         }
     }
 
     fn touch(&mut self, i: usize) -> bool {
-        if self.kind(i) == SlotKind::Unknown {
+        if matches!(
+            self.kind(i),
+            SlotKind::Unknown | SlotKind::Result(ResultKind::Unpredicted)
+        ) {
             self.unknown = true;
             return false;
         }
@@ -253,6 +119,59 @@ impl Menu<'_> {
             self.slots[i].count += n;
             if input.count <= 0 {
                 *input = ItemStack::default();
+            }
+        }
+    }
+
+    /// `Slot#tryRemove`: result and other non-placeable slots only give up their whole stack at once.
+    fn try_remove(&mut self, i: usize, amount: i32, max: i32) -> Option<ItemStack> {
+        if !self.may_pickup(i) {
+            return None;
+        }
+        let allow_modification = self.may_place(i, &self.slots[i].clone());
+        if !allow_modification && max < self.slots[i].count {
+            return None;
+        }
+        let taken = split(&mut self.slots[i], amount.min(max));
+        (!taken.is_empty()).then_some(taken)
+    }
+
+    /// `Slot#onTake`: what leaving a result slot does to the rest of the menu.
+    fn on_take(&mut self, i: usize) {
+        let SlotKind::Result(kind) = self.kind(i) else {
+            return;
+        };
+        match kind {
+            ResultKind::Crafting { grid, width } => self.take_crafting(grid, width),
+            ResultKind::Furnace => {}
+            ResultKind::Smithing => (0..3).for_each(|s| shrink(&mut self.slots[s], 1)),
+            ResultKind::Grindstone => (0..2).for_each(|s| self.slots[s] = ItemStack::default()),
+            ResultKind::Stonecutter => shrink(&mut self.slots[0], 1),
+            ResultKind::Loom => (0..2).for_each(|s| shrink(&mut self.slots[s], 1)),
+            ResultKind::Cartography => (0..2).for_each(|s| shrink(&mut self.slots[s], 1)),
+            ResultKind::Unpredicted => self.unknown = true,
+        }
+    }
+
+    fn take_crafting(&mut self, grid: std::ops::Range<usize>, _width: usize) {
+        for s in grid {
+            let item = self.slots[s].clone();
+            if item.is_empty() {
+                continue;
+            }
+            let remainder = self.rules.craft_remainder(&item);
+            shrink(&mut self.slots[s], 1);
+            let Some(replacement) = remainder else {
+                continue;
+            };
+            if self.slots[s].is_empty() {
+                self.slots[s] = replacement;
+            } else if same(&self.slots[s], &replacement) {
+                let mut merged = replacement;
+                merged.count += self.slots[s].count;
+                self.slots[s] = merged;
+            } else {
+                self.unknown = true;
             }
         }
     }
@@ -321,36 +240,47 @@ impl Menu<'_> {
             return;
         }
         if quick {
-            self.quick_move_loop(i);
+            if self.may_pickup(i) {
+                self.quick_move_loop(i);
+            }
             return;
         }
         let clicked = self.slots[i].clone();
         let mut carried = std::mem::take(self.cursor);
+        if button == 1 && (self.rules.is_bundle(&carried) || self.rules.is_bundle(&clicked)) {
+            self.unknown = true;
+            *self.cursor = carried;
+            return;
+        }
         if clicked.is_empty() {
             if !carried.is_empty() {
                 let amount = if button == 0 { carried.count } else { 1 };
                 self.safe_insert(i, &mut carried, amount);
             }
-        } else if carried.is_empty() {
-            let amount = if button == 0 {
-                clicked.count
-            } else {
-                (clicked.count + 1) / 2
-            };
-            carried = split(&mut self.slots[i], amount);
-        } else if self.may_place(i, &carried) {
-            if same(&clicked, &carried) {
-                let amount = if button == 0 { carried.count } else { 1 };
-                self.safe_insert(i, &mut carried, amount);
-            } else if carried.count <= self.slot_max(i, &carried) {
-                self.slots[i] = std::mem::replace(&mut carried, clicked);
-            }
-        } else if same(&clicked, &carried) {
-            let room = self.rules.max_stack(&carried) - carried.count;
-            let take = clicked.count.min(room);
-            if take > 0 {
-                let taken = split(&mut self.slots[i], take);
-                carried.count += taken.count;
+        } else if self.may_pickup(i) {
+            if carried.is_empty() {
+                let amount = if button == 0 {
+                    clicked.count
+                } else {
+                    (clicked.count + 1) / 2
+                };
+                if let Some(taken) = self.try_remove(i, amount, i32::MAX) {
+                    carried = taken;
+                    self.on_take(i);
+                }
+            } else if self.may_place(i, &carried) {
+                if same(&clicked, &carried) {
+                    let amount = if button == 0 { carried.count } else { 1 };
+                    self.safe_insert(i, &mut carried, amount);
+                } else if carried.count <= self.slot_max(i, &carried) {
+                    self.slots[i] = std::mem::replace(&mut carried, clicked);
+                }
+            } else if same(&clicked, &carried) {
+                let room = self.rules.max_stack(&carried) - carried.count;
+                if let Some(taken) = self.try_remove(i, clicked.count, room) {
+                    carried.count += taken.count;
+                    self.on_take(i);
+                }
             }
         }
         *self.cursor = carried;
@@ -384,8 +314,11 @@ impl Menu<'_> {
             None => *this.offhand = v,
         };
         if source.is_empty() {
-            set_source(self, target);
-            self.slots[a] = ItemStack::default();
+            if self.may_pickup(a) {
+                set_source(self, target);
+                self.slots[a] = ItemStack::default();
+                self.on_take(a);
+            }
         } else if target.is_empty() {
             if self.may_place(a, &source) {
                 let max = self.slot_max(a, &source);
@@ -398,7 +331,7 @@ impl Menu<'_> {
                     self.slots[a] = source;
                 }
             }
-        } else if self.may_place(a, &source) {
+        } else if self.may_pickup(a) && self.may_place(a, &source) {
             let max = self.slot_max(a, &source);
             if source.count > max {
                 let part = split(&mut source, max);
@@ -409,6 +342,7 @@ impl Menu<'_> {
             } else {
                 set_source(self, target);
                 self.slots[a] = source;
+                self.on_take(a);
             }
         }
     }
@@ -423,7 +357,10 @@ impl Menu<'_> {
                 return;
             }
             let amount = if button == 0 { 1 } else { item.count };
-            split(&mut self.slots[i], amount);
+            if self.try_remove(i, amount, i32::MAX).is_none() {
+                return;
+            }
+            self.on_take(i);
             if button != 1 || !same(&self.slots[i], &item) {
                 return;
             }
@@ -432,7 +369,9 @@ impl Menu<'_> {
 
     fn pickup_all(&mut self, i: usize, button: i32) {
         if self.cursor.is_empty()
-            || (!self.slots[i].is_empty() && self.kind(i) != SlotKind::Unknown)
+            || (!self.slots[i].is_empty()
+                && self.kind(i) != SlotKind::Unknown
+                && self.may_pickup(i))
         {
             return;
         }
@@ -447,16 +386,24 @@ impl Menu<'_> {
                 if self.slots[t].is_empty() || !same(&self.slots[t], self.cursor) {
                     continue;
                 }
-                if self.kind(t) == SlotKind::Unknown {
+                if matches!(
+                    self.kind(t),
+                    SlotKind::Unknown | SlotKind::Result(ResultKind::Unpredicted)
+                ) {
                     self.unknown = true;
+                    continue;
+                }
+                if !self.may_pickup(t) || !self.layout.can_take_for_pickup_all(self.kind(t)) {
                     continue;
                 }
                 if pass == 0 && self.slots[t].count == self.rules.max_stack(&self.slots[t]) {
                     continue;
                 }
                 let take = self.slots[t].count.min(max - self.cursor.count);
-                let taken = split(&mut self.slots[t], take);
-                self.cursor.count += taken.count;
+                if let Some(taken) = self.try_remove(t, take, max - self.cursor.count) {
+                    self.cursor.count += taken.count;
+                    self.on_take(t);
+                }
             }
         }
     }
@@ -496,7 +443,10 @@ impl Menu<'_> {
     fn can_quick_replace(&self, i: usize, ignore_size: bool) -> bool {
         let s = &self.slots[i];
         if s.is_empty() {
-            return self.kind(i) != SlotKind::Unknown;
+            return !matches!(
+                self.kind(i),
+                SlotKind::Unknown | SlotKind::Result(ResultKind::Unpredicted)
+            );
         }
         same(s, self.cursor)
             && s.count + if ignore_size { 0 } else { self.cursor.count }
@@ -553,92 +503,7 @@ impl Menu<'_> {
         }
     }
 
-    fn quick_move(&mut self, i: usize) -> ItemStack {
-        if self.slots[i].is_empty() {
-            return ItemStack::default();
-        }
-        let n = self.slots.len();
-        let original = self.slots[i].clone();
-        let mut stack = original.clone();
-        let ok = match self.layout {
-            Layout::Player => self.quick_move_player(i, &mut stack),
-            Layout::Crafting => {
-                if i == 0 {
-                    self.unknown = true;
-                    false
-                } else if (10..46).contains(&i) {
-                    if self.move_to(&mut stack, 1, 10, false) {
-                        true
-                    } else if i < 37 {
-                        self.move_to(&mut stack, 37, 46, false)
-                    } else {
-                        self.move_to(&mut stack, 10, 37, false)
-                    }
-                } else {
-                    self.move_to(&mut stack, 10, 46, false)
-                }
-            }
-            Layout::Simple { container, .. } => {
-                if i < container {
-                    self.move_to(&mut stack, container, n, true)
-                } else {
-                    self.move_to(&mut stack, 0, container, false)
-                }
-            }
-            Layout::Opaque => {
-                self.unknown = true;
-                false
-            }
-        };
-        if self.unknown && !ok {
-            return ItemStack::default();
-        }
-        if !ok {
-            return ItemStack::default();
-        }
-        self.slots[i] = if stack.is_empty() {
-            ItemStack::default()
-        } else {
-            stack.clone()
-        };
-        if matches!(self.layout, Layout::Player | Layout::Crafting) && stack.count == original.count
-        {
-            return ItemStack::default();
-        }
-        original
-    }
-
-    fn quick_move_player(&mut self, i: usize, stack: &mut ItemStack) -> bool {
-        let eq = self.rules.equip_slot(stack);
-        match i {
-            0 => {
-                self.unknown = true;
-                false
-            }
-            1..=8 => self.move_to(stack, 9, 45, false),
-            _ => {
-                let armor_pos = match eq {
-                    Some(EquipmentSlot::Head) => Some(5),
-                    Some(EquipmentSlot::Chest) => Some(6),
-                    Some(EquipmentSlot::Legs) => Some(7),
-                    Some(EquipmentSlot::Feet) => Some(8),
-                    _ => None,
-                };
-                if let Some(pos) = armor_pos.filter(|&p| self.slots[p].is_empty()) {
-                    self.move_to(stack, pos, pos + 1, false)
-                } else if eq == Some(EquipmentSlot::OffHand) && self.slots[45].is_empty() {
-                    self.move_to(stack, 45, 46, false)
-                } else if (9..36).contains(&i) {
-                    self.move_to(stack, 36, 45, false)
-                } else if (36..45).contains(&i) {
-                    self.move_to(stack, 9, 36, false)
-                } else {
-                    self.move_to(stack, 9, 45, false)
-                }
-            }
-        }
-    }
-
+    /// `AbstractContainerMenu#moveItemStackTo` over `start..end`.
     fn move_to(
         &mut self,
         stack: &mut ItemStack,
@@ -680,7 +545,11 @@ impl Menu<'_> {
         }
         if !stack.is_empty() {
             for &d in &order {
-                if self.kind(d) == SlotKind::Unknown && self.slots[d].is_empty() {
+                if matches!(
+                    self.kind(d),
+                    SlotKind::Unknown | SlotKind::Result(ResultKind::Unpredicted)
+                ) && self.slots[d].is_empty()
+                {
                     self.unknown = true;
                 }
                 if self.slots[d].is_empty() && self.may_place(d, stack) {

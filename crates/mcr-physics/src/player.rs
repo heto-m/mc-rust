@@ -41,6 +41,15 @@ pub struct PlayerPhysics {
     pub passenger: bool,
     pub dims: Option<(f32, f32)>,
     pub fast_lava: bool,
+    /// Gliding (entity flag 7); the server clears it on landing.
+    pub fall_flying: bool,
+    /// A glider is worn in its slot and not about to break.
+    pub glider_equipped: bool,
+    pub stand_on_lava: bool,
+    pub spin_attack_ticks: i32,
+    /// Living-entity flag 4 as the server reports it.
+    pub spin_attack_flag: bool,
+    pub(crate) fall_flying_started: bool,
     pub(crate) fluid: FluidState,
     pub(crate) was_touching_water: bool,
     pub(crate) was_eye_in_water: bool,
@@ -105,6 +114,12 @@ impl PlayerPhysics {
             passenger: false,
             dims: None,
             fast_lava: false,
+            fall_flying: false,
+            glider_equipped: false,
+            stand_on_lava: false,
+            spin_attack_ticks: 0,
+            spin_attack_flag: false,
+            fall_flying_started: false,
             fluid: FluidState::default(),
             was_touching_water: false,
             was_eye_in_water: false,
@@ -185,6 +200,7 @@ impl PlayerPhysics {
             fall_distance: self.fall_distance,
             powder_walk: self.leather_boots,
             descending: self.keys.sneak,
+            stand_on_lava: self.stand_on_lava,
         }
     }
 
@@ -198,6 +214,10 @@ impl PlayerPhysics {
 
     pub fn keys_sneak(&self) -> bool {
         self.keys.sneak
+    }
+
+    pub fn in_water(&self) -> bool {
+        self.was_touching_water
     }
 
     pub fn eye_in_water(&self) -> bool {
@@ -349,6 +369,7 @@ impl PlayerPhysics {
             horizontal_collision: self.horizontal_collision,
             input: out_input,
             sprint_command,
+            start_fall_flying: std::mem::take(&mut self.fall_flying_started),
         }
     }
 }

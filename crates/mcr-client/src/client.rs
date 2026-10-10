@@ -555,9 +555,18 @@ impl Client {
             self.state.controlled_vehicle = None;
             self.state.player.physics.passenger = false;
         }
+        self.state.player.physics.glider_equipped = self.glider_equipped();
         let player = &mut self.state.player;
         let out = player.physics.tick(&keys, &self.state.chunks);
         let entity_id = player.entity_id;
+        self.apply_firework_boosts();
+        if out.start_fall_flying {
+            self.send_play(&PlayServerbound::PlayerCommand(sb::PlayerCommand {
+                entity_id,
+                action: sb::PlayerCommandKind::StartFallFlying,
+                data: 0,
+            }))?;
+        }
         if let Some(i) = out.input {
             self.send_play(&PlayServerbound::PlayerInput(sb::PlayerInput {
                 forward: i.forward,

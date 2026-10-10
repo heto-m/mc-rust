@@ -77,6 +77,10 @@ impl PlayerPhysics {
         }
         let desired = if self.swimming {
             Pose::Swimming
+        } else if self.fall_flying {
+            Pose::FallFlying
+        } else if self.spin_attack_flag {
+            Pose::SpinAttack
         } else if self.keys.sneak && !self.abilities.flying {
             Pose::Crouching
         } else {
@@ -121,6 +125,7 @@ impl PlayerPhysics {
             && has_forward
             && self.is_sprinting_possible(self.abilities.flying)
             && !self.slow_due_to_item()
+            && (!self.fall_flying || self.is_under_water())
             && !self.is_moving_slowly_or_under();
         if can_start {
             if !had_forward {
@@ -169,7 +174,14 @@ impl PlayerPhysics {
                 }
             }
         }
-        let _ = just_toggled;
+        if input.jump
+            && !just_toggled
+            && !was_jumping
+            && !self.on_climbable(w)
+            && self.try_start_fall_flying()
+        {
+            self.fall_flying_started = true;
+        }
         if self.is_in_water() && input.sneak && !self.abilities.flying {
             self.vel[1] += f64::from(-0.04f32);
         }
@@ -293,11 +305,15 @@ impl PlayerPhysics {
         } else {
             self.no_jump_delay = 0;
         }
+        if self.fall_flying {
+            self.check_fall_distance_accumulation();
+        }
         if self.effects.slow_falling || self.effects.levitation.is_some() {
             self.fall_distance = 0.0;
         }
         self.travel(w, [f64::from(mi[0]), 0.0, f64::from(mi[1])]);
         self.apply_effects_from_blocks(w);
+        self.tick_spin_attack();
     }
 
     pub(crate) fn jump_from_ground<W: CollisionWorld + ?Sized>(&mut self, w: &W) {
@@ -317,7 +333,7 @@ impl PlayerPhysics {
         }
     }
 
-    fn move_relative(&mut self, speed: f32, input: [f64; 3]) {
+    pub(crate) fn move_relative(&mut self, speed: f32, input: [f64; 3]) {
         let len = input[0] * input[0] + input[1] * input[1] + input[2] * input[2];
         if len < 1.0e-7 {
             return;
@@ -413,7 +429,9 @@ impl PlayerPhysics {
     }
 
     fn travel_base<W: CollisionWorld + ?Sized>(&mut self, w: &W, input: [f64; 3]) {
-        if (self.is_in_water() || self.is_in_lava()) && !self.abilities.flying {
+        if (self.is_in_water() || (self.is_in_lava() && !self.stand_on_lava))
+            && !self.abilities.flying
+        {
             let is_falling = self.vel[1] <= 0.0;
             let old_y = self.pos[1];
             let g = self.effective_gravity();
@@ -422,12 +440,14 @@ impl PlayerPhysics {
             } else {
                 self.travel_in_lava(w, input, g, is_falling, old_y);
             }
+        } else if self.fall_flying {
+            self.travel_fall_flying(w, input);
         } else {
             self.travel_in_air(w, input);
         }
     }
 
-    fn travel_in_air<W: CollisionWorld + ?Sized>(&mut self, w: &W, input: [f64; 3]) {
+    pub(crate) fn travel_in_air<W: CollisionWorld + ?Sized>(&mut self, w: &W, input: [f64; 3]) {
         let below = self.block_below_affecting_movement(w);
         let block_friction = if self.on_ground {
             self.block_friction(w)

@@ -19,6 +19,8 @@ pub struct Container {
     pub menu_type: Option<i32>,
     pub title: Component,
     pub data: FxHashMap<i16, i16>,
+    pub mount: Option<crate::menu::MountInfo>,
+    pub synced: bool,
 }
 
 impl Container {
@@ -30,6 +32,8 @@ impl Container {
             menu_type: None,
             title: Component::text(""),
             data: FxHashMap::default(),
+            mount: None,
+            synced: false,
         }
     }
 }
@@ -45,7 +49,21 @@ pub struct Inventory {
     pub corrections: u64,
     /// Every `container_set_slot`/`container_set_content` applied.
     pub server_updates: u64,
+    /// Full `container_set_content` packets for a container that was already synced.
+    pub resyncs: u64,
+    /// Recent server slot updates, oldest first; tests clear it between clicks.
+    pub update_log: Vec<ServerUpdate>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerUpdate {
+    pub container: i32,
+    /// `-1` for a full content packet.
+    pub slot: i32,
+    pub differs: bool,
+}
+
+const MAX_UPDATE_LOG: usize = 1024;
 
 impl Default for Inventory {
     fn default() -> Self {
@@ -56,6 +74,8 @@ impl Default for Inventory {
             qc: crate::menu::QuickCraft::default(),
             corrections: 0,
             server_updates: 0,
+            resyncs: 0,
+            update_log: Vec::new(),
         }
     }
 }
@@ -121,6 +141,11 @@ impl Inventory {
         let Some(container) = self.container_mut(id) else {
             return false;
         };
+        let resync = std::mem::replace(&mut container.synced, true);
+        self.resyncs += u64::from(resync);
+        let Some(container) = self.container_mut(id) else {
+            return false;
+        };
         let mut items = items;
         items.truncate(MAX_CONTAINER_SLOTS);
         if id == PLAYER_MENU_ID {
@@ -135,6 +160,7 @@ impl Inventory {
             .count() as u64;
         container.slots = items;
         self.corrections += differing;
+        self.log_update(id, -1, differing > 0);
         self.cursor = cursor;
         self.qc = crate::menu::QuickCraft::default();
         if id != PLAYER_MENU_ID {
@@ -158,10 +184,22 @@ impl Inventory {
         let differs = *target != item;
         *target = item;
         self.corrections += u64::from(differs);
+        self.log_update(id, i32::from(slot), differs);
         if id != PLAYER_MENU_ID {
             self.mirror_player_slots();
         }
         true
+    }
+
+    fn log_update(&mut self, container: i32, slot: i32, differs: bool) {
+        if self.update_log.len() >= MAX_UPDATE_LOG {
+            self.update_log.remove(0);
+        }
+        self.update_log.push(ServerUpdate {
+            container,
+            slot,
+            differs,
+        });
     }
 
     pub fn set_player_inventory(&mut self, index: i32, item: ItemStack) -> bool {
@@ -222,7 +260,7 @@ impl Inventory {
         let mut changed: Vec<usize> = Vec::new();
         if let Some(container) = self.container(container_id).cloned() {
             let before = container.slots.clone();
-            let mut slots = container.slots;
+            let mut slots = container.slots.clone();
             let mut cursor = self.cursor.clone();
             let mut offhand = self
                 .player
@@ -239,6 +277,7 @@ impl Inventory {
                 container_id,
                 container.menu_type,
                 slots.len(),
+                container.mount,
             );
             let n = slots.len();
             let is_player = container_id == PLAYER_MENU_ID;
@@ -255,6 +294,7 @@ impl Inventory {
                 let mut menu = crate::menu::Menu {
                     rules: crate::menu::Rules {
                         data: ctx.data,
+                        registries: ctx.registries,
                         creative,
                     },
                     layout,
@@ -262,6 +302,7 @@ impl Inventory {
                     cursor: &mut cursor,
                     offhand: &mut offhand,
                     qc: &mut qc,
+                    data: &container.data,
                     unknown: false,
                 };
                 menu.click(slot, button, input, &hotbar);

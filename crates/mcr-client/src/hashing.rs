@@ -7,13 +7,16 @@ use mcr_data::Version;
 use mcr_nbt::{Compound, List, Value};
 use mcr_protocol::types::component::{
     AttributeDisplay, AttributeOperation, COMPONENT_NAMES, DataComponent, DataComponentPatch,
-    DyeColor, EquipmentSlotGroup, FireworkShape, Rarity,
+    DyeColor, EquipmentSlot, EquipmentSlotGroup, FireworkShape, Rarity,
 };
 use mcr_protocol::types::item::{HashedComponent, HashedItem, HashedPatchMap, HashedStack};
-use mcr_protocol::types::text::{Color, Content, HoverEvent};
+use mcr_protocol::types::text::{ClickEvent, Color, Content, HoverEvent, NbtSource, ObjectContent};
 use mcr_protocol::types::{Component, ItemStack};
 
 use crate::registry::Registries;
+
+mod more;
+mod snbt;
 
 const MAX_NBT_DEPTH: usize = 512;
 const NBT_DEPTH_LIMIT_HASH: u32 = 0;
@@ -101,6 +104,10 @@ pub fn h_list(items: impl IntoIterator<Item = u32>) -> u32 {
     }
     buf.push(5);
     crc32c(&buf)
+}
+
+fn int_array(items: &[i32]) -> u32 {
+    h_array(16, 17, items.iter().map(|v| v.to_le_bytes()))
 }
 
 fn h_array<const N: usize>(start: u8, end: u8, items: impl IntoIterator<Item = [u8; N]>) -> u32 {
@@ -464,15 +471,19 @@ impl<'a> HashCx<'a> {
                 h_list(out)
             }
             D::PotionContents(p) => {
-                if !p.custom_effects.is_empty() {
-                    return None;
-                }
                 let mut map = MapBuilder::default();
                 if let Some(potion) = p.potion {
                     map.put("potion", self.registry_ref("minecraft:potion", potion.0)?);
                 }
                 if let Some(color) = p.custom_color {
                     map.put("custom_color", h_int(color));
+                }
+                if !p.custom_effects.is_empty() {
+                    let mut out = Vec::new();
+                    for e in &p.custom_effects {
+                        out.push(self.mob_effect(e)?);
+                    }
+                    map.put("custom_effects", h_list(out));
                 }
                 if let Some(name) = &p.custom_name {
                     map.put("custom_name", h_str(name));
@@ -531,7 +542,7 @@ impl<'a> HashCx<'a> {
             D::Fireworks(f) => {
                 let mut map = MapBuilder::default();
                 map.put_if(f.flight_duration != 0, "flight_duration", || {
-                    h_int(f.flight_duration)
+                    h_byte(f.flight_duration as i8)
                 });
                 if !f.explosions.0.is_empty() {
                     map.put(
@@ -582,7 +593,7 @@ impl<'a> HashCx<'a> {
             D::CatVariant(v) => self.registry_ref("minecraft:cat_variant", v.0)?,
             D::CatSoundVariant(v) => self.registry_ref("minecraft:cat_sound_variant", v.0)?,
             D::DamageType(v) => self.registry_ref("minecraft:damage_type", v.0)?,
-            _ => return None,
+            _ => return self.component_hash_more(c),
         })
     }
 }
@@ -617,6 +628,19 @@ fn firework_explosion(e: &mcr_protocol::types::component::FireworkExplosion) -> 
     map.put_if(e.has_trail, "has_trail", || h_bool(true));
     map.put_if(e.has_twinkle, "has_twinkle", || h_bool(true));
     map.build()
+}
+
+fn equipment_slot_name(s: EquipmentSlot) -> &'static str {
+    match s {
+        EquipmentSlot::MainHand => "mainhand",
+        EquipmentSlot::OffHand => "offhand",
+        EquipmentSlot::Feet => "feet",
+        EquipmentSlot::Legs => "legs",
+        EquipmentSlot::Chest => "chest",
+        EquipmentSlot::Head => "head",
+        EquipmentSlot::Body => "body",
+        EquipmentSlot::Saddle => "saddle",
+    }
 }
 
 fn slot_group_name(g: EquipmentSlotGroup) -> &'static str {
@@ -694,7 +718,7 @@ fn component_depth(c: &Component, depth: usize) -> Option<u32> {
                         mcr_protocol::types::text::Arg::Component(c) => {
                             component_depth(c, depth + 1)?
                         }
-                        mcr_protocol::types::text::Arg::Number(_) => return None,
+                        mcr_protocol::types::text::Arg::Number(n) => nbt(n, 0),
                     });
                 }
                 map.put("with", h_list(out));
@@ -718,7 +742,36 @@ fn component_depth(c: &Component, depth: usize) -> Option<u32> {
                 map.put("separator", component_depth(sep, depth + 1)?);
             }
         }
-        _ => return None,
+        Content::Nbt(n) => {
+            map.put("nbt", h_str(&n.path));
+            map.put_if(n.interpret, "interpret", || h_bool(true));
+            map.put_if(n.plain, "plain", || h_bool(true));
+            if let Some(sep) = &n.separator {
+                map.put("separator", component_depth(sep, depth + 1)?);
+            }
+            match &n.source {
+                NbtSource::Entity(s) => map.put("entity", h_str(s)),
+                NbtSource::Block(s) => map.put("block", h_str(s)),
+                NbtSource::Storage(id) => map.put("storage", h_str(id.as_str())),
+            };
+        }
+        Content::Object { object, fallback } => {
+            match object {
+                ObjectContent::Atlas { atlas, sprite } => {
+                    map.put_if(atlas.as_str() != "minecraft:blocks", "atlas", || {
+                        h_str(atlas.as_str())
+                    });
+                    map.put("sprite", h_str(sprite.as_str()));
+                }
+                ObjectContent::Player { player, hat } => {
+                    map.put("player", nbt(player, 0));
+                    map.put_if(!hat, "hat", || h_bool(false));
+                }
+            }
+            if let Some(f) = fallback {
+                map.put("fallback", component_depth(f, depth + 1)?);
+            }
+        }
     }
     if !c.extra.is_empty() {
         let mut out = Vec::new();
@@ -745,19 +798,11 @@ fn component_depth(c: &Component, depth: usize) -> Option<u32> {
             map.put(name, h_bool(v));
         }
     }
-    if s.click_event.is_some() {
-        return None;
+    if let Some(e) = &s.click_event {
+        map.put("click_event", click_event(e)?);
     }
     if let Some(h) = &s.hover_event {
-        match &**h {
-            HoverEvent::ShowText(t) => {
-                let mut m = MapBuilder::default();
-                m.put("action", h_str("show_text"));
-                m.put("value", component_depth(t, depth + 1)?);
-                map.put("hover_event", m.build());
-            }
-            _ => return None,
-        }
+        map.put("hover_event", hover_event(h, depth)?);
     }
     if let Some(i) = &s.insertion {
         map.put("insertion", h_str(i));
@@ -766,6 +811,64 @@ fn component_depth(c: &Component, depth: usize) -> Option<u32> {
         map.put("font", h_str(f.as_str()));
     }
     Some(map.build())
+}
+
+fn click_event(e: &ClickEvent) -> Option<u32> {
+    let mut m = MapBuilder::default();
+    let (action, key, value) = match e {
+        ClickEvent::OpenUrl(v) => ("open_url", "url", h_str(v)),
+        ClickEvent::OpenFile(v) => ("open_file", "path", h_str(v)),
+        ClickEvent::RunCommand(v) => ("run_command", "command", h_str(v)),
+        ClickEvent::SuggestCommand(v) => ("suggest_command", "command", h_str(v)),
+        ClickEvent::ShowDialog(v) => ("show_dialog", "dialog", nbt(v, 0)),
+        ClickEvent::ChangePage(v) => ("change_page", "page", h_int(*v)),
+        ClickEvent::CopyToClipboard(v) => ("copy_to_clipboard", "value", h_str(v)),
+        ClickEvent::Custom { id, payload } => {
+            m.put("id", h_str(id.as_str()));
+            if let Some(p) = payload {
+                m.put("payload", nbt(p, 0));
+            }
+            m.put("action", h_str("custom"));
+            return Some(m.build());
+        }
+    };
+    m.put("action", h_str(action));
+    m.put(key, value);
+    Some(m.build())
+}
+
+fn hover_event(h: &HoverEvent, depth: usize) -> Option<u32> {
+    let mut m = MapBuilder::default();
+    match h {
+        HoverEvent::ShowText(t) => {
+            m.put("action", h_str("show_text"));
+            m.put("value", component_depth(t, depth + 1)?);
+        }
+        HoverEvent::ShowItem(item) => {
+            m.put("action", h_str("show_item"));
+            for (k, v) in item.iter() {
+                m.put(k, nbt(v, 1));
+            }
+        }
+        HoverEvent::ShowEntity { entity, uuid, name } => {
+            m.put("action", h_str("show_entity"));
+            m.put("id", h_str(entity.as_str()));
+            let v = uuid.as_u128();
+            m.put(
+                "uuid",
+                int_array(&[
+                    (v >> 96) as i32,
+                    (v >> 64) as i32,
+                    (v >> 32) as i32,
+                    v as i32,
+                ]),
+            );
+            if let Some(n) = name {
+                m.put("name", component_depth(n, depth + 1)?);
+            }
+        }
+    }
+    Some(m.build())
 }
 
 #[cfg(test)]

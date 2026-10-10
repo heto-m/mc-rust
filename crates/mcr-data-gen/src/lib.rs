@@ -494,6 +494,7 @@ fn item_components(
     t: &mut Tables,
 ) -> Result<()> {
     let dir = inputs.reports.join("minecraft/components/item");
+    let component_ids = component_type_ids(inputs)?;
     let it = &mut t.items;
     it.tool_start.push(0);
     for name in item_names {
@@ -504,6 +505,15 @@ fn item_components(
         } else {
             Value::Null
         };
+        let mut words = [0u32; 4];
+        for key in comps.as_object().into_iter().flat_map(Map::keys) {
+            let id = *component_ids
+                .get(key.as_str())
+                .with_context(|| format!("unknown component {key}"))?;
+            ensure!(id < 128, "component id {id} out of range");
+            words[id / 32] |= 1 << (id % 32);
+        }
+        it.default_components.extend_from_slice(&words);
         let tool = comps.get("minecraft:tool");
         let (mut default_speed, mut damage, mut flags) = (-1.0f32, 0u8, 0u8);
         if let Some(tool) = tool {
@@ -569,6 +579,20 @@ fn item_components(
         );
     }
     Ok(())
+}
+
+fn component_type_ids(inputs: &Inputs) -> Result<HashMap<String, usize>> {
+    let report: Map<String, Value> = read_json(&inputs.reports.join("registries.json"))?;
+    let entries = report["minecraft:data_component_type"]["entries"]
+        .as_object()
+        .context("data_component_type entries")?;
+    entries
+        .iter()
+        .map(|(name, e)| {
+            let id = e["protocol_id"].as_u64().context("protocol_id")?;
+            Ok((name.clone(), usize::try_from(id)?))
+        })
+        .collect()
 }
 
 pub fn write_module(out_dir: &Path, blob: &[u8]) -> Result<()> {

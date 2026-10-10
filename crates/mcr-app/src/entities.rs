@@ -351,6 +351,8 @@ impl EntityLayer {
             PhysPose::Standing => DataPose::Standing,
             PhysPose::Crouching => DataPose::Crouching,
             PhysPose::Swimming => DataPose::Swimming,
+            PhysPose::FallFlying => DataPose::FallFlying,
+            PhysPose::SpinAttack => DataPose::SpinAttack,
         };
         self.local_data.insert(6, EntityDataValue::Pose(pose));
         self.local_data.insert(

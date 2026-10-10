@@ -99,6 +99,8 @@ pub enum Pose {
     Standing,
     Crouching,
     Swimming,
+    FallFlying,
+    SpinAttack,
 }
 
 impl Pose {
@@ -106,7 +108,7 @@ impl Pose {
         match self {
             Pose::Standing => 1.8,
             Pose::Crouching => 1.5,
-            Pose::Swimming => 0.6,
+            Pose::Swimming | Pose::FallFlying | Pose::SpinAttack => 0.6,
         }
     }
 
@@ -114,7 +116,7 @@ impl Pose {
         match self {
             Pose::Standing => 1.62,
             Pose::Crouching => 1.27,
-            Pose::Swimming => 0.4,
+            Pose::Swimming | Pose::FallFlying | Pose::SpinAttack => 0.4,
         }
     }
 }
@@ -140,4 +142,6 @@ pub struct MovementOutput {
     pub input: Option<PlayerInput>,
     /// `Some(true)` for start-sprinting, `Some(false)` for stop-sprinting.
     pub sprint_command: Option<bool>,
+    /// The player just began gliding and the server must be told.
+    pub start_fall_flying: bool,
 }

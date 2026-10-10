@@ -1,9 +1,10 @@
 use crate::aabb::Aabb;
-use crate::data::{PhysicsData, StateInfo, flag};
+use crate::data::{FLUID_LAVA, PhysicsData, StateInfo, flag};
 use crate::world::CollisionWorld;
 
 pub const EPS: f64 = 1.0e-7;
 const FALLING_POWDER_SNOW: [f64; 6] = [0.0, 0.0, 0.0, 1.0, 0.8999999761581421, 1.0];
+const LAVA_FLOOR: [f64; 6] = [0.0, 0.0, 0.0, 1.0, 0.5, 1.0];
 const FULL_CUBE: [f64; 6] = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 const ABOVE_EPS: f64 = 1.0e-5_f32 as f64;
 
@@ -13,6 +14,7 @@ pub struct CollisionCtx {
     pub fall_distance: f64,
     pub powder_walk: bool,
     pub descending: bool,
+    pub stand_on_lava: bool,
 }
 
 impl Default for CollisionCtx {
@@ -22,6 +24,7 @@ impl Default for CollisionCtx {
             fall_distance: 0.0,
             powder_walk: false,
             descending: false,
+            stand_on_lava: false,
         }
     }
 }
@@ -118,13 +121,23 @@ fn visit_cells<W: CollisionWorld + ?Sized>(
                     continue;
                 }
                 let s = data.state(world.block_state(x, y, z));
-                if s.box_len == 0 && !s.has(flag::POWDER_SNOW | flag::SCAFFOLDING) {
+                let lava_floor = ctx.stand_on_lava
+                    && s.box_len == 0
+                    && s.fluid == FLUID_LAVA
+                    && s.has(flag::FLUID_SOURCE)
+                    && ctx.y > f64::from(y) + 0.5 - ABOVE_EPS
+                    && data.state(world.block_state(x, y + 1, z)).fluid != FLUID_LAVA;
+                if s.box_len == 0 && !lava_floor && !s.has(flag::POWDER_SNOW | flag::SCAFFOLDING) {
                     continue;
                 }
                 if border == 1 && !s.has(flag::LARGE) {
                     continue;
                 }
-                let raw = effective(data, s, p, ctx);
+                let raw = if lava_floor {
+                    std::slice::from_ref(&LAVA_FLOOR)
+                } else {
+                    effective(data, s, p, ctx)
+                };
                 if raw.is_empty() || raw.len() > tmp.len() {
                     continue;
                 }

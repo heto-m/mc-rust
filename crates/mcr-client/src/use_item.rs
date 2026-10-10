@@ -408,8 +408,16 @@ impl Client {
 
     /// Releases the use key: ends the local state and tells the server (bows, tridents, shields).
     pub fn release_use(&mut self) -> Result<()> {
-        if self.using.is_none() {
+        let Some(using) = self.using else {
             return Ok(());
+        };
+        let stack = self.hand_stack(using.hand);
+        let held = self.ticks.saturating_sub(using.started_tick);
+        if held >= 10 && self.state.is_item(&stack, "trident") {
+            let strength = self.riptide_strength(&stack);
+            if strength > 0.0 && self.in_water_or_rain() && !self.state.player.physics.passenger {
+                self.start_riptide(strength);
+            }
         }
         self.stop_using_local();
         self.release_use_item()

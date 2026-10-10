@@ -7,6 +7,7 @@ mod collide;
 mod data;
 mod effects;
 mod fluid;
+mod fly;
 mod mover;
 mod player;
 mod tick;
@@ -17,12 +18,15 @@ mod world;
 
 pub use aabb::Aabb;
 pub use data::{PhysicsData, StateInfo, flag};
+pub use fly::RIPTIDE_SPIN_TICKS;
 pub use player::PlayerPhysics;
 pub use types::{
     Abilities, Attributes, Effects, ItemUse, MoveKind, MovementOutput, PlayerInput, Pose,
 };
-pub use vehicle::{Boat, BoatStatus, Mount};
+pub use vehicle::{Boat, BoatStatus, Mount, MountMode};
 pub use world::CollisionWorld;
 
+#[cfg(test)]
+mod fly_tests;
 #[cfg(test)]
 mod tests;

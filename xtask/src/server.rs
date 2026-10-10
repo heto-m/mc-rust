@@ -35,6 +35,7 @@ pub fn render_properties(existing: Option<&str>, port: u16) -> String {
         ("pause-when-empty-seconds", "-1"),
         ("white-list", "false"),
         ("enforce-whitelist", "false"),
+        ("accept-transfers", "true"),
     ];
     let defaults = [("view-distance", "10"), ("simulation-distance", "10")];
     let mut lines: Vec<String> = existing

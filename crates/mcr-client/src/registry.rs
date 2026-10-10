@@ -2,13 +2,22 @@ use mcr_buf::Identifier;
 use mcr_nbt::Compound;
 use mcr_protocol::common::UpdateTags;
 use mcr_protocol::configuration::RegistryData;
-use rustc_hash::FxHashMap;
+use mcr_protocol::play::clientbound::ui::UpdateRecipes;
+use mcr_protocol::types::component::HolderSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 const MAX_REGISTRIES: usize = 256;
 const MAX_ENTRIES: usize = 1 << 16;
+const MAX_TOTAL_ENTRIES: usize = 1 << 17;
+const MAX_ENTRY_NBT_BYTES: usize = 1 << 16;
+const MAX_TOTAL_NBT_BYTES: usize = 1 << 24;
+const MAX_TOTAL_TAGS: usize = 1 << 16;
 const MAX_TAG_REGISTRIES: usize = 256;
 const MAX_TAGS_PER_REGISTRY: usize = 1 << 14;
 const MAX_TAG_IDS: usize = 1 << 20;
+const MAX_RECIPE_SETS: usize = 64;
+const MAX_RECIPE_SET_ITEMS: usize = 1 << 14;
+const MAX_STONECUTTER_INPUTS: usize = 1 << 12;
 
 pub const DIMENSION_TYPE: &str = "minecraft:dimension_type";
 pub const BIOME: &str = "minecraft:worldgen/biome";
@@ -25,6 +34,7 @@ pub struct RegistryItem {
 pub struct Registry {
     pub entries: Vec<RegistryItem>,
     by_name: FxHashMap<String, u32>,
+    nbt_bytes: usize,
 }
 
 impl Registry {
@@ -49,6 +59,8 @@ impl Registry {
 pub struct Registries {
     registries: FxHashMap<String, Registry>,
     tags: FxHashMap<String, FxHashMap<String, Vec<i32>>>,
+    recipe_sets: FxHashMap<String, FxHashSet<i32>>,
+    stonecutter_inputs: Vec<HolderSet>,
     pub enabled_features: Vec<String>,
 }
 
@@ -69,6 +81,36 @@ impl Registries {
         self.tag(registry, tag).is_some_and(|ids| ids.contains(&id))
     }
 
+    pub fn apply_recipes(&mut self, packet: &UpdateRecipes) {
+        self.recipe_sets.clear();
+        for (key, items) in packet.item_sets.0.iter().take(MAX_RECIPE_SETS) {
+            let set = items
+                .iter()
+                .take(MAX_RECIPE_SET_ITEMS)
+                .map(|v| v.0)
+                .collect();
+            self.recipe_sets.insert(key.as_str().to_owned(), set);
+        }
+        self.stonecutter_inputs = packet
+            .stonecutter_recipes
+            .iter()
+            .take(MAX_STONECUTTER_INPUTS)
+            .map(|r| r.input.clone())
+            .collect();
+    }
+
+    /// Whether an item is in a synced recipe property set such as `minecraft:furnace_input`.
+    pub fn recipe_set_contains(&self, set: &str, item: i32) -> bool {
+        self.recipe_sets.get(set).is_some_and(|s| s.contains(&item))
+    }
+
+    pub fn stonecutter_accepts(&self, item: i32) -> bool {
+        self.stonecutter_inputs.iter().any(|input| match input {
+            HolderSet::Ids(ids) => ids.contains(&item),
+            HolderSet::Tag(tag) => self.is_in_tag("minecraft:item", tag.as_str(), item),
+        })
+    }
+
     pub fn tag_registries(&self) -> impl Iterator<Item = &str> {
         self.tags.keys().map(String::as_str)
     }
@@ -82,12 +124,36 @@ impl Registries {
         if !self.registries.contains_key(&name) && self.registries.len() >= MAX_REGISTRIES {
             return;
         }
+        let (mut entries_used, mut bytes_used) = (0usize, 0usize);
+        for (n, r) in &self.registries {
+            if *n != name {
+                entries_used += r.entries.len();
+                bytes_used += r.nbt_bytes;
+            }
+        }
         let mut registry = Registry::default();
         for (index, entry) in packet.entries.iter().take(MAX_ENTRIES).enumerate() {
-            let data = entry
+            if entries_used + index >= MAX_TOTAL_ENTRIES {
+                break;
+            }
+            let mut data = entry
                 .data
                 .as_ref()
                 .and_then(|nbt| nbt.0.clone().into_compound());
+            if let Some(compound) = &data {
+                let mut bytes = Vec::new();
+                mcr_nbt::write_network(
+                    &mut bytes,
+                    Some(&mcr_nbt::Value::Compound(compound.clone())),
+                );
+                if bytes.len() > MAX_ENTRY_NBT_BYTES
+                    || bytes_used + registry.nbt_bytes + bytes.len() > MAX_TOTAL_NBT_BYTES
+                {
+                    data = None;
+                } else {
+                    registry.nbt_bytes += bytes.len();
+                }
+            }
             registry
                 .by_name
                 .insert(entry.id.as_str().to_owned(), index as u32);
@@ -102,13 +168,15 @@ impl Registries {
     pub fn apply_tags(&mut self, packet: &UpdateTags) {
         self.tags.clear();
         let mut budget = MAX_TAG_IDS;
+        let mut tag_budget = MAX_TOTAL_TAGS;
         for registry in packet.registries.iter().take(MAX_TAG_REGISTRIES) {
             let mut tags = FxHashMap::default();
             for tag in registry.tags.iter().take(MAX_TAGS_PER_REGISTRY) {
-                if tag.ids.0.len() > budget {
+                if tag.ids.0.len() > budget || tag_budget == 0 {
                     break;
                 }
                 budget -= tag.ids.0.len();
+                tag_budget -= 1;
                 tags.insert(tag.name.as_str().to_owned(), tag.ids.0.clone());
             }
             self.tags
@@ -179,6 +247,58 @@ mod tests {
             id: Identifier::parse(id).unwrap(),
             data: data.map(|c| NetworkNbt(Value::Compound(c))),
         }
+    }
+
+    #[test]
+    fn total_entries_are_capped_across_registries_and_packets() {
+        let mut regs = Registries::default();
+        for r in 0..200 {
+            regs.apply_registry_data(&RegistryData {
+                registry: Identifier::parse(&format!("minecraft:r{r}")).unwrap(),
+                entries: (0..MAX_ENTRIES)
+                    .map(|i| entry(&format!("minecraft:e{i}"), None))
+                    .collect(),
+            });
+        }
+        let total: usize = regs.names().map(|n| regs.get(n).unwrap().len()).sum();
+        assert!(total <= MAX_TOTAL_ENTRIES);
+        regs.apply_registry_data(&RegistryData {
+            registry: Identifier::parse("minecraft:r0").unwrap(),
+            entries: vec![entry("minecraft:a", None)],
+        });
+        assert_eq!(regs.get("minecraft:r0").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn oversized_entry_nbt_is_dropped() {
+        let mut regs = Registries::default();
+        let mut nbt = Compound::new();
+        for i in 0..3 {
+            nbt.insert(format!("big{i}"), "x".repeat(30_000));
+        }
+        regs.apply_registry_data(&RegistryData {
+            registry: Identifier::parse("minecraft:r").unwrap(),
+            entries: vec![entry("minecraft:a", Some(nbt))],
+        });
+        assert!(
+            regs.get("minecraft:r")
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .data
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn clearing_resets_everything() {
+        let mut regs = Registries::default();
+        regs.apply_registry_data(&RegistryData {
+            registry: Identifier::parse("minecraft:r").unwrap(),
+            entries: vec![entry("minecraft:a", None)],
+        });
+        regs.clear();
+        assert!(regs.get("minecraft:r").is_none());
     }
 
     #[test]

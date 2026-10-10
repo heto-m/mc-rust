@@ -15,10 +15,15 @@ mod events;
 mod gamestate;
 #[cfg(test)]
 mod gamestate_tests;
+mod glide;
 mod handler;
 pub mod hashing;
+#[cfg(test)]
+mod hashing_tests;
 mod inventory;
 mod menu;
+#[cfg(test)]
+mod menu_layout_tests;
 #[cfg(test)]
 mod menu_tests;
 mod player;
@@ -43,9 +48,10 @@ pub use gamestate::{
     Advancements, GameplayState, MapData, Merchant, RecipeBook, SignEditor, Waypoints,
 };
 pub use inventory::{
-    Container, Inventory, OUTSIDE_SLOT, PLAYER_MENU_ID, inventory_index_to_menu_slot,
+    Container, Inventory, OUTSIDE_SLOT, PLAYER_MENU_ID, ServerUpdate, inventory_index_to_menu_slot,
 };
 pub use mcr_physics::PlayerInput;
+pub use menu::MountInfo;
 pub use player::LocalPlayer;
 pub use registry::{Dimension, Registries, Registry, RegistryItem};
 pub use riding::{Ride, Sim};
