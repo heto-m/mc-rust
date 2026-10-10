@@ -3,8 +3,10 @@
 use mcr_world::SectionPos;
 
 use crate::cache::{
-    ATTR_AIR, ATTR_FULL_COLLISION, ATTR_HALF_TRANSPARENT, ATTR_LEAVES, ATTR_SOLID_RENDER, CubeFace,
-    FluidInfo, FluidKind, LAYER_NONE, ModelCache, QuadDef, RenderLayer, Shape, StateModel,
+    ATTR_AIR, ATTR_FULL_COLLISION, ATTR_HALF_TRANSPARENT, ATTR_LEAVES, ATTR_LIGHT_OPAQUE,
+    ATTR_SOLID, ATTR_SOLID_RENDER, Alt, CubeFace, FaceMask, FluidInfo, FluidKind, LAYER_NONE,
+    MASK_EMPTY, MASK_FULL, ModelCache, PartSpan, QuadDef, RandomModel, RenderLayer, Shape,
+    StateModel,
 };
 use crate::input::MeshInput;
 use crate::tint::{TINT_GRASS, TINT_NONE};
@@ -17,6 +19,8 @@ pub const STAINED_GLASS: u16 = 4;
 pub const WATER: u16 = 5;
 pub const SLAB: u16 = 6;
 pub const GRASS_BLOCK: u16 = 7;
+pub const RANDOM: u16 = 9;
+pub const SLAB_TOP: u16 = 10;
 pub const LEAVES: u16 = 8;
 pub const STONE_LAYER: u16 = 1;
 pub const DIRT_LAYER: u16 = 2;
@@ -33,15 +37,17 @@ fn cube(layer: u16, rl: RenderLayer, block: u16) -> StateModel {
             tint: TINT_NONE,
             overlay: LAYER_NONE,
             overlay_tint: TINT_NONE,
+            rot: 0,
+            overlay_rot: 0,
         }; 6],
         ..StateModel::EMPTY
     }
 }
 
 pub fn test_cache() -> ModelCache {
-    let mut states = vec![StateModel::EMPTY; 9];
-    let mut attrs = vec![0u8; 9];
-    let mut occlusion = vec![0u8; 9];
+    let mut states = vec![StateModel::EMPTY; 11];
+    let mut attrs = vec![0u8; 11];
+    let mut occlusion = vec![0u8; 11];
     attrs[0] = ATTR_AIR;
 
     states[STONE as usize] = cube(STONE_LAYER, RenderLayer::Solid, 1);
@@ -60,12 +66,13 @@ pub fn test_cache() -> ModelCache {
     states[GRASS_BLOCK as usize] = grass;
 
     for id in [STONE, DIRT, GRASS_BLOCK] {
-        attrs[id as usize] = ATTR_SOLID_RENDER | ATTR_FULL_COLLISION;
+        attrs[id as usize] =
+            ATTR_SOLID_RENDER | ATTR_FULL_COLLISION | ATTR_LIGHT_OPAQUE | ATTR_SOLID;
         occlusion[id as usize] = 0b11_1111;
     }
-    attrs[GLASS as usize] = ATTR_FULL_COLLISION | ATTR_HALF_TRANSPARENT;
-    attrs[STAINED_GLASS as usize] = ATTR_FULL_COLLISION | ATTR_HALF_TRANSPARENT;
-    attrs[LEAVES as usize] = ATTR_FULL_COLLISION | ATTR_LEAVES | ATTR_HALF_TRANSPARENT;
+    attrs[GLASS as usize] = ATTR_FULL_COLLISION | ATTR_HALF_TRANSPARENT | ATTR_SOLID;
+    attrs[STAINED_GLASS as usize] = ATTR_FULL_COLLISION | ATTR_HALF_TRANSPARENT | ATTR_SOLID;
+    attrs[LEAVES as usize] = ATTR_FULL_COLLISION | ATTR_LEAVES | ATTR_HALF_TRANSPARENT | ATTR_SOLID;
 
     states[WATER as usize].fluid = FluidInfo {
         kind: FluidKind::Water,
@@ -74,48 +81,151 @@ pub fn test_cache() -> ModelCache {
     };
     states[WATER as usize].block = 5;
 
-    let slab_quad = |face: u8, pos: [[f32; 3]; 4]| QuadDef {
+    let slab_quad = |face: u8, cull: bool, pos: [[f32; 3]; 4]| QuadDef {
         pos,
         uv: [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
         layer: 7,
         tint: TINT_NONE,
-        cull: if face == 3 { 3 } else { crate::cache::NO_CULL },
+        cull: if cull { face } else { crate::cache::NO_CULL },
         normal: face,
         shade: face,
         translucent: false,
-        boundary: face == 3,
+        boundary: cull,
+        flat: true,
     };
-    states[SLAB as usize] = StateModel {
-        shape: Shape::Model,
-        ao: true,
-        block: 6,
-        quad_start: 0,
-        quad_count: 2,
-        ..StateModel::EMPTY
+    let slab_quads = |y0: f32, y1: f32, top: bool| {
+        let rect = |face: u8, cull: bool, p: [[f32; 3]; 4]| slab_quad(face, cull, p);
+        vec![
+            rect(
+                2,
+                top,
+                [
+                    [0.0, y1, 0.0],
+                    [0.0, y1, 1.0],
+                    [1.0, y1, 1.0],
+                    [1.0, y1, 0.0],
+                ],
+            ),
+            rect(
+                3,
+                !top,
+                [
+                    [0.0, y0, 1.0],
+                    [0.0, y0, 0.0],
+                    [1.0, y0, 0.0],
+                    [1.0, y0, 1.0],
+                ],
+            ),
+            rect(
+                0,
+                true,
+                [
+                    [1.0, y1, 0.0],
+                    [1.0, y1, 1.0],
+                    [1.0, y0, 1.0],
+                    [1.0, y0, 0.0],
+                ],
+            ),
+            rect(
+                1,
+                true,
+                [
+                    [0.0, y1, 1.0],
+                    [0.0, y1, 0.0],
+                    [0.0, y0, 0.0],
+                    [0.0, y0, 1.0],
+                ],
+            ),
+            rect(
+                4,
+                true,
+                [
+                    [1.0, y1, 1.0],
+                    [0.0, y1, 1.0],
+                    [0.0, y0, 1.0],
+                    [1.0, y0, 1.0],
+                ],
+            ),
+            rect(
+                5,
+                true,
+                [
+                    [0.0, y1, 0.0],
+                    [1.0, y1, 0.0],
+                    [1.0, y0, 0.0],
+                    [0.0, y0, 0.0],
+                ],
+            ),
+        ]
     };
-    attrs[SLAB as usize] = 0;
+    let mut quads = slab_quads(0.0, 0.5, false);
+    quads.extend(slab_quads(0.5, 1.0, true));
+    for (id, start) in [(SLAB, 0), (SLAB_TOP, 6)] {
+        states[id as usize] = StateModel {
+            shape: Shape::Model,
+            ao: true,
+            block: id,
+            quad_start: start,
+            quad_count: 6,
+            ..StateModel::EMPTY
+        };
+    }
     occlusion[SLAB as usize] = 1 << 3;
-    let quads = vec![
-        slab_quad(
-            2,
-            [
-                [0.0, 0.5, 0.0],
-                [0.0, 0.5, 1.0],
-                [1.0, 0.5, 1.0],
-                [1.0, 0.5, 0.0],
-            ],
-        ),
-        slab_quad(
-            3,
-            [
-                [0.0, 0.0, 1.0],
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [1.0, 0.0, 1.0],
-            ],
-        ),
-    ];
-    ModelCache::from_parts(states, quads, attrs, occlusion)
+    occlusion[SLAB_TOP as usize] = 1 << 2;
+
+    states[RANDOM as usize] = cube(STONE_LAYER, RenderLayer::Solid, 9);
+    states[RANDOM as usize].random = 1;
+    attrs[RANDOM as usize] =
+        ATTR_SOLID_RENDER | ATTR_FULL_COLLISION | ATTR_LIGHT_OPAQUE | ATTR_SOLID;
+    occlusion[RANDOM as usize] = 0b11_1111;
+
+    let mut cache = ModelCache::from_parts(states, quads, attrs, occlusion.clone());
+    let half = |hi: bool| -> FaceMask {
+        let row = |v: usize| if hi { v >= 8 } else { v < 8 };
+        std::array::from_fn(|w| {
+            (0..4)
+                .filter(|k| row(w * 4 + k))
+                .fold(0u64, |acc, k| acc | 0xffffu64 << (16 * k))
+        })
+    };
+    let masks = vec![half(false), half(true)];
+    let per_state: Vec<[u16; 6]> = (0..occlusion.len())
+        .map(|i| {
+            std::array::from_fn(|f| {
+                if occlusion[i] >> f & 1 != 0 {
+                    MASK_FULL
+                } else if f == 2 || f == 3 || (i as u16 != SLAB && i as u16 != SLAB_TOP) {
+                    MASK_EMPTY
+                } else if i as u16 == SLAB {
+                    2
+                } else {
+                    3
+                }
+            })
+        })
+        .collect();
+    cache = cache.with_face_masks(masks, per_state);
+    cache.parts.push(PartSpan {
+        alt_start: 0,
+        alt_count: 4,
+        total_weight: 4,
+    });
+    cache.randoms.push(RandomModel {
+        multipart: false,
+        part_start: 0,
+        part_count: 1,
+    });
+    for rot in 0..4 {
+        let mut faces = cache.states[RANDOM as usize].cube;
+        faces.iter_mut().for_each(|f| f.rot = rot);
+        cache.alts.push(Alt {
+            weight: 1,
+            cube: faces,
+            quad_start: 0,
+            quad_count: 0,
+        });
+    }
+    cache
 }
 
 pub fn input_from(f: impl Fn(i32, i32, i32) -> u16) -> MeshInput {
@@ -243,12 +353,15 @@ pub fn fill_terrain_input(
             }
         }
     }
-    let r = input.blend_radius as i32;
-    let side = (16 + 2 * r) as usize;
-    for wz in 0..side as i32 {
-        for wx in 0..side as i32 {
-            input.biomes[wz as usize * side + wx as usize] =
-                biome(sx * 16 + wx - r, sz * 16 + wz - r);
+    for qy in 0..crate::input::QUART_SPAN_Y as i32 {
+        for qz in 0..crate::input::QUART_SPAN as i32 {
+            for qx in 0..crate::input::QUART_SPAN as i32 {
+                let wx = sx * 16 + (qx + crate::input::QUART_ORIGIN_XZ) * 4;
+                let wz = sz * 16 + (qz + crate::input::QUART_ORIGIN_XZ) * 4;
+                input.biomes[(qy as usize * crate::input::QUART_SPAN + qz as usize)
+                    * crate::input::QUART_SPAN
+                    + qx as usize] = biome(wx, wz);
+            }
         }
     }
 }

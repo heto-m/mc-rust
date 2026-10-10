@@ -5,8 +5,10 @@ use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::animation::{ANIM_TABLE_LEN, AnimationTable, SpriteAnimation};
 use crate::arena::Arena;
 use crate::camera::Camera;
+use crate::environment::Environment;
 use crate::mesh::SectionMesh;
 use crate::mesh::TINT_TABLE_WORDS;
 use crate::quad::{ModelQuad, PackedQuad};
@@ -20,12 +22,8 @@ const CULL_SRC: &str = include_str!("shaders/cull.wgsl");
 
 pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-const SKY_CLEAR: wgpu::Color = wgpu::Color {
-    r: 0.45,
-    g: 0.68,
-    b: 1.0,
-    a: 1.0,
-};
+const TICKS_PER_SECOND: f64 = 20.0;
+const LIGHTMAP_BYTES: u64 = 256 * 16;
 const READBACK_SLOTS: usize = 3;
 const STATS_COUNTER_OFFSET: u64 = 256;
 const STATS_SIZE: u64 = 512;
@@ -147,6 +145,12 @@ struct GlobalsGpu {
     cam_frac: [f32; 4],
     params: [u32; 4],
     sun: [f32; 4],
+    inv_view_proj: [f32; 16],
+    fog_color: [f32; 4],
+    fog: [f32; 4],
+    sky_color: [f32; 4],
+    shade_a: [f32; 4],
+    shade_b: [f32; 4],
 }
 
 #[repr(C)]
@@ -237,6 +241,15 @@ pub struct Renderer {
     textures: Vec<wgpu::Texture>,
     dummy_texture: wgpu::Texture,
     tint_arena: Arena,
+    lightmap: wgpu::Buffer,
+    anim_buffer: wgpu::Buffer,
+    animations: AnimationTable,
+    anim_tick: Option<u64>,
+    anim_applied_tick: Option<u64>,
+    anim_start: Instant,
+    environment: Environment,
+    lightmap_key: Option<(Environment, f32)>,
+    sky_pipeline: wgpu::RenderPipeline,
 
     cube_arena: Arena,
     model_arena: Arena,
@@ -601,7 +614,7 @@ impl Renderer {
         let globals_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals"),
             entries: &[
-                uniform_entry(0, wgpu::ShaderStages::VERTEX),
+                uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -612,6 +625,8 @@ impl Renderer {
                 texture_entry(3),
                 texture_entry(4),
                 texture_entry(5),
+                uniform_entry(6, wgpu::ShaderStages::VERTEX),
+                storage_entry(7, wgpu::ShaderStages::FRAGMENT, true),
             ],
         });
         let vs = wgpu::ShaderStages::VERTEX;
@@ -664,10 +679,31 @@ impl Renderer {
             &queue,
             &[TextureArrayData::placeholder(16).into_group()],
         );
+        let lightmap = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lightmap"),
+            size: LIGHTMAP_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let anim_buffer = storage_buffer(
+            &device,
+            "animation table",
+            ANIM_TABLE_LEN as u64 * 8,
+            wgpu::BufferUsages::empty(),
+        );
+        queue.write_buffer(
+            &anim_buffer,
+            0,
+            bytemuck::cast_slice(&AnimationTable::identity_table()),
+        );
         let globals_bg = make_globals_bg(
             &device,
             &globals_bgl,
-            &globals,
+            &Bindings {
+                globals: &globals,
+                lightmap: &lightmap,
+                anim: &anim_buffer,
+            },
             &textures,
             &dummy_texture,
             &sampler,
@@ -721,8 +757,51 @@ impl Renderer {
             };
         let cube_pipeline =
             make_pipeline("cube", "vs_cube", "fs_main", Some(wgpu::Face::Back), false);
-        let model_pipeline = make_pipeline("model", "vs_model", "fs_main", None, false);
-        let trans_pipeline = make_pipeline("translucent", "vs_model", "fs_translucent", None, true);
+        let model_pipeline = make_pipeline(
+            "model",
+            "vs_model",
+            "fs_main",
+            Some(wgpu::Face::Back),
+            false,
+        );
+        let trans_pipeline = make_pipeline(
+            "translucent",
+            "vs_model",
+            "fs_translucent",
+            Some(wgpu::Face::Back),
+            true,
+        );
+        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky"),
+            layout: Some(&draw_layout),
+            vertex: wgpu::VertexState {
+                module: &terrain_module,
+                entry_point: Some("vs_sky"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &terrain_module,
+                entry_point: Some("fs_sky"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let timestamps = features
             .contains(wgpu::Features::TIMESTAMP_QUERY)
@@ -759,6 +838,15 @@ impl Renderer {
             draw_count_supported: config.allow_draw_count
                 && features.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
             tint_arena: Arena::new(config.tint_tables),
+            lightmap,
+            anim_buffer,
+            animations: AnimationTable::new(),
+            anim_tick: None,
+            anim_applied_tick: None,
+            anim_start: Instant::now(),
+            environment: Environment::default(),
+            lightmap_key: None,
+            sky_pipeline,
             cube_arena: Arena::new(cube_quads),
             model_arena: Arena::new(model_quads),
             depth_view: depth_view(&device, width, height),
@@ -862,14 +950,80 @@ impl Renderer {
     /// Up to four size groups; a quad's layer field is `group << 14 | layer`.
     pub fn set_texture_groups(&mut self, groups: &[TextureGroupData]) {
         self.textures = group_textures(&self.device, &self.queue, groups);
+        let animations = groups
+            .iter()
+            .flat_map(|g| g.animations.iter().cloned())
+            .collect();
+        self.set_animations(animations);
         self.globals_bg = make_globals_bg(
             &self.device,
             &self.globals_bgl,
-            &self.globals,
+            &Bindings {
+                globals: &self.globals,
+                lightmap: &self.lightmap,
+                anim: &self.anim_buffer,
+            },
             &self.textures,
             &self.dummy_texture,
             &self.sampler,
         );
+    }
+
+    /// Sky, fog and lighting inputs; takes effect on the next frame without remeshing.
+    pub fn set_environment(&mut self, environment: &Environment) {
+        if self.environment != *environment {
+            self.environment = environment.clone();
+        }
+    }
+
+    pub fn environment(&self) -> &Environment {
+        &self.environment
+    }
+
+    /// Animated sprites (packed layer plus frame list); the table is evaluated at the current tick.
+    pub fn set_animations(&mut self, animations: Vec<SpriteAnimation>) {
+        let tick = self.current_tick();
+        let table = self.animations.set(animations, tick);
+        self.queue
+            .write_buffer(&self.anim_buffer, 0, bytemuck::cast_slice(table));
+        self.anim_applied_tick = Some(tick);
+    }
+
+    /// Pins the animation clock to a client tick count; without it a wall clock at 20 ticks per second
+    /// is used.
+    pub fn set_animation_tick(&mut self, tick: u64) {
+        self.anim_tick = Some(tick);
+    }
+
+    fn current_tick(&self) -> u64 {
+        self.anim_tick
+            .unwrap_or_else(|| (self.anim_start.elapsed().as_secs_f64() * TICKS_PER_SECOND) as u64)
+    }
+
+    fn update_animations(&mut self) {
+        let tick = self.current_tick();
+        if self.anim_applied_tick == Some(tick) {
+            return;
+        }
+        self.anim_applied_tick = Some(tick);
+        for (index, entry) in self.animations.update(tick) {
+            self.queue.write_buffer(
+                &self.anim_buffer,
+                index as u64 * 8,
+                bytemuck::bytes_of(&entry),
+            );
+        }
+    }
+
+    fn update_lightmap(&mut self, sky_scale: f32) {
+        let key = (self.environment.clone(), sky_scale);
+        if self.lightmap_key.as_ref() == Some(&key) {
+            return;
+        }
+        let map = self.environment.lightmap(sky_scale);
+        self.queue
+            .write_buffer(&self.lightmap, 0, bytemuck::cast_slice(&map));
+        self.lightmap_key = Some(key);
     }
 
     /// Colours (`r | g << 8 | b << 16`) for constant tint kinds 8 and up, indexed `kind - 8`.
@@ -1210,13 +1364,34 @@ impl Renderer {
         let frustum = cam.frustum(w as f32 / h as f32);
         let ci = cam.block_pos();
         let cf = cam.frac();
+        self.update_animations();
+        self.update_lightmap(frame.sky_light);
+        let env = self.environment.clone();
+        let (rd_start, rd_end) = env.render_fog_range();
+        let view_proj = cam.view_proj(w as f32 / h as f32);
         let globals = GlobalsGpu {
-            view_proj: cam.view_proj(w as f32 / h as f32).to_cols_array(),
+            view_proj: view_proj.to_cols_array(),
             planes: frustum.0.map(|p| p.to_array()),
             cam_int: [ci.x, ci.y, ci.z, 0],
             cam_frac: [cf.x, cf.y, cf.z, 0.0],
             params: [self.slot_count, 0, 0, 0],
             sun: [frame.sky_light, 0.0, 0.0, 0.0],
+            inv_view_proj: view_proj.inverse().to_cols_array(),
+            fog_color: [env.fog_color[0], env.fog_color[1], env.fog_color[2], 1.0],
+            fog: [env.fog_start, env.fog_end, rd_start, rd_end],
+            sky_color: [
+                env.sky_color[0],
+                env.sky_color[1],
+                env.sky_color[2],
+                env.sky_fog_end,
+            ],
+            shade_a: [
+                env.cardinal[0],
+                env.cardinal[1],
+                env.cardinal[2],
+                env.cardinal[3],
+            ],
+            shade_b: [env.cardinal[4], env.cardinal[5], 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
@@ -1280,7 +1455,12 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(SKY_CLEAR),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: f64::from(env.fog_color[0]),
+                            g: f64::from(env.fog_color[1]),
+                            b: f64::from(env.fog_color[2]),
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1304,6 +1484,8 @@ impl Renderer {
             });
             pass.set_bind_group(0, &self.globals_bg, &[]);
             pass.set_bind_group(1, &self.geom_bg, &[]);
+            pass.set_pipeline(&self.sky_pipeline);
+            pass.draw(0..3, 0..1);
             let cube_max = self.slot_count * 6;
             let model_max = self.slot_count;
             pass.set_pipeline(&self.cube_pipeline);
@@ -1445,10 +1627,16 @@ fn bind(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     }
 }
 
+struct Bindings<'a> {
+    globals: &'a wgpu::Buffer,
+    lightmap: &'a wgpu::Buffer,
+    anim: &'a wgpu::Buffer,
+}
+
 fn make_globals_bg(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    globals: &wgpu::Buffer,
+    buffers: &Bindings,
     textures: &[wgpu::Texture],
     dummy: &wgpu::Texture,
     sampler: &wgpu::Sampler,
@@ -1465,7 +1653,7 @@ fn make_globals_bg(
         })
         .collect();
     let mut entries = vec![
-        bind(0, globals),
+        bind(0, buffers.globals),
         wgpu::BindGroupEntry {
             binding: 1,
             resource: wgpu::BindingResource::Sampler(sampler),
@@ -1475,6 +1663,8 @@ fn make_globals_bg(
         binding: 2 + i as u32,
         resource: wgpu::BindingResource::TextureView(v),
     }));
+    entries.push(bind(6, buffers.lightmap));
+    entries.push(bind(7, buffers.anim));
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("globals"),
         layout,

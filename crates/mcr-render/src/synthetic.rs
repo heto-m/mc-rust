@@ -4,7 +4,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::mesh::SectionMesh;
-use crate::quad::{CubeQuad, Face, ModelQuad, ModelQuadDesc, PackedQuad};
+use crate::quad::{
+    CubeQuad, Face, LIGHT_FULL_SKY, ModelQuad, ModelQuadDesc, PackedQuad, pack_light,
+};
 
 pub const GRASS_TOP: u16 = 0;
 pub const GRASS_SIDE: u16 = 1;
@@ -119,9 +121,9 @@ fn ao_corners(heights: &Heights, pos: [i32; 3], face: Face) -> [u8; 4] {
         duv[va] = sv;
         let (s1, s2, corner) = (solid(du), solid(dv), solid(duv));
         if s1 && s2 {
-            0
+            1
         } else {
-            3 - (u8::from(s1) + u8::from(s2) + u8::from(corner))
+            4 - (u8::from(s1) + u8::from(s2) + u8::from(corner))
         }
     })
 }
@@ -148,12 +150,12 @@ fn model_box(min: [f32; 3], max: [f32; 3], layer: u16) -> Vec<ModelQuad> {
             corners,
             uvs: [[0.0, h], [w, h], [0.0, 0.0], [w, 0.0]],
             layer,
-            light: 0xf0,
+            light: [LIGHT_FULL_SKY; 4],
             shade_face: face,
             flags: 0,
-            ao: [3; 4],
+            ao: [63; 4],
             tint: 0,
-            cell: [0, 0],
+            cell: [min[0] as u8, min[1] as u8, min[2] as u8],
         };
         out.push(ModelQuad::encode(&desc).expect("box within section bounds"));
     }
@@ -170,7 +172,7 @@ pub fn mesh_section(terrain: &Terrain, sx: i32, sy: i32, sz: i32) -> SectionMesh
     }
 
     let push =
-        |mesh: &mut SectionMesh, x: i32, y: i32, z: i32, face: Face, layer: u16, light: u8| {
+        |mesh: &mut SectionMesh, x: i32, y: i32, z: i32, face: Face, layer: u16, light: u16| {
             let q = CubeQuad {
                 x: x as u8,
                 y: (y - oy) as u8,
@@ -180,8 +182,9 @@ pub fn mesh_section(terrain: &Terrain, sx: i32, sy: i32, sz: i32) -> SectionMesh
                 height: 1,
                 layer,
                 ao: ao_corners(&heights, [x, y, z], face),
-                light,
+                light: [light; 4],
                 tint: 0,
+                rotation: 0,
             };
             mesh.push_cube(PackedQuad::encode(&q).expect("quad fields in range"));
         };
@@ -195,7 +198,7 @@ pub fn mesh_section(terrain: &Terrain, sx: i32, sy: i32, sz: i32) -> SectionMesh
                 .min()
                 .expect("four neighbours");
             if (oy..oy + 16).contains(&h) {
-                push(&mut mesh, x, h, z, Face::PosY, top_layer(h), 0xf0);
+                push(&mut mesh, x, h, z, Face::PosY, top_layer(h), LIGHT_FULL_SKY);
             }
             for y in (lowest_open + 1).max(oy)..=h.min(oy + 15) {
                 let layer = side_layer(y, h);
@@ -206,7 +209,7 @@ pub fn mesh_section(terrain: &Terrain, sx: i32, sy: i32, sz: i32) -> SectionMesh
                     (Face::NegZ, 0, -1),
                 ] {
                     if y > heights.at(x + dx, z + dz) {
-                        push(&mut mesh, x, y, z, face, layer, 0xc0);
+                        push(&mut mesh, x, y, z, face, layer, pack_light(192, 0));
                     }
                 }
             }

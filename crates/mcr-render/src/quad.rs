@@ -1,17 +1,24 @@
 //! Packed quad formats. The WGSL decoders in `shaders/quad.wgsl` mirror these layouts exactly.
 //!
-//! Cube quad, 8 bytes (`[w0, w1]`):
+//! Light is `sky << 8 | block` with each half in 1/16 light levels (0..=240), the smooth-lighting scale.
+//!
+//! Cube quad, 16 bytes (`[w0, w1, w2, w3]`):
 //! - `w0`: x `[0,5)`, y `[5,10)`, z `[10,15)` block coords inside the section, face `[15,18)`,
 //!   width-1 `[18,22)`, height-1 `[22,26)`, tint kind `[26,32)`.
-//! - `w1`: texture layer `[0,16)`, AO `[16,24)` as four 2-bit corners, light `[24,32)` (sky<<4 | block).
+//! - `w1`: texture layer `[0,16)`, AO `[16,28)` as four 3-bit levels (0..=4, brightness `0.2 + 0.2 * level`),
+//!   UV orientation `[28,31)`: quarter turns in the low two bits, bit 2 mirrors u first.
+//! - `w2`, `w3`: corner light, corners 0,1 and 2,3, 16 bits each.
 //!
-//! Model quad, 32 bytes (eight `u32`):
-//! - `w0..w3`: corner positions, `x[0,10) y[10,20) z[20,30)` in 1/32 block with a -1 block bias.
+//! Model quad, 40 bytes (ten `u32`):
+//! - `w0..w3`: corner offsets from the base cell, `x[0,9) y[9,18) z[18,27)` in 1/128 block with a -1 block
+//!   bias; the spare top bits of `w0..w2` hold the base cell x, y, z (4 bits each, `[27,31)`).
 //! - `w4,w5`: corner UVs, 16 bits each (`u[0,8) v[8,16)`, 1/16 tile units), corners 0,1 and 2,3.
-//! - `w6`: layer `[0,16)`, light `[16,24)`, shading face `[24,27)`, flags `[27,32)`.
-//! - `w7`: AO as four 2-bit corners `[0,8)`, tint kind `[8,14)`, tint cell x `[14,18)` and z `[18,22)`.
+//! - `w6`: layer `[0,16)`, shading face `[16,19)`, flags `[19,24)`, tint kind `[24,30)`.
+//! - `w7,w8`: corner light, corners 0,1 and 2,3, 16 bits each.
+//! - `w9`: AO as four 6-bit brightness values (`v / 63`) `[0,24)`.
 //!
-//! Corners are ordered (0,0), (1,0), (0,1), (1,1) in (u, v).
+//! Cube corners are ordered (0,0), (1,0), (0,1), (1,1) in (u, v). Model corners are in drawing order: the
+//! shader emits triangles `(0, 1, 2)` and `(2, 1, 3)`.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -52,6 +59,22 @@ impl Face {
     }
 }
 
+/// Packs smooth light levels, each in 1/16 light levels (0..=240).
+pub const fn pack_light(sky: u8, block: u8) -> u16 {
+    (sky as u16) << 8 | block as u16
+}
+
+pub const fn light_sky(light: u16) -> u8 {
+    (light >> 8) as u8
+}
+
+pub const fn light_block(light: u16) -> u8 {
+    light as u8
+}
+
+/// Full daylight and no block light.
+pub const LIGHT_FULL_SKY: u16 = pack_light(240, 0);
+
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum QuadError {
     #[error("{field} value {value} out of range")]
@@ -78,16 +101,17 @@ pub struct CubeQuad {
     pub height: u8,
     pub layer: u16,
     pub ao: [u8; 4],
-    pub light: u8,
+    pub light: [u16; 4],
     pub tint: u8,
+    pub rotation: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
 #[repr(C)]
-pub struct PackedQuad(pub [u32; 2]);
+pub struct PackedQuad(pub [u32; 4]);
 
 impl PackedQuad {
-    pub const SIZE: usize = 8;
+    pub const SIZE: usize = 16;
 
     pub fn encode(q: &CubeQuad) -> Result<Self, QuadError> {
         let x = check("x", q.x.into(), 31)?;
@@ -107,7 +131,7 @@ impl PackedQuad {
         }
         let mut ao = 0u32;
         for (i, a) in q.ao.iter().enumerate() {
-            ao |= check("ao", (*a).into(), 3)? << (2 * i);
+            ao |= check("ao", (*a).into(), 4)? << (3 * i);
         }
         let w0 = x
             | y << 5
@@ -116,12 +140,13 @@ impl PackedQuad {
             | u32::from(q.width - 1) << 18
             | u32::from(q.height - 1) << 22
             | check("tint", q.tint.into(), 63)? << 26;
-        let w1 = u32::from(q.layer) | ao << 16 | u32::from(q.light) << 24;
-        Ok(Self([w0, w1]))
+        let w1 = u32::from(q.layer) | ao << 16 | check("rotation", q.rotation.into(), 7)? << 28;
+        let l = |i: usize| u32::from(q.light[i]);
+        Ok(Self([w0, w1, l(0) | l(1) << 16, l(2) | l(3) << 16]))
     }
 
     pub fn decode(self) -> CubeQuad {
-        let [w0, w1] = self.0;
+        let [w0, w1, w2, w3] = self.0;
         CubeQuad {
             x: (w0 & 31) as u8,
             y: (w0 >> 5 & 31) as u8,
@@ -130,9 +155,10 @@ impl PackedQuad {
             width: (w0 >> 18 & 15) as u8 + 1,
             height: (w0 >> 22 & 15) as u8 + 1,
             layer: (w1 & 0xffff) as u16,
-            ao: std::array::from_fn(|i| (w1 >> (16 + 2 * i) & 3) as u8),
-            light: (w1 >> 24) as u8,
+            ao: std::array::from_fn(|i| (w1 >> (16 + 3 * i) & 7) as u8),
+            light: [w2 as u16, (w2 >> 16) as u16, w3 as u16, (w3 >> 16) as u16],
             tint: (w0 >> 26) as u8,
+            rotation: (w1 >> 28 & 7) as u8,
         }
     }
 
@@ -141,24 +167,37 @@ impl PackedQuad {
     }
 }
 
+/// Brightness of a cube AO level.
+pub fn cube_ao_brightness(level: u8) -> f32 {
+    0.2 + 0.2 * f32::from(level)
+}
+
+/// Quantises a 0..=1 brightness to the model quad's six-bit AO.
+pub fn model_ao(brightness: f32) -> u8 {
+    (brightness.clamp(0.0, 1.0) * 63.0).round() as u8
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelQuadDesc {
+    /// Section-local positions, each within `-1..3` blocks of `cell`.
     pub corners: [[f32; 3]; 4],
     pub uvs: [[f32; 2]; 4],
     pub layer: u16,
-    pub light: u8,
+    pub light: [u16; 4],
     pub shade_face: Face,
     pub flags: u8,
+    /// Six-bit brightness per corner (`model_ao`).
     pub ao: [u8; 4],
     pub tint: u8,
-    pub cell: [u8; 2],
+    /// Base block cell inside the section; also the tint column.
+    pub cell: [u8; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
 #[repr(C)]
-pub struct ModelQuad(pub [u32; 8]);
+pub struct ModelQuad(pub [u32; 10]);
 
-const POS_SCALE: f32 = 32.0;
+const POS_SCALE: f32 = 128.0;
 const UV_SCALE: f32 = 16.0;
 
 fn quantize(
@@ -179,14 +218,18 @@ fn quantize(
 }
 
 impl ModelQuad {
-    pub const SIZE: usize = 32;
+    pub const SIZE: usize = 40;
 
     pub fn encode(q: &ModelQuadDesc) -> Result<Self, QuadError> {
-        let mut w = [0u32; 8];
+        let mut w = [0u32; 10];
         for (i, c) in q.corners.iter().enumerate() {
-            w[i] = quantize("corner x", c[0], POS_SCALE, 1.0, 1023)?
-                | quantize("corner y", c[1], POS_SCALE, 1.0, 1023)? << 10
-                | quantize("corner z", c[2], POS_SCALE, 1.0, 1023)? << 20;
+            let rel = |axis: usize| c[axis] - f32::from(q.cell[axis]);
+            w[i] = quantize("corner x", rel(0), POS_SCALE, 1.0, 511)?
+                | quantize("corner y", rel(1), POS_SCALE, 1.0, 511)? << 9
+                | quantize("corner z", rel(2), POS_SCALE, 1.0, 511)? << 18;
+        }
+        for (axis, word) in w.iter_mut().take(3).enumerate() {
+            *word |= check("cell", q.cell[axis].into(), 15)? << 27;
         }
         for pair in 0..2 {
             for half in 0..2 {
@@ -197,27 +240,32 @@ impl ModelQuad {
             }
         }
         w[6] = u32::from(q.layer)
-            | u32::from(q.light) << 16
-            | (q.shade_face as u32) << 24
-            | check("flags", q.flags.into(), 31)? << 27;
-        for (i, a) in q.ao.iter().enumerate() {
-            w[7] |= check("ao", (*a).into(), 3)? << (2 * i);
+            | (q.shade_face as u32) << 16
+            | check("flags", q.flags.into(), 31)? << 19
+            | check("tint", q.tint.into(), 63)? << 24;
+        for pair in 0..2 {
+            w[7 + pair] = u32::from(q.light[pair * 2]) | u32::from(q.light[pair * 2 + 1]) << 16;
         }
-        w[7] |= check("tint", q.tint.into(), 63)? << 8
-            | check("cell x", q.cell[0].into(), 15)? << 14
-            | check("cell z", q.cell[1].into(), 15)? << 18;
+        for (i, a) in q.ao.iter().enumerate() {
+            w[9] |= check("ao", (*a).into(), 63)? << (6 * i);
+        }
         Ok(Self(w))
     }
 
     pub fn decode(self) -> ModelQuadDesc {
         let w = self.0;
-        let unq = |bits: u32| bits as f32 / POS_SCALE - 1.0;
+        let cell = [
+            (w[0] >> 27 & 15) as u8,
+            (w[1] >> 27 & 15) as u8,
+            (w[2] >> 27 & 15) as u8,
+        ];
+        let unq = |bits: u32, axis: usize| bits as f32 / POS_SCALE - 1.0 + f32::from(cell[axis]);
         ModelQuadDesc {
             corners: std::array::from_fn(|i| {
                 [
-                    unq(w[i] & 1023),
-                    unq(w[i] >> 10 & 1023),
-                    unq(w[i] >> 20 & 1023),
+                    unq(w[i] & 511, 0),
+                    unq(w[i] >> 9 & 511, 1),
+                    unq(w[i] >> 18 & 511, 2),
                 ]
             }),
             uvs: std::array::from_fn(|i| {
@@ -228,12 +276,12 @@ impl ModelQuad {
                 ]
             }),
             layer: (w[6] & 0xffff) as u16,
-            light: (w[6] >> 16) as u8,
-            shade_face: Face::ALL[(w[6] >> 24 & 7).min(5) as usize],
-            flags: (w[6] >> 27) as u8,
-            ao: std::array::from_fn(|i| (w[7] >> (2 * i) & 3) as u8),
-            tint: (w[7] >> 8 & 63) as u8,
-            cell: [(w[7] >> 14 & 15) as u8, (w[7] >> 18 & 15) as u8],
+            light: std::array::from_fn(|i| (w[7 + i / 2] >> (16 * (i % 2))) as u16),
+            shade_face: Face::ALL[(w[6] >> 16 & 7).min(5) as usize],
+            flags: (w[6] >> 19 & 31) as u8,
+            ao: std::array::from_fn(|i| (w[9] >> (6 * i) & 63) as u8),
+            tint: (w[6] >> 24 & 63) as u8,
+            cell,
         }
     }
 }
@@ -251,9 +299,10 @@ mod tests {
             width: 16,
             height: 1,
             layer: 0xbeef,
-            ao: [0, 1, 2, 3],
-            light: 0xa5,
+            ao: [0, 1, 4, 3],
+            light: [0xf000, 0x00f0, 0x1234, 0xffff],
             tint: 63,
+            rotation: 7,
         }
     }
 
@@ -279,26 +328,29 @@ mod tests {
         q.height = 0;
         assert!(PackedQuad::encode(&q).is_err());
         let mut q = cube(0, Face::PosX);
-        q.ao[2] = 4;
+        q.ao[2] = 5;
+        assert!(PackedQuad::encode(&q).is_err());
+        let mut q = cube(0, Face::PosX);
+        q.rotation = 8;
         assert!(PackedQuad::encode(&q).is_err());
     }
 
     pub(crate) fn sample_model() -> ModelQuadDesc {
         ModelQuadDesc {
             corners: [
-                [-1.0, 0.0, 0.5],
-                [0.03125, 15.5, 30.96875],
-                [30.96875, 8.0, 0.0],
-                [16.0, 16.0, 16.0],
+                [14.0, 3.0, 3.5],
+                [15.0078125, 5.5, 5.9921875],
+                [14.0, 3.0, 3.0],
+                [15.0, 5.0, 5.0],
             ],
             uvs: [[0.0, 0.0], [15.9375, 0.0], [0.0, 1.5], [8.0, 15.9375]],
             layer: 65535,
-            light: 0x3c,
+            light: [0x3c3c, 0xf000, 0x00f0, 0x0102],
             shade_face: Face::NegZ,
             flags: 17,
-            ao: [3, 2, 1, 0],
+            ao: [63, 32, 1, 0],
             tint: 9,
-            cell: [15, 3],
+            cell: [15, 3, 4],
         }
     }
 
@@ -309,15 +361,26 @@ mod tests {
     }
 
     #[test]
+    fn model_positions_resolve_to_a_128th() {
+        let mut q = sample_model();
+        q.corners[0] = [14.3333, 3.0, 3.5];
+        let back = ModelQuad::encode(&q).unwrap().decode();
+        assert!((back.corners[0][0] - 14.3333).abs() <= 1.0 / 256.0 + 1e-6);
+    }
+
+    #[test]
     fn model_rejects_out_of_range() {
         let mut q = sample_model();
-        q.corners[0][1] = 32.0;
+        q.corners[0][1] = 8.0;
         assert!(ModelQuad::encode(&q).is_err());
         let mut q = sample_model();
-        q.corners[0][0] = -1.5;
+        q.corners[0][0] = 12.9;
         assert!(ModelQuad::encode(&q).is_err());
         let mut q = sample_model();
         q.uvs[1][0] = 16.0;
+        assert!(ModelQuad::encode(&q).is_err());
+        let mut q = sample_model();
+        q.ao[0] = 64;
         assert!(ModelQuad::encode(&q).is_err());
     }
 

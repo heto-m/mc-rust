@@ -25,10 +25,6 @@ pub const VANILLA_OFFSET: [[i32; 3]; 6] = [
 /// Axes of a face's quad (u, v), matching the shader: X faces run (z, y), Y faces (x, z), Z faces (x, y).
 pub const TANGENTS: [[usize; 2]; 3] = [[2, 1], [0, 2], [0, 1]];
 
-pub const fn opposite(face: usize) -> usize {
-    face ^ 1
-}
-
 pub const fn axis(face: usize) -> usize {
     face >> 1
 }

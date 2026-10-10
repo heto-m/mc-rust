@@ -5,6 +5,17 @@ struct Globals {
     cam_frac: vec4<f32>,
     params: vec4<u32>,
     sun: vec4<f32>,
+    inv_view_proj: mat4x4<f32>,
+    // rgb, strength
+    fog_color: vec4<f32>,
+    // environmental start/end, render-distance start/end
+    fog: vec4<f32>,
+    // rgb, sky fog end distance
+    sky_color: vec4<f32>,
+    // directional shade: down, up, north, south
+    shade_a: vec4<f32>,
+    // west, east
+    shade_b: vec4<f32>,
 }
 
 struct SectionMeta {

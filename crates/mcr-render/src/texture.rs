@@ -1,3 +1,5 @@
+use crate::animation::SpriteAnimation;
+
 /// One size class of block textures: every layer shares `width x height`, and each mip level holds all
 /// layers back to back as RGBA8 in gamma space.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6,6 +8,8 @@ pub struct TextureGroupData {
     pub height: u32,
     pub layers: u32,
     pub mips: Vec<Vec<u8>>,
+    /// Animated sprites whose first layer lives in this group.
+    pub animations: Vec<SpriteAnimation>,
 }
 
 pub const MAX_TEXTURE_GROUPS: usize = 4;
@@ -21,6 +25,7 @@ impl TextureGroupData {
             height: 1,
             layers: 1,
             mips: vec![vec![255; 4]],
+            animations: Vec::new(),
         }
     }
 }
@@ -55,6 +60,7 @@ impl TextureArrayData {
             height: self.size,
             layers: count as u32,
             mips,
+            animations: Vec::new(),
         }
     }
 

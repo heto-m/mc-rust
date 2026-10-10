@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use mcr_render::glam::DVec3;
 use mcr_render::synthetic::{Terrain, generate_world};
 use mcr_render::{
-    Camera, CubeQuad, Face, FrameInputs, ModelQuad, ModelQuadDesc, PackedQuad, RenderError,
-    Renderer, RendererConfig, SectionMesh, Target,
+    Camera, CubeQuad, Face, FrameInputs, LIGHT_FULL_SKY, ModelQuad, ModelQuadDesc, PackedQuad,
+    RenderError, Renderer, RendererConfig, SectionMesh, Target,
 };
 use wgpu::util::DeviceExt;
 
@@ -69,42 +69,67 @@ fn shader_decoder_matches_rust_encoder() {
     let (device, queue) = (r.device(), r.queue());
 
     let cubes: Vec<PackedQuad> = [
-        (0, 0, 0, Face::PosX, 1, 1, 0, [0, 0, 0, 0], 0),
-        (31, 31, 31, Face::NegZ, 16, 16, 0xffff, [3, 2, 1, 0], 0xff),
-        (15, 7, 3, Face::PosY, 9, 4, 1234, [1, 3, 0, 2], 0x5a),
+        (0, 0, 0, Face::PosX, 1, 1, 0, [0, 0, 0, 0], [0; 4], 0),
+        (
+            31,
+            31,
+            31,
+            Face::NegZ,
+            16,
+            16,
+            0xffff,
+            [4, 3, 2, 1],
+            [0xffff, 0xf000, 0x00f0, 0x1234],
+            3,
+        ),
+        (
+            15,
+            7,
+            3,
+            Face::PosY,
+            9,
+            4,
+            1234,
+            [1, 3, 0, 2],
+            [0x5a5a, 0xa5a5, 0x0102, 0x0408],
+            1,
+        ),
     ]
     .into_iter()
-    .map(|(x, y, z, face, width, height, layer, ao, light)| {
-        PackedQuad::encode(&CubeQuad {
-            x,
-            y,
-            z,
-            face,
-            width,
-            height,
-            layer,
-            ao,
-            light,
-            tint: 0,
-        })
-        .unwrap()
-    })
+    .map(
+        |(x, y, z, face, width, height, layer, ao, light, rotation)| {
+            PackedQuad::encode(&CubeQuad {
+                x,
+                y,
+                z,
+                face,
+                width,
+                height,
+                layer,
+                ao,
+                light,
+                tint: 5,
+                rotation,
+            })
+            .unwrap()
+        },
+    )
     .collect();
     let model_desc = ModelQuadDesc {
         corners: [
-            [-1.0, 0.0, 0.5],
-            [0.03125, 15.5, 30.96875],
-            [30.96875, 8.0, 0.0],
-            [16.0, 16.0, 16.0],
+            [14.0, 3.0, 3.5],
+            [15.0078125, 5.5, 5.9921875],
+            [14.0, 3.0, 3.0],
+            [15.0, 5.0, 5.0],
         ],
         uvs: [[0.0, 0.0], [15.9375, 0.0], [0.0, 1.5], [8.0, 15.9375]],
         layer: 65535,
-        light: 0x3c,
+        light: [0x3c3c, 0xf000, 0x00f0, 0x0102],
         shade_face: Face::NegZ,
         flags: 17,
-        ao: [3, 2, 1, 0],
-        tint: 0,
-        cell: [0, 0],
+        ao: [63, 32, 1, 0],
+        tint: 9,
+        cell: [15, 3, 4],
     };
     let models = [ModelQuad::encode(&model_desc).unwrap()];
 
@@ -126,8 +151,8 @@ fn shader_decoder_matches_rust_encoder() {
         wgpu::BufferUsages::STORAGE,
     );
     let out_usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;
-    let cube_out = init("cube out", &vec![0u8; cubes.len() * 48], out_usage);
-    let model_out = init("model out", &vec![0u8; models.len() * 128], out_usage);
+    let cube_out = init("cube out", &vec![0u8; cubes.len() * 80], out_usage);
+    let model_out = init("model out", &vec![0u8; models.len() * 160], out_usage);
 
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("decode test"),
@@ -175,7 +200,7 @@ fn shader_decoder_matches_rust_encoder() {
             mapped_at_creation: false,
         })
     };
-    let (cube_read, model_read) = (read(cubes.len() as u64 * 48), read(128));
+    let (cube_read, model_read) = (read(cubes.len() as u64 * 80), read(160));
     let mut enc = device.create_command_encoder(&Default::default());
     {
         let mut pass = enc.begin_compute_pass(&Default::default());
@@ -184,7 +209,7 @@ fn shader_decoder_matches_rust_encoder() {
         pass.dispatch_workgroups(cubes.len() as u32, 1, 1);
     }
     enc.copy_buffer_to_buffer(&cube_out, 0, &cube_read, 0, cube_read.size());
-    enc.copy_buffer_to_buffer(&model_out, 0, &model_read, 0, 128);
+    enc.copy_buffer_to_buffer(&model_out, 0, &model_read, 0, 160);
     queue.submit([enc.finish()]);
     cube_read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
     model_read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
@@ -206,9 +231,14 @@ fn shader_decoder_matches_rust_encoder() {
             d.ao[1].into(),
             d.ao[2].into(),
             d.ao[3].into(),
-            d.light.into(),
+            d.light[0].into(),
+            d.light[1].into(),
+            d.light[2].into(),
+            d.light[3].into(),
+            d.tint.into(),
+            d.rotation.into(),
         ];
-        assert_eq!(got[i * 12..i * 12 + 12], expect, "cube quad {i}");
+        assert_eq!(got[i * 20..i * 20 + 17], expect, "cube quad {i}");
     }
 
     let got: Vec<i32> =
@@ -216,18 +246,20 @@ fn shader_decoder_matches_rust_encoder() {
     let d = models[0].decode();
     let mut expect = Vec::new();
     for c in d.corners {
-        expect.extend(c.map(|v| (v * 32.0).round() as i32));
+        expect.extend(c.map(|v| (v * 128.0).round() as i32));
     }
     for uv in d.uvs {
         expect.extend(uv.map(|v| (v * 16.0).round() as i32));
     }
     expect.extend([
         d.layer.into(),
-        d.light.into(),
         d.shade_face as i32,
         d.flags.into(),
+        d.tint.into(),
     ]);
+    expect.extend(d.light.map(i32::from));
     expect.extend(d.ao.map(i32::from));
+    expect.extend(d.cell.map(i32::from));
     assert_eq!(got[..expect.len()], expect[..]);
 }
 
@@ -242,7 +274,7 @@ fn synthetic_terrain_renders_nontrivial_image() {
 
     let pixels = px.as_chunks::<4>().0;
     let colors: HashSet<[u8; 4]> = pixels.iter().copied().collect();
-    let sky_px = pixels.iter().filter(|p| p[2] > 240 && p[0] < 140).count();
+    let sky_px = pixels.iter().filter(|p| p[2] > 240 && p[1] > 150).count();
     let total = (w * h) as usize;
     assert!(colors.len() > 200, "only {} distinct colours", colors.len());
     assert!(sky_px > total / 50, "no sky visible");
@@ -306,9 +338,10 @@ fn one_quad_per_face() -> SectionMesh {
                 width: 2,
                 height: 2,
                 layer: 3,
-                ao: [3; 4],
-                light: 0xf0,
+                ao: [4; 4],
+                light: [LIGHT_FULL_SKY; 4],
                 tint: 0,
+                rotation: 0,
             })
             .unwrap(),
         );
@@ -380,6 +413,7 @@ fn flat_group(layers: &[[u8; 4]]) -> mcr_render::TextureGroupData {
         height: 16,
         layers: layers.len() as u32,
         mips,
+        animations: Vec::new(),
     }
 }
 
@@ -396,9 +430,10 @@ fn translucent_scene(with_glass: bool) -> Option<[u8; 4]> {
             width: 8,
             height: 8,
             layer: 0,
-            ao: [3; 4],
-            light: 0xf0,
+            ao: [4; 4],
+            light: [LIGHT_FULL_SKY; 4],
             tint: 0,
+            rotation: 0,
         })
         .unwrap(),
     );
@@ -406,19 +441,19 @@ fn translucent_scene(with_glass: bool) -> Option<[u8; 4]> {
         m.translucent.push(
             ModelQuad::encode(&ModelQuadDesc {
                 corners: [
-                    [4.0, 4.0, 10.0],
-                    [12.0, 4.0, 10.0],
-                    [4.0, 12.0, 10.0],
-                    [12.0, 12.0, 10.0],
+                    [7.0, 7.0, 10.0],
+                    [9.5, 7.0, 10.0],
+                    [7.0, 9.5, 10.0],
+                    [9.5, 9.5, 10.0],
                 ],
                 uvs: [[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
                 layer: 1,
-                light: 0xf0,
+                light: [LIGHT_FULL_SKY; 4],
                 shade_face: Face::PosZ,
                 flags: 0,
-                ao: [3; 4],
+                ao: [63; 4],
                 tint: 0,
-                cell: [0, 0],
+                cell: [7, 7, 10],
             })
             .unwrap(),
         );
@@ -456,9 +491,10 @@ fn wall(layer: u16, tint: u8) -> SectionMesh {
             width: 8,
             height: 8,
             layer,
-            ao: [3; 4],
-            light: 0xf0,
+            ao: [4; 4],
+            light: [LIGHT_FULL_SKY; 4],
             tint,
+            rotation: 0,
         })
         .unwrap(),
     );
@@ -520,4 +556,154 @@ fn tint_tables_and_constant_palette_colour_quads() {
         plain[0] > 150 && plain[1] > 150 && plain[2] > 150,
         "{plain:?}"
     );
+}
+
+fn lit_wall(layer: u16, light: u16) -> SectionMesh {
+    let mut m = SectionMesh::default();
+    m.push_cube(
+        PackedQuad::encode(&CubeQuad {
+            x: 4,
+            y: 4,
+            z: 4,
+            face: Face::PosZ,
+            width: 8,
+            height: 8,
+            layer,
+            ao: [4; 4],
+            light: [light; 4],
+            tint: 0,
+            rotation: 0,
+        })
+        .unwrap(),
+    );
+    m
+}
+
+fn pixel_with(
+    group: mcr_render::TextureGroupData,
+    mesh: &SectionMesh,
+    setup: impl FnOnce(&mut Renderer),
+    camera_z: f64,
+) -> Option<[u8; 4]> {
+    let mut r = renderer(64, 64)?;
+    r.set_texture_groups(&[group]);
+    setup(&mut r);
+    r.set_section([0, 0, 0], mesh).unwrap();
+    let cam = Camera {
+        position: DVec3::new(8.0, 8.0, camera_z),
+        ..Camera::default()
+    };
+    frame(&mut r, &cam);
+    let px = r.read_offscreen().unwrap();
+    let i = (32 * 64 + 32) * 4;
+    Some([px[i], px[i + 1], px[i + 2], px[i + 3]])
+}
+
+#[test]
+fn day_time_relights_sky_light_but_not_block_light() {
+    let white = flat_group(&[[255, 255, 255, 255]]);
+    let sky = lit_wall(0, mcr_render::pack_light(240, 0));
+    let torch = lit_wall(0, mcr_render::pack_light(0, 128));
+    let at = |time: u64, mesh: &SectionMesh| {
+        pixel_with(
+            white.clone(),
+            mesh,
+            |r| r.set_environment(&mcr_render::Environment::overworld(time, 0.0, 0.0)),
+            20.0,
+        )
+    };
+    let Some(day) = at(6000, &sky) else { return };
+    let night = at(18000, &sky).unwrap();
+    assert!(day[0] > 150 && night[0] < day[0] / 2, "{day:?} {night:?}");
+    let torch_day = at(6000, &torch).unwrap();
+    let torch_night = at(18000, &torch).unwrap();
+    assert!(
+        torch_day[0].abs_diff(torch_night[0]) <= 6,
+        "{torch_day:?} {torch_night:?}"
+    );
+    assert!(
+        torch_day[0] > torch_day[2],
+        "block light is warm: {torch_day:?}"
+    );
+}
+
+#[test]
+fn distant_surfaces_fade_to_fog() {
+    let white = flat_group(&[[255, 255, 255, 255]]);
+    let wall = lit_wall(0, mcr_render::LIGHT_FULL_SKY);
+    let env = mcr_render::Environment {
+        fog_color: [1.0, 0.0, 0.0],
+        render_distance: 30.0,
+        ..Default::default()
+    };
+    let near = pixel_with(white.clone(), &wall, |r| r.set_environment(&env), 20.0);
+    let Some(near) = near else { return };
+    let far = pixel_with(white, &wall, |r| r.set_environment(&env), 45.0).unwrap();
+    assert!(
+        near[1] > 100 && far[1] < 20 && far[0] > 200,
+        "{near:?} {far:?}"
+    );
+}
+
+fn animated_group(interpolate: bool) -> mcr_render::TextureGroupData {
+    let mut g = flat_group(&[[255, 0, 0, 255], [0, 255, 0, 255]]);
+    g.animations = vec![mcr_render::SpriteAnimation {
+        layer: 0,
+        frames: vec![
+            mcr_render::SpriteFrame {
+                layer_offset: 0,
+                ticks: 4,
+            },
+            mcr_render::SpriteFrame {
+                layer_offset: 1,
+                ticks: 4,
+            },
+        ],
+        interpolate,
+    }];
+    g
+}
+
+#[test]
+fn animated_sprites_advance_without_new_geometry() {
+    let wall = lit_wall(0, mcr_render::LIGHT_FULL_SKY);
+    let at = |tick: u64, interpolate: bool| {
+        pixel_with(
+            animated_group(interpolate),
+            &wall,
+            |r| r.set_animation_tick(tick),
+            20.0,
+        )
+    };
+    let Some(first) = at(0, false) else { return };
+    let second = at(4, false).unwrap();
+    assert!(first[0] > 150 && first[1] < 10, "{first:?}");
+    assert!(second[1] > 150 && second[0] < 10, "{second:?}");
+    let mid = at(2, true).unwrap();
+    assert!(mid[0] > 60 && mid[1] > 60, "interpolated: {mid:?}");
+}
+
+#[test]
+fn animation_tick_changes_reuse_uploaded_sections() {
+    let Some(mut r) = renderer(64, 64) else {
+        return;
+    };
+    r.set_texture_groups(&[animated_group(false)]);
+    r.set_section([0, 0, 0], &lit_wall(0, mcr_render::LIGHT_FULL_SKY))
+        .unwrap();
+    let cam = Camera {
+        position: DVec3::new(8.0, 8.0, 20.0),
+        ..Camera::default()
+    };
+    let read = |r: &mut Renderer, tick: u64| {
+        r.set_animation_tick(tick);
+        frame(r, &cam);
+        let px = r.read_offscreen().unwrap();
+        let i = (32 * 64 + 32) * 4;
+        [px[i], px[i + 1]]
+    };
+    let a = read(&mut r, 0);
+    let b = read(&mut r, 4);
+    let c = read(&mut r, 8);
+    assert!(a[0] > 150 && b[1] > 150 && c[0] > 150);
 }

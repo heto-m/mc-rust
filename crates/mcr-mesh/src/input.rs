@@ -22,16 +22,30 @@ pub struct MeshInput {
     pub states: Box<[u16; PADDED]>,
     /// `sky << 4 | block`.
     pub light: Box<[u8; PADDED]>,
-    /// Biome ids of the columns around the section, `side * side` entries with
-    /// `side = 16 + 2 * blend_radius`, row-major by z.
+    /// Biome ids on the quart grid around the section: x and z quarts `-3..=6`, y quarts `-1..=4`,
+    /// indexed `(qy * 10 + qz) * 10 + qx` with the origin offsets applied (`quart_index`).
     pub biomes: Vec<u16>,
     pub blend_radius: usize,
+    /// The hashed world seed vanilla's biome zoom is keyed with.
+    pub biome_seed: i64,
+}
+
+pub const QUART_SPAN: usize = 10;
+pub const QUART_SPAN_Y: usize = 6;
+pub const QUART_ORIGIN_XZ: i32 = -3;
+pub const QUART_ORIGIN_Y: i32 = -1;
+
+/// Index of the quart `(qx, qy, qz)` relative to the section's first quart, clamped to the grid.
+pub fn quart_index(qx: i32, qy: i32, qz: i32) -> usize {
+    let x = (qx - QUART_ORIGIN_XZ).clamp(0, QUART_SPAN as i32 - 1) as usize;
+    let y = (qy - QUART_ORIGIN_Y).clamp(0, QUART_SPAN_Y as i32 - 1) as usize;
+    let z = (qz - QUART_ORIGIN_XZ).clamp(0, QUART_SPAN as i32 - 1) as usize;
+    (y * QUART_SPAN + z) * QUART_SPAN + x
 }
 
 impl MeshInput {
     pub fn blank(pos: SectionPos, blend_radius: usize) -> Self {
         let radius = blend_radius.min(MAX_BLEND_RADIUS);
-        let side = 16 + 2 * radius;
         Self {
             pos,
             states: vec![0u16; PADDED]
@@ -42,8 +56,9 @@ impl MeshInput {
                 .into_boxed_slice()
                 .try_into()
                 .expect("size"),
-            biomes: vec![0; side * side],
+            biomes: vec![0; QUART_SPAN * QUART_SPAN * QUART_SPAN_Y],
             blend_radius: radius,
+            biome_seed: 0,
         }
     }
 
@@ -137,34 +152,45 @@ impl MeshInput {
     }
 
     fn fill_biomes(&mut self, store: &ChunkStore, pos: SectionPos) {
-        let r = self.blend_radius as i32;
-        let side = (16 + 2 * r) as usize;
-        let mut cache: [Option<[u16; 64]>; 9] = [None; 9];
+        let mut cache: [Option<[u16; 64]>; 27] = [None; 27];
         for (slot, entry) in cache.iter_mut().enumerate() {
-            let (cx, cz) = (slot as i32 % 3 - 1, slot as i32 / 3 - 1);
+            let (cx, cy, cz) = (
+                slot as i32 % 3 - 1,
+                slot as i32 / 9 - 1,
+                slot as i32 / 3 % 3 - 1,
+            );
             *entry = store
                 .column(ChunkPos::new(pos.x + cx, pos.z + cz))
                 .and_then(|c| {
-                    let index = usize::try_from(pos.y - (c.min_y() >> 4)).ok()?;
+                    let index = usize::try_from(pos.y + cy - (c.min_y() >> 4)).ok()?;
                     let mut out = [0u16; 64];
                     c.section(index)?.unpack_biomes(&mut out);
                     Some(out)
                 });
         }
-        let center = cache[4].unwrap_or([0; 64]);
-        for wz in 0..side as i32 {
-            for wx in 0..side as i32 {
-                let (bx, bz) = (wx - r, wz - r);
-                let slot = ((bz.div_euclid(16) + 1) * 3 + bx.div_euclid(16) + 1) as usize;
-                let (table, bx, bz) = match &cache[slot] {
-                    Some(t) => (t, bx, bz),
-                    None => (&center, bx.clamp(0, 15), bz.clamp(0, 15)),
-                };
-                let (qx, qz) = (
-                    (bx.rem_euclid(16) >> 2) as usize,
-                    (bz.rem_euclid(16) >> 2) as usize,
-                );
-                self.biomes[wz as usize * side + wx as usize] = table[(2 << 4) | (qz << 2) | qx];
+        let center = cache[13].unwrap_or([0; 64]);
+        for qy in 0..QUART_SPAN_Y as i32 {
+            for qz in 0..QUART_SPAN as i32 {
+                for qx in 0..QUART_SPAN as i32 {
+                    let (gx, gy, gz) = (
+                        qx + QUART_ORIGIN_XZ,
+                        qy + QUART_ORIGIN_Y,
+                        qz + QUART_ORIGIN_XZ,
+                    );
+                    let slot = ((gy.div_euclid(4) + 1) * 9
+                        + (gz.div_euclid(4) + 1) * 3
+                        + gx.div_euclid(4)
+                        + 1) as usize;
+                    let table = cache[slot].as_ref().unwrap_or(&center);
+                    let (lx, ly, lz) = (
+                        gx.rem_euclid(4) as usize,
+                        gy.rem_euclid(4) as usize,
+                        gz.rem_euclid(4) as usize,
+                    );
+                    self.biomes
+                        [(qy as usize * QUART_SPAN + qz as usize) * QUART_SPAN + qx as usize] =
+                        table[ly << 4 | lz << 2 | lx];
+                }
             }
         }
     }

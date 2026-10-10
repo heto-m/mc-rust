@@ -79,10 +79,9 @@ fn biome_window_reads_neighbour_columns() {
     column = ChunkColumn::from_data(data, &config());
     s.insert(ChunkPos::new(1, 0), column);
     let input = MeshInput::snapshot(&s, SectionPos::new(0, 0, 0), 2).unwrap();
-    let side = 20;
-    assert_eq!(input.biomes[(2 + 3) * side + 2 + 16], 7);
-    assert_eq!(input.biomes[(2 + 3) * side + 2 + 15], 0);
-    assert_eq!(input.biomes.len(), side * side);
+    assert_eq!(input.biomes[mcr_mesh::quart_index(4, 2, 0)], 7);
+    assert_eq!(input.biomes[mcr_mesh::quart_index(3, 2, 0)], 0);
+    assert_eq!(input.biomes[mcr_mesh::quart_index(4, 3, 0)], 0);
 }
 
 fn pool(threads: usize) -> MeshPool {

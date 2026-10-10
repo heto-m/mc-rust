@@ -59,6 +59,7 @@ pub struct MeshPool {
     next_generation: u64,
     seq: u64,
     blend_radius: usize,
+    biome_seed: i64,
 }
 
 impl std::fmt::Debug for MeshPool {
@@ -137,7 +138,13 @@ impl MeshPool {
             next_generation: 0,
             seq: 0,
             blend_radius,
+            biome_seed: 0,
         }
+    }
+
+    /// The hashed world seed biome zoom uses; applies to jobs submitted afterwards.
+    pub fn set_biome_seed(&mut self, seed: i64) {
+        self.biome_seed = seed;
     }
 
     pub fn blend_radius(&self) -> usize {
@@ -146,7 +153,8 @@ impl MeshPool {
 
     /// Queues `input`; lower `priority` values mesh first. Older queued or running jobs for the same
     /// section are superseded and their results dropped by `poll`.
-    pub fn submit(&mut self, input: MeshInput, priority: u32) {
+    pub fn submit(&mut self, mut input: MeshInput, priority: u32) {
+        input.biome_seed = self.biome_seed;
         self.next_generation += 1;
         self.seq += 1;
         self.latest.insert(input.pos, self.next_generation);

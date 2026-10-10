@@ -5,6 +5,10 @@ use std::path::Path;
 use mcr_assets::{ResourceManager, decode_sprite};
 use mcr_render::{TINT_TABLE_WORDS, TintTable};
 
+use crate::biome_zoom::zoom_biome;
+use crate::input::{MeshInput, quart_index};
+use crate::simplex::Simplex;
+
 pub const TINT_NONE: u8 = 0;
 pub const TINT_GRASS: u8 = 1;
 pub const TINT_FOLIAGE: u8 = 2;
@@ -23,6 +27,9 @@ pub const PALETTE_LEN: usize = 28;
 
 pub const DEFAULT_BLEND_RADIUS: usize = 2;
 pub const MAX_BLEND_RADIUS: usize = 7;
+
+/// Marks a column without tinted quads.
+pub const NO_Y: u8 = 255;
 
 const fn rgb(r: u32, g: u32, b: u32) -> u32 {
     r | g << 8 | b << 16
@@ -216,6 +223,12 @@ pub struct BiomeColors {
     foliage: Vec<u32>,
     dry_foliage: Vec<u32>,
     water: Vec<u32>,
+    swamp: Vec<bool>,
+}
+
+fn swamp_noise() -> &'static Simplex {
+    static NOISE: std::sync::OnceLock<Simplex> = std::sync::OnceLock::new();
+    NOISE.get_or_init(|| Simplex::new(2345))
 }
 
 fn modify_grass(modifier: GrassModifier, base: u32) -> u32 {
@@ -235,8 +248,10 @@ impl BiomeColors {
             foliage: Vec::new(),
             dry_foliage: Vec::new(),
             water: Vec::new(),
+            swamp: Vec::new(),
         };
         for c in climates {
+            out.swamp.push(c.modifier == GrassModifier::Swamp);
             let grass = c
                 .grass
                 .map_or_else(|| sample(&maps.grass, c.temperature, c.downfall), from_hex);
@@ -298,6 +313,36 @@ impl BiomeColors {
             .unwrap_or(0xffffff)
     }
 
+    fn blur(colors: &[u32], radius: usize, out: &mut [u32]) {
+        let side = 16 + 2 * radius;
+        let span = 2 * radius + 1;
+        let count = (span * span) as u32;
+        let mut rows = vec![[0u32; 3]; 16 * side];
+        for z in 0..side {
+            for x in 0..16 {
+                let mut sum = [0u32; 3];
+                for c in &colors[z * side + x..z * side + x + span] {
+                    sum[0] += c & 255;
+                    sum[1] += c >> 8 & 255;
+                    sum[2] += c >> 16 & 255;
+                }
+                rows[z * 16 + x] = sum;
+            }
+        }
+        for z in 0..16 {
+            for x in 0..16 {
+                let mut sum = [0u32; 3];
+                for dz in 0..span {
+                    let r = rows[(z + dz) * 16 + x];
+                    sum[0] += r[0];
+                    sum[1] += r[1];
+                    sum[2] += r[2];
+                }
+                out[z * 16 + x] = rgb(sum[0] / count, sum[1] / count, sum[2] / count);
+            }
+        }
+    }
+
     /// Fills `table` for a 16x16 area from a biome id window of side `16 + 2 * radius`, averaging the
     /// colours over `(2 * radius + 1)^2` columns like vanilla's biome blend.
     pub fn fill_table(&self, window: &[u16], radius: usize, table: &mut TintTable) {
@@ -311,31 +356,110 @@ impl BiomeColors {
                 continue;
             }
             let colors: Vec<u32> = window.iter().map(|&b| self.color(kind, b)).collect();
-            let span = 2 * radius + 1;
-            let count = (span * span) as u32;
-            let mut rows = vec![[0u32; 3]; 16 * side];
-            for z in 0..side {
-                for x in 0..16 {
-                    let mut sum = [0u32; 3];
-                    for c in &colors[z * side + x..z * side + x + span] {
-                        sum[0] += c & 255;
-                        sum[1] += c >> 8 & 255;
-                        sum[2] += c >> 16 & 255;
-                    }
-                    rows[z * 16 + x] = sum;
-                }
+            Self::blur(&colors, radius, out);
+        }
+    }
+
+    fn grass_at(&self, biome: u16, wx: i32, wz: i32) -> u32 {
+        if self.swamp.get(usize::from(biome)).copied().unwrap_or(false) {
+            let noise = swamp_noise().get(f64::from(wx) * 0.0225, f64::from(wz) * 0.0225);
+            return if noise < -0.1 {
+                rgb(0x4c, 0x3a, 0x3c)
+            } else {
+                rgb(0x6a, 0x70, 0x39)
+            };
+        }
+        self.color(TINT_GRASS, biome)
+    }
+
+    /// Per-column tint table for a section: each column's biome is resolved with vanilla's seeded zoom at
+    /// the height in `ys` (section-local, `NO_Y` for untinted columns), then blended over the radius.
+    pub fn fill_table_zoomed(&self, input: &MeshInput, ys: &[u8; 256], table: &mut TintTable) {
+        let radius = input.blend_radius;
+        let side = 16 + 2 * radius;
+        let uniform = input.biomes.iter().all(|&b| b == input.biomes[0]);
+        let swamp_any = input
+            .biomes
+            .iter()
+            .any(|&b| self.swamp.get(usize::from(b)).copied().unwrap_or(false));
+        if uniform && !swamp_any {
+            for kind in TINT_GRASS..=TINT_WATER {
+                table[(kind as usize - 1) * 256..][..256].fill(self.color(kind, input.biomes[0]));
             }
-            for z in 0..16 {
-                for x in 0..16 {
-                    let mut sum = [0u32; 3];
-                    for dz in 0..span {
-                        let r = rows[(z + dz) * 16 + x];
-                        sum[0] += r[0];
-                        sum[1] += r[1];
-                        sum[2] += r[2];
+            return;
+        }
+        let origin = [input.pos.x * 16, input.pos.y * 16, input.pos.z * 16];
+        let mut levels: Vec<u8> = ys.iter().copied().filter(|&y| y != NO_Y).collect();
+        levels.sort_unstable();
+        levels.dedup();
+        if levels.is_empty() {
+            levels.push(8);
+        }
+        let mut windows: Vec<Vec<u16>> = Vec::new();
+        let mut slot_of_level = [0usize; 16];
+        for &y in &levels {
+            let ids: Vec<u16> = (0..side * side)
+                .map(|i| {
+                    if uniform {
+                        return input.biomes[0];
                     }
-                    out[z * 16 + x] = rgb(sum[0] / count, sum[1] / count, sum[2] / count);
+                    let wx = (i % side) as i32 - radius as i32;
+                    let wz = (i / side) as i32 - radius as i32;
+                    zoom_biome(
+                        input.biome_seed,
+                        origin[0] + wx,
+                        origin[1] + i32::from(y),
+                        origin[2] + wz,
+                        |qx, qy, qz| {
+                            input.biomes[quart_index(
+                                qx - input.pos.x * 4,
+                                qy - input.pos.y * 4,
+                                qz - input.pos.z * 4,
+                            )]
+                        },
+                    )
+                })
+                .collect();
+            let slot = match windows.iter().position(|w| *w == ids) {
+                Some(s) => s,
+                None => {
+                    windows.push(ids);
+                    windows.len() - 1
                 }
+            };
+            slot_of_level[usize::from(y)] = slot;
+        }
+        for kind in TINT_GRASS..=TINT_WATER {
+            let blurred: Vec<[u32; 256]> = windows
+                .iter()
+                .map(|ids| {
+                    let colors: Vec<u32> = ids
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &b)| {
+                            if kind == TINT_GRASS {
+                                let wx = origin[0] + (i % side) as i32 - radius as i32;
+                                let wz = origin[2] + (i / side) as i32 - radius as i32;
+                                self.grass_at(b, wx, wz)
+                            } else {
+                                self.color(kind, b)
+                            }
+                        })
+                        .collect();
+                    let mut out = [0u32; 256];
+                    Self::blur(&colors, radius, &mut out);
+                    out
+                })
+                .collect();
+            let dst = &mut table[(kind as usize - 1) * 256..][..256];
+            for (col, d) in dst.iter_mut().enumerate() {
+                let y = ys[col];
+                let slot = if y == NO_Y {
+                    0
+                } else {
+                    slot_of_level[usize::from(y)]
+                };
+                *d = blurred[slot][col];
             }
         }
     }
@@ -409,5 +533,59 @@ mod tests {
         assert_eq!(kinds[0], constant(CONST_REDSTONE + 15));
         assert_eq!(tint_kinds("minecraft:grass_block", &[])[0], TINT_GRASS);
         assert_eq!(tint_kinds("minecraft:stone", &[]), [0, 0]);
+    }
+
+    fn split_input(radius: usize) -> MeshInput {
+        let mut input = MeshInput::blank(mcr_world::SectionPos::new(0, 4, 0), radius);
+        input.biome_seed = 99;
+        for qy in 0..crate::input::QUART_SPAN_Y as i32 {
+            for qz in 0..crate::input::QUART_SPAN as i32 {
+                for qx in 0..crate::input::QUART_SPAN as i32 {
+                    let quart = qx + crate::input::QUART_ORIGIN_XZ;
+                    input.biomes[(qy as usize * crate::input::QUART_SPAN + qz as usize)
+                        * crate::input::QUART_SPAN
+                        + qx as usize] = u16::from(quart >= 2);
+                }
+            }
+        }
+        input
+    }
+
+    #[test]
+    fn zoomed_columns_follow_the_seeded_biome_border() {
+        let colors = two_biomes();
+        let input = split_input(0);
+        let ys = [8u8; 256];
+        let mut a = colors.new_table();
+        colors.fill_table_zoomed(&input, &ys, &mut a);
+        let mut b = colors.new_table();
+        colors.fill_table_zoomed(&input, &ys, &mut b);
+        assert_eq!(a[..256], b[..256]);
+        assert_eq!(a[0], rgb(255, 0, 0));
+        assert_eq!(a[15], rgb(0, 0, 255));
+        let reds = (0..16).filter(|&x| a[x] == rgb(255, 0, 0)).count();
+        assert!(
+            (6..=10).contains(&reds),
+            "border near x = 8, got {reds} red columns"
+        );
+    }
+
+    #[test]
+    fn swamp_grass_uses_position_noise() {
+        let swamp = BiomeClimate {
+            modifier: GrassModifier::Swamp,
+            ..BiomeClimate::default()
+        };
+        let colors = BiomeColors::from_climates(&[swamp], &ColorMaps::flat(1, 2, 3));
+        let mut input = MeshInput::blank(mcr_world::SectionPos::new(7, 4, -3), 0);
+        input.biome_seed = 1;
+        let mut t = colors.new_table();
+        colors.fill_table_zoomed(&input, &[8; 256], &mut t);
+        let distinct: std::collections::HashSet<u32> = t[..256].iter().copied().collect();
+        assert!(
+            distinct
+                .iter()
+                .all(|&c| c == rgb(0x6a, 0x70, 0x39) || c == rgb(0x4c, 0x3a, 0x3c))
+        );
     }
 }
