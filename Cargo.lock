@@ -1602,6 +1602,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcr-block-entity"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytemuck",
+ "criterion 0.5.1",
+ "glam",
+ "mcr-assets",
+ "mcr-data",
+ "mcr-entity-model",
+ "mcr-nbt",
+ "mcr-protocol",
+ "mcr-ui",
+ "md-5",
+ "png",
+ "pollster",
+ "rustc-hash 2.1.3",
+ "serde_json",
+ "thiserror 2.0.21",
+ "uuid",
+ "wgpu",
+]
+
+[[package]]
 name = "mcr-buf"
 version = "0.1.0"
 dependencies = [

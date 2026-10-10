@@ -25,6 +25,7 @@ pub struct Page {
 pub struct Atlas {
     size: u32,
     pages: Vec<Page>,
+    revision: u64,
 }
 
 impl Atlas {
@@ -32,6 +33,7 @@ impl Atlas {
         let mut atlas = Self {
             size,
             pages: Vec::new(),
+            revision: 0,
         };
         atlas.add_page();
         atlas
@@ -39,6 +41,11 @@ impl Atlas {
 
     pub fn size(&self) -> u32 {
         self.size
+    }
+
+    /// Increases whenever pixels change, so other renderers can mirror the pages without taking dirty flags.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn pages(&self) -> &[Page] {
@@ -136,6 +143,7 @@ impl Atlas {
 
     pub fn write(&mut self, slot: Slot, w: u32, h: u32, rgba: &[u8]) {
         debug_assert_eq!(rgba.len(), (w * h * 4) as usize);
+        self.revision += 1;
         let size = self.size as usize;
         let page = &mut self.pages[slot.page as usize];
         for row in 0..h as usize {
