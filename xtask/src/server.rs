@@ -26,8 +26,33 @@ pub fn eula_action(env_accept: Option<&str>, existing_eula: Option<&str>) -> Eul
     }
 }
 
-pub fn render_properties(port: u16) -> String {
-    format!("online-mode=false\nserver-port={port}\nview-distance=4\nsimulation-distance=4\n")
+/// Keeps the user's existing settings; only the keys a dev server needs are forced.
+pub fn render_properties(existing: Option<&str>, port: u16) -> String {
+    let port = port.to_string();
+    let forced = [
+        ("online-mode", "false"),
+        ("server-port", port.as_str()),
+        ("pause-when-empty-seconds", "-1"),
+        ("white-list", "false"),
+        ("enforce-whitelist", "false"),
+    ];
+    let defaults = [("view-distance", "10"), ("simulation-distance", "10")];
+    let mut lines: Vec<String> = existing
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| {
+            let key = l.split('=').next().unwrap_or_default().trim();
+            !forced.iter().any(|(k, _)| *k == key)
+        })
+        .map(str::to_owned)
+        .collect();
+    for (key, value) in defaults {
+        if !lines.iter().any(|l| l.split('=').next() == Some(key)) {
+            lines.push(format!("{key}={value}"));
+        }
+    }
+    lines.extend(forced.iter().map(|(k, v)| format!("{k}={v}")));
+    lines.join("\n") + "\n"
 }
 
 pub fn run(layout: &Layout, ver: &str, port: u16, nogui: bool) -> Result<()> {
@@ -55,7 +80,9 @@ pub fn run(layout: &Layout, ver: &str, port: u16, nogui: bool) -> Result<()> {
             server_jar.display()
         );
     }
-    fs::write(run_dir.join("server.properties"), render_properties(port))?;
+    let properties = run_dir.join("server.properties");
+    let current = fs::read_to_string(&properties).ok();
+    fs::write(&properties, render_properties(current.as_deref(), port))?;
 
     let java = resolve_java(layout)?;
     let mut cmd = Command::new(java);
@@ -76,10 +103,28 @@ mod tests {
 
     #[test]
     fn properties_disable_online_mode_and_set_port() {
-        let text = render_properties(25570);
+        let text = render_properties(None, 25570);
         assert!(text.lines().any(|l| l == "online-mode=false"));
         assert!(text.lines().any(|l| l == "server-port=25570"));
-        assert!(text.lines().any(|l| l == "view-distance=4"));
+        assert!(text.lines().any(|l| l == "pause-when-empty-seconds=-1"));
+        assert!(text.lines().any(|l| l == "view-distance=10"));
+    }
+
+    #[test]
+    fn properties_keep_user_settings_and_force_dev_keys() {
+        let text = render_properties(
+            Some("motd=hi\nview-distance=16\nonline-mode=true\nserver-port=1\n"),
+            25570,
+        );
+        assert!(text.lines().any(|l| l == "motd=hi"));
+        assert!(text.lines().any(|l| l == "view-distance=16"));
+        assert!(!text.lines().any(|l| l == "online-mode=true"));
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.starts_with("server-port="))
+                .count(),
+            1
+        );
     }
 
     #[test]
