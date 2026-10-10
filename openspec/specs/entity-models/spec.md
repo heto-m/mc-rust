@@ -34,7 +34,7 @@ The system SHALL provide walk-cycle limb swing for biped and quadruped models an
 - **THEN** limbs keep their rest pose
 
 ### Requirement: Instanced rendering
-The system SHALL draw all entities of one model with a single instanced draw using per-instance bone matrices from a storage buffer and entity textures from a texture array.
+The system SHALL draw all instances of one model and texture array with a single instanced draw per pipeline using per-instance bone matrices from a storage buffer, entity textures from dynamically growing texture arrays, directional lighting, tint and hurt overlay, and opaque, translucent and additive pipelines.
 
 #### Scenario: Row of mobs
 - **WHEN** a pig, zombie, creeper, cow, villager and armor stand are rendered offscreen

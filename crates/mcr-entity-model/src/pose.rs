@@ -18,7 +18,7 @@ impl Pose {
     };
 
     pub fn matrix(&self) -> Mat4 {
-        let rotation = Quat::from_euler(EulerRot::XYZ, self.rot.x, self.rot.y, self.rot.z);
+        let rotation = Quat::from_euler(EulerRot::ZYX, self.rot.z, self.rot.y, self.rot.x);
         Mat4::from_scale_rotation_translation(self.scale, rotation, self.pos)
     }
 }

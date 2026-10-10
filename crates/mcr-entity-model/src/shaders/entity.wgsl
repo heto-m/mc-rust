@@ -1,16 +1,22 @@
 struct Globals {
     view_proj: mat4x4<f32>,
-    light_dir: vec4<f32>,
+    light0: vec4<f32>,
+    light1: vec4<f32>,
+    params: vec4<f32>,
 }
 
 struct Instance {
     bone_base: u32,
     layer: u32,
     uv_scale: vec2<f32>,
+    tint: u32,
+    flags: u32,
+    uv_offset: vec2<f32>,
+    origin: vec3<f32>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
-@group(0) @binding(1) var<storage, read> bones: array<mat4x4<f32>>;
+@group(0) @binding(1) var<storage, read> bones: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> instances: array<Instance>;
 @group(0) @binding(3) var entity_textures: texture_2d_array<f32>;
 @group(0) @binding(4) var entity_sampler: sampler;
@@ -26,29 +32,89 @@ struct VertexIn {
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) shade: f32,
+    @location(1) shade: vec3<f32>,
     @location(2) @interpolate(flat) layer: u32,
+    @location(3) @interpolate(flat) tint: vec4<f32>,
+    @location(4) @interpolate(flat) hurt: f32,
+}
+
+fn unpack_rgba(c: u32) -> vec4<f32> {
+    return vec4<f32>(
+        f32(c & 255u),
+        f32((c >> 8u) & 255u),
+        f32((c >> 16u) & 255u),
+        f32((c >> 24u) & 255u),
+    ) / 255.0;
+}
+
+fn light_curve(level: f32) -> f32 {
+    let v = level / 15.0;
+    return max(v / (4.0 - 3.0 * v), 0.04);
+}
+
+fn to_linear(c: vec3<f32>) -> vec3<f32> {
+    return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
 }
 
 @vertex
 fn vs_main(v: VertexIn) -> VertexOut {
     let inst = instances[v.instance];
-    let m = bones[inst.bone_base + v.bone];
-    let world = m * vec4<f32>(v.pos, 1.0);
-    let n = normalize((m * vec4<f32>(v.normal, 0.0)).xyz);
+    let at = (inst.bone_base + v.bone) * 3u;
+    let r0 = bones[at];
+    let r1 = bones[at + 1u];
+    let r2 = bones[at + 2u];
+    let p = vec3<f32>(dot(r0.xyz, v.pos) + r0.w, dot(r1.xyz, v.pos) + r1.w, dot(r2.xyz, v.pos) + r2.w);
+    let world = vec4<f32>(p + inst.origin, 1.0);
+    let n = normalize(vec3<f32>(dot(r0.xyz, v.normal), dot(r1.xyz, v.normal), dot(r2.xyz, v.normal)));
     var out: VertexOut;
     out.clip = globals.view_proj * world;
-    out.uv = v.uv * inst.uv_scale;
-    out.shade = 0.55 + 0.45 * max(dot(n, normalize(globals.light_dir.xyz)), 0.0);
+    out.uv = v.uv * inst.uv_scale + inst.uv_offset;
+    let fullbright = (inst.flags & 1u) != 0u;
+    let block = f32((inst.flags >> 8u) & 15u);
+    let sky = f32((inst.flags >> 12u) & 15u) * globals.params.x;
+    var lit = vec3<f32>(1.0);
+    if !fullbright {
+        let acc = max(dot(n, globals.light0.xyz), 0.0) + max(dot(n, globals.light1.xyz), 0.0);
+        lit = vec3<f32>(min(acc * 0.6 + 0.4, 1.0)) * light_curve(max(block, sky));
+    }
+    out.shade = lit;
     out.layer = inst.layer;
+    out.tint = unpack_rgba(inst.tint);
+    out.hurt = f32((inst.flags >> 1u) & 1u);
     return out;
 }
 
+fn finish(rgb: vec3<f32>) -> vec3<f32> {
+    if globals.params.y > 0.5 {
+        return to_linear(rgb);
+    }
+    return rgb;
+}
+
 @fragment
-fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+fn fs_cutout(in: VertexOut) -> @location(0) vec4<f32> {
     let c = textureSample(entity_textures, entity_sampler, in.uv, in.layer);
     if c.a < 0.1 {
         discard;
     }
-    return vec4<f32>(c.rgb * in.shade, 1.0);
+    var rgb = c.rgb * in.tint.rgb;
+    rgb = mix(rgb, vec3<f32>(1.0, 0.0, 0.0), in.hurt * 0.3);
+    return vec4<f32>(finish(rgb * in.shade), 1.0);
+}
+
+@fragment
+fn fs_blend(in: VertexOut) -> @location(0) vec4<f32> {
+    let c = textureSample(entity_textures, entity_sampler, in.uv, in.layer);
+    if c.a < 0.003 {
+        discard;
+    }
+    var rgb = c.rgb * in.tint.rgb;
+    rgb = mix(rgb, vec3<f32>(1.0, 0.0, 0.0), in.hurt * 0.3);
+    return vec4<f32>(finish(rgb * in.shade), c.a * in.tint.a);
+}
+
+@fragment
+fn fs_additive(in: VertexOut) -> @location(0) vec4<f32> {
+    let c = textureSample(entity_textures, entity_sampler, in.uv, in.layer);
+    return vec4<f32>(finish(c.rgb * in.tint.rgb), c.a * in.tint.a);
 }

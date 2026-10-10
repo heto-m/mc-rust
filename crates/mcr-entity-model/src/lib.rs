@@ -1,25 +1,52 @@
 mod anim;
 mod assets;
+mod catalog;
 mod cube;
 mod data;
+mod equipment;
 mod gpu;
+mod humanoids;
+pub mod idx;
+mod items;
+mod kf;
+mod misc;
+mod mobs;
 mod model;
+mod plan;
 mod pose;
-mod procedural;
+mod rig;
+mod scene;
+mod skin;
+mod texcache;
+mod view;
 
 pub use anim::{BoundAnimation, catmull_rom, sample};
-pub use assets::{ImageRgba, load_jar_texture};
+pub use assets::{
+    EquipmentInfo, EquipmentLayer, Equippable, ImageRgba, SceneAssets, TrimOverride,
+    load_jar_texture, missing_image,
+};
+pub use catalog::{Catalog, PlanCx, Simple};
 pub use cube::{Vertex, unwrap_cube};
 pub use data::{
     AnimationDef, AnimationSet, ChannelDef, CubeDef, Interp, KeyframeDef, LayerDef, LayerSet,
     PartDef, RendererInfo, RendererSet, Target,
 };
-pub use gpu::{EntityRenderer, Instance, ModelHandle, TextureArrayBuilder, TextureLayer};
+pub use gpu::{
+    Bone34, CLASS_SIZES, EntityRenderer, LightInfo, MAX_BONES, MAX_INSTANCES, ModelId,
+    PartInstance, Pipeline, TargetFormats, TexId,
+};
+pub use humanoids::default_skin;
+pub use items::clone_count;
 pub use model::{Bone, BoneId, Model};
+pub use plan::{Attach, AttachKind, ItemContext, ItemSource, Part, Plan};
 pub use pose::{Pose, evaluate};
-pub use procedural::{AnimState, Biped, Quadruped, Rig};
+pub use rig::{AnimIn, ArmPose, Binding, HumanoidStyle, Rig, Slot, animate};
+pub use scene::{EntityScene, FrameParams, NameTag, SceneStats};
+pub use texcache::TextureCache;
+pub use view::{EntityData, EntityView, NoData, PlayerView, Registries, Skin, slot};
 
 pub use glam;
+pub use mcr_protocol;
 pub use wgpu;
 
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +59,8 @@ pub enum Error {
     Zip(#[from] zip::result::ZipError),
     #[error("png: {0}")]
     Png(#[from] png::DecodingError),
+    #[error("assets: {0}")]
+    Assets(String),
     #[error("unsupported png color type {0:?}")]
     PngFormat(png::ColorType),
 }

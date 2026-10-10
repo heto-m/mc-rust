@@ -65,6 +65,102 @@ impl Model {
         }
     }
 
+    /// A single-bone model from ready-made geometry (item and block meshes); vertices use bone 0.
+    pub fn from_geometry(vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
+        Model {
+            bones: vec![Bone {
+                name: "root".to_owned(),
+                parent: None,
+                rest: crate::pose::Pose::IDENTITY,
+            }],
+            vertices,
+            indices,
+            tex_size: [1, 1],
+            names: HashMap::from([("root".to_owned(), 0)]),
+        }
+    }
+
+    /// A box centred on x/z with its feet at the entity origin once the standard entity transform
+    /// is applied; scaled by the plan to hitbox size.
+    pub fn unit_cube() -> Self {
+        let (lo, hi) = (8.016f32, 24.016f32);
+        let corners = |f: [[f32; 3]; 4], n: [f32; 3]| -> Vec<Vertex> {
+            f.iter()
+                .zip([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+                .map(|(p, uv)| Vertex {
+                    pos: *p,
+                    bone: 0,
+                    normal: n,
+                    uv,
+                })
+                .collect()
+        };
+        let faces = [
+            (
+                [
+                    [-8.0, lo, -8.0],
+                    [8.0, lo, -8.0],
+                    [8.0, hi, -8.0],
+                    [-8.0, hi, -8.0],
+                ],
+                [0.0, 0.0, -1.0],
+            ),
+            (
+                [
+                    [8.0, lo, 8.0],
+                    [-8.0, lo, 8.0],
+                    [-8.0, hi, 8.0],
+                    [8.0, hi, 8.0],
+                ],
+                [0.0, 0.0, 1.0],
+            ),
+            (
+                [
+                    [-8.0, lo, 8.0],
+                    [-8.0, lo, -8.0],
+                    [-8.0, hi, -8.0],
+                    [-8.0, hi, 8.0],
+                ],
+                [-1.0, 0.0, 0.0],
+            ),
+            (
+                [
+                    [8.0, lo, -8.0],
+                    [8.0, lo, 8.0],
+                    [8.0, hi, 8.0],
+                    [8.0, hi, -8.0],
+                ],
+                [1.0, 0.0, 0.0],
+            ),
+            (
+                [
+                    [-8.0, lo, 8.0],
+                    [8.0, lo, 8.0],
+                    [8.0, lo, -8.0],
+                    [-8.0, lo, -8.0],
+                ],
+                [0.0, -1.0, 0.0],
+            ),
+            (
+                [
+                    [-8.0, hi, -8.0],
+                    [8.0, hi, -8.0],
+                    [8.0, hi, 8.0],
+                    [-8.0, hi, 8.0],
+                ],
+                [0.0, 1.0, 0.0],
+            ),
+        ];
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        for (f, n) in faces {
+            let base = vertices.len() as u32;
+            vertices.extend(corners(f, n));
+            indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        Self::from_geometry(vertices, indices)
+    }
+
     pub fn bone(&self, name: &str) -> Option<BoneId> {
         self.names.get(name).copied()
     }
