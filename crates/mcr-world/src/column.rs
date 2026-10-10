@@ -164,6 +164,18 @@ impl ChunkColumn {
         }
     }
 
+    /// Decodes one biome container per section (the chunks-biomes packet layout).
+    pub fn replace_biomes(&mut self, input: &mut &[u8], cfg: &WorldConfig) -> crate::Result<()> {
+        let mut decoded = Vec::with_capacity(self.sections.len());
+        for _ in 0..self.sections.len() {
+            decoded.push(crate::BiomeContainer::decode(input, cfg.biome_limits())?);
+        }
+        for (section, biomes) in self.sections.iter_mut().zip(decoded) {
+            section.replace_biomes(biomes);
+        }
+        Ok(())
+    }
+
     pub fn min_y(&self) -> i32 {
         self.min_y
     }

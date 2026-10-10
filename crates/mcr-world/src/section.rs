@@ -59,6 +59,10 @@ impl ChunkSection {
         self.non_empty == 0
     }
 
+    pub fn replace_biomes(&mut self, biomes: BiomeContainer) {
+        self.biomes = biomes;
+    }
+
     #[inline]
     pub fn block(&self, x: usize, y: usize, z: usize) -> BlockState {
         BlockState(self.blocks.get(block_index(x, y, z)))

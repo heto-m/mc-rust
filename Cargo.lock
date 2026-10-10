@@ -1622,6 +1622,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcr-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "mcr-auth",
+ "mcr-buf",
+ "mcr-data",
+ "mcr-nbt",
+ "mcr-net",
+ "mcr-physics",
+ "mcr-protocol",
+ "mcr-world",
+ "rustc-hash 2.1.3",
+ "thiserror 2.0.21",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "mcr-data"
 version = "0.1.0"
 dependencies = [

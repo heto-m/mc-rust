@@ -103,6 +103,19 @@ impl ChunkStore {
         true
     }
 
+    /// Returns `Ok(false)` when the chunk is not loaded.
+    pub fn apply_biomes(&mut self, pos: ChunkPos, buffer: &[u8]) -> crate::Result<bool> {
+        let Some(column) = self.columns.get_mut(&pos) else {
+            return Ok(false);
+        };
+        let mut input = buffer;
+        column.replace_biomes(&mut input, &self.cfg)?;
+        let base = column.min_y() >> 4;
+        let sections = column.sections().len() as i32;
+        self.mark_column(pos, base, sections);
+        Ok(true)
+    }
+
     fn mark_column(&mut self, pos: ChunkPos, base: i32, sections: i32) {
         for y in base..base + sections {
             self.dirty.insert(SectionPos::new(pos.x, y, pos.z));
