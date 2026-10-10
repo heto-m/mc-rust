@@ -86,7 +86,10 @@ pub fn run(layout: &Layout, ver: &str, port: u16, nogui: bool) -> Result<()> {
 
     let java = resolve_java(layout)?;
     let mut cmd = Command::new(java);
-    cmd.arg("-jar").arg(&server_jar).current_dir(&run_dir);
+    cmd.args(["-Xms256M", "-Xmx1536M", "-XX:+UseSerialGC"])
+        .arg("-jar")
+        .arg(&server_jar)
+        .current_dir(&run_dir);
     if nogui {
         cmd.arg("--nogui");
     }
