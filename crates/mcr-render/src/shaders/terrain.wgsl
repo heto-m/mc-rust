@@ -51,16 +51,6 @@ fn light_color(packed: u32) -> vec3<f32> {
     return mix(low, high, fs);
 }
 
-fn cube_corner_index(v: u32, flip: bool) -> u32 {
-    var seq: array<u32, 6>;
-    if flip {
-        seq = array<u32, 6>(0u, 3u, 1u, 0u, 2u, 3u);
-    } else {
-        seq = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
-    }
-    return seq[v];
-}
-
 fn rotate_uv(uv_in: vec2<f32>, orientation: u32) -> vec2<f32> {
     var uv = uv_in;
     if (orientation & 4u) != 0u {
@@ -89,11 +79,12 @@ fn fog_distances(rel: vec3<f32>) -> vec2<f32> {
 @vertex
 fn vs_cube(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) -> VsOut {
     let draw = cube_draws[slot];
-    let q = decode_cube(cube_quads[draw.first_quad + vi / 6u]);
+    let q = decode_cube(cube_quads[draw.first_quad + (vi >> 2u)]);
 
-    // Quads split along vanilla's v0-v2 diagonal; the same faces wind the other way.
+    // The index buffer emits corners (0, 1, 2), (2, 1, 3); quads split along vanilla's v0-v2 diagonal
+    // instead swap corner pairs, which keeps the winding.
     let flip = q.face == 0u || q.face == 2u || q.face == 5u;
-    let c = cube_corner_index(vi % 6u, flip);
+    let c = select(vi & 3u, (vi & 3u) ^ 1u, flip);
     let cu = f32(c & 1u);
     let cv = f32(c >> 1u);
 
@@ -139,10 +130,8 @@ fn vs_cube(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) -
 @vertex
 fn vs_model(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) -> VsOut {
     let draw = model_draws[slot];
-    let q = model_quads[draw.first_quad + vi / 6u];
-
-    var seq = array<u32, 6>(0u, 1u, 2u, 2u, 1u, 3u);
-    let c = seq[vi % 6u];
+    let q = model_quads[draw.first_quad + (vi >> 2u)];
+    let c = vi & 3u;
     let p = decode_model_corner(q, c);
     let cell = model_cell(q);
 

@@ -19,15 +19,22 @@ use crate::fluid;
 use crate::input::{MeshInput, PADDED, pidx};
 use crate::random::{JavaRandom, OFFSET_NONE, block_offset, mth_get_seed};
 use crate::tint::{BiomeColors, NO_Y, TINT_WATER};
+use crate::visgraph::section_visibility;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MeshOptions {
     pub greedy: bool,
+    /// Drops faces between two leaves that are both enclosed by leaves or opaque blocks, so dense
+    /// canopies lose their interior faces while every leaf on the surface keeps its fancy look.
+    pub leaves_culling: bool,
 }
 
 impl Default for MeshOptions {
     fn default() -> Self {
-        Self { greedy: true }
+        Self {
+            greedy: true,
+            leaves_culling: true,
+        }
     }
 }
 
@@ -122,6 +129,13 @@ impl Ctx<'_> {
         (self.meta(c) & META_ATTR_MASK) as u8
     }
 
+    /// Every neighbour is leaves or an opaque full block; unknown cells past the padding are not.
+    fn enclosed(&self, c: [i32; 3]) -> bool {
+        NORMAL
+            .iter()
+            .all(|n| self.attr(add(c, *n)) & (ATTR_LEAVES | ATTR_SOLID_RENDER) != 0)
+    }
+
     /// Sky and block light at `c` as vanilla's `getLightCoords` reads it: emitting blocks raise block
     /// light and emissive ones are fully bright.
     #[inline]
@@ -200,6 +214,7 @@ pub struct Mesher {
     overlays: [Vec<PackedQuad>; 6],
     meta: Vec<u32>,
     tint_y: [u8; 256],
+    flood: Vec<u16>,
 }
 
 impl std::fmt::Debug for Mesher {
@@ -297,6 +312,7 @@ impl Mesher {
             overlays: Default::default(),
             meta: vec![0; PADDED],
             tint_y: [NO_Y; 256],
+            flood: Vec::new(),
         }
     }
 
@@ -363,6 +379,10 @@ impl Mesher {
                 }
             }
         }
+        out.visibility = section_visibility(
+            meta.as_slice().try_into().expect("padded size"),
+            &mut self.flood,
+        );
         self.meta = meta;
         self.flush_cubes(out);
 
@@ -513,6 +533,14 @@ impl Mesher {
             }
             let neighbor = add(cell, NORMAL[face]);
             if !ctx.face_visible(id, neighbor, face) {
+                continue;
+            }
+            if self.options.leaves_culling
+                && attr & ATTR_LEAVES != 0
+                && ctx.attr(neighbor) & ATTR_LEAVES != 0
+                && ctx.enclosed(cell)
+                && ctx.enclosed(neighbor)
+            {
                 continue;
             }
             let shading = if sm.ao {
@@ -854,7 +882,10 @@ mod tests {
                 &[crate::tint::BiomeClimate::default()],
                 &crate::tint::ColorMaps::flat(0x112233, 0x445566, 0x778899),
             )),
-            MeshOptions { greedy },
+            MeshOptions {
+                greedy,
+                ..MeshOptions::default()
+            },
         )
     }
 
@@ -1028,6 +1059,16 @@ mod tests {
         assert_eq!(pair(GLASS, STONE).cube_count(), 6 + 5);
         assert_eq!(pair(STAINED_GLASS, STAINED_GLASS).translucent.len(), 10);
         assert_eq!(pair(STAINED_GLASS, GLASS).translucent.len(), 6);
+    }
+
+    #[test]
+    fn faces_between_enclosed_leaves_are_culled() {
+        let blob = |x: i32, y: i32, z: i32| [x, y, z].iter().all(|v| (2..=6).contains(v));
+        let culled = run(false, |x, y, z| if blob(x, y, z) { LEAVES } else { AIR });
+        // Only faces between two cells of the enclosed 3^3 core go: 2 planes of 9 per direction.
+        let full = 5 * 5 * 5;
+        assert_eq!(culled.faces[0].len(), full - 2 * 9);
+        assert_eq!(culled.faces[1].len(), full - 2 * 9);
     }
 
     #[test]

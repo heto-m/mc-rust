@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use mcr_mesh::{MeshInput, MeshPool, MeshResult};
+use mcr_mesh::{ATTR_SOLID_RENDER, MeshInput, MeshPool, MeshResult};
 use mcr_render::{Camera, FrameInputs, FrameStats, Overlay, Renderer};
 use mcr_world::{ChunkPos, SectionPos};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -139,7 +139,18 @@ impl RenderSystem {
         self.submit_urgent(world);
         self.submit(world);
         self.upload(world);
+        self.sync_camera(world);
         Ok(())
+    }
+
+    /// Tells the renderer whether the camera sits inside an opaque block.
+    pub fn sync_camera(&mut self, world: &dyn MeshWorld) {
+        let eye = world.camera().block_pos();
+        let in_opaque = world
+            .store()
+            .block(eye.x, eye.y, eye.z)
+            .is_some_and(|b| self.assets.cache.attr(b.0) & ATTR_SOLID_RENDER != 0);
+        self.renderer.set_camera_in_opaque_block(in_opaque);
     }
 
     pub fn draw(&mut self, camera: &Camera, sky_light: f32) -> Option<FrameStats> {

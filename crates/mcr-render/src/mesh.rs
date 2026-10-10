@@ -1,3 +1,4 @@
+use crate::graph::SectionVisibility;
 use crate::quad::{ModelQuad, PackedQuad};
 
 pub const TINT_KINDS: usize = 4;
@@ -15,6 +16,8 @@ pub struct SectionMesh {
     pub model: Vec<ModelQuad>,
     pub translucent: Vec<ModelQuad>,
     pub tints: Option<Box<TintTable>>,
+    /// Face-to-face connectivity through non-opaque cells, kept even when the mesh is empty.
+    pub visibility: SectionVisibility,
 }
 
 impl SectionMesh {
@@ -35,5 +38,6 @@ impl SectionMesh {
         self.model.clear();
         self.translucent.clear();
         self.tints = None;
+        self.visibility = SectionVisibility::ALL;
     }
 }

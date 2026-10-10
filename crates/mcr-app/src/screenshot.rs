@@ -31,6 +31,9 @@ pub fn run(opts: &crate::cli::Options, out: &Path, launched: Instant) -> Result<
     let (assets, source) = world_setup::open(opts)?;
     let streaming = Instant::now();
     let mut engine = Engine::new(renderer, assets, source, opts.camera, opts.render_distance);
+    if opts.bench_frames > 0 {
+        engine.render.renderer.set_animation_tick(0);
+    }
     loop {
         engine.tick()?;
         engine.draw();
@@ -59,6 +62,79 @@ pub fn run(opts: &crate::cli::Options, out: &Path, launched: Instant) -> Result<
     let pixels = engine.render.renderer.read_offscreen()?;
     write_png(out, width, height, &pixels)?;
     println!("wrote {}", out.display());
+    if opts.bench_frames > 0 {
+        bench(&mut engine, opts, out)?;
+    }
+    Ok(())
+}
+
+/// Renders each view for `--bench` frames and prints wall-clock, CPU and median GPU frame times; with
+/// `--bench-modes` every view is measured under each culling configuration in turn.
+fn bench(engine: &mut Engine, opts: &crate::cli::Options, out: &Path) -> Result<()> {
+    let (width, height) = opts.size;
+    let views = if opts.bench_views.is_empty() {
+        vec![engine.game.camera]
+    } else {
+        opts.bench_views.clone()
+    };
+    let renderer = &engine.render.renderer;
+    let current = [(
+        "",
+        renderer.visibility_graph(),
+        renderer.occlusion_culling(),
+    )];
+    let all = [
+        ("-none", false, false),
+        ("-graph", true, false),
+        ("-hiz", false, true),
+        ("-both", true, true),
+    ];
+    let modes: &[(&str, bool, bool)] = if opts.bench_modes { &all } else { &current };
+    let stem = out.file_stem().and_then(|s| s.to_str()).unwrap_or("bench");
+    for &(name, graph, hiz) in modes {
+        engine.render.renderer.set_visibility_graph(graph);
+        engine.render.renderer.set_occlusion_culling(hiz);
+        for (i, view) in views.iter().enumerate() {
+            engine.game.camera = *view;
+            engine.render.sync_camera(&engine.game);
+            let mut graph_ms = engine.draw().map_or(0.0, |s| s.graph_ms);
+            let pixels = engine.render.renderer.read_offscreen()?;
+            let path = out.with_file_name(format!("{stem}-view{i}{name}-first.png"));
+            write_png(&path, width, height, &pixels)?;
+            for _ in 1..SETTLE_FRAMES {
+                graph_ms = graph_ms.max(engine.draw().map_or(0.0, |s| s.graph_ms));
+            }
+            engine.render.renderer.wait_gpu_stats();
+            let mut gpu = Vec::with_capacity(opts.bench_frames as usize);
+            let (mut cpu, mut draws) = (0.0, 0);
+            let start = Instant::now();
+            for _ in 0..opts.bench_frames {
+                let stats = engine.draw();
+                cpu += stats.map_or(0.0, |s| s.cpu_ms);
+                if let Some(g) = stats.and_then(|s| s.gpu) {
+                    gpu.push(g.frame_ms);
+                    draws = g.cube_draws + g.model_draws;
+                }
+            }
+            engine.render.renderer.wait_gpu_stats();
+            let wall = start.elapsed().as_secs_f32() * 1000.0 / opts.bench_frames as f32;
+            gpu.sort_by(f32::total_cmp);
+            let median = gpu.get(gpu.len() / 2).copied().unwrap_or(0.0);
+            println!(
+                "view {i}{name} {:.1},{:.1},{:.1} yaw {:.0} pitch {:.0}: {:.0} fps ({wall:.3} ms) | gpu median {median:.3} ms | cpu {:.3} | graph search {graph_ms:.2} ms | draws {draws}",
+                view.position.x,
+                view.position.y,
+                view.position.z,
+                view.yaw.to_degrees(),
+                view.pitch.to_degrees(),
+                1000.0 / wall,
+                cpu / opts.bench_frames as f32,
+            );
+            let pixels = engine.render.renderer.read_offscreen()?;
+            let path = out.with_file_name(format!("{stem}-view{i}{name}.png"));
+            write_png(&path, width, height, &pixels)?;
+        }
+    }
     Ok(())
 }
 

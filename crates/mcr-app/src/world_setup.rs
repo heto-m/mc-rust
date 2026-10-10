@@ -13,6 +13,8 @@ use crate::source::WorldSource;
 pub fn renderer_config(opts: &Options, base: RendererConfig) -> RendererConfig {
     RendererConfig {
         vsync: opts.vsync,
+        occlusion_culling: opts.occlusion,
+        visibility_graph: opts.visibility_graph,
         cube_arena_quads: 32 << 20,
         model_arena_quads: 8 << 20,
         tint_tables: 32768,

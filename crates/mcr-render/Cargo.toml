@@ -12,6 +12,7 @@ bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 png.workspace = true
 thiserror.workspace = true
+rustc-hash.workspace = true
 tracing.workspace = true
 
 [lints]

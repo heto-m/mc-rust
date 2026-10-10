@@ -4,14 +4,17 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
+use wgpu::util::DeviceExt;
 
 use crate::animation::{ANIM_TABLE_LEN, AnimationTable, SpriteAnimation};
 use crate::arena::Arena;
 use crate::camera::Camera;
 use crate::effects::{CloudSettings, DestroyDecal, EffectAssets, Effects, WeatherSource};
 use crate::environment::{Environment, Skybox};
+use crate::graph::VisibilityGraph;
 use crate::mesh::SectionMesh;
 use crate::mesh::TINT_TABLE_WORDS;
+use crate::occlusion::HiZ;
 use crate::overlay::{Overlay, OverlayCtx};
 use crate::quad::{ModelQuad, PackedQuad};
 use crate::staging::{Dest, Uploader};
@@ -21,6 +24,7 @@ const QUAD_SRC: &str = include_str!("shaders/quad.wgsl");
 const GLOBALS_SRC: &str = include_str!("shaders/globals.wgsl");
 const TERRAIN_SRC: &str = include_str!("shaders/terrain.wgsl");
 const CULL_SRC: &str = include_str!("shaders/cull.wgsl");
+const TRANS_CULL_SRC: &str = include_str!("shaders/trans_cull.wgsl");
 
 pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -28,8 +32,15 @@ const TICKS_PER_SECOND: f64 = 20.0;
 const LIGHTMAP_BYTES: u64 = 256 * 16;
 const READBACK_SLOTS: usize = 3;
 const STATS_COUNTER_OFFSET: u64 = 256;
+const COUNTERS_SIZE: u64 = 16;
+const TIMESTAMPS: u32 = 8;
 const STATS_SIZE: u64 = 512;
-const DRAW_CMD_SIZE: u64 = 16;
+/// `DrawIndexedIndirect` arguments.
+const DRAW_CMD_SIZE: u64 = 20;
+/// Greedy meshing leaves at most one face plus one overlay per cell and direction.
+const MAX_CUBE_QUADS_PER_DRAW: u32 = 2 * 16 * 16 * 16;
+/// Bounds the shared quad index buffer; model or translucent quads past it in one section are dropped.
+const MAX_QUADS_PER_DRAW: u32 = 1 << 17;
 const DRAW_DATA_SIZE: u64 = 32;
 const TINT_PALETTE_WORDS: usize = 64;
 const NO_TINT_TABLE: u32 = u32::MAX;
@@ -77,6 +88,8 @@ pub struct RendererConfig {
     pub allow_draw_count: bool,
     pub tint_tables: u32,
     pub max_translucent_sections: u32,
+    pub occlusion_culling: bool,
+    pub visibility_graph: bool,
 }
 
 impl Default for RendererConfig {
@@ -90,6 +103,8 @@ impl Default for RendererConfig {
             allow_draw_count: true,
             tint_tables: 8192,
             max_translucent_sections: 16384,
+            occlusion_culling: true,
+            visibility_graph: true,
         }
     }
 }
@@ -104,6 +119,8 @@ pub struct FrameInputs<'a> {
 pub struct GpuTimes {
     pub cull_ms: f32,
     pub draw_ms: f32,
+    /// From the start of the first culling pass to the end of the last world pass.
+    pub frame_ms: f32,
     pub cube_draws: u32,
     pub model_draws: u32,
 }
@@ -114,6 +131,8 @@ pub struct FrameStats {
     pub uploaded_bytes: usize,
     pub uploaded_writes: usize,
     pub pending_upload_bytes: usize,
+    /// CPU time of the visibility graph search this frame; zero when it was reused.
+    pub graph_ms: f32,
     pub gpu: Option<GpuTimes>,
 }
 
@@ -153,6 +172,7 @@ struct GlobalsGpu {
     sky_color: [f32; 4],
     shade_a: [f32; 4],
     shade_b: [f32; 4],
+    cull: [f32; 4],
 }
 
 #[repr(C)]
@@ -186,6 +206,8 @@ struct SectionSlot {
 struct Readback {
     buffer: wgpu::Buffer,
     state: Arc<AtomicU8>,
+    two_phase: bool,
+    frame: u64,
 }
 
 const RB_IDLE: u8 = 0;
@@ -222,12 +244,16 @@ struct Geometry {
     model_arena: wgpu::Buffer,
     cube_cmds: wgpu::Buffer,
     cube_draws: wgpu::Buffer,
+    quad_indices: wgpu::Buffer,
     model_cmds: wgpu::Buffer,
     model_draws: wgpu::Buffer,
     counters: wgpu::Buffer,
+    visibility: wgpu::Buffer,
+    reachable: wgpu::Buffer,
     tints: wgpu::Buffer,
     trans_cmds: wgpu::Buffer,
     trans_draws: wgpu::Buffer,
+    trans_count: wgpu::Buffer,
 }
 
 pub struct Renderer {
@@ -241,10 +267,19 @@ pub struct Renderer {
     offscreen: Option<wgpu::Texture>,
     size: (u32, u32),
     depth_view: wgpu::TextureView,
+    hiz: HiZ,
+    occlusion: bool,
+    graph: VisibilityGraph,
+    use_graph: bool,
+    camera_in_opaque: bool,
 
     globals: wgpu::Buffer,
     geo: Geometry,
-    cull_pipeline: wgpu::ComputePipeline,
+    cull_early: wgpu::ComputePipeline,
+    cull_late: wgpu::ComputePipeline,
+    trans_cull: wgpu::ComputePipeline,
+    trans_cull_bg: wgpu::BindGroup,
+    cull_bgl: wgpu::BindGroupLayout,
     cull_bg: wgpu::BindGroup,
     cube_pipeline: wgpu::RenderPipeline,
     model_pipeline: wgpu::RenderPipeline,
@@ -280,6 +315,8 @@ pub struct Renderer {
     readbacks: Vec<Readback>,
     readback_cursor: usize,
     latest_gpu: Option<GpuTimes>,
+    latest_gpu_frame: u64,
+    frame_index: u64,
 }
 
 impl std::fmt::Debug for Renderer {
@@ -348,7 +385,7 @@ fn depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         })
         .create_view(&wgpu::TextureViewDescriptor::default())
@@ -520,9 +557,14 @@ impl Renderer {
             cube_cmds: storage_buffer(
                 &device,
                 "cube cmds",
-                max_sections * 6 * DRAW_CMD_SIZE,
+                2 * max_sections * 6 * DRAW_CMD_SIZE,
                 wgpu::BufferUsages::INDIRECT,
             ),
+            quad_indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("quad indices"),
+                contents: bytemuck::cast_slice(&quad_indices(MAX_QUADS_PER_DRAW)),
+                usage: wgpu::BufferUsages::INDEX,
+            }),
             cube_draws: storage_buffer(
                 &device,
                 "cube draws",
@@ -532,7 +574,7 @@ impl Renderer {
             model_cmds: storage_buffer(
                 &device,
                 "model cmds",
-                max_sections * DRAW_CMD_SIZE,
+                2 * max_sections * DRAW_CMD_SIZE,
                 wgpu::BufferUsages::INDIRECT,
             ),
             model_draws: storage_buffer(
@@ -544,8 +586,20 @@ impl Renderer {
             counters: storage_buffer(
                 &device,
                 "counters",
-                8,
+                COUNTERS_SIZE,
                 wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_SRC,
+            ),
+            reachable: storage_buffer(
+                &device,
+                "graph reachable",
+                u64::from(config.max_sections.div_ceil(32)) * 4,
+                wgpu::BufferUsages::empty(),
+            ),
+            visibility: storage_buffer(
+                &device,
+                "section visibility",
+                max_sections * 4,
+                wgpu::BufferUsages::empty(),
             ),
             tints: storage_buffer(
                 &device,
@@ -567,6 +621,12 @@ impl Renderer {
                 u64::from(config.max_translucent_sections) * DRAW_DATA_SIZE,
                 wgpu::BufferUsages::empty(),
             ),
+            trans_count: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("translucent count"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
         };
 
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
@@ -587,38 +647,64 @@ impl Renderer {
                 storage_entry(4, cs, false),
                 storage_entry(5, cs, false),
                 storage_entry(6, cs, false),
+                storage_entry(7, cs, false),
+                storage_entry(9, cs, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: cs,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
-        let cull_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cull"),
-            layout: &cull_bgl,
-            entries: &[
-                bind(0, &globals),
-                bind(1, &geo.sections),
-                bind(2, &geo.cube_cmds),
-                bind(3, &geo.cube_draws),
-                bind(4, &geo.model_cmds),
-                bind(5, &geo.model_draws),
-                bind(6, &geo.counters),
-            ],
-        });
+        let depth_view = depth_view(&device, width, height);
+        let hiz = HiZ::new(&device, &depth_view, width, height);
+        let cull_bg = make_cull_bg(&device, &cull_bgl, &globals, &geo, &hiz);
         let cull_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cull"),
             source: wgpu::ShaderSource::Wgsl([GLOBALS_SRC, CULL_SRC].concat().into()),
         });
-        let cull_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let cull_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("cull"),
-            layout: Some(
-                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("cull"),
-                    bind_group_layouts: &[Some(&cull_bgl)],
-                    immediate_size: 0,
-                }),
-            ),
-            module: &cull_module,
-            entry_point: Some("cull"),
+            bind_group_layouts: &[Some(&cull_bgl)],
+            immediate_size: 0,
+        });
+        let cull_pipeline = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&cull_layout),
+                module: &cull_module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let cull_early = cull_pipeline("cull_early");
+        let cull_late = cull_pipeline("cull_late");
+        let trans_cull = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("cull translucent"),
+            layout: None,
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("cull translucent"),
+                source: wgpu::ShaderSource::Wgsl([GLOBALS_SRC, TRANS_CULL_SRC].concat().into()),
+            }),
+            entry_point: Some("cull_translucent"),
             compilation_options: Default::default(),
             cache: None,
+        });
+        let trans_cull_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cull translucent"),
+            layout: &trans_cull.get_bind_group_layout(0),
+            entries: &[
+                bind(0, &geo.trans_count),
+                bind(1, &geo.visibility),
+                bind(2, &geo.trans_cmds),
+                bind(3, &geo.trans_draws),
+            ],
         });
 
         let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
@@ -838,7 +924,7 @@ impl Renderer {
                 set: device.create_query_set(&wgpu::QuerySetDescriptor {
                     label: Some("frame timestamps"),
                     ty: wgpu::QueryType::Timestamp,
-                    count: 4,
+                    count: TIMESTAMPS,
                 }),
                 period_ns: queue.get_timestamp_period(),
             });
@@ -859,6 +945,8 @@ impl Renderer {
                     mapped_at_creation: false,
                 }),
                 state: Arc::new(AtomicU8::new(RB_IDLE)),
+                two_phase: false,
+                frame: 0,
             })
             .collect();
 
@@ -879,7 +967,12 @@ impl Renderer {
             effects,
             cube_arena: Arena::new(cube_quads),
             model_arena: Arena::new(model_quads),
-            depth_view: depth_view(&device, width, height),
+            occlusion: config.occlusion_culling,
+            graph: VisibilityGraph::default(),
+            use_graph: config.visibility_graph,
+            camera_in_opaque: false,
+            depth_view,
+            hiz,
             size: (width, height),
             device,
             queue,
@@ -889,7 +982,11 @@ impl Renderer {
             offscreen,
             globals,
             geo,
-            cull_pipeline,
+            cull_early,
+            cull_late,
+            trans_cull,
+            trans_cull_bg,
+            cull_bgl,
             cull_bg,
             cube_pipeline,
             model_pipeline,
@@ -910,6 +1007,8 @@ impl Renderer {
             readbacks,
             readback_cursor: 0,
             latest_gpu: None,
+            latest_gpu_frame: 0,
+            frame_index: 0,
         })
     }
 
@@ -971,6 +1070,40 @@ impl Renderer {
             self.offscreen = Some(create_offscreen(&self.device, width, height));
         }
         self.depth_view = depth_view(&self.device, width, height);
+        self.hiz
+            .resize(&self.device, &self.depth_view, width, height);
+        self.cull_bg = make_cull_bg(
+            &self.device,
+            &self.cull_bgl,
+            &self.globals,
+            &self.geo,
+            &self.hiz,
+        );
+    }
+
+    /// Two-phase Hi-Z occlusion culling of sections; off draws every frustum-visible section.
+    pub fn set_occlusion_culling(&mut self, enabled: bool) {
+        self.occlusion = enabled;
+    }
+
+    pub fn occlusion_culling(&self) -> bool {
+        self.occlusion
+    }
+
+    /// Section connectivity search from the camera; sections it cannot reach are not drawn.
+    pub fn set_visibility_graph(&mut self, enabled: bool) {
+        self.use_graph = enabled;
+        self.graph.invalidate();
+    }
+
+    pub fn visibility_graph(&self) -> bool {
+        self.use_graph
+    }
+
+    /// A camera inside an opaque block (spectator) sees through walls the graph would treat as
+    /// closed, so the graph search is skipped like vanilla does.
+    pub fn set_camera_in_opaque_block(&mut self, inside: bool) {
+        self.camera_in_opaque = inside;
     }
 
     pub fn set_block_textures(&mut self, data: &TextureArrayData) {
@@ -1119,13 +1252,16 @@ impl Renderer {
                 &g.cube_draws,
                 &g.model_cmds,
                 &g.model_draws,
+                &g.visibility,
+                &g.reachable,
                 &g.tints,
                 &g.trans_cmds,
                 &g.trans_draws,
             ]
             .iter()
             .map(|b| b.size())
-            .sum(),
+            .sum::<u64>()
+                + self.hiz.bytes(),
             texture_bytes,
             target_bytes: u64::from(w) * u64::from(h) * 8,
         }
@@ -1137,13 +1273,21 @@ impl Renderer {
 
     /// Replaces (or inserts) the geometry of the section at `key` (section coordinates).
     pub fn set_section(&mut self, key: [i32; 3], mesh: &SectionMesh) -> Result<(), RenderError> {
+        self.graph.set(key, mesh.visibility);
         if mesh.is_empty() {
-            self.remove_section(key);
+            self.remove_geometry(key);
             return Ok(());
         }
-        let cube_total = mesh.cube_count() as u32;
-        let model_main = mesh.model.len() as u32;
-        let translucent_total = mesh.translucent.len() as u32;
+        let face_quads = mesh
+            .faces
+            .each_ref()
+            .map(|q| &q[..q.len().min(MAX_CUBE_QUADS_PER_DRAW as usize)]);
+        let cube_total = face_quads.iter().map(|q| q.len() as u32).sum::<u32>();
+        let bounded = |q: &[ModelQuad]| q.len().min(MAX_QUADS_PER_DRAW as usize);
+        let model_quads = &mesh.model[..bounded(&mesh.model)];
+        let translucent_quads = &mesh.translucent[..bounded(&mesh.translucent)];
+        let model_main = model_quads.len() as u32;
+        let translucent_total = translucent_quads.len() as u32;
         let model_total = model_main + translucent_total;
 
         let cube = if cube_total > 0 {
@@ -1214,7 +1358,7 @@ impl Renderer {
         let mut counts = [0u32; 6];
         if let Some((base, _)) = cube {
             let mut dst = u64::from(base) * PackedQuad::SIZE as u64;
-            for (face, quads) in mesh.faces.iter().enumerate() {
+            for (face, quads) in face_quads.iter().enumerate() {
                 counts[face] = quads.len() as u32;
                 let bytes: &[u8] = bytemuck::cast_slice(quads);
                 self.uploader.push(Dest::Cube, dst, bytes);
@@ -1224,11 +1368,11 @@ impl Renderer {
         if let Some((base, _)) = model {
             let at = u64::from(base) * ModelQuad::SIZE as u64;
             self.uploader
-                .push(Dest::Model, at, bytemuck::cast_slice(&mesh.model));
+                .push(Dest::Model, at, bytemuck::cast_slice(model_quads));
             self.uploader.push(
                 Dest::Model,
                 at + u64::from(model_main) * ModelQuad::SIZE as u64,
-                bytemuck::cast_slice(&mesh.translucent),
+                bytemuck::cast_slice(translucent_quads),
             );
         }
         let tint_base = tint.map_or(NO_TINT_TABLE, |t| {
@@ -1261,6 +1405,7 @@ impl Renderer {
         let translucent = model
             .filter(|_| translucent_total > 0)
             .map(|(base, _)| (base + model_main, translucent_total));
+        self.graph.set_slot(key, Some(index));
         self.sections.insert(
             key,
             SectionSlot {
@@ -1287,9 +1432,15 @@ impl Renderer {
     }
 
     pub fn remove_section(&mut self, key: [i32; 3]) {
+        self.graph.remove(key);
+        self.remove_geometry(key);
+    }
+
+    fn remove_geometry(&mut self, key: [i32; 3]) {
         let Some(slot) = self.sections.remove(&key) else {
             return;
         };
+        self.graph.set_slot(key, None);
         self.release(&slot);
         self.uploader.push(
             Dest::Sections,
@@ -1322,12 +1473,16 @@ impl Renderer {
         frustum: &crate::Frustum,
         cam_int: [i32; 3],
         cam_frac: glam::Vec3,
+        graph: bool,
     ) -> u32 {
-        let mut visible: Vec<(f32, glam::Vec3, u32, u32, u32)> = Vec::new();
+        let mut visible: Vec<(f32, glam::Vec3, u32, u32, u32, u32)> = Vec::new();
         for (key, slot) in &self.sections {
             let Some((base, count)) = slot.translucent else {
                 continue;
             };
+            if graph && !self.graph.reachable(slot.index) {
+                continue;
+            }
             let lo = glam::Vec3::new(
                 (key[0] * 16 - cam_int[0]) as f32,
                 (key[1] * 16 - cam_int[1]) as f32,
@@ -1345,14 +1500,15 @@ impl Renderer {
                 base,
                 count,
                 tint_base,
+                slot.index,
             ));
         }
         visible.sort_by(|a, b| b.0.total_cmp(&a.0));
         visible.truncate(self.config.max_translucent_sections as usize);
-        let cmds: Vec<[u32; 4]> = visible
+        let cmds: Vec<[u32; 5]> = visible
             .iter()
             .enumerate()
-            .map(|(i, v)| [v.3 * 6, 1, 0, i as u32])
+            .map(|(i, v)| [v.3 * 6, 1, 0, 0, i as u32])
             .collect();
         let draws: Vec<DrawDataGpu> = visible
             .iter()
@@ -1360,7 +1516,7 @@ impl Renderer {
                 origin: v.1.to_array(),
                 first_quad: v.2,
                 tint_base: v.4,
-                pad: [0; 3],
+                pad: [v.5, 0, 0],
             })
             .collect();
         if !cmds.is_empty() {
@@ -1369,6 +1525,11 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.geo.trans_draws, 0, bytemuck::cast_slice(&draws));
         }
+        self.queue.write_buffer(
+            &self.geo.trans_count,
+            0,
+            bytemuck::cast_slice(&[cmds.len() as u32, 0, 0, 0]),
+        );
         cmds.len() as u32
     }
 
@@ -1388,17 +1549,33 @@ impl Renderer {
                     .slice(..)
                     .get_mapped_range()
                     .expect("mapped readback");
-                let ts: &[u64] = bytemuck::cast_slice(&view[..32]);
-                let counters: &[u32] =
-                    bytemuck::cast_slice(&view[STATS_COUNTER_OFFSET as usize..][..8]);
+                let ts: &[u64] = bytemuck::cast_slice(&view[..8 * TIMESTAMPS as usize]);
+                let c: &[u32] = bytemuck::cast_slice(
+                    &view[STATS_COUNTER_OFFSET as usize..][..COUNTERS_SIZE as usize],
+                );
                 let period = self.timestamps.as_ref().map_or(0.0, |t| t.period_ns);
                 let ms = |a: u64, b: u64| b.saturating_sub(a) as f32 * period / 1.0e6;
-                self.latest_gpu = Some(GpuTimes {
-                    cull_ms: ms(ts[0], ts[1]),
-                    draw_ms: ms(ts[2], ts[3]),
-                    cube_draws: counters[0],
-                    model_draws: counters[1],
-                });
+                let times = if rb.two_phase {
+                    GpuTimes {
+                        cull_ms: ms(ts[0], ts[1]) + ms(ts[4], ts[5]),
+                        draw_ms: ms(ts[2], ts[3]) + ms(ts[6], ts[7]),
+                        frame_ms: ms(ts[0], ts[7]),
+                        cube_draws: c[0] + c[2],
+                        model_draws: c[1] + c[3],
+                    }
+                } else {
+                    GpuTimes {
+                        cull_ms: ms(ts[0], ts[1]),
+                        draw_ms: ms(ts[2], ts[3]),
+                        frame_ms: ms(ts[0], ts[3]),
+                        cube_draws: c[0],
+                        model_draws: c[1],
+                    }
+                };
+                if rb.frame >= self.latest_gpu_frame {
+                    self.latest_gpu = Some(times);
+                    self.latest_gpu_frame = rb.frame;
+                }
             }
             rb.buffer.unmap();
             rb.state.store(RB_IDLE, Ordering::Release);
@@ -1442,12 +1619,18 @@ impl Renderer {
         let env = self.environment.clone();
         let (rd_start, rd_end) = env.render_fog_range();
         let view_proj = cam.view_proj(w as f32 / h as f32);
+        let graph = self.use_graph && !self.camera_in_opaque;
         let globals = GlobalsGpu {
             view_proj: view_proj.to_cols_array(),
             planes: frustum.0.map(|p| p.to_array()),
             cam_int: [ci.x, ci.y, ci.z, 0],
             cam_frac: [cf.x, cf.y, cf.z, 0.0],
-            params: [self.slot_count, 0, 0, 0],
+            params: [
+                self.slot_count,
+                u32::from(self.occlusion) | u32::from(graph) << 1,
+                self.late_cube_base(),
+                self.late_model_base(),
+            ],
             sun: [
                 frame.sky_light,
                 f32::from(u8::from(
@@ -1473,10 +1656,22 @@ impl Renderer {
                 env.cardinal[3],
             ],
             shade_b: [env.cardinal[4], env.cardinal[5], 0.0, 0.0],
+            cull: [w as f32, h as f32, self.hiz.mip_count() as f32, cam.near],
         };
         self.queue
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
-        let trans_n = self.build_translucent(&frustum, [ci.x, ci.y, ci.z], cf);
+        let mut graph_ms = 0.0;
+        if graph {
+            let origin = [ci.x >> 4, ci.y >> 4, ci.z >> 4];
+            if self.graph.needs_update(origin) {
+                let started = Instant::now();
+                let bits = self.graph.update(origin, self.slot_count);
+                self.queue
+                    .write_buffer(&self.geo.reachable, 0, bytemuck::cast_slice(bits));
+                graph_ms = started.elapsed().as_secs_f32() * 1000.0;
+            }
+        }
+        let trans_n = self.build_translucent(&frustum, [ci.x, ci.y, ci.z], cf, graph);
         self.effects.prepare(&env, cam.position.to_array());
 
         let mut surface_tex = None;
@@ -1508,26 +1703,48 @@ impl Renderer {
                 label: Some("frame"),
             });
         let slots = u64::from(self.slot_count);
+        let two_phase = self.occlusion;
+        self.frame_index += 1;
+        let late_cube = u64::from(self.late_cube_base()) * DRAW_CMD_SIZE;
+        let late_model = u64::from(self.late_model_base()) * DRAW_CMD_SIZE;
         encoder.clear_buffer(&self.geo.counters, 0, None);
         if !self.draw_count_supported {
-            encoder.clear_buffer(&self.geo.cube_cmds, 0, Some(slots * 6 * DRAW_CMD_SIZE));
-            encoder.clear_buffer(&self.geo.model_cmds, 0, Some(slots * DRAW_CMD_SIZE));
+            let (cube_len, model_len) = (slots * 6 * DRAW_CMD_SIZE, slots * DRAW_CMD_SIZE);
+            encoder.clear_buffer(&self.geo.cube_cmds, 0, Some(cube_len));
+            encoder.clear_buffer(&self.geo.model_cmds, 0, Some(model_len));
+            if two_phase {
+                encoder.clear_buffer(&self.geo.cube_cmds, late_cube, Some(cube_len));
+                encoder.clear_buffer(&self.geo.model_cmds, late_model, Some(model_len));
+            }
         }
+        let groups = self.slot_count.div_ceil(64).max(1);
+        let compute_ts = |begin: u32| {
+            self.timestamps
+                .as_ref()
+                .map(|t| wgpu::ComputePassTimestampWrites {
+                    query_set: &t.set,
+                    beginning_of_pass_write_index: Some(begin),
+                    end_of_pass_write_index: Some(begin + 1),
+                })
+        };
+        let render_ts = |begin: u32| {
+            self.timestamps
+                .as_ref()
+                .map(|t| wgpu::RenderPassTimestampWrites {
+                    query_set: &t.set,
+                    beginning_of_pass_write_index: Some(begin),
+                    end_of_pass_write_index: Some(begin + 1),
+                })
+        };
 
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("cull"),
-                timestamp_writes: self.timestamps.as_ref().map(|t| {
-                    wgpu::ComputePassTimestampWrites {
-                        query_set: &t.set,
-                        beginning_of_pass_write_index: Some(0),
-                        end_of_pass_write_index: Some(1),
-                    }
-                }),
+                label: Some("cull early"),
+                timestamp_writes: compute_ts(0),
             });
-            pass.set_pipeline(&self.cull_pipeline);
+            pass.set_pipeline(&self.cull_early);
             pass.set_bind_group(0, &self.cull_bg, &[]);
-            pass.dispatch_workgroups(self.slot_count.div_ceil(64).max(1), 1, 1);
+            pass.dispatch_workgroups(groups, 1, 1);
         }
 
         {
@@ -1555,13 +1772,7 @@ impl Renderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: self.timestamps.as_ref().map(|t| {
-                    wgpu::RenderPassTimestampWrites {
-                        query_set: &t.set,
-                        beginning_of_pass_write_index: Some(2),
-                        end_of_pass_write_index: Some(3),
-                    }
-                }),
+                timestamp_writes: render_ts(2),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1571,42 +1782,55 @@ impl Renderer {
             pass.draw(0..3, 0..1);
             self.effects.draw_sky(&mut pass);
             pass.set_bind_group(1, &self.geom_bg, &[]);
-            let cube_max = self.slot_count * 6;
-            let model_max = self.slot_count;
-            pass.set_pipeline(&self.cube_pipeline);
-            if self.draw_count_supported {
-                pass.multi_draw_indirect_count(
-                    &self.geo.cube_cmds,
-                    0,
-                    &self.geo.counters,
-                    0,
-                    cube_max,
-                );
-            } else {
-                pass.multi_draw_indirect(&self.geo.cube_cmds, 0, cube_max);
+            self.draw_sections(&mut pass, 0, 0, 0);
+            if !two_phase {
+                self.draw_late_layers(&mut pass, overlay.as_deref_mut(), trans_n);
             }
-            pass.set_pipeline(&self.model_pipeline);
-            if self.draw_count_supported {
-                pass.multi_draw_indirect_count(
-                    &self.geo.model_cmds,
-                    0,
-                    &self.geo.counters,
-                    4,
-                    model_max,
-                );
-            } else {
-                pass.multi_draw_indirect(&self.geo.model_cmds, 0, model_max);
+        }
+
+        if two_phase {
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("occlusion"),
+                    timestamp_writes: compute_ts(4),
+                });
+                self.hiz.record(&mut pass);
+                pass.set_pipeline(&self.cull_late);
+                pass.set_bind_group(0, &self.cull_bg, &[]);
+                pass.dispatch_workgroups(groups, 1, 1);
+                if trans_n > 0 {
+                    pass.set_pipeline(&self.trans_cull);
+                    pass.set_bind_group(0, &self.trans_cull_bg, &[]);
+                    pass.dispatch_workgroups(trans_n.div_ceil(64), 1, 1);
+                }
             }
-            if let Some(overlay) = overlay.as_deref_mut() {
-                overlay.opaque(&mut pass);
-                pass.set_bind_group(0, &self.globals_bg, &[]);
-            }
-            if trans_n > 0 {
-                pass.set_pipeline(&self.trans_pipeline);
-                pass.set_bind_group(1, &self.trans_geom_bg, &[]);
-                pass.multi_draw_indirect(&self.geo.trans_cmds, 0, trans_n);
-            }
-            self.effects.draw_world(&mut pass);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("terrain late"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: render_ts(6),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.globals_bg, &[]);
+            pass.set_bind_group(1, &self.geom_bg, &[]);
+            self.draw_sections(&mut pass, late_cube, late_model, 8);
+            self.draw_late_layers(&mut pass, overlay.as_deref_mut(), trans_n);
         }
 
         if let Some(overlay) = overlay {
@@ -1630,14 +1854,15 @@ impl Renderer {
             .find(|&i| self.readbacks[i].state.load(Ordering::Acquire) == RB_IDLE);
         if slot.is_some() {
             if let Some(t) = &self.timestamps {
-                encoder.resolve_query_set(&t.set, 0..4, &self.stats_gpu, 0);
+                let written = if two_phase { TIMESTAMPS } else { 4 };
+                encoder.resolve_query_set(&t.set, 0..written, &self.stats_gpu, 0);
             }
             encoder.copy_buffer_to_buffer(
                 &self.geo.counters,
                 0,
                 &self.stats_gpu,
                 STATS_COUNTER_OFFSET,
-                8,
+                COUNTERS_SIZE,
             );
         }
         if let Some(i) = slot {
@@ -1653,7 +1878,9 @@ impl Renderer {
         self.queue.submit([encoder.finish()]);
         if let Some(i) = slot {
             self.readback_cursor = (i + 1) % READBACK_SLOTS;
-            let rb = &self.readbacks[i];
+            let rb = &mut self.readbacks[i];
+            rb.two_phase = two_phase;
+            rb.frame = self.frame_index;
             rb.state.store(RB_PENDING, Ordering::Release);
             let state = rb.state.clone();
             rb.buffer
@@ -1674,8 +1901,74 @@ impl Renderer {
             uploaded_bytes,
             uploaded_writes,
             pending_upload_bytes: self.uploader.pending_bytes(),
+            graph_ms,
             gpu: self.latest_gpu,
         })
+    }
+
+    fn late_cube_base(&self) -> u32 {
+        self.config.max_sections * 6
+    }
+
+    fn late_model_base(&self) -> u32 {
+        self.config.max_sections
+    }
+
+    /// Cube and model draws from one culling phase; `counter_offset` selects its draw counters.
+    fn draw_sections(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        cube_offset: u64,
+        model_offset: u64,
+        counter_offset: u64,
+    ) {
+        let cube_max = self.slot_count * 6;
+        let model_max = self.slot_count;
+        pass.set_pipeline(&self.cube_pipeline);
+        pass.set_index_buffer(self.geo.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
+        if self.draw_count_supported {
+            pass.multi_draw_indexed_indirect_count(
+                &self.geo.cube_cmds,
+                cube_offset,
+                &self.geo.counters,
+                counter_offset,
+                cube_max,
+            );
+        } else {
+            pass.multi_draw_indexed_indirect(&self.geo.cube_cmds, cube_offset, cube_max);
+        }
+        pass.set_pipeline(&self.model_pipeline);
+        if self.draw_count_supported {
+            pass.multi_draw_indexed_indirect_count(
+                &self.geo.model_cmds,
+                model_offset,
+                &self.geo.counters,
+                counter_offset + 4,
+                model_max,
+            );
+        } else {
+            pass.multi_draw_indexed_indirect(&self.geo.model_cmds, model_offset, model_max);
+        }
+    }
+
+    /// Everything after opaque terrain: overlay opaque geometry, translucent terrain and world effects.
+    fn draw_late_layers<'o>(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        overlay: Option<&mut (dyn Overlay + 'o)>,
+        trans_n: u32,
+    ) {
+        if let Some(overlay) = overlay {
+            overlay.opaque(pass);
+            pass.set_bind_group(0, &self.globals_bg, &[]);
+        }
+        if trans_n > 0 {
+            pass.set_pipeline(&self.trans_pipeline);
+            pass.set_bind_group(1, &self.trans_geom_bg, &[]);
+            pass.set_index_buffer(self.geo.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.multi_draw_indexed_indirect(&self.geo.trans_cmds, 0, trans_n);
+        }
+        self.effects.draw_world(pass);
     }
 
     /// Returns tightly packed RGBA8 (sRGB-encoded) pixels of the offscreen target.
@@ -1724,6 +2017,44 @@ impl Renderer {
         }
         Ok(out)
     }
+}
+
+/// Corners `(0, 1, 2), (2, 1, 3)` of each quad; the vertex shader maps index `4q + k` to quad q, corner k.
+fn quad_indices(quads: u32) -> Vec<u32> {
+    (0..quads)
+        .flat_map(|q| {
+            let b = q * 4;
+            [b, b + 1, b + 2, b + 2, b + 1, b + 3]
+        })
+        .collect()
+}
+
+fn make_cull_bg(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    globals: &wgpu::Buffer,
+    geo: &Geometry,
+    hiz: &HiZ,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("cull"),
+        layout,
+        entries: &[
+            bind(0, globals),
+            bind(1, &geo.sections),
+            bind(2, &geo.cube_cmds),
+            bind(3, &geo.cube_draws),
+            bind(4, &geo.model_cmds),
+            bind(5, &geo.model_draws),
+            bind(6, &geo.counters),
+            bind(7, &geo.visibility),
+            bind(9, &geo.reachable),
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(hiz.view()),
+            },
+        ],
+    })
 }
 
 fn bind(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {

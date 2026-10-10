@@ -16,6 +16,8 @@ struct Globals {
     shade_a: vec4<f32>,
     // west, east
     shade_b: vec4<f32>,
+    // viewport width, height, depth pyramid levels, near plane
+    cull: vec4<f32>,
 }
 
 struct SectionMeta {
@@ -34,9 +36,10 @@ struct DrawData {
     pad2: u32,
 }
 
-struct DrawIndirect {
-    vertex_count: u32,
+struct DrawIndexedIndirect {
+    index_count: u32,
     instance_count: u32,
-    first_vertex: u32,
+    first_index: u32,
+    base_vertex: i32,
     first_instance: u32,
 }

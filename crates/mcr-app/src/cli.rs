@@ -25,6 +25,11 @@ pub struct Options {
     pub after_ticks: Option<u32>,
     pub autopilot: Option<PathBuf>,
     pub render_distance_set: bool,
+    pub bench_frames: u32,
+    pub bench_views: Vec<Camera>,
+    pub bench_modes: bool,
+    pub occlusion: bool,
+    pub visibility_graph: bool,
 }
 
 impl Default for Options {
@@ -47,13 +52,18 @@ impl Default for Options {
             after_ticks: None,
             autopilot: None,
             render_distance_set: false,
+            bench_frames: 0,
+            bench_views: Vec::new(),
+            bench_modes: false,
+            occlusion: true,
+            visibility_graph: true,
         }
     }
 }
 
-pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect host[:port]] [--render-distance N] [--no-vsync]
+pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect host[:port]] [--render-distance N] [--no-vsync] [--no-occlusion] [--no-graph]
            [--jar <client.jar>] [--screenshot out.png [--camera x,y,z,yaw,pitch] [--size WxH]]
-           [--autofly blocks_per_s]
+           [--autofly blocks_per_s] [--bench frames [--bench-view x,y,z,yaw,pitch]... [--bench-modes]]
        connect mode: [--name <name>] [--game-dir dir] [--assets-dir dir] [--autopilot script]
            [--screenshot out.png [--after-ticks N]]
 camera angles are degrees; yaw 0 looks toward -Z, positive turns left";
@@ -93,6 +103,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             "--world" => opts.world = Some(value(&arg, &mut args)?.into()),
             "--synthetic" => opts.synthetic = true,
             "--no-vsync" => opts.vsync = false,
+            "--no-occlusion" => opts.occlusion = false,
+            "--no-graph" => opts.visibility_graph = false,
+            "--bench-modes" => opts.bench_modes = true,
             "--jar" => opts.jar = value(&arg, &mut args)?.into(),
             "--screenshot" => opts.screenshot = Some(value(&arg, &mut args)?.into()),
             "--camera" => opts.camera = Some(parse_camera(&value(&arg, &mut args)?)?),
@@ -115,6 +128,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                         .map_err(|_| "--after-ticks needs a tick count")?,
                 );
             }
+            "--bench" => {
+                opts.bench_frames = value(&arg, &mut args)?
+                    .parse()
+                    .map_err(|_| "--bench needs a frame count")?;
+            }
+            "--bench-view" => opts
+                .bench_views
+                .push(parse_camera(&value(&arg, &mut args)?)?),
             "--size" => opts.size = parse_size(&value(&arg, &mut args)?)?,
             "--render-distance" => {
                 opts.render_distance = value(&arg, &mut args)?
@@ -175,6 +196,17 @@ mod tests {
         assert_eq!(c.position, DVec3::new(1.0, 2.0, 3.0));
         assert!((c.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
         assert!((c.pitch + std::f32::consts::FRAC_PI_4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bench_views_accumulate() {
+        let o = parse_str(
+            "--world w --screenshot o.png --bench 100 --bench-view 0,70,0,0,0 --bench-view 0,20,0,90,0",
+        )
+        .unwrap();
+        assert_eq!(o.bench_frames, 100);
+        assert_eq!(o.bench_views.len(), 2);
+        assert_eq!(o.bench_views[1].position.y, 20.0);
     }
 
     #[test]

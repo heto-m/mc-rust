@@ -11,6 +11,7 @@ mod random;
 mod simplex;
 pub mod testing;
 mod tint;
+mod visgraph;
 
 pub use biome_zoom::zoom_biome;
 pub use cache::{
