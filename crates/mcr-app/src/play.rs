@@ -761,6 +761,16 @@ impl Play {
                     audio.play(&name, at, volume, pitch, wire_category(source));
                 }
             }
+            ClientEvent::ItemTaken {
+                pos,
+                experience_orb,
+                silent: false,
+                ..
+            } => {
+                if let Some(audio) = &mut self.audio {
+                    audio.play_pickup(pos, experience_orb);
+                }
+            }
             ClientEvent::LevelEvent {
                 event: 2001,
                 pos,

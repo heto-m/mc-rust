@@ -27,6 +27,7 @@ mod menu;
 mod menu_layout_tests;
 #[cfg(test)]
 mod menu_tests;
+mod pickup;
 mod player;
 mod registry;
 mod riding;
@@ -42,7 +43,7 @@ pub use batch::ChunkBatchSizeCalculator;
 pub use client::{Client, Phase};
 pub use commands::{CommandTree, Completion, SuggestSource};
 pub use config::{ClientConfig, OnlineAuth, ResourcePackPolicy};
-pub use entity::{AttributeState, Entities, Entity, MobEffect};
+pub use entity::{AttributeState, Entities, Entity, MobEffect, SimShape};
 pub use error::{ClientError, Result};
 pub use events::{ChatKind, ClientEvent, DisconnectReason, sanitize_for_log};
 pub use gamestate::{
@@ -53,6 +54,7 @@ pub use inventory::{
 };
 pub use mcr_physics::PlayerInput;
 pub use menu::MountInfo;
+pub use pickup::Pickup;
 pub use player::LocalPlayer;
 pub use registry::{Dimension, Registries, Registry, RegistryItem};
 pub use riding::{Ride, Sim};

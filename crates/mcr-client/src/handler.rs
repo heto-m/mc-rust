@@ -15,6 +15,7 @@ use mcr_protocol::play::serverbound as sb;
 use mcr_protocol::types::Component;
 use mcr_protocol::types::ItemStack;
 use mcr_protocol::types::component::AttributeModifier;
+use mcr_protocol::types::entity_data::EntityDataValue;
 use mcr_protocol::types::game::GameType;
 use mcr_protocol::types::registry::KnownPack;
 use mcr_world::{ChunkColumn, ChunkData, ChunkPos, LightData};
@@ -319,8 +320,9 @@ impl ClientState {
                     e.target_yaw = e.yaw;
                     e.target_pitch = e.pitch;
                     e.head_yaw = p.y_head_rot.degrees();
-                    e.velocity = v3(&p.velocity.0);
+                    e.velocity = clamp_motion(v3(&p.velocity.0));
                     e.object_data = p.data;
+                    e.sim = self.sim_kinds.get(p.entity_type);
                     if self.entities.insert(e) {
                         out.event(ClientEvent::EntityAdded(p.entity_id));
                     }
@@ -396,7 +398,7 @@ impl ClientState {
                     if p.entity_id == self.player.entity_id {
                         self.player.physics.vel = vel;
                     } else if let Some(e) = self.entities.get_mut(p.entity_id) {
-                        e.velocity = vel;
+                        e.velocity = clamp_motion(vel);
                     }
                 }
             }
@@ -511,11 +513,7 @@ impl ClientState {
                 entity_id: p.entity_id,
                 source_type: p.source_type,
             }),
-            P::TakeItemEntity(p) => out.event(ClientEvent::ItemTaken {
-                item_id: p.item_id,
-                collector_id: p.player_id,
-                amount: p.amount,
-            }),
+            P::TakeItemEntity(p) => self.take_item_entity(&p, out),
 
             P::PlayerPosition(p) => self.on_player_position(&p, out),
             P::PlayerRotation(p) => {
@@ -1063,6 +1061,50 @@ impl ClientState {
         out.event(ClientEvent::EntityMoved(id));
     }
 
+    fn take_item_entity(
+        &mut self,
+        p: &mcr_protocol::play::clientbound::entity::TakeItemEntity,
+        out: &mut Outbox,
+    ) {
+        let Some(item) = self.entities.get(p.item_id).cloned() else {
+            return;
+        };
+        let name = self.data.entity_type_name(item.kind as u32);
+        let experience_orb = name == Some("minecraft:experience_orb");
+        let is_item = name == Some("minecraft:item");
+        let silent = matches!(item.data.get(&4), Some(EntityDataValue::Boolean(true)));
+        out.event(ClientEvent::ItemTaken {
+            item_id: p.item_id,
+            collector_id: p.player_id,
+            amount: p.amount,
+            pos: item.pos,
+            experience_orb,
+            silent,
+        });
+        if let Some(target) = self.pickup_target(p.player_id)
+            && self.pickups.len() < crate::pickup::MAX_PICKUPS
+        {
+            self.pickups
+                .push(crate::pickup::Pickup::new(item, p.player_id, target));
+        }
+        if experience_orb {
+            return;
+        }
+        let emptied = match self.entities.get_mut(p.item_id) {
+            Some(e) if is_item => match e.data.get_mut(&8) {
+                Some(EntityDataValue::ItemStack(stack)) => {
+                    stack.count = stack.count.saturating_sub(p.amount);
+                    stack.count <= 0
+                }
+                _ => true,
+            },
+            _ => true,
+        };
+        if emptied && self.entities.remove(p.item_id).is_some() {
+            out.event(ClientEvent::EntityRemoved(p.item_id));
+        }
+    }
+
     fn teleport_entity(&mut self, p: &TeleportEntity, out: &mut Outbox) {
         let Some(e) = self.entities.get_mut(p.entity_id) else {
             return;
@@ -1100,7 +1142,7 @@ impl ClientState {
         }
         let vel = v3(&p.change.delta_movement);
         if sane3(vel) {
-            e.velocity = vel;
+            e.velocity = clamp_motion(vel);
         }
         e.move_or_interpolate_to(pos, Some((yaw, pitch.clamp(-90.0, 90.0))));
         e.on_ground = p.on_ground;
@@ -1322,4 +1364,9 @@ fn chat_fallback(key: &str, arg_count: usize) -> String {
         "commands.message.display.outgoing" => "You whisper to %s: %s".into(),
         _ => vec!["%s"; arg_count].join(" "),
     }
+}
+
+/// Vanilla clamps synced motion to this per axis.
+fn clamp_motion(v: [f64; 3]) -> [f64; 3] {
+    v.map(|c| c.clamp(-3.9, 3.9))
 }

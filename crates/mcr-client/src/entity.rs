@@ -1,3 +1,5 @@
+use mcr_data::Version;
+use mcr_physics::{Body, BodyKind, BodyScratch, CollisionWorld, PhysicsData};
 use mcr_protocol::play::clientbound::entity::{PositionPath, VecDelta};
 use mcr_protocol::types::ItemStack;
 use mcr_protocol::types::component::{AttributeModifier, EquipmentSlot};
@@ -6,12 +8,72 @@ use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 pub const MAX_ENTITIES: usize = 1 << 16;
+const MAX_SIMULATED_PER_TICK: usize = 4096;
 const MAX_PASSENGERS: usize = 4096;
 const MAX_EFFECTS: usize = 64;
 const MAX_ATTRIBUTES: usize = 128;
 const INTERPOLATION_STEPS: u8 = 3;
 const TOO_BIG_TO_INTERPOLATE_SQR: f64 = 4096.0;
 const DELTA_SCALE: f64 = 4096.0;
+
+/// Entity types the client simulates between server updates, as vanilla's `SERVER_AND_CLIENT` movers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SimShape {
+    pub kind: BodyKind,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SimKinds {
+    by_type: FxHashMap<i32, SimShape>,
+}
+
+impl SimKinds {
+    pub fn resolve(data: &Version) -> Self {
+        const NAMES: [(&str, BodyKind); 12] = [
+            ("item", BodyKind::Item),
+            ("experience_orb", BodyKind::ExperienceOrb),
+            ("tnt", BodyKind::Tnt),
+            ("falling_block", BodyKind::FallingBlock),
+            ("snowball", BodyKind::Thrown),
+            ("egg", BodyKind::Thrown),
+            ("ender_pearl", BodyKind::Thrown),
+            ("experience_bottle", BodyKind::ExperienceBottle),
+            ("splash_potion", BodyKind::Potion),
+            ("lingering_potion", BodyKind::Potion),
+            ("arrow", BodyKind::Arrow),
+            ("spectral_arrow", BodyKind::Arrow),
+        ];
+        let by_type = NAMES
+            .iter()
+            .filter_map(|&(name, kind)| {
+                let id = data.entity_type_by_name(&format!("minecraft:{name}"))?;
+                let info = data.entity_type_info(id)?;
+                let shape = SimShape {
+                    kind,
+                    width: f64::from(info.width),
+                    height: f64::from(info.height),
+                };
+                Some((id as i32, shape))
+            })
+            .collect();
+        Self { by_type }
+    }
+
+    pub fn get(&self, entity_type: i32) -> Option<SimShape> {
+        self.by_type.get(&entity_type).copied()
+    }
+}
+
+/// Everything entity simulation reads from the world for one tick.
+pub(crate) struct SimContext<'a, W: CollisionWorld + ?Sized> {
+    pub world: &'a W,
+    pub data: &'static PhysicsData,
+    pub scratch: &'a mut BodyScratch,
+    /// Mid-eye of the local player, which XP orbs home toward.
+    pub follow: Option<[f64; 3]>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MobEffect {
@@ -76,6 +138,8 @@ pub struct Entity {
     pub leash_holder: Option<i32>,
     pub effects: FxHashMap<i32, MobEffect>,
     pub attributes: FxHashMap<i32, AttributeState>,
+    pub sim: Option<SimShape>,
+    sim_ticks: u32,
     interpolation_left: u8,
 }
 
@@ -102,8 +166,15 @@ impl Entity {
             leash_holder: None,
             effects: FxHashMap::default(),
             attributes: FxHashMap::default(),
+            sim: None,
+            sim_ticks: 0,
             interpolation_left: 0,
         }
+    }
+
+    /// Ticks this entity has been simulated locally; drives the item spin and bob.
+    pub fn age_ticks(&self) -> u32 {
+        self.sim_ticks
     }
 
     pub fn equipment_slot(&self, slot: EquipmentSlot) -> &ItemStack {
@@ -126,7 +197,7 @@ impl Entity {
             self.target_yaw = yaw;
             self.target_pitch = pitch;
         }
-        if dist_sqr > TOO_BIG_TO_INTERPOLATE_SQR {
+        if self.sim.is_some() || dist_sqr > TOO_BIG_TO_INTERPOLATE_SQR {
             self.snap();
         } else {
             self.interpolation_left = INTERPOLATION_STEPS;
@@ -158,6 +229,34 @@ impl Entity {
         self.yaw = lerp_degrees(self.yaw, self.target_yaw, t as f32);
         self.pitch += (self.target_pitch - self.pitch) * t as f32;
         self.interpolation_left -= 1;
+    }
+
+    fn tick_sim<W: CollisionWorld + ?Sized>(
+        &mut self,
+        shape: SimShape,
+        cx: &mut SimContext<'_, W>,
+    ) {
+        let mut body = Body::new(
+            shape.kind,
+            self.id,
+            (shape.width, shape.height),
+            self.pos,
+            self.velocity,
+        );
+        body.tick_count = self.sim_ticks;
+        body.on_ground = self.on_ground;
+        body.tick(cx.world, cx.data, cx.scratch, cx.follow);
+        self.sim_ticks = body.tick_count;
+        self.pos = body.pos;
+        self.velocity = body.vel;
+        self.on_ground = body.on_ground;
+        if shape.kind.is_projectile() && body.vel != [0.0; 3] {
+            let (yaw, pitch) = mcr_physics::aim(body.vel);
+            self.yaw = lerp_degrees(self.yaw, yaw, 0.2);
+            self.pitch = lerp_degrees(self.pitch, pitch, 0.2);
+            self.target_yaw = self.yaw;
+            self.target_pitch = self.pitch;
+        }
     }
 
     pub fn set_passengers(&mut self, passengers: &[i32]) {
@@ -278,9 +377,17 @@ impl Entities {
         self.map.clear();
     }
 
-    pub fn tick(&mut self) {
+    pub(crate) fn tick<W: CollisionWorld + ?Sized>(&mut self, cx: &mut SimContext<'_, W>) {
+        let mut simulated = 0usize;
         for entity in self.map.values_mut() {
-            entity.tick_interpolation();
+            match entity.sim {
+                Some(_) if simulated >= MAX_SIMULATED_PER_TICK => {}
+                Some(shape) => {
+                    simulated += 1;
+                    entity.tick_sim(shape, cx);
+                }
+                None => entity.tick_interpolation(),
+            }
         }
     }
 

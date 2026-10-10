@@ -475,7 +475,17 @@ impl EntityLayer {
                 }
                 Some(view)
             })
-            .chain(local_view);
+            .chain(local_view)
+            .chain(cx.state.pickups.iter().map(|p| {
+                let e = &p.entity;
+                let mut t = Track::new(e.pos, e.yaw, e.head_yaw, e.pitch, false);
+                t.age = e.age_ticks();
+                let mut view = make_view(e.id, e.uuid, e.kind, &t, 1.0, &e.data, 1.0);
+                view.pos = p.position(cx.partial);
+                view.object_data = e.object_data;
+                view.light = light_at(&cx.state.chunks, view.pos, 0.0);
+                view
+            }));
         let chunks = &cx.state.chunks;
         scene.update_grounded(&registries, views, &|x, y, z| ground_top(chunks, x, y, z));
         self.last_drawn = drawn;

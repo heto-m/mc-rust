@@ -135,6 +135,36 @@ impl Audio {
         );
     }
 
+    /// Vanilla's pickup sounds: pitch is the difference of two uniform draws, scaled and offset.
+    pub fn play_pickup(&mut self, pos: [f64; 3], experience_orb: bool) {
+        let spread = self.unit() - self.unit();
+        if experience_orb {
+            self.play(
+                "entity.experience_orb.pickup",
+                Some(pos),
+                0.1,
+                spread * 0.35 + 0.9,
+                SoundSource::Players,
+            );
+        } else {
+            self.play(
+                "entity.item.pickup",
+                Some(pos),
+                0.2,
+                spread * 1.4 + 2.0,
+                SoundSource::Players,
+            );
+        }
+    }
+
+    fn unit(&mut self) -> f32 {
+        self.seed = self
+            .seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((self.seed as u64) >> 40) as f32 / (1u64 << 24) as f32
+    }
+
     pub fn play_block(&mut self, state: u32, kind: BlockSound, pos: [f64; 3]) {
         let Some(event) = block_event(self.data, state, kind) else {
             return;

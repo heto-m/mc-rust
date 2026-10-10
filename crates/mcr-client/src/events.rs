@@ -89,6 +89,9 @@ pub enum ClientEvent {
         item_id: i32,
         collector_id: i32,
         amount: i32,
+        pos: [f64; 3],
+        experience_orb: bool,
+        silent: bool,
     },
 
     Chat {

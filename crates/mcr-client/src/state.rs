@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use mcr_buf::{BlockPos, Identifier};
 use mcr_data::Version;
 use mcr_nbt::Compound;
-use mcr_physics::{Attributes, Effects};
+use mcr_physics::{Attributes, BodyScratch, Effects, PhysicsData};
 use mcr_protocol::common::{ResourcePackAction, ResourcePackResponse, ServerLink};
 use mcr_protocol::dispatch::PlayServerbound;
 use mcr_protocol::types::Component;
@@ -13,10 +13,11 @@ use uuid::Uuid;
 
 use crate::batch::ChunkBatchSizeCalculator;
 use crate::config::{ClientConfig, ResourcePackPolicy};
-use crate::entity::Entities;
+use crate::entity::{Entities, SimContext, SimKinds};
 use crate::error::{ClientError, Result};
 use crate::events::ClientEvent;
 use crate::inventory::Inventory;
+use crate::pickup::Pickup;
 use crate::player::{LocalPlayer, SPRINT_MODIFIER_ID};
 use crate::registry::{BIOME, DIMENSION_TYPE, Dimension, Registries, dimension_shape};
 use crate::social::{BossBar, ChatState, PlayerList, Scoreboard, TabList, Titles};
@@ -254,6 +255,7 @@ pub struct ClientState {
     pub chunks: ChunkStore,
     pub block_entities: FxHashMap<BlockPos, (i32, Compound)>,
     pub entities: Entities,
+    pub pickups: Vec<Pickup>,
     pub player: LocalPlayer,
     pub inventory: Inventory,
     pub world: WorldInfo,
@@ -278,6 +280,8 @@ pub struct ClientState {
     pub chunks_received: u64,
     pub unhandled: FxHashMap<&'static str, u64>,
     pub(crate) ids: PhysicsIds,
+    pub(crate) sim_kinds: SimKinds,
+    sim_scratch: BodyScratch,
     pub(crate) resource_packs: ResourcePackPolicy,
     pub(crate) in_batch: bool,
 }
@@ -341,6 +345,7 @@ impl ClientState {
             chunks,
             block_entities: FxHashMap::default(),
             entities: Entities::default(),
+            pickups: Vec::new(),
             player: LocalPlayer::default(),
             inventory: Inventory::default(),
             world: WorldInfo::default(),
@@ -365,6 +370,8 @@ impl ClientState {
             chunks_received: 0,
             unhandled: FxHashMap::default(),
             ids: PhysicsIds::resolve(data),
+            sim_kinds: SimKinds::resolve(data),
+            sim_scratch: BodyScratch::default(),
             resource_packs: config.resource_packs,
             in_batch: false,
         }
@@ -413,8 +420,45 @@ impl ClientState {
         self.game_ticks += 1;
         let now = self.game_ticks;
         self.cooldowns.retain(|_, c| c.ends_at > now);
-        self.entities.tick();
+        let eye = f64::from(self.player.physics.eye_height());
+        let pos = self.player.physics.pos;
+        let mut cx = SimContext {
+            world: &self.chunks,
+            data: PhysicsData::v26_3(),
+            scratch: &mut self.sim_scratch,
+            follow: Some([pos[0], pos[1] + eye / 2.0, pos[2]]),
+        };
+        self.entities.tick(&mut cx);
+        self.tick_pickups();
         self.world.tick();
+    }
+
+    /// Where a collector's pickup animation aims: halfway up its body.
+    pub(crate) fn pickup_target(&self, id: i32) -> Option<[f64; 3]> {
+        if id == self.player.entity_id {
+            let p = &self.player.physics;
+            return Some([
+                p.pos[0],
+                p.pos[1] + f64::from(p.eye_height()) / 2.0,
+                p.pos[2],
+            ]);
+        }
+        let e = self.entities.get(id)?;
+        let eye = u32::try_from(e.kind)
+            .ok()
+            .and_then(|k| self.data.entity_type_info(k))
+            .map_or(1.62, |i| f64::from(i.eye_height));
+        Some([e.pos[0], e.pos[1] + eye / 2.0, e.pos[2]])
+    }
+
+    fn tick_pickups(&mut self) {
+        let mut pickups = std::mem::take(&mut self.pickups);
+        for p in &mut pickups {
+            let target = self.pickup_target(p.collector);
+            p.advance(target);
+        }
+        pickups.retain(|p| !p.finished());
+        self.pickups = pickups;
     }
 
     pub(crate) fn refresh_physics_inputs(&mut self) {
