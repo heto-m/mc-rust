@@ -266,5 +266,9 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     if dir.y > 0.0 {
         k = clamp(16.0 / dir.y / max(g.sky_color.w, 1.0), 0.0, 1.0);
     }
+    if dir.y < 0.0 && g.sun.y > 0.5 {
+        let void_k = clamp(4.0 / -dir.y / max(g.sky_color.w, 1.0), 0.0, 1.0);
+        return vec4<f32>(mix(vec3<f32>(0.0), g.fog_color.rgb, void_k), 1.0);
+    }
     return vec4<f32>(mix(g.sky_color.rgb, g.fog_color.rgb, k), 1.0);
 }

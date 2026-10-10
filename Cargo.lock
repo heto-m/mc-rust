@@ -1734,6 +1734,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcr-particles"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "criterion 0.5.1",
+ "glam",
+ "mcr-assets",
+ "mcr-protocol",
+ "mcr-render",
+ "png",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "mcr-physics"
 version = "0.1.0"
 dependencies = [
@@ -1762,6 +1777,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
+ "mcr-assets",
  "png",
  "pollster",
  "thiserror 2.0.21",

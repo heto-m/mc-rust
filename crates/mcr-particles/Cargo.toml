@@ -1,0 +1,26 @@
+[package]
+name = "mcr-particles"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcr-render = { path = "../mcr-render" }
+mcr-protocol = { path = "../mcr-protocol" }
+glam = { version = "0.34", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+mcr-assets = { path = "../mcr-assets" }
+png.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "particles"
+harness = false
+
+[lints]
+workspace = true

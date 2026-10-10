@@ -10,11 +10,12 @@ wgpu = "30"
 glam = { version = "0.34", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
+png.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-[dev-dependencies]
-png = "0.18"
-
 [lints]
 workspace = true
+
+[dev-dependencies]
+mcr-assets = { path = "../mcr-assets" }

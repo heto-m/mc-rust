@@ -8,7 +8,8 @@ use bytemuck::{Pod, Zeroable};
 use crate::animation::{ANIM_TABLE_LEN, AnimationTable, SpriteAnimation};
 use crate::arena::Arena;
 use crate::camera::Camera;
-use crate::environment::Environment;
+use crate::effects::{CloudSettings, DestroyDecal, EffectAssets, Effects, WeatherSource};
+use crate::environment::{Environment, Skybox};
 use crate::mesh::SectionMesh;
 use crate::mesh::TINT_TABLE_WORDS;
 use crate::overlay::{Overlay, OverlayCtx};
@@ -251,6 +252,7 @@ pub struct Renderer {
     environment: Environment,
     lightmap_key: Option<(Environment, f32)>,
     sky_pipeline: wgpu::RenderPipeline,
+    effects: Effects,
 
     cube_arena: Arena,
     model_arena: Arena,
@@ -804,6 +806,15 @@ impl Renderer {
             cache: None,
         });
 
+        let effects = Effects::new(
+            &device,
+            &queue,
+            color_format,
+            DEPTH_FORMAT,
+            &globals_bgl,
+            GLOBALS_SRC,
+        );
+
         let timestamps = features
             .contains(wgpu::Features::TIMESTAMP_QUERY)
             .then(|| Timestamps {
@@ -848,6 +859,7 @@ impl Renderer {
             environment: Environment::default(),
             lightmap_key: None,
             sky_pipeline,
+            effects,
             cube_arena: Arena::new(cube_quads),
             model_arena: Arena::new(model_quads),
             depth_view: depth_view(&device, width, height),
@@ -979,6 +991,34 @@ impl Renderer {
 
     pub fn environment(&self) -> &Environment {
         &self.environment
+    }
+
+    /// Uploads sun, moon, end sky, cloud, rain, snow and destroy-stage textures; effects stay hidden until
+    /// this is called.
+    pub fn set_effect_assets(&mut self, assets: &EffectAssets) {
+        self.effects.set_assets(assets);
+    }
+
+    pub fn set_cloud_settings(&mut self, settings: CloudSettings) {
+        self.effects.set_cloud_settings(settings);
+    }
+
+    /// Game time in ticks plus the partial tick; drives cloud scroll and precipitation animation.
+    pub fn set_effect_time(&mut self, game_time: u64, partial: f32) {
+        self.effects.set_time(game_time, partial);
+    }
+
+    /// Rebuilds the precipitation columns around `camera`; call every frame while
+    /// `Environment::rain_level` is positive. `radius` is the weather radius option (3 to 10).
+    pub fn update_weather(&mut self, camera: &Camera, radius: u32, source: &dyn WeatherSource) {
+        let env = self.environment.clone();
+        self.effects
+            .update_weather(&env, camera.position.to_array(), radius, source);
+    }
+
+    /// Blocks currently being broken (own or other players'); replaces the previous list.
+    pub fn set_destroy_decals(&mut self, decals: &[DestroyDecal]) {
+        self.effects.set_decals(decals);
     }
 
     /// Animated sprites (packed layer plus frame list); the table is evaluated at the current tick.
@@ -1391,7 +1431,15 @@ impl Renderer {
             cam_int: [ci.x, ci.y, ci.z, 0],
             cam_frac: [cf.x, cf.y, cf.z, 0.0],
             params: [self.slot_count, 0, 0, 0],
-            sun: [frame.sky_light, 0.0, 0.0, 0.0],
+            sun: [
+                frame.sky_light,
+                f32::from(u8::from(
+                    env.skybox == Skybox::Overworld
+                        && cam.position.y < f64::from(env.horizon_height),
+                )),
+                0.0,
+                0.0,
+            ],
             inv_view_proj: view_proj.inverse().to_cols_array(),
             fog_color: [env.fog_color[0], env.fog_color[1], env.fog_color[2], 1.0],
             fog: [env.fog_start, env.fog_end, rd_start, rd_end],
@@ -1412,6 +1460,7 @@ impl Renderer {
         self.queue
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         let trans_n = self.build_translucent(&frustum, [ci.x, ci.y, ci.z], cf);
+        self.effects.prepare(&env, cam.position.to_array());
 
         let mut surface_tex = None;
         let color_view = match (&self.surface, &self.offscreen) {
@@ -1502,6 +1551,8 @@ impl Renderer {
             pass.set_bind_group(1, &self.geom_bg, &[]);
             pass.set_pipeline(&self.sky_pipeline);
             pass.draw(0..3, 0..1);
+            self.effects.draw_sky(&mut pass);
+            pass.set_bind_group(1, &self.geom_bg, &[]);
             let cube_max = self.slot_count * 6;
             let model_max = self.slot_count;
             pass.set_pipeline(&self.cube_pipeline);
@@ -1533,6 +1584,7 @@ impl Renderer {
                 pass.set_bind_group(1, &self.trans_geom_bg, &[]);
                 pass.multi_draw_indirect(&self.geo.trans_cmds, 0, trans_n);
             }
+            self.effects.draw_world(&mut pass);
         }
 
         if let Some(overlay) = overlay {

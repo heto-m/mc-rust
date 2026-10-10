@@ -1,6 +1,7 @@
 mod animation;
 mod arena;
 mod camera;
+mod effects;
 mod environment;
 mod mesh;
 mod overlay;
@@ -13,7 +14,13 @@ mod texture;
 pub use animation::{AnimationTable, SpriteAnimation, SpriteFrame};
 pub use arena::Arena;
 pub use camera::{Camera, Frustum};
-pub use environment::{CARDINAL_DEFAULT, CARDINAL_NETHER, Environment, Rgb, hex, srgb_lerp};
+pub use effects::{
+    CloudMode, CloudSettings, DestroyDecal, EffectAssets, EffectImage, MAX_BOXES_PER_DECAL,
+    MAX_DECALS, MAX_WEATHER_RADIUS, MIN_WEATHER_RADIUS, Precipitation, WeatherSource,
+};
+pub use environment::{
+    CARDINAL_DEFAULT, CARDINAL_NETHER, Environment, OverworldBase, Rgb, Skybox, hex, srgb_lerp,
+};
 pub use mesh::SectionMesh;
 pub use mesh::{TINT_KINDS, TINT_TABLE_WORDS, TintTable};
 pub use overlay::{Overlay, OverlayCtx};
