@@ -3,6 +3,10 @@ mod blockstate;
 mod error;
 mod geometry;
 mod identifier;
+mod item_bake;
+mod item_def;
+mod item_eval;
+mod item_special;
 mod model;
 mod pack;
 mod resources;
@@ -19,7 +23,18 @@ pub use blockstate::{BlockStateDef, Condition, Properties, Selector, Term, Varia
 pub use error::{AssetError, Result};
 pub use geometry::Face;
 pub use identifier::{DEFAULT_NAMESPACE, Identifier};
-pub use model::{Element, FaceDef, Material, ModelLoader, ResolvedModel};
+pub use item_bake::{BakedItemModel, ItemBaker};
+pub use item_def::{
+    CompassTarget, ConditionProp, IDENTITY4, ItemModelDef, ItemNode, Mat4, NodeKind, RangeProp,
+    SelectProp, SpecialKind, TimeSource, TintSource, mat4_apply, mat4_mul,
+};
+pub use item_eval::{
+    ChargeType, ItemContext, ItemLayer, ItemModels, ItemProps, LayerKind, LocalDateTime, PlainItem,
+};
+pub use model::{
+    Builtin, DisplayContext, Element, FaceDef, GuiLight, ItemTransform, Material, ModelLoader,
+    ResolvedModel,
+};
 pub use pack::{FormatRange, Overlay, PackFormat, PackMeta};
 pub use resources::ResourceManager;
 pub use source::{AssetSource, DirSource, ZipSource};
@@ -30,3 +45,6 @@ pub use texture::{
 
 #[cfg(test)]
 mod fixture_tests;
+
+#[cfg(test)]
+mod item_tests;

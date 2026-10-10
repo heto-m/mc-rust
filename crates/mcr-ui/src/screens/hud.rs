@@ -1,3 +1,4 @@
+use crate::items::{ItemIcons, ItemView};
 use crate::sprites::SpriteId;
 use crate::ui::{Ui, UiFrame};
 
@@ -112,6 +113,30 @@ impl HudSprites {
                 [container(true, false), container(true, true)],
             ],
             hearts,
+        }
+    }
+}
+
+/// Items shown on the hotbar, in slot order, and in the offhand slot.
+#[derive(Debug, Default)]
+pub struct HudItems<'a> {
+    pub hotbar: [Option<ItemView<'a>>; 9],
+    pub offhand: Option<ItemView<'a>>,
+}
+
+impl HudSprites {
+    /// Draws hotbar and offhand items over the hotbar background.
+    pub fn draw_items(&self, frame: &mut UiFrame<'_>, icons: &mut ItemIcons, items: &HudItems) {
+        let (gui_w, gui_h) = frame.gui_size();
+        let y = gui_h - 16 - 3;
+        let left = gui_w / 2 - 90;
+        for (slot, view) in items.hotbar.iter().enumerate() {
+            if let Some(view) = view {
+                icons.draw_with_decorations(frame, view, left + slot as i32 * 20 + 2, y);
+            }
+        }
+        if let Some(view) = &items.offhand {
+            icons.draw_with_decorations(frame, view, gui_w / 2 - 91 - 26, y);
         }
     }
 }

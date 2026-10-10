@@ -4,4 +4,4 @@ mod hud;
 
 pub use chat::{ChatHud, ChatOptions, fade_alpha};
 pub use debug::DebugOverlay;
-pub use hud::{HeartKind, HudSprites, HudState};
+pub use hud::{HeartKind, HudItems, HudSprites, HudState};

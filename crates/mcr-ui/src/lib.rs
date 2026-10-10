@@ -2,6 +2,7 @@ mod assets;
 mod atlas;
 mod error;
 mod font;
+mod items;
 mod renderer;
 mod screens;
 mod sprites;
@@ -13,9 +14,10 @@ pub use assets::{AssetIndexSource, vanilla_resources};
 pub use atlas::{Atlas, Slot};
 pub use error::{Result, UiError};
 pub use font::{Baked, FontOptions, Fonts, GlyphInfo};
+pub use items::{IconStats, ItemIcons, ItemView, StackView, durability_bar};
 pub use renderer::{UiRenderer, UiStats};
 pub use screens::{
-    ChatHud, ChatOptions, DebugOverlay, HeartKind, HudSprites, HudState, fade_alpha,
+    ChatHud, ChatOptions, DebugOverlay, HeartKind, HudItems, HudSprites, HudState, fade_alpha,
 };
 pub use sprites::{Scaling, SpriteId, SpriteInfo, SpriteQuad, Sprites};
 pub use style::{Cell, Flags, FontId, Style};

@@ -53,11 +53,99 @@ struct ElementJson {
 }
 
 #[derive(Deserialize)]
+struct TransformJson {
+    rotation: Option<[f32; 3]>,
+    translation: Option<[f32; 3]>,
+    scale: Option<[f32; 3]>,
+}
+
+#[derive(Deserialize)]
 struct ModelJson {
     parent: Option<String>,
     ambientocclusion: Option<bool>,
+    gui_light: Option<String>,
+    display: Option<HashMap<String, TransformJson>>,
     textures: Option<HashMap<String, TextureJson>>,
     elements: Option<Vec<ElementJson>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DisplayContext {
+    None,
+    ThirdPersonLeftHand,
+    ThirdPersonRightHand,
+    FirstPersonLeftHand,
+    FirstPersonRightHand,
+    Head,
+    Gui,
+    Ground,
+    Fixed,
+    OnShelf,
+}
+
+impl DisplayContext {
+    pub const ALL: [DisplayContext; 10] = [
+        DisplayContext::None,
+        DisplayContext::ThirdPersonLeftHand,
+        DisplayContext::ThirdPersonRightHand,
+        DisplayContext::FirstPersonLeftHand,
+        DisplayContext::FirstPersonRightHand,
+        DisplayContext::Head,
+        DisplayContext::Gui,
+        DisplayContext::Ground,
+        DisplayContext::Fixed,
+        DisplayContext::OnShelf,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            DisplayContext::None => "none",
+            DisplayContext::ThirdPersonLeftHand => "thirdperson_lefthand",
+            DisplayContext::ThirdPersonRightHand => "thirdperson_righthand",
+            DisplayContext::FirstPersonLeftHand => "firstperson_lefthand",
+            DisplayContext::FirstPersonRightHand => "firstperson_righthand",
+            DisplayContext::Head => "head",
+            DisplayContext::Gui => "gui",
+            DisplayContext::Ground => "ground",
+            DisplayContext::Fixed => "fixed",
+            DisplayContext::OnShelf => "on_shelf",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.name() == name)
+    }
+}
+
+/// Rotation in degrees (JOML `rotationXYZ` order), translation in blocks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ItemTransform {
+    pub rotation: [f32; 3],
+    pub translation: [f32; 3],
+    pub scale: [f32; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuiLight {
+    Front,
+    Side,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Builtin {
+    Generated,
+    Entity,
+    Other,
+}
+
+impl Builtin {
+    fn from_id(id: &Identifier) -> Self {
+        match id.path() {
+            "builtin/generated" => Builtin::Generated,
+            "builtin/entity" => Builtin::Entity,
+            _ => Builtin::Other,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -101,6 +189,8 @@ enum Slot {
 struct RawModel {
     parent: Option<Identifier>,
     ambient_occlusion: Option<bool>,
+    gui_light: Option<GuiLight>,
+    display: Vec<(DisplayContext, ItemTransform)>,
     textures: Vec<(Box<str>, Slot)>,
     elements: Option<Arc<[Element]>>,
 }
@@ -111,9 +201,20 @@ pub struct ResolvedModel {
     pub elements: Arc<[Element]>,
     pub ambient_occlusion: bool,
     pub textures: HashMap<Box<str>, Material>,
+    pub gui_light: GuiLight,
+    pub builtin: Option<Builtin>,
+    display: [Option<ItemTransform>; 10],
 }
 
 impl ResolvedModel {
+    pub fn display(&self, context: DisplayContext) -> Option<&ItemTransform> {
+        self.display[context as usize].as_ref()
+    }
+
+    pub(crate) fn display_table(&self) -> [Option<ItemTransform>; 10] {
+        self.display
+    }
+
     pub fn material(&self, texture: &str) -> Option<&Material> {
         self.textures
             .get(texture.strip_prefix('#').unwrap_or(texture))
@@ -242,9 +343,34 @@ fn parse_raw(json: &[u8], path: &str) -> Result<RawModel> {
                 .collect::<Result<Arc<[Element]>>>()
         })
         .transpose()?;
+    let gui_light = match model.gui_light.as_deref() {
+        Some("front") => Some(GuiLight::Front),
+        Some("side") => Some(GuiLight::Side),
+        Some(_) => return Err(AssetError::invalid(path, "unknown gui_light")),
+        None => None,
+    };
+    let clamp = |v: [f32; 3], limit: f32| v.map(|c| c.clamp(-limit, limit));
+    let display = model
+        .display
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(name, t)| {
+            let context = DisplayContext::from_name(&name)?;
+            Some((
+                context,
+                ItemTransform {
+                    rotation: t.rotation.unwrap_or([0.0; 3]),
+                    translation: clamp(t.translation.unwrap_or([0.0; 3]).map(|c| c / 16.0), 5.0),
+                    scale: clamp(t.scale.unwrap_or([1.0; 3]), 4.0),
+                },
+            ))
+        })
+        .collect();
     Ok(RawModel {
         parent: model.parent.as_deref().map(Identifier::parse),
         ambient_occlusion: model.ambientocclusion,
+        gui_light,
+        display,
         textures,
         elements,
     })
@@ -280,11 +406,13 @@ impl ModelLoader {
         }
         let mut chain = Vec::new();
         let mut current = Some(id.clone());
+        let mut builtin = None;
         while let Some(cur) = current {
             if chain.len() >= MAX_PARENT_DEPTH {
                 return Err(AssetError::ParentCycle(id.to_string()));
             }
             if is_builtin(&cur) {
+                builtin = Some(Builtin::from_id(&cur));
                 break;
             }
             let raw = self.raw(rm, &cur)?;
@@ -334,11 +462,27 @@ impl ModelLoader {
             }
         }
 
+        let mut gui_light = None;
+        let mut display = [None; 10];
+        for raw in chain.iter() {
+            gui_light = gui_light.or(raw.gui_light);
+            for (context, transform) in &raw.display {
+                display[*context as usize].get_or_insert(*transform);
+            }
+        }
+        let default_light = if builtin == Some(Builtin::Generated) {
+            GuiLight::Front
+        } else {
+            GuiLight::Side
+        };
         let resolved = Arc::new(ResolvedModel {
             id: id.clone(),
             elements: elements.unwrap_or_else(|| Arc::from([])),
             ambient_occlusion: ambient_occlusion.unwrap_or(true),
             textures,
+            gui_light: gui_light.unwrap_or(default_light),
+            builtin,
+            display,
         });
         self.resolved.insert(id.clone(), resolved.clone());
         Ok(resolved)

@@ -1737,6 +1737,8 @@ dependencies = [
  "bytemuck",
  "criterion 0.5.1",
  "mcr-assets",
+ "mcr-buf",
+ "mcr-data",
  "mcr-nbt",
  "mcr-protocol",
  "png",

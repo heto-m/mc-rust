@@ -183,13 +183,13 @@ fn fix_winding(vertices: &mut [Vertex; 4], facing: Face) {
     }
 }
 
-struct BakeCtx<'a> {
-    model: &'a ResolvedModel,
-    rot: Rot,
-    uvlock: bool,
+pub(crate) struct BakeCtx<'a> {
+    pub(crate) model: &'a ResolvedModel,
+    pub(crate) rot: Rot,
+    pub(crate) uvlock: bool,
 }
 
-fn bake_face(
+pub(crate) fn bake_face(
     ctx: &BakeCtx,
     element: &Element,
     face: Face,
@@ -251,7 +251,7 @@ fn bake_face(
     }
 }
 
-fn bake_elements(
+pub(crate) fn bake_elements(
     model: &ResolvedModel,
     rot: Rot,
     uvlock: bool,

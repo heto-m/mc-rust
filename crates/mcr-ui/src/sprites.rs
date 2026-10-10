@@ -251,6 +251,33 @@ impl Sprites {
     pub fn info(&self, id: SpriteId) -> &SpriteInfo {
         &self.infos[id.0 as usize]
     }
+
+    /// Adds an unnamed straight-alpha RGBA image at runtime; `None` when it exceeds an atlas page.
+    pub fn add_raw(&mut self, width: u32, height: u32, rgba: &[u8]) -> Option<SpriteId> {
+        let slot = self.atlas.alloc(width, height)?;
+        self.atlas.write(slot, width, height, rgba);
+        let id = SpriteId(self.infos.len() as u32);
+        self.infos.push(SpriteInfo {
+            page: slot.page,
+            x: slot.x,
+            y: slot.y,
+            width,
+            height,
+            scaling: Scaling::Stretch,
+        });
+        Some(id)
+    }
+
+    /// Overwrites the pixels of a sprite from [`Sprites::add_raw`] with an image of the same size.
+    pub fn rewrite(&mut self, id: SpriteId, rgba: &[u8]) {
+        let info = self.infos[id.0 as usize];
+        let slot = crate::atlas::Slot {
+            page: info.page,
+            x: info.x,
+            y: info.y,
+        };
+        self.atlas.write(slot, info.width, info.height, rgba);
+    }
 }
 
 fn parse_scaling(v: &Value) -> Option<Scaling> {
