@@ -312,23 +312,19 @@ impl ChatScreen {
     }
 
     pub fn handle_click_event(&mut self, event: ClickEvent, out: &mut Vec<ScreenAction>) {
-        match event {
-            ClickEvent::OpenUrl(url) => {
-                if url.starts_with("http://") || url.starts_with("https://") {
-                    out.push(ScreenAction::Push(Box::new(ConfirmScreen::link(url))));
-                }
-            }
-            ClickEvent::RunCommand(command) => {
-                out.push(ScreenAction::SendCommand(
-                    command.strip_prefix('/').unwrap_or(&command).to_owned(),
-                ));
-            }
+        let confirm = match event {
+            ClickEvent::OpenUrl(url) => ConfirmScreen::link(url),
+            ClickEvent::RunCommand(command) => ConfirmScreen::command(&command),
+            ClickEvent::CopyToClipboard(text) => ConfirmScreen::copy(&text),
             ClickEvent::SuggestCommand(text) => {
                 self.edit().set_value(&text);
                 self.edited();
+                None
             }
-            ClickEvent::CopyToClipboard(text) => out.push(ScreenAction::CopyToClipboard(text)),
-            _ => {}
+            _ => None,
+        };
+        if let Some(confirm) = confirm {
+            out.push(ScreenAction::Push(Box::new(confirm)));
         }
     }
 

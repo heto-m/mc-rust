@@ -262,7 +262,7 @@ fn chat_click_events_become_actions() {
     screen.handle_click_event(ClickEvent::CopyToClipboard("abc".into()), &mut out);
     assert!(matches!(
         out.as_slice(),
-        [ScreenAction::SendCommand(c), ScreenAction::CopyToClipboard(t)] if c == "home" && t == "abc"
+        [ScreenAction::Push(_), ScreenAction::Push(_)]
     ));
     screen.handle_click_event(
         ClickEvent::SuggestCommand("/msg Bob ".into()),
@@ -894,4 +894,87 @@ fn server_list_keyboard_selection_scrolls_into_view() {
         out.iter()
             .any(|a| matches!(a, ScreenAction::Connect(addr) if addr == "s19.example.com"))
     );
+}
+
+fn confirm_outcome(mut out: Vec<ScreenAction>, yes: bool) -> Vec<ScreenAction> {
+    let Some(ScreenAction::Push(mut screen)) = out.pop() else {
+        panic!("expected a confirmation screen");
+    };
+    screen.init(W, H);
+    let mut clip = MemoryClipboard::default();
+    let mut env = Env {
+        view: &NoView,
+        clipboard: &mut clip,
+        now_ms: 0,
+    };
+    let mut actions = Vec::new();
+    let x = if yes {
+        213.0 - 155.0 + 75.0
+    } else {
+        213.0 + 5.0 + 75.0
+    };
+    let y = (H / 6 + 96 + 10).max(H / 2 - 50 + 60 + 10) as f32;
+    screen.input(
+        &mut env,
+        &UiInput::press(x, y, MouseButton::Left),
+        &mut actions,
+    );
+    actions
+}
+
+#[test]
+fn server_click_events_never_act_without_confirmation() {
+    let (_, mut screen, _) = chat();
+    for event in [
+        ClickEvent::RunCommand("op me".into()),
+        ClickEvent::OpenUrl("https://example.com".into()),
+        ClickEvent::CopyToClipboard("x".into()),
+    ] {
+        let mut out = Vec::new();
+        screen.handle_click_event(event, &mut out);
+        assert!(matches!(out.as_slice(), [ScreenAction::Push(_)]), "{out:?}");
+    }
+    let mut out = Vec::new();
+    for event in [
+        ClickEvent::OpenFile("/etc/passwd".into()),
+        ClickEvent::ChangePage(3),
+        ClickEvent::ShowDialog(mcr_nbt::Value::String("x".into())),
+    ] {
+        screen.handle_click_event(event, &mut out);
+    }
+    assert!(out.is_empty());
+}
+
+#[test]
+fn confirmed_command_is_exactly_the_displayed_one() {
+    let (_, mut screen, _) = chat();
+    let mut out = Vec::new();
+    screen.handle_click_event(ClickEvent::RunCommand("/say hi".into()), &mut out);
+    let acts = confirm_outcome(out, true);
+    assert!(
+        acts.iter()
+            .any(|a| matches!(a, ScreenAction::SendCommand(c) if c == "say hi")),
+        "{acts:?}"
+    );
+}
+
+#[test]
+fn spoofable_targets_are_rejected() {
+    let (_, mut screen, _) = chat();
+    for event in [
+        ClickEvent::OpenUrl("https://good.com@evil.com/".into()),
+        ClickEvent::OpenUrl("https://exаmple.com".into()),
+        ClickEvent::OpenUrl("https://example.com/\u{202E}gpj".into()),
+        ClickEvent::OpenUrl("javascript:alert(1)".into()),
+        ClickEvent::OpenUrl("https://a.com\\@evil.com".into()),
+        ClickEvent::RunCommand("say hi\u{202E}".into()),
+        ClickEvent::RunCommand("say \u{a7}ahi".into()),
+        ClickEvent::RunCommand("say hi\nop me".into()),
+        ClickEvent::CopyToClipboard("a".repeat(1000)),
+        ClickEvent::CopyToClipboard("rm -rf\u{200B}".into()),
+    ] {
+        let mut out = Vec::new();
+        screen.handle_click_event(event.clone(), &mut out);
+        assert!(out.is_empty(), "{event:?}");
+    }
 }

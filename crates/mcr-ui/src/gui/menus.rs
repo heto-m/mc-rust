@@ -12,6 +12,45 @@ use super::widgets::{Button, WidgetEvent, WidgetEventKind, WidgetSet};
 
 pub(super) const WHITE: u32 = 0xFFFF_FFFF;
 const MAX_LINES: usize = 40;
+const MAX_COMMAND: usize = 256;
+const MAX_COPY: usize = 256;
+const MAX_URL: usize = 512;
+
+/// Printable text only: no controls, `§`, bidi overrides, zero-width or other format characters.
+pub fn is_plain(text: &str) -> bool {
+    text.chars().all(|c| {
+        !c.is_control()
+            && c != '§'
+            && !matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{00AD}')
+    })
+}
+
+/// The host of an http(s) URL with an ASCII-only authority and no userinfo, else `None`.
+pub fn parse_web_url(url: &str) -> Option<String> {
+    if url.len() > MAX_URL || !url.is_ascii() || !is_plain(url) || url.contains(char::is_whitespace)
+    {
+        return None;
+    }
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    if authority.is_empty() || authority.contains(['@', '\\']) {
+        return None;
+    }
+    let host = authority.rsplit_once(':').map_or(authority, |(h, port)| {
+        if port.bytes().all(|b| b.is_ascii_digit()) {
+            h
+        } else {
+            authority
+        }
+    });
+    let valid = !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'[' | b']' | b':'));
+    valid.then(|| host.to_ascii_lowercase())
+}
 
 pub fn draw_dim_background(cx: &mut RenderCx<'_, '_>) {
     let (w, h) = cx.gui_size();
@@ -104,13 +143,14 @@ impl ConfirmScreen {
         }
     }
 
-    /// Open-link confirmation: Yes opens `OpenUrl`, Copy copies the link, No goes back.
-    pub fn link(url: String) -> Self {
+    /// `None` unless `url` is a plain http(s) URL whose displayed text equals what will be opened.
+    pub fn link(url: String) -> Option<Self> {
+        let host = parse_web_url(&url)?;
         let open = url.clone();
         let copy = url.clone();
-        Self::new(
+        Some(Self::new(
             "lang:chat.link.confirm",
-            &format!("{url}\n§7lang:chat.link.warning"),
+            &format!("§e{host}§r\n{url}\n§7lang:chat.link.warning"),
             vec![
                 (
                     "lang:gui.yes".into(),
@@ -122,7 +162,53 @@ impl ConfirmScreen {
                 ),
                 ("lang:gui.no".into(), Box::new(|| vec![ScreenAction::Pop])),
             ],
-        )
+        ))
+    }
+
+    /// `None` unless the command is printable text, so the prompt shows exactly what is sent.
+    pub fn command(command: &str) -> Option<Self> {
+        let command = command.strip_prefix('/').unwrap_or(command);
+        if command.is_empty() || command.chars().count() > MAX_COMMAND || !is_plain(command) {
+            return None;
+        }
+        let run = command.to_owned();
+        Some(Self::new(
+            "lang:chat.link.confirm",
+            &format!("/{command}"),
+            vec![
+                (
+                    "lang:gui.yes".into(),
+                    Box::new(move || {
+                        vec![ScreenAction::SendCommand(run.clone()), ScreenAction::Pop]
+                    }),
+                ),
+                ("lang:gui.no".into(), Box::new(|| vec![ScreenAction::Pop])),
+            ],
+        ))
+    }
+
+    /// `None` unless the text is short and printable.
+    pub fn copy(text: &str) -> Option<Self> {
+        if text.is_empty() || text.chars().count() > MAX_COPY || !is_plain(text) {
+            return None;
+        }
+        let copy = text.to_owned();
+        Some(Self::new(
+            "lang:chat.copy",
+            text,
+            vec![
+                (
+                    "lang:gui.yes".into(),
+                    Box::new(move || {
+                        vec![
+                            ScreenAction::CopyToClipboard(copy.clone()),
+                            ScreenAction::Pop,
+                        ]
+                    }),
+                ),
+                ("lang:gui.no".into(), Box::new(|| vec![ScreenAction::Pop])),
+            ],
+        ))
     }
 
     pub fn with_delay(mut self, ticks: u32) -> Self {
