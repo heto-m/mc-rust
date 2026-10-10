@@ -1,5 +1,5 @@
 const MAGIC: &[u8; 4] = b"MCRD";
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Aabb {
@@ -29,6 +29,7 @@ pub struct BlockTable {
     pub speed_factor: Vec<f32>,
     pub jump_factor: Vec<f32>,
     pub destroy_time: Vec<f32>,
+    pub requires_tool: Vec<u8>,
     pub explosion_resistance: Vec<f32>,
     pub sound_type: Vec<u32>,
     pub prop_start: Vec<u32>,
@@ -56,6 +57,17 @@ pub struct ItemTable {
     pub max_stack_size: Vec<u16>,
     pub max_damage: Vec<u32>,
     pub block: Vec<i32>,
+    pub tool_start: Vec<u32>,
+    pub tool_blocks: Vec<u32>,
+    pub tool_speed: Vec<f32>,
+    pub tool_correct: Vec<u8>,
+    pub tool_default_speed: Vec<f32>,
+    pub tool_damage: Vec<u8>,
+    pub tool_flags: Vec<u8>,
+    pub equip_slot: Vec<u8>,
+    pub consume_seconds: Vec<f32>,
+    pub cooldown_seconds: Vec<f32>,
+    pub food_flags: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -188,6 +200,7 @@ impl Tables {
         w.vec(&b.speed_factor);
         w.vec(&b.jump_factor);
         w.vec(&b.destroy_time);
+        w.vec(&b.requires_tool);
         w.vec(&b.explosion_resistance);
         w.vec(&b.sound_type);
         w.vec(&b.prop_start);
@@ -220,6 +233,18 @@ impl Tables {
         w.vec(&self.items.max_stack_size);
         w.vec(&self.items.max_damage);
         w.vec(&self.items.block);
+        let i = &self.items;
+        w.vec(&i.tool_start);
+        w.vec(&i.tool_blocks);
+        w.vec(&i.tool_speed);
+        w.vec(&i.tool_correct);
+        w.vec(&i.tool_default_speed);
+        w.vec(&i.tool_damage);
+        w.vec(&i.tool_flags);
+        w.vec(&i.equip_slot);
+        w.vec(&i.consume_seconds);
+        w.vec(&i.cooldown_seconds);
+        w.vec(&i.food_flags);
         w.vec(&self.entities.width);
         w.vec(&self.entities.height);
         w.vec(&self.entities.eye_height);
@@ -271,6 +296,7 @@ impl Tables {
             speed_factor: r.vec()?,
             jump_factor: r.vec()?,
             destroy_time: r.vec()?,
+            requires_tool: r.vec()?,
             explosion_resistance: r.vec()?,
             sound_type: r.vec()?,
             prop_start: r.vec()?,
@@ -312,6 +338,17 @@ impl Tables {
             max_stack_size: r.vec()?,
             max_damage: r.vec()?,
             block: r.vec()?,
+            tool_start: r.vec()?,
+            tool_blocks: r.vec()?,
+            tool_speed: r.vec()?,
+            tool_correct: r.vec()?,
+            tool_default_speed: r.vec()?,
+            tool_damage: r.vec()?,
+            tool_flags: r.vec()?,
+            equip_slot: r.vec()?,
+            consume_seconds: r.vec()?,
+            cooldown_seconds: r.vec()?,
+            food_flags: r.vec()?,
         };
         let entities = EntityTable {
             width: r.vec()?,

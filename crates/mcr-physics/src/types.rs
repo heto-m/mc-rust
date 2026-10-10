@@ -70,6 +70,22 @@ impl Default for Attributes {
     }
 }
 
+/// The `use_effects` of the item being used; slows and optionally forbids sprinting.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ItemUse {
+    pub can_sprint: bool,
+    pub speed_multiplier: f32,
+}
+
+impl Default for ItemUse {
+    fn default() -> Self {
+        Self {
+            can_sprint: false,
+            speed_multiplier: 0.2,
+        }
+    }
+}
+
 /// Amplifier is the vanilla zero-based level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Effects {

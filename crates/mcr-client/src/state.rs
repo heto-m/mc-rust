@@ -40,6 +40,12 @@ impl Outbox {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cooldown {
+    pub ends_at: u64,
+    pub total: i32,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClockState {
     pub ticks: f64,
@@ -262,7 +268,12 @@ pub struct ClientState {
     pub commands: crate::commands::CommandTree,
     pub command_reply: Option<CommandReply>,
     pub block_ack_sequence: i32,
-    pub cooldowns: FxHashMap<String, i32>,
+    pub predictions: crate::digging::BlockPredictions,
+    pub cooldowns: FxHashMap<String, Cooldown>,
+    pub gameplay: crate::gamestate::GameplayState,
+    pub game_ticks: u64,
+    pub controlled_vehicle: Option<i32>,
+    pub vehicle_corrections: u32,
     pub chunk_batches: ChunkBatchSizeCalculator,
     pub chunks_received: u64,
     pub unhandled: FxHashMap<&'static str, u64>,
@@ -288,6 +299,34 @@ pub fn default_world_config(
 }
 
 impl ClientState {
+    /// Remaining fraction of the cooldown covering the stack, if any.
+    pub fn cooldown_progress(&self, stack: &mcr_protocol::types::ItemStack) -> Option<f32> {
+        let key = self.cooldown_group(stack)?;
+        let c = self.cooldowns.get(&key)?;
+        let left = c.ends_at.checked_sub(self.game_ticks)?;
+        (left > 0).then(|| left as f32 / c.total.max(1) as f32)
+    }
+
+    pub fn is_on_cooldown(&self, stack: &mcr_protocol::types::ItemStack) -> bool {
+        self.cooldown_progress(stack).is_some()
+    }
+
+    fn cooldown_group(&self, stack: &mcr_protocol::types::ItemStack) -> Option<String> {
+        use mcr_protocol::types::component::DataComponent;
+        if stack.is_empty() {
+            return None;
+        }
+        for c in &stack.components.added {
+            if let DataComponent::UseCooldown(u) = c
+                && let Some(g) = &u.cooldown_group
+            {
+                return Some(g.as_str().to_owned());
+            }
+        }
+        let name = self.data.item_name(u32::try_from(stack.item).ok()?)?;
+        Some(name.to_owned())
+    }
+
     pub fn new(config: &ClientConfig, uuid: Uuid) -> Self {
         let data = mcr_data::v26_3();
         let chunks = ChunkStore::new(
@@ -316,7 +355,12 @@ impl ClientState {
             commands: crate::commands::CommandTree::default(),
             command_reply: None,
             block_ack_sequence: 0,
+            predictions: crate::digging::BlockPredictions::default(),
             cooldowns: FxHashMap::default(),
+            gameplay: crate::gamestate::GameplayState::default(),
+            game_ticks: 0,
+            controlled_vehicle: None,
+            vehicle_corrections: 0,
             chunk_batches: ChunkBatchSizeCalculator::default(),
             chunks_received: 0,
             unhandled: FxHashMap::default(),
@@ -366,6 +410,9 @@ impl ClientState {
     }
 
     pub fn tick(&mut self) {
+        self.game_ticks += 1;
+        let now = self.game_ticks;
+        self.cooldowns.retain(|_, c| c.ends_at > now);
         self.entities.tick();
         self.world.tick();
     }

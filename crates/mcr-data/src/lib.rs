@@ -10,7 +10,7 @@ pub use tables::{Aabb, DecodeError};
 pub use version::{
     BlockId, BlockInfo, BlockStateInfo, Direction, EntityTypeId, EntityTypeInfo, FluidId,
     FluidStateInfo, ItemId, ItemInfo, ProtocolState, RegistryView, StateId, StateProperties,
-    Version,
+    ToolInfo, ToolRuleInfo, Version,
 };
 
 pub fn v26_3() -> &'static Version {

@@ -12,12 +12,16 @@ mod player;
 mod tick;
 mod trig;
 mod types;
+mod vehicle;
 mod world;
 
 pub use aabb::Aabb;
 pub use data::{PhysicsData, StateInfo, flag};
 pub use player::PlayerPhysics;
-pub use types::{Abilities, Attributes, Effects, MoveKind, MovementOutput, PlayerInput, Pose};
+pub use types::{
+    Abilities, Attributes, Effects, ItemUse, MoveKind, MovementOutput, PlayerInput, Pose,
+};
+pub use vehicle::{Boat, BoatStatus, Mount};
 pub use world::CollisionWorld;
 
 #[cfg(test)]

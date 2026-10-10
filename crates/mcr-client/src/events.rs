@@ -33,6 +33,19 @@ pub enum ClientEvent {
     },
     Disconnected(DisconnectReason),
 
+    RecipeBookUpdated,
+    AdvancementsUpdated,
+    MapUpdated(i32),
+    MerchantOffersUpdated,
+    StatsUpdated,
+    SignEditorOpened {
+        pos: BlockPos,
+        side: mcr_protocol::types::game::SignSide,
+    },
+    BookOpened {
+        hand: mcr_protocol::types::game::Hand,
+    },
+
     ChunkLoaded(ChunkPos),
     ChunkUnloaded(ChunkPos),
     LightUpdated(ChunkPos),

@@ -12,11 +12,14 @@ use crate::client::Client;
 use crate::error::Result;
 use crate::inventory::PLAYER_MENU_ID;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Digging {
     pub pos: BlockPos,
     pub face: Facing,
     pub started_tick: u64,
+    pub item: ItemStack,
+    pub progress: f32,
+    pub ticks: u32,
 }
 
 fn now_millis() -> i64 {
@@ -99,37 +102,186 @@ impl Client {
         self.use_item_on(Hand::Main, against, face, [0.5, 0.5, 0.5], false)
     }
 
-    pub fn start_digging(&mut self, pos: BlockPos, face: Facing) -> Result<()> {
+    /// Vanilla `MultiPlayerGameMode#startDestroyBlock`; false when the action is restricted.
+    pub fn start_destroy(&mut self, pos: BlockPos, face: Facing) -> Result<bool> {
+        if !self.can_act_on_block(pos) {
+            return Ok(false);
+        }
+        if self.state.player.instabuild {
+            let sequence = self.next_sequence();
+            self.destroy_block_local(pos, sequence);
+            self.destroy_delay = 5;
+            self.send_play(&S::PlayerAction(sb::PlayerAction {
+                action: sb::PlayerActionKind::StartDestroyBlock,
+                pos,
+                face,
+                sequence,
+            }))?;
+            return Ok(true);
+        }
+        if self
+            .digging
+            .as_ref()
+            .is_some_and(|d| d.pos == pos && d.item == *self.state.held_stack())
+        {
+            return Ok(true);
+        }
+        if let Some(old) = self.digging.take() {
+            self.send_play(&S::PlayerAction(sb::PlayerAction {
+                action: sb::PlayerActionKind::AbortDestroyBlock,
+                pos: old.pos,
+                face,
+                sequence: 0,
+            }))?;
+        }
         let sequence = self.next_sequence();
-        self.digging = Some(crate::actions::Digging {
-            pos,
-            face,
-            started_tick: self.ticks,
-        });
+        let progress = self.state.destroy_progress(pos);
+        if progress.is_some_and(|p| p >= 1.0) {
+            self.destroy_block_local(pos, sequence);
+        } else {
+            self.digging = Some(Digging {
+                pos,
+                face,
+                started_tick: self.ticks,
+                item: self.state.held_stack().clone(),
+                progress: 0.0,
+                ticks: 0,
+            });
+        }
         self.send_play(&S::PlayerAction(sb::PlayerAction {
             action: sb::PlayerActionKind::StartDestroyBlock,
             pos,
             face,
             sequence,
+        }))?;
+        Ok(true)
+    }
+
+    /// Vanilla `continueDestroyBlock`, called every tick while the attack key is held on a block.
+    pub fn continue_destroy(&mut self, pos: BlockPos, face: Facing) -> Result<bool> {
+        if self.destroy_delay > 0 {
+            self.destroy_delay -= 1;
+            return Ok(true);
+        }
+        if self.state.player.instabuild && self.can_act_on_block(pos) {
+            self.destroy_delay = 5;
+            let sequence = self.next_sequence();
+            self.destroy_block_local(pos, sequence);
+            self.send_play(&S::PlayerAction(sb::PlayerAction {
+                action: sb::PlayerActionKind::StartDestroyBlock,
+                pos,
+                face,
+                sequence,
+            }))?;
+            return Ok(true);
+        }
+        let same = self
+            .digging
+            .as_ref()
+            .is_some_and(|d| d.pos == pos && d.item == *self.state.held_stack());
+        if !same {
+            return self.start_destroy(pos, face);
+        }
+        let Some(step) = self.state.destroy_progress(pos) else {
+            self.digging = None;
+            return Ok(false);
+        };
+        let Some(d) = self.digging.as_mut() else {
+            return Ok(false);
+        };
+        d.progress += step;
+        d.ticks += 1;
+        if d.progress >= 1.0 {
+            self.digging = None;
+            let sequence = self.next_sequence();
+            self.destroy_block_local(pos, sequence);
+            self.destroy_delay = 5;
+            self.send_play(&S::PlayerAction(sb::PlayerAction {
+                action: sb::PlayerActionKind::StopDestroyBlock,
+                pos,
+                face,
+                sequence,
+            }))?;
+        } else if d.face != face {
+            d.face = face;
+            self.send_play(&S::PlayerAction(sb::PlayerAction {
+                action: sb::PlayerActionKind::ChangeDestroyDirection,
+                pos,
+                face,
+                sequence: 0,
+            }))?;
+        }
+        Ok(true)
+    }
+
+    /// Attack key released: vanilla `stopDestroyBlock`.
+    pub fn stop_destroy(&mut self) -> Result<()> {
+        let Some(d) = self.digging.take() else {
+            return Ok(());
+        };
+        self.send_play(&S::PlayerAction(sb::PlayerAction {
+            action: sb::PlayerActionKind::AbortDestroyBlock,
+            pos: d.pos,
+            face: Facing::Down,
+            sequence: 0,
         }))
+    }
+
+    fn can_act_on_block(&self, pos: BlockPos) -> bool {
+        use mcr_protocol::types::game::GameType;
+        let p = &self.state.player;
+        if matches!(p.game_mode, GameType::Adventure | GameType::Spectator) {
+            return false;
+        }
+        let b = &self.state.world.border;
+        let half = b.size / 2.0;
+        let (x, z) = (f64::from(pos.x) + 0.5, f64::from(pos.z) + 0.5);
+        (x - b.center_x).abs() <= half && (z - b.center_z).abs() <= half
+    }
+
+    fn destroy_block_local(&mut self, pos: BlockPos, sequence: i32) {
+        let Some(old) = self.state.chunks.block(pos.x, pos.y, pos.z) else {
+            return;
+        };
+        let held = self.state.held_stack();
+        if self.state.player.instabuild
+            && u32::try_from(held.item)
+                .ok()
+                .and_then(|i| self.state.data.item_tool(i))
+                .is_some_and(|t| !t.can_destroy_blocks_in_creative)
+        {
+            return;
+        }
+        if self
+            .state
+            .data
+            .block_state(u32::from(old.0))
+            .is_none_or(|i| i.is_air())
+        {
+            return;
+        }
+        let after = self.state.state_after_break(old);
+        self.state.predict_block(pos, after, sequence);
+    }
+
+    /// Starts breaking; stays in the digging state unless the block breaks instantly.
+    pub fn start_digging(&mut self, pos: BlockPos, face: Facing) -> Result<()> {
+        self.start_destroy(pos, face).map(|_| ())
     }
 
     /// Creative break: the server removes the block on the start action, no digging state is kept.
     pub fn break_instantly(&mut self, pos: BlockPos, face: Facing) -> Result<()> {
-        let sequence = self.next_sequence();
-        self.send_play(&S::PlayerAction(sb::PlayerAction {
-            action: sb::PlayerActionKind::StartDestroyBlock,
-            pos,
-            face,
-            sequence,
-        }))
+        self.start_destroy(pos, face).map(|_| ())
     }
 
+    /// Sends the finishing action for the current dig and predicts the broken block.
     pub fn finish_digging(&mut self) -> Result<()> {
         let Some(d) = self.digging.take() else {
             return Ok(());
         };
         let sequence = self.next_sequence();
+        self.destroy_block_local(d.pos, sequence);
+        self.destroy_delay = 5;
         self.send_play(&S::PlayerAction(sb::PlayerAction {
             action: sb::PlayerActionKind::StopDestroyBlock,
             pos: d.pos,
@@ -139,35 +291,23 @@ impl Client {
     }
 
     pub fn abort_digging(&mut self) -> Result<()> {
-        let Some(d) = self.digging.take() else {
-            return Ok(());
-        };
-        let sequence = self.next_sequence();
-        self.send_play(&S::PlayerAction(sb::PlayerAction {
-            action: sb::PlayerActionKind::AbortDestroyBlock,
-            pos: d.pos,
-            face: d.face,
-            sequence,
-        }))
+        self.stop_destroy()
     }
 
-    pub fn digging(&self) -> Option<Digging> {
-        self.digging
+    pub fn digging(&self) -> Option<&Digging> {
+        self.digging.as_ref()
     }
 
-    /// Ticks to hold the break with an empty hand; 1 when instant (creative) and `None` if unbreakable.
+    /// Ticks of holding the break after the start action until the block gives way; 1 when instant.
     pub fn estimate_dig_ticks(&self, pos: BlockPos) -> Option<u32> {
         if self.state.player.instabuild {
             return Some(1);
         }
-        let data = self.state.data;
-        let state = self.state.chunks.block(pos.x, pos.y, pos.z)?;
-        let block = data.block_state(u32::from(state.0))?.block;
-        let hardness = data.block_info(block)?.destroy_time;
-        if hardness < 0.0 {
+        let p = self.state.destroy_progress(pos)?;
+        if p <= 0.0 {
             return None;
         }
-        Some((hardness * 30.0).ceil() as u32 + 2)
+        Some(((1.0 / p).ceil() as u32).clamp(1, 1 << 20))
     }
 
     fn simple_action(&mut self, action: sb::PlayerActionKind) -> Result<()> {
@@ -220,6 +360,7 @@ impl Client {
             return Ok(());
         }
         self.state.player.held_slot = slot;
+        self.stop_using_local();
         self.send_play(&S::SetCarriedItem(sb::SetCarriedItem {
             slot: i16::from(slot),
         }))
@@ -239,11 +380,12 @@ impl Client {
             Some(c) => (c.id, c.state_id),
             None => (PLAYER_MENU_ID, self.state.inventory.player.state_id),
         };
-        let data = self.state.data;
+        let creative = self.state.player.instabuild;
+        let cx = crate::hashing::HashCx::new(self.state.data, &self.state.registries);
         let prediction =
             self.state
                 .inventory
-                .predict_click(data, container_id, slot, button, input);
+                .predict_click(&cx, creative, container_id, slot, button, input);
         self.send_play(&S::ContainerClick(sb::ContainerClick {
             container_id,
             state_id,
@@ -327,23 +469,6 @@ impl Client {
                 new_state: enabled,
             },
         ))
-    }
-
-    pub fn select_trade(&mut self, index: i32) -> Result<()> {
-        self.send_play(&S::SelectTrade(sb::SelectTrade { item: index }))
-    }
-
-    pub fn rename_item(&mut self, name: &str) -> Result<()> {
-        self.send_play(&S::RenameItem(sb::RenameItem {
-            name: name.chars().take(50).collect(),
-        }))
-    }
-
-    pub fn set_beacon(&mut self, primary: Option<i32>, secondary: Option<i32>) -> Result<()> {
-        self.send_play(&S::SetBeacon(sb::SetBeacon {
-            primary: primary.map(mcr_buf::VarInt),
-            secondary: secondary.map(mcr_buf::VarInt),
-        }))
     }
 
     pub fn request_command_suggestions(&mut self, id: i32, command: &str) -> Result<()> {

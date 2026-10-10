@@ -1,10 +1,7 @@
-use mcr_buf::LengthPrefixed;
-use mcr_buf::VarInt;
-use mcr_data::Version;
 use mcr_protocol::play::serverbound::{ChangedSlot, ContainerInput};
 use mcr_protocol::types::Component;
 use mcr_protocol::types::ItemStack;
-use mcr_protocol::types::item::{HashedItem, HashedPatchMap, HashedStack};
+use mcr_protocol::types::item::HashedStack;
 use rustc_hash::FxHashMap;
 
 pub const PLAYER_MENU_ID: i32 = 0;
@@ -43,6 +40,11 @@ pub struct Inventory {
     pub player: Container,
     pub open: Option<Container>,
     pub cursor: ItemStack,
+    pub(crate) qc: crate::menu::QuickCraft,
+    /// Slots the server overwrote with something other than the local prediction.
+    pub corrections: u64,
+    /// Every `container_set_slot`/`container_set_content` applied.
+    pub server_updates: u64,
 }
 
 impl Default for Inventory {
@@ -51,6 +53,9 @@ impl Default for Inventory {
             player: Container::new(PLAYER_MENU_ID, PLAYER_MENU_SLOTS),
             open: None,
             cursor: ItemStack::default(),
+            qc: crate::menu::QuickCraft::default(),
+            corrections: 0,
+            server_updates: 0,
         }
     }
 }
@@ -92,11 +97,13 @@ impl Inventory {
         container.menu_type = Some(menu_type);
         container.title = title;
         self.open = Some(container);
+        self.qc = crate::menu::QuickCraft::default();
     }
 
     pub fn close(&mut self, id: i32) -> bool {
         if self.open.as_ref().is_some_and(|c| c.id == id) {
             self.open = None;
+            self.qc = crate::menu::QuickCraft::default();
             true
         } else {
             false
@@ -110,7 +117,7 @@ impl Inventory {
         items: Vec<ItemStack>,
         cursor: ItemStack,
     ) -> bool {
-        self.cursor = cursor;
+        self.server_updates += 1;
         let Some(container) = self.container_mut(id) else {
             return false;
         };
@@ -120,7 +127,16 @@ impl Inventory {
             items.resize(PLAYER_MENU_SLOTS, ItemStack::default());
         }
         container.state_id = state_id;
+        let differing = container
+            .slots
+            .iter()
+            .zip(items.iter())
+            .filter(|(a, b)| a != b)
+            .count() as u64;
         container.slots = items;
+        self.corrections += differing;
+        self.cursor = cursor;
+        self.qc = crate::menu::QuickCraft::default();
         if id != PLAYER_MENU_ID {
             self.mirror_player_slots();
         }
@@ -128,6 +144,7 @@ impl Inventory {
     }
 
     pub fn set_slot(&mut self, id: i32, state_id: i32, slot: i16, item: ItemStack) -> bool {
+        self.server_updates += 1;
         let Some(container) = self.container_mut(id) else {
             return false;
         };
@@ -138,7 +155,9 @@ impl Inventory {
         else {
             return false;
         };
+        let differs = *target != item;
         *target = item;
+        self.corrections += u64::from(differs);
         if id != PLAYER_MENU_ID {
             self.mirror_player_slots();
         }
@@ -171,37 +190,15 @@ impl Inventory {
     }
 }
 
-pub fn same_item(a: &ItemStack, b: &ItemStack) -> bool {
-    a.item == b.item && a.components == b.components
-}
-
-fn max_stack(data: &Version, item: &ItemStack) -> i32 {
-    u32::try_from(item.item)
-        .ok()
-        .and_then(|i| data.item_info(i))
-        .map_or(64, |info| i32::from(info.max_stack_size).max(1))
-}
-
-pub fn hash_stack(stack: &ItemStack) -> HashedStack {
-    if stack.is_empty() {
-        return HashedStack::Empty;
+fn clamp_count(stack: &mut ItemStack) {
+    if stack.count <= 0 {
+        *stack = ItemStack::default();
+    } else {
+        stack.count = stack.count.min(MAX_STACK_COUNT);
     }
-    HashedStack::Item(HashedItem {
-        item: stack.item,
-        count: stack.count,
-        components: HashedPatchMap {
-            added: LengthPrefixed(Vec::new()),
-            removed: LengthPrefixed(
-                stack
-                    .components
-                    .removed
-                    .iter()
-                    .map(|&i| VarInt(i))
-                    .collect(),
-            ),
-        },
-    })
 }
+
+pub const MAX_STACK_COUNT: i32 = 99;
 
 /// Outcome of predicting a click locally.
 #[derive(Debug, Clone, PartialEq)]
@@ -211,46 +208,82 @@ pub struct ClickPrediction {
 }
 
 impl Inventory {
-    /// Applies the click to the local copy (pickup, hotbar swap and drop only) and describes the result.
-    /// Other modes send no predicted changes, so the server answers with a resync.
+    /// Applies the click to the local copy the way vanilla's `AbstractContainerMenu#clicked` does and
+    /// describes the result. Menus with recipe-dependent slots leave the local state untouched.
     pub fn predict_click(
         &mut self,
-        data: &Version,
+        ctx: &crate::hashing::HashCx<'_>,
+        creative: bool,
         container_id: i32,
         slot: i16,
         button: i8,
         input: ContainerInput,
     ) -> ClickPrediction {
         let mut changed: Vec<usize> = Vec::new();
-        let result_slot_of_player_menu = container_id == PLAYER_MENU_ID && slot == 0;
-        if let Some(container) = self.container(container_id).cloned()
-            && !result_slot_of_player_menu
-        {
+        if let Some(container) = self.container(container_id).cloned() {
+            let before = container.slots.clone();
             let mut slots = container.slots;
-            let mut cursor = std::mem::take(&mut self.cursor);
-            match input {
-                ContainerInput::Pickup => {
-                    simulate_pickup(data, &mut slots, &mut cursor, slot, button, &mut changed)
+            let mut cursor = self.cursor.clone();
+            let mut offhand = self
+                .player
+                .slots
+                .get(OFFHAND_MENU_SLOT)
+                .cloned()
+                .unwrap_or_default();
+            slots
+                .iter_mut()
+                .chain([&mut cursor, &mut offhand])
+                .for_each(clamp_count);
+            let layout = crate::menu::Layout::from_menu(
+                ctx.data,
+                container_id,
+                container.menu_type,
+                slots.len(),
+            );
+            let n = slots.len();
+            let is_player = container_id == PLAYER_MENU_ID;
+            let hotbar = move |b: i8| {
+                let b = usize::try_from(b).ok()?;
+                if is_player {
+                    Some(HOTBAR_START + b)
+                } else {
+                    n.checked_sub(9).map(|s| s + b)
                 }
-                ContainerInput::Swap => simulate_swap(
-                    &mut slots,
-                    container_id == PLAYER_MENU_ID,
-                    slot,
-                    button,
-                    &mut changed,
-                ),
-                ContainerInput::Throw => {
-                    simulate_throw(&mut slots, slot, button, &mut changed);
+            };
+            let mut qc = std::mem::take(&mut self.qc);
+            let unknown = {
+                let mut menu = crate::menu::Menu {
+                    rules: crate::menu::Rules {
+                        data: ctx.data,
+                        creative,
+                    },
+                    layout,
+                    slots: &mut slots,
+                    cursor: &mut cursor,
+                    offhand: &mut offhand,
+                    qc: &mut qc,
+                    unknown: false,
+                };
+                menu.click(slot, button, input, &hotbar);
+                menu.unknown
+            };
+            self.qc = qc;
+            if !unknown {
+                changed = (0..slots.len())
+                    .filter(|&i| before.get(i) != slots.get(i))
+                    .collect();
+                self.cursor = cursor;
+                if !is_player && let Some(o) = self.player.slots.get_mut(OFFHAND_MENU_SLOT) {
+                    *o = offhand;
                 }
-                _ => {}
-            }
-            self.cursor = cursor;
-            if let Some(c) = self.container_mut(container_id) {
-                c.slots = slots;
+                if let Some(c) = self.container_mut(container_id) {
+                    c.slots = slots;
+                }
+                if !is_player {
+                    self.mirror_player_slots();
+                }
             }
         }
-        changed.sort_unstable();
-        changed.dedup();
         let container = self.container(container_id);
         let changed_slots = changed
             .into_iter()
@@ -258,145 +291,15 @@ impl Inventory {
                 let item = container?.slots.get(i)?;
                 Some(ChangedSlot {
                     slot: i as i16,
-                    item: hash_stack(item),
+                    item: ctx.hash_stack(item),
                 })
             })
             .collect();
         ClickPrediction {
             changed_slots,
-            carried: hash_stack(&self.cursor),
+            carried: ctx.hash_stack(&self.cursor),
         }
     }
-}
-
-fn take_half(stack: &mut ItemStack) -> ItemStack {
-    let taken = (stack.count + 1) / 2;
-    let mut out = stack.clone();
-    out.count = taken;
-    stack.count -= taken;
-    if stack.count <= 0 {
-        *stack = ItemStack::default();
-    }
-    out
-}
-
-fn split_one(stack: &mut ItemStack) -> ItemStack {
-    let mut out = stack.clone();
-    out.count = 1;
-    stack.count -= 1;
-    if stack.count <= 0 {
-        *stack = ItemStack::default();
-    }
-    out
-}
-
-fn simulate_pickup(
-    data: &Version,
-    slots: &mut [ItemStack],
-    cursor: &mut ItemStack,
-    slot: i16,
-    button: i8,
-    changed: &mut Vec<usize>,
-) {
-    if slot == OUTSIDE_SLOT {
-        if !cursor.is_empty() {
-            if button == 0 {
-                *cursor = ItemStack::default();
-            } else {
-                split_one(cursor);
-            }
-        }
-        return;
-    }
-    let Some(index) = usize::try_from(slot).ok().filter(|&i| i < slots.len()) else {
-        return;
-    };
-    let target = &mut slots[index];
-    match (target.is_empty(), cursor.is_empty()) {
-        (true, true) => {}
-        (false, true) => {
-            *cursor = if button == 0 {
-                std::mem::take(target)
-            } else {
-                take_half(target)
-            };
-            changed.push(index);
-        }
-        (true, false) => {
-            let limit = max_stack(data, cursor);
-            let amount = if button == 0 { cursor.count } else { 1 }.min(limit);
-            let mut placed = cursor.clone();
-            placed.count = amount;
-            cursor.count -= amount;
-            if cursor.count <= 0 {
-                *cursor = ItemStack::default();
-            }
-            *target = placed;
-            changed.push(index);
-        }
-        (false, false) => {
-            if same_item(target, cursor) {
-                let limit = max_stack(data, target);
-                let room = (limit - target.count).max(0);
-                let amount = if button == 0 { cursor.count } else { 1 }.min(room);
-                target.count += amount;
-                cursor.count -= amount;
-                if cursor.count <= 0 {
-                    *cursor = ItemStack::default();
-                }
-                if amount > 0 {
-                    changed.push(index);
-                }
-            } else if cursor.count <= max_stack(data, cursor) {
-                std::mem::swap(target, cursor);
-                changed.push(index);
-            }
-        }
-    }
-}
-
-fn simulate_swap(
-    slots: &mut [ItemStack],
-    player_menu: bool,
-    slot: i16,
-    button: i8,
-    changed: &mut Vec<usize>,
-) {
-    let Some(a) = usize::try_from(slot).ok().filter(|&i| i < slots.len()) else {
-        return;
-    };
-    let n = slots.len();
-    let hotbar_start = if player_menu {
-        HOTBAR_START
-    } else {
-        n.saturating_sub(9)
-    };
-    let b = match button {
-        0..=8 if n >= 36 => hotbar_start + button as usize,
-        40 if player_menu => OFFHAND_MENU_SLOT,
-        _ => return,
-    };
-    if a == b || b >= n {
-        return;
-    }
-    slots.swap(a, b);
-    changed.push(a);
-    changed.push(b);
-}
-
-fn simulate_throw(slots: &mut [ItemStack], slot: i16, button: i8, changed: &mut Vec<usize>) {
-    let Some(index) = usize::try_from(slot).ok().filter(|&i| i < slots.len()) else {
-        return;
-    };
-    if slots[index].is_empty() {
-        return;
-    }
-    if button == 0 {
-        split_one(&mut slots[index]);
-    } else {
-        slots[index] = ItemStack::default();
-    }
-    changed.push(index);
 }
 
 #[cfg(test)]
@@ -407,8 +310,12 @@ mod tests {
         ItemStack::new(item, count)
     }
 
-    fn data() -> &'static Version {
-        mcr_data::v26_3()
+    fn cx() -> crate::hashing::HashCx<'static> {
+        static REG: std::sync::OnceLock<crate::registry::Registries> = std::sync::OnceLock::new();
+        crate::hashing::HashCx::new(
+            mcr_data::v26_3(),
+            REG.get_or_init(crate::registry::Registries::default),
+        )
     }
 
     #[test]
@@ -425,11 +332,11 @@ mod tests {
     fn pickup_and_place_round_trip() {
         let mut inv = Inventory::default();
         inv.player.slots[10] = stack(1, 10);
-        let p = inv.predict_click(data(), 0, 10, 0, ContainerInput::Pickup);
+        let p = inv.predict_click(&cx(), false, 0, 10, 0, ContainerInput::Pickup);
         assert_eq!(inv.cursor.count, 10);
         assert!(inv.player.slots[10].is_empty());
         assert_eq!(p.changed_slots.len(), 1);
-        inv.predict_click(data(), 0, 11, 1, ContainerInput::Pickup);
+        inv.predict_click(&cx(), false, 0, 11, 1, ContainerInput::Pickup);
         assert_eq!(inv.player.slots[11].count, 1);
         assert_eq!(inv.cursor.count, 9);
     }
@@ -438,7 +345,7 @@ mod tests {
     fn right_click_takes_the_larger_half() {
         let mut inv = Inventory::default();
         inv.player.slots[10] = stack(1, 5);
-        inv.predict_click(data(), 0, 10, 1, ContainerInput::Pickup);
+        inv.predict_click(&cx(), false, 0, 10, 1, ContainerInput::Pickup);
         assert_eq!((inv.cursor.count, inv.player.slots[10].count), (3, 2));
     }
 
@@ -447,7 +354,7 @@ mod tests {
         let mut inv = Inventory::default();
         inv.player.slots[10] = stack(1, 2);
         inv.player.slots[36] = stack(2, 3);
-        let p = inv.predict_click(data(), 0, 10, 0, ContainerInput::Swap);
+        let p = inv.predict_click(&cx(), false, 0, 10, 0, ContainerInput::Swap);
         assert_eq!(inv.player.slots[10].item, 2);
         assert_eq!(inv.player.slots[36].item, 1);
         assert_eq!(p.changed_slots.len(), 2);
@@ -459,7 +366,7 @@ mod tests {
             cursor: stack(1, 4),
             ..Inventory::default()
         };
-        let p = inv.predict_click(data(), 0, OUTSIDE_SLOT, 0, ContainerInput::Pickup);
+        let p = inv.predict_click(&cx(), false, 0, OUTSIDE_SLOT, 0, ContainerInput::Pickup);
         assert!(inv.cursor.is_empty());
         assert_eq!(p.carried, HashedStack::Empty);
     }

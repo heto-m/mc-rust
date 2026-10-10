@@ -5,16 +5,31 @@ mod batch;
 mod client;
 pub mod commands;
 mod config;
+mod digging;
+#[cfg(test)]
+mod digging_tests;
+mod edits;
 mod entity;
 mod error;
 mod events;
+mod gamestate;
+#[cfg(test)]
+mod gamestate_tests;
 mod handler;
+pub mod hashing;
 mod inventory;
+mod menu;
+#[cfg(test)]
+mod menu_tests;
 mod player;
 mod registry;
+mod riding;
 pub mod script;
 mod social;
 mod state;
+mod use_item;
+#[cfg(test)]
+mod use_item_tests;
 
 pub use actions::Digging;
 pub use batch::ChunkBatchSizeCalculator;
@@ -24,10 +39,14 @@ pub use config::{ClientConfig, OnlineAuth, ResourcePackPolicy};
 pub use entity::{AttributeState, Entities, Entity, MobEffect};
 pub use error::{ClientError, Result};
 pub use events::{ChatKind, ClientEvent, DisconnectReason, sanitize_for_log};
-pub use inventory::{Container, Inventory};
+pub use gamestate::{
+    Advancements, GameplayState, MapData, Merchant, RecipeBook, SignEditor, Waypoints,
+};
+pub use inventory::{Container, Inventory, OUTSIDE_SLOT, PLAYER_MENU_ID};
 pub use mcr_physics::PlayerInput;
 pub use player::LocalPlayer;
 pub use registry::{Dimension, Registries, Registry, RegistryItem};
+pub use riding::{Ride, Sim};
 pub use social::{
     BossBar, ChatMessage, ChatState, Objective, PlayerInfo, PlayerList, Score, Scoreboard, TabList,
     Team, Titles,
@@ -35,3 +54,4 @@ pub use social::{
 pub use state::{
     ClientState, CommandReply, Outbox, ServerInfo, SpawnPoint, WorldBorder, WorldInfo,
 };
+pub use use_item::{UseKind, UseResult, UseTarget, UsingItem};

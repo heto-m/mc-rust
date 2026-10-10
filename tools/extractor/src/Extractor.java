@@ -73,6 +73,7 @@ public final class Extractor {
                 w.print(",\"speed_factor\":" + block.getSpeedFactor());
                 w.print(",\"jump_factor\":" + block.getJumpFactor());
                 w.print(",\"destroy_time\":" + block.defaultDestroyTime());
+                w.print(",\"requires_tool\":" + def.requiresCorrectToolForDrops());
                 w.print(",\"explosion_resistance\":" + block.getExplosionResistance());
                 w.print(",\"sound_type\":" + str(def.getSoundType().getBreakSound().location().toString()));
                 w.print(",\"states\":[");

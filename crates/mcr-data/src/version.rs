@@ -102,6 +102,7 @@ pub struct BlockInfo<'a> {
     pub speed_factor: f32,
     pub jump_factor: f32,
     pub destroy_time: f32,
+    pub requires_correct_tool: bool,
     pub explosion_resistance: f32,
     pub sound_type: &'a str,
 }
@@ -111,6 +112,41 @@ pub struct ItemInfo {
     pub max_stack_size: u16,
     pub max_damage: u32,
     pub block: Option<BlockId>,
+}
+
+/// Default `tool` component of an item; `blocks` is a block name or `#tag`.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolInfo<'a> {
+    pub default_mining_speed: f32,
+    pub damage_per_block: u8,
+    pub can_destroy_blocks_in_creative: bool,
+    owner: &'a Version,
+    rules: (usize, usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToolRuleInfo<'a> {
+    pub blocks: &'a str,
+    pub speed: Option<f32>,
+    pub correct_for_drops: Option<bool>,
+}
+
+impl<'a> ToolInfo<'a> {
+    pub fn rules(&self) -> impl Iterator<Item = ToolRuleInfo<'a>> + 'a {
+        let owner = self.owner;
+        let (start, end) = self.rules;
+        (start..end).map(move |i| {
+            let t = &owner.tables.items;
+            ToolRuleInfo {
+                blocks: owner.string(t.tool_blocks[i]),
+                speed: Some(t.tool_speed[i]).filter(|v| *v >= 0.0),
+                correct_for_drops: match t.tool_correct[i] {
+                    0 => None,
+                    n => Some(n == 2),
+                },
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -307,6 +343,7 @@ impl Version {
             speed_factor: b.speed_factor[i],
             jump_factor: b.jump_factor[i],
             destroy_time: b.destroy_time[i],
+            requires_correct_tool: b.requires_tool[i] != 0,
             explosion_resistance: b.explosion_resistance[i],
             sound_type: self.string(b.sound_type[i]),
         })
@@ -409,6 +446,42 @@ impl Version {
             max_damage: t.max_damage[i],
             block: u32::try_from(t.block[i]).ok(),
         })
+    }
+
+    pub fn item_tool(&self, item: ItemId) -> Option<ToolInfo<'_>> {
+        let t = &self.tables.items;
+        let i = item as usize;
+        let flags = *t.tool_flags.get(i)?;
+        (flags & 1 != 0).then(|| ToolInfo {
+            default_mining_speed: t.tool_default_speed[i],
+            damage_per_block: t.tool_damage[i],
+            can_destroy_blocks_in_creative: flags & 2 != 0,
+            owner: self,
+            rules: (t.tool_start[i] as usize, t.tool_start[i + 1] as usize),
+        })
+    }
+
+    /// Slot the item equips into by default: head, chest, legs, feet, body, saddle, mainhand, offhand.
+    pub fn item_equip_slot(&self, item: ItemId) -> Option<&'static str> {
+        const NAMES: [&str; 8] = [
+            "head", "chest", "legs", "feet", "body", "saddle", "mainhand", "offhand",
+        ];
+        let slot = *self.tables.items.equip_slot.get(item as usize)?;
+        NAMES.get(usize::from(slot)).copied()
+    }
+
+    /// `Some(can_always_eat)` for items with the `food` component.
+    pub fn item_food(&self, item: ItemId) -> Option<bool> {
+        let f = *self.tables.items.food_flags.get(item as usize)?;
+        (f & 1 != 0).then_some(f & 2 != 0)
+    }
+
+    pub fn item_consume_seconds(&self, item: ItemId) -> Option<f32> {
+        Some(*self.tables.items.consume_seconds.get(item as usize)?).filter(|v| *v >= 0.0)
+    }
+
+    pub fn item_use_cooldown_seconds(&self, item: ItemId) -> Option<f32> {
+        Some(*self.tables.items.cooldown_seconds.get(item as usize)?).filter(|v| *v >= 0.0)
     }
 
     pub fn entity_type_by_name(&self, name: &str) -> Option<EntityTypeId> {

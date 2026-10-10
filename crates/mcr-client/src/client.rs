@@ -53,6 +53,9 @@ pub struct Client {
     pub ticks: u64,
     pub view: (f32, f32),
     pub(crate) digging: Option<crate::actions::Digging>,
+    pub(crate) destroy_delay: u8,
+    pub(crate) using: Option<crate::use_item::UsingItem>,
+    pub(crate) ride: Option<crate::riding::Ride>,
 }
 
 fn plain_json_text(json: &str) -> Component {
@@ -119,6 +122,9 @@ impl Client {
             ticks: 0,
             view: (0.0, 0.0),
             digging: None,
+            destroy_delay: 0,
+            using: None,
+            ride: None,
         };
         let intent = if client.config.transfer {
             Intent::Transfer
@@ -180,6 +186,10 @@ impl Client {
 
     pub fn is_closed(&self) -> bool {
         self.phase == Phase::Closed
+    }
+
+    pub(crate) fn push_event(&mut self, event: ClientEvent) {
+        self.events.push_back(event);
     }
 
     pub fn drain_events(&mut self) -> std::collections::vec_deque::Drain<'_, ClientEvent> {
@@ -480,6 +490,7 @@ impl Client {
         self.pump()?;
         if self.phase == Phase::Play && self.joined {
             self.state.tick();
+            self.update_using_item();
             self.player_tick(input)?;
             self.send_play(&PlayServerbound::ClientTickEnd(sb::ClientTickEnd))?;
         }
@@ -506,22 +517,26 @@ impl Client {
 
     fn player_tick(&mut self, input: &PlayerInput) -> Result<()> {
         let player = &mut self.state.player;
+        let pos = player.physics.pos;
+        let column_loaded = self
+            .state
+            .chunks
+            .column(mcr_world::ChunkPos::from_block(
+                pos[0].floor() as i32,
+                pos[2].floor() as i32,
+            ))
+            .is_some();
         if !player.loaded {
             player.loaded_waited_ticks += 1;
-            let pos = player.physics.pos;
-            let ground_loaded = self
-                .state
-                .chunks
-                .column(mcr_world::ChunkPos::from_block(
-                    pos[0].floor() as i32,
-                    pos[2].floor() as i32,
-                ))
-                .is_some();
             let timed_out = player.loaded_waited_ticks > LOAD_TIMEOUT_TICKS;
-            if (player.placed && ground_loaded) || timed_out {
+            let dead_and_placed = player.dead && player.placed;
+            if (player.placed && column_loaded) || timed_out || dead_and_placed {
                 player.loaded = true;
                 self.send_play(&PlayServerbound::PlayerLoaded(sb::PlayerLoaded))?;
             }
+            return Ok(());
+        }
+        if !column_loaded {
             return Ok(());
         }
         let mut keys = *input;
@@ -533,6 +548,14 @@ impl Client {
             };
         }
         self.view = (keys.yaw, keys.pitch);
+        if let Some(vehicle) = player.vehicle {
+            return self.ride_tick(&keys, vehicle);
+        }
+        if self.ride.take().is_some() {
+            self.state.controlled_vehicle = None;
+            self.state.player.physics.passenger = false;
+        }
+        let player = &mut self.state.player;
         let out = player.physics.tick(&keys, &self.state.chunks);
         let entity_id = player.entity_id;
         if let Some(i) = out.input {

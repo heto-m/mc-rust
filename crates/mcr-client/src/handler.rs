@@ -193,6 +193,12 @@ impl ClientState {
             }),
             P::BlockChangedAck(p) => {
                 self.block_ack_sequence = self.block_ack_sequence.max(p.sequence);
+                for (pos, state) in self.finish_predictions(p.sequence) {
+                    out.event(ClientEvent::BlockChanged {
+                        pos,
+                        state: u32::from(state),
+                    });
+                }
                 out.event(ClientEvent::BlockAckReceived(p.sequence));
             }
             P::LevelEvent(p) => out.event(ClientEvent::LevelEvent {
@@ -351,6 +357,26 @@ impl ClientState {
                 on_ground,
                 out,
             ),
+            P::MoveVehicle(p) => {
+                if let Some(id) = self.controlled_vehicle
+                    && let Some(e) = self.entities.get_mut(id)
+                {
+                    let pos = [p.position.x, p.position.y, p.position.z];
+                    if sane3(pos) && p.y_rot.is_finite() && p.x_rot.is_finite() {
+                        e.snap_to(pos, p.y_rot, p.x_rot.clamp(-90.0, 90.0));
+                        self.vehicle_corrections += 1;
+                        out.replies
+                            .push(mcr_protocol::dispatch::PlayServerbound::MoveVehicle(
+                                mcr_protocol::play::serverbound::MoveVehicle {
+                                    position: p.position,
+                                    y_rot: p.y_rot,
+                                    x_rot: p.x_rot,
+                                    on_ground: e.on_ground,
+                                },
+                            ));
+                    }
+                }
+            }
             P::TeleportEntity(p) => self.teleport_entity(&p, out),
             P::EntityPositionSync(p) => self.position_sync(&p, out),
             P::RotateHead(p) => {
@@ -605,11 +631,20 @@ impl ClientState {
                 }
             }
             P::Cooldown(p) => {
-                if self.cooldowns.len() < 1024
-                    || self.cooldowns.contains_key(p.cooldown_group.as_str())
-                {
-                    self.cooldowns
-                        .insert(p.cooldown_group.as_str().to_owned(), p.duration);
+                let ticks = p.duration.clamp(0, 1 << 20);
+                let key = p.cooldown_group.as_str().to_owned();
+                if ticks == 0 {
+                    self.cooldowns.remove(&key);
+                } else {
+                    crate::gamestate::insert_bounded(
+                        &mut self.cooldowns,
+                        1024,
+                        key,
+                        crate::state::Cooldown {
+                            ends_at: self.game_ticks + ticks as u64,
+                            total: ticks,
+                        },
+                    );
                 }
             }
 
@@ -749,6 +784,58 @@ impl ClientState {
                         .map(|s| s.text)
                         .collect(),
                 ));
+            }
+            P::RecipeBookAdd(p) => {
+                self.gameplay.recipe_book.add(p);
+                out.event(ClientEvent::RecipeBookUpdated);
+            }
+            P::RecipeBookRemove(p) => {
+                self.gameplay
+                    .recipe_book
+                    .remove(p.recipes.iter().map(|v| v.0));
+                out.event(ClientEvent::RecipeBookUpdated);
+            }
+            P::RecipeBookSettings(p) => {
+                self.gameplay.recipe_book.settings = p;
+                out.event(ClientEvent::RecipeBookUpdated);
+            }
+            P::UpdateAdvancements(p) => {
+                self.gameplay.advancements.apply(p);
+                out.event(ClientEvent::AdvancementsUpdated);
+            }
+            P::SelectAdvancementsTab(p) => {
+                self.gameplay.advancements.selected_tab = p.tab.map(|t| t.as_str().to_owned());
+            }
+            P::MapItemData(p) => {
+                let id = p.map_id;
+                self.gameplay.apply_map(p);
+                out.event(ClientEvent::MapUpdated(id));
+            }
+            P::MerchantOffers(p) => {
+                self.gameplay.merchant = Some(p.into());
+                out.event(ClientEvent::MerchantOffersUpdated);
+            }
+            P::AwardStats(p) => {
+                for (stat, value) in p.stats.0.into_iter().take(crate::gamestate::MAX_STATS) {
+                    self.gameplay.set_stat(stat.stat_type, stat.value, value.0);
+                }
+                out.event(ClientEvent::StatsUpdated);
+            }
+            P::Waypoint(p) => self.gameplay.waypoints.apply(p),
+            P::OpenSignEditor(p) => {
+                self.gameplay.sign_editor = Some(crate::gamestate::SignEditor {
+                    pos: p.pos,
+                    side: p.side,
+                });
+                out.event(ClientEvent::SignEditorOpened {
+                    pos: p.pos,
+                    side: p.side,
+                });
+            }
+            P::OpenBook(p) => {
+                let stack = self.hand_stack(p.hand);
+                self.gameplay.book_editor = self.is_item(&stack, "writable_book").then_some(p.hand);
+                out.event(ClientEvent::BookOpened { hand: p.hand });
             }
             other => {
                 *self.unhandled.entry(other.name()).or_insert(0) += 1;
@@ -913,6 +1000,9 @@ impl ClientState {
             return;
         }
         let new = mcr_world::BlockState(state as u16);
+        if self.predictions.hold(pos, new.0) {
+            return;
+        }
         if self.chunks.set_block(pos.x, pos.y, pos.z, new).is_some() {
             let has_entity = self
                 .data
@@ -933,6 +1023,9 @@ impl ClientState {
         on_ground: bool,
         out: &mut Outbox,
     ) {
+        if self.controlled_vehicle == Some(id) {
+            return;
+        }
         let Some(e) = self.entities.get_mut(id) else {
             return;
         };

@@ -27,6 +27,7 @@ pub mod flag {
     pub const WATER_BLOCK: u32 = 1 << 20;
     pub const FENCE: u32 = 1 << 21;
     pub const DRAG_DOWN: u32 = 1 << 22;
+    pub const LILY_PAD: u32 = 1 << 23;
 }
 
 pub const FLUID_NONE: u8 = 0;
@@ -152,6 +153,7 @@ impl PhysicsData {
                 | "cave_vines_plant" => flags |= flag::CLIMBABLE,
                 "scaffolding" => flags |= flag::CLIMBABLE | flag::SCAFFOLDING,
                 "cobweb" => flags |= flag::WEB,
+                "lily_pad" => flags |= flag::LILY_PAD,
                 "powder_snow" => flags |= flag::POWDER_SNOW,
                 "sweet_berry_bush" => flags |= flag::SWEET_BERRY,
                 "honey_block" => flags |= flag::HONEY,

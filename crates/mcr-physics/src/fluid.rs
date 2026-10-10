@@ -25,7 +25,7 @@ fn blocks_fluid_flow(s: &StateInfo) -> bool {
 }
 
 impl PlayerPhysics {
-    fn fluid_height_at<W: CollisionWorld + ?Sized>(
+    pub(crate) fn fluid_height_at<W: CollisionWorld + ?Sized>(
         &self,
         w: &W,
         p: [i32; 3],

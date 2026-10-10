@@ -114,12 +114,13 @@ impl PlayerPhysics {
         );
         self.move_vec = mv;
         let has_forward = mv[1] > 1.0e-5;
-        if was_shift || input.backward {
+        if was_shift || self.slow_due_to_item() || input.backward {
             self.sprint_trigger_time = 0;
         }
         let can_start = !self.sprinting
             && has_forward
             && self.is_sprinting_possible(self.abilities.flying)
+            && !self.slow_due_to_item()
             && !self.is_moving_slowly_or_under();
         if can_start {
             if !had_forward {
@@ -191,6 +192,10 @@ impl PlayerPhysics {
         }
     }
 
+    fn slow_due_to_item(&self) -> bool {
+        self.using_item.is_some_and(|u| !u.can_sprint) && !self.passenger
+    }
+
     fn is_moving_slowly_or_under(&self) -> bool {
         self.is_moving_slowly() && !self.is_under_water()
     }
@@ -201,11 +206,48 @@ impl PlayerPhysics {
             return v;
         }
         let mut n = [v[0] * 0.98, v[1] * 0.98];
+        if let Some(u) = self.using_item.filter(|_| !self.passenger) {
+            n = [n[0] * u.speed_multiplier, n[1] * u.speed_multiplier];
+        }
         if self.is_moving_slowly() {
             let f = self.attributes.sneaking_speed as f32;
             n = [n[0] * f, n[1] * f];
         }
         square_movement(n)
+    }
+
+    /// `xxa`/`zza` of a rider: impulses scaled by 0.98 and squared like the local player's input.
+    pub fn rider_axes(input: &PlayerInput) -> [f32; 2] {
+        let mv = normalized(
+            impulse(input.left, input.right),
+            impulse(input.forward, input.backward),
+        );
+        if mv[0] * mv[0] + mv[1] * mv[1] == 0.0 {
+            return mv;
+        }
+        square_movement([mv[0] * 0.98, mv[1] * 0.98])
+    }
+
+    /// Travel of a controlled non-player mob: the living-entity step without jump or sprint logic.
+    pub(crate) fn ridden_travel<W: CollisionWorld + ?Sized>(&mut self, w: &W, input: [f64; 3]) {
+        let (mut dx, mut dz) = (self.vel[0], self.vel[2]);
+        if dx * dx + dz * dz < 9.0e-6 {
+            dx = 0.0;
+            dz = 0.0;
+        }
+        let dy = if self.vel[1].abs() < 0.003 {
+            0.0
+        } else {
+            self.vel[1]
+        };
+        self.vel = [dx, dy, dz];
+        self.jumping = false;
+        self.sprinting = false;
+        if self.effects.slow_falling || self.effects.levitation.is_some() {
+            self.fall_distance = 0.0;
+        }
+        self.travel(w, input);
+        self.apply_effects_from_blocks(w);
     }
 
     fn living_ai_step<W: CollisionWorld + ?Sized>(&mut self, input: &PlayerInput, w: &W) {

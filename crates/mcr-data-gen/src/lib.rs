@@ -25,6 +25,8 @@ struct ExtractedBlock {
     speed_factor: f32,
     jump_factor: f32,
     destroy_time: f32,
+    #[serde(default)]
+    requires_tool: bool,
     explosion_resistance: f32,
     sound_type: String,
     states: Vec<ExtractedState>,
@@ -250,6 +252,7 @@ pub fn generate(inputs: &Inputs) -> Result<Vec<u8>> {
         b.speed_factor.push(block.speed_factor);
         b.jump_factor.push(block.jump_factor);
         b.destroy_time.push(block.destroy_time);
+        b.requires_tool.push(u8::from(block.requires_tool));
         b.explosion_resistance.push(block.explosion_resistance);
         b.sound_type.push(strings.intern(&block.sound_type));
 
@@ -338,6 +341,7 @@ pub fn generate(inputs: &Inputs) -> Result<Vec<u8>> {
         };
         t.items.block.push(block);
     }
+    item_components(inputs, &item_names, &mut strings, &mut t)?;
 
     let entities: Vec<ExtractedEntity> = read_json(&inputs.extracted.join("entity_types.json"))?;
     ensure!(
@@ -476,6 +480,94 @@ fn push_state(
         }
     };
     st.fluid.push(fluid);
+    Ok(())
+}
+
+const EQUIP_SLOTS: [&str; 8] = [
+    "head", "chest", "legs", "feet", "body", "saddle", "mainhand", "offhand",
+];
+
+fn item_components(
+    inputs: &Inputs,
+    item_names: &[String],
+    strings: &mut Interner,
+    t: &mut Tables,
+) -> Result<()> {
+    let dir = inputs.reports.join("minecraft/components/item");
+    let it = &mut t.items;
+    it.tool_start.push(0);
+    for name in item_names {
+        let short = name.strip_prefix("minecraft:").unwrap_or(name);
+        let file = dir.join(format!("{short}.json"));
+        let comps: Value = if file.is_file() {
+            read_json::<Value>(&file)?["components"].clone()
+        } else {
+            Value::Null
+        };
+        let tool = comps.get("minecraft:tool");
+        let (mut default_speed, mut damage, mut flags) = (-1.0f32, 0u8, 0u8);
+        if let Some(tool) = tool {
+            default_speed = tool["default_mining_speed"].as_f64().unwrap_or(1.0) as f32;
+            damage = tool["damage_per_block"].as_u64().unwrap_or(1) as u8;
+            flags = 1 | if tool["can_destroy_blocks_in_creative"]
+                .as_bool()
+                .unwrap_or(true)
+            {
+                2
+            } else {
+                0
+            };
+            for rule in tool["rules"].as_array().map_or(&[][..], Vec::as_slice) {
+                let blocks: Vec<&str> = match &rule["blocks"] {
+                    Value::String(s) => vec![s.as_str()],
+                    Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+                    _ => Vec::new(),
+                };
+                for b in blocks {
+                    it.tool_blocks.push(strings.intern(b));
+                    it.tool_speed
+                        .push(rule["speed"].as_f64().map_or(-1.0, |v| v as f32));
+                    it.tool_correct
+                        .push(match rule["correct_for_drops"].as_bool() {
+                            None => 0,
+                            Some(false) => 1,
+                            Some(true) => 2,
+                        });
+                }
+            }
+        }
+        it.tool_start
+            .push(u32::try_from(it.tool_blocks.len()).context("tool rules")?);
+        it.tool_default_speed.push(default_speed);
+        it.tool_damage.push(damage);
+        it.tool_flags.push(flags);
+        it.equip_slot.push(
+            comps
+                .get("minecraft:equippable")
+                .and_then(|e| e["slot"].as_str())
+                .and_then(|s| EQUIP_SLOTS.iter().position(|n| *n == s))
+                .map_or(255, |p| p as u8),
+        );
+        it.consume_seconds
+            .push(comps.get("minecraft:consumable").map_or(-1.0, |c| {
+                c["consume_seconds"].as_f64().unwrap_or(1.6) as f32
+            }));
+        it.food_flags.push(match comps.get("minecraft:food") {
+            None => 0,
+            Some(f) => {
+                1 | if f["can_always_eat"].as_bool().unwrap_or(false) {
+                    2
+                } else {
+                    0
+                }
+            }
+        });
+        it.cooldown_seconds.push(
+            comps
+                .get("minecraft:use_cooldown")
+                .map_or(-1.0, |c| c["seconds"].as_f64().unwrap_or(0.0) as f32),
+        );
+    }
     Ok(())
 }
 

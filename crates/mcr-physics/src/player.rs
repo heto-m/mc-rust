@@ -1,6 +1,7 @@
 use crate::aabb::Aabb;
 use crate::collide::{Colliders, CollisionCtx};
 use crate::data::{PhysicsData, StateInfo, flag};
+use crate::types::ItemUse;
 use crate::types::{Abilities, Attributes, Effects, MoveKind, MovementOutput, PlayerInput, Pose};
 use crate::world::CollisionWorld;
 
@@ -36,6 +37,9 @@ pub struct PlayerPhysics {
     pub effects: Effects,
     pub food_level: i32,
     pub leather_boots: bool,
+    pub using_item: Option<ItemUse>,
+    pub passenger: bool,
+    pub dims: Option<(f32, f32)>,
     pub fast_lava: bool,
     pub(crate) fluid: FluidState,
     pub(crate) was_touching_water: bool,
@@ -97,6 +101,9 @@ impl PlayerPhysics {
             effects: Effects::default(),
             food_level: 20,
             leather_boots: false,
+            using_item: None,
+            passenger: false,
+            dims: None,
             fast_lava: false,
             fluid: FluidState::default(),
             was_touching_water: false,
@@ -146,8 +153,9 @@ impl PlayerPhysics {
     }
 
     pub(crate) fn bounding_box_for(&self, pose: Pose, p: [f64; 3]) -> Aabb {
-        let w = f64::from(0.6f32 / 2.0);
-        let h = f64::from(pose.height());
+        let (width, height) = self.dims.unwrap_or((0.6, pose.height()));
+        let w = f64::from(width / 2.0);
+        let h = f64::from(height);
         Aabb::new([p[0] - w, p[1], p[2] - w], [p[0] + w, p[1] + h, p[2] + w])
     }
 
@@ -186,6 +194,14 @@ impl PlayerPhysics {
         p: [i32; 3],
     ) -> &'static StateInfo {
         self.data.state(w.block_state(p[0], p[1], p[2]))
+    }
+
+    pub fn keys_sneak(&self) -> bool {
+        self.keys.sneak
+    }
+
+    pub fn eye_in_water(&self) -> bool {
+        self.fluid.eye_in_water
     }
 
     pub(crate) fn is_in_water(&self) -> bool {
