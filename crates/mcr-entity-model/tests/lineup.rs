@@ -57,6 +57,8 @@ impl Spec {
 fn row(h: &mut Harness, specs: &[Spec], name: &str, spacing: f64, _world_h: f64) -> Shot {
     const COLS: usize = 5;
     let registries = TestRegistries::vanilla();
+    h.scene
+        .set_block_top(Some(Box::new(|_, y, _| (y < 0).then_some(1.0))));
     let (width, height) = (1800u32, 750u32);
     let mut all = Vec::new();
     let mut rows = 0;
@@ -88,9 +90,10 @@ fn row(h: &mut Harness, specs: &[Spec], name: &str, spacing: f64, _world_h: f64)
             })
             .collect();
         let _ = n;
-        h.scene.update(&registries, views.into_iter());
         let world_w = COLS as f64 * spacing + 0.4;
         let dist = world_w * 0.95;
+        h.scene.set_camera([0.0, 1.5, dist], 180.0, 0.0);
+        h.scene.update(&registries, views.into_iter());
         let cam = Camera {
             position: DVec3::new(0.0, 1.5, dist),
             target: Vec3::new(0.0, 1.5, 0.0),
@@ -381,4 +384,95 @@ fn unknown_type_draws_hitbox() {
     };
     let shot = h.render(&cam.frame(400, 300), 400, 300);
     assert!(shot.covered() > 500);
+}
+
+#[test]
+fn aquatic() {
+    let Some(mut h) = Harness::new() else { return };
+    let mut hold = spec("minecraft:dolphin");
+    hold = hold.equip(0, item("minecraft:cod"));
+    let specs = [
+        spec("minecraft:squid"),
+        spec("minecraft:glow_squid"),
+        spec("minecraft:cod"),
+        spec("minecraft:salmon"),
+        spec("minecraft:tropical_fish").d(17, V::Int(0x0501_0101)),
+        spec("minecraft:pufferfish").d(17, V::Int(2)),
+        spec("minecraft:pufferfish").d(17, V::Int(0)),
+        hold,
+        spec("minecraft:guardian"),
+        spec("minecraft:elder_guardian"),
+        spec("minecraft:turtle"),
+        spec("minecraft:axolotl"),
+    ];
+    let shot = row(&mut h, &specs, "aquatic", 2.4, 3.0);
+    assert!(shot.covered() > 4000);
+}
+
+#[test]
+fn flying() {
+    let Some(mut h) = Harness::new() else { return };
+    let mut vexy = spec("minecraft:vex").equip(0, item("minecraft:iron_sword"));
+    vexy.walk = 0.5;
+    let specs = [
+        spec("minecraft:bat"),
+        spec("minecraft:bee"),
+        spec("minecraft:phantom"),
+        vexy,
+        spec("minecraft:allay").equip(0, item("minecraft:apple")),
+        spec("minecraft:parrot").d(20, V::Int(1)),
+        spec("minecraft:parrot").d(18, V::Byte(1)),
+        spec("minecraft:blaze"),
+        spec("minecraft:ghast"),
+        spec("minecraft:happy_ghast"),
+    ];
+    let shot = row(&mut h, &specs, "flying", 5.0, 3.0);
+    assert!(shot.covered() > 4000);
+}
+
+#[test]
+fn bosses_and_golems() {
+    let Some(mut h) = Harness::new() else { return };
+    let block = mcr_data::v26_3()
+        .block_by_name("minecraft:dirt")
+        .and_then(|b| mcr_data::v26_3().block_info(b))
+        .map_or(1, |i| i.default_state as i32);
+    let specs = [
+        spec("minecraft:ender_dragon"),
+        spec("minecraft:wither"),
+        spec("minecraft:iron_golem"),
+        spec("minecraft:snow_golem"),
+        spec("minecraft:ravager"),
+        spec("minecraft:hoglin"),
+        spec("minecraft:strider"),
+        spec("minecraft:shulker").d(17, V::Byte(60)),
+        spec("minecraft:enderman").d(16, V::OptionalBlockState(Some(block))),
+        spec("minecraft:slime").d(18, V::Int(2)),
+        spec("minecraft:magma_cube").d(18, V::Int(2)),
+        spec("minecraft:horse").d(18, V::Byte(32)),
+        spec("minecraft:llama").d(19, V::Boolean(true)),
+        spec("minecraft:wolf")
+            .d(18, V::Byte(5))
+            .d(23, V::WolfVariant(3)),
+        spec("minecraft:mooshroom"),
+    ];
+    let shot = row(&mut h, &specs, "bosses", 4.0, 6.0);
+    assert!(shot.covered() > 4000);
+}
+
+#[test]
+fn effects() {
+    let Some(mut h) = Harness::new() else { return };
+    let specs = [
+        spec("minecraft:snowball").d(8, V::ItemStack(item("minecraft:snowball"))),
+        spec("minecraft:ender_pearl").d(8, V::ItemStack(item("minecraft:ender_pearl"))),
+        spec("minecraft:experience_orb").obj(40),
+        spec("minecraft:fishing_bobber"),
+        spec("minecraft:firework_rocket").d(8, V::ItemStack(item("minecraft:firework_rocket"))),
+        spec("minecraft:end_crystal"),
+        spec("minecraft:lightning_bolt"),
+        spec("minecraft:egg").d(8, V::ItemStack(item("minecraft:egg"))),
+    ];
+    let shot = row(&mut h, &specs, "effects", 1.5, 2.0);
+    assert!(shot.covered() > 1000);
 }

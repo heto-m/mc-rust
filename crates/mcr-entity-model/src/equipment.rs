@@ -19,6 +19,20 @@ pub fn dyed_color(stack: &ItemStack) -> Option<i32> {
     }
 }
 
+/// Whether vanilla draws the enchantment glint over this stack.
+pub fn has_glint(stack: &ItemStack) -> bool {
+    if stack.components.is_empty() {
+        return false;
+    }
+    match component(stack, "enchantment_glint_override") {
+        Some(DataComponent::EnchantmentGlintOverride(v)) => *v,
+        _ => matches!(
+            component(stack, "enchantments"),
+            Some(DataComponent::Enchantments(e)) if !e.0.is_empty()
+        ),
+    }
+}
+
 fn slot_name(slot: EquipmentSlot) -> &'static str {
     match slot {
         EquipmentSlot::MainHand => "mainhand",
@@ -106,6 +120,17 @@ pub fn add_layers(
     }
     if plan.parts.len() == before {
         return false;
+    }
+    if has_glint(stack) {
+        let mut glint = Part::new(model.to_owned(), "misc/enchanted_glint_armor")
+            .pipeline(Pipeline::Additive)
+            .no_hurt();
+        glint.tint = [160, 100, 255, 150];
+        glint.uv_offset = [
+            (plan.anim.age * 0.01).fract(),
+            (plan.anim.age * 0.007).fract(),
+        ];
+        plan.push(glint);
     }
     if matches!(layer_type, "humanoid" | "humanoid_leggings")
         && let Some(DataComponent::Trim(trim)) = component(stack, "trim")

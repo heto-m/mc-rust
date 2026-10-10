@@ -386,12 +386,8 @@ pub(crate) fn builder_for(name: &str) -> Builder {
         "minecraft:area_effect_cloud"
         | "minecraft:interaction"
         | "minecraft:marker"
-        | "minecraft:lightning_bolt"
         | "minecraft:text_display"
-        | "minecraft:ominous_item_spawner"
-        | "minecraft:experience_orb"
-        | "minecraft:fishing_bobber"
-        | "minecraft:firework_rocket" => Builder::Skip,
+        | "minecraft:ominous_item_spawner" => Builder::Skip,
         "minecraft:pig" => Builder::Func(pig),
         "minecraft:cow" => Builder::Func(cow),
         "minecraft:mooshroom" => Builder::Func(mooshroom),
@@ -540,6 +536,10 @@ fn sheep(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
             .tint(rgb),
         );
     }
+}
+
+pub(crate) fn tamable_flags(v: &EntityView<'_>) -> (bool, bool) {
+    tamable(v)
 }
 
 fn tamable(v: &EntityView<'_>) -> (bool, bool) {

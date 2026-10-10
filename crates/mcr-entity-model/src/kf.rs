@@ -23,6 +23,23 @@ fn walk(plan: &mut Plan, v: &EntityView<'_>, name: &'static str, speed: f32, sca
     }
 }
 
+pub fn has_animation(name: &str) -> bool {
+    matches!(
+        name,
+        "minecraft:armadillo"
+            | "minecraft:camel"
+            | "minecraft:camel_husk"
+            | "minecraft:sniffer"
+            | "minecraft:frog"
+            | "minecraft:breeze"
+            | "minecraft:warden"
+            | "minecraft:bat"
+            | "minecraft:rabbit"
+            | "minecraft:copper_golem"
+            | "minecraft:creaking"
+    )
+}
+
 /// Drives the extracted keyframe animations of the types that have them from pose and state.
 pub fn drive(cx: &PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     if plan.parts.is_empty() {

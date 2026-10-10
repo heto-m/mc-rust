@@ -6,6 +6,26 @@ use mcr_entity_model::EntityView;
 use mcr_entity_model::mcr_protocol::types::ItemStack;
 use support::*;
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct Counting;
+static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+
+// SAFETY: forwards to the system allocator unchanged.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        unsafe { System.alloc(l) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        unsafe { System.dealloc(p, l) }
+    }
+}
+
+#[global_allocator]
+static A: Counting = Counting;
+
 const TYPES: [&str; 8] = [
     "minecraft:pig",
     "minecraft:zombie",
@@ -46,6 +66,12 @@ pub fn scene_update(c: &mut Criterion) {
     let frame = cam.frame(1280, 720);
     h.scene.update(&registries, views.iter().copied());
     h.scene.prepare(&frame);
+    let before = ALLOCS.load(Ordering::Relaxed);
+    h.scene.update(&registries, views.iter().copied());
+    println!(
+        "allocs per update: {}",
+        ALLOCS.load(Ordering::Relaxed) - before
+    );
     c.bench_function("update_2000_mixed", |b| {
         b.iter(|| h.scene.update(&registries, views.iter().copied()))
     });

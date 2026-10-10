@@ -57,7 +57,126 @@ pub struct SceneStats {
     pub models: usize,
 }
 
+/// Top surface height (0..=1) of the block cell `(x, y, z)`, or `None` when it is not solid.
+pub type BlockTop = Box<dyn Fn(i32, i32, i32) -> Option<f32> + Send + Sync>;
+
+const MAX_SHADOW_DROP: i32 = 4;
+const PARALLEL_MIN: usize = 256;
+
+type BoundMap = FxHashMap<(usize, &'static str), Option<BoundAnimation>>;
+
 #[derive(Debug)]
+struct PartJob {
+    mi: usize,
+    tex: crate::gpu::TexId,
+    part: usize,
+    bone_off: u32,
+}
+
+/// One entity's resolved plan and its pose results, reused across frames.
+#[derive(Debug, Default)]
+struct Job {
+    plan: Plan,
+    xf: Mat4,
+    parts: Vec<PartJob>,
+    bones: usize,
+    base_model: Option<usize>,
+    attach_world: Vec<Mat4>,
+    attach_pose: Vec<Pose>,
+}
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<(Vec<Pose>, Vec<Mat4>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
+fn eval_job(
+    job: &mut Job,
+    out: &mut [crate::gpu::Bone34],
+    models: &[ModelEntry],
+    bound: &BoundMap,
+) {
+    SCRATCH.with_borrow_mut(|(pose, world)| {
+        let Job {
+            plan,
+            xf,
+            parts,
+            attach_world,
+            attach_pose,
+            ..
+        } = job;
+        let mut cursor = 0;
+        let mut cached = None;
+        for pj in parts.iter() {
+            let part = &plan.parts[pj.part];
+            let entry = &models[pj.mi];
+            let n = entry.rest.len();
+            let reuse =
+                cached == Some((pj.mi, part.pose)) && part.pose != crate::plan::Pose::Keyframes;
+            if !reuse {
+                pose.clear();
+                pose.extend_from_slice(&entry.rest);
+                match part.pose {
+                    crate::plan::Pose::Rig => animate(plan.rig, &plan.anim, &entry.binding, pose),
+                    crate::plan::Pose::Rest => {}
+                    crate::plan::Pose::Keyframes => {
+                        for &(name, seconds, weight) in &plan.keyframes {
+                            if let Some(Some(anim)) = bound.get(&(pj.mi, name)) {
+                                anim.apply(seconds, weight, pose);
+                            }
+                        }
+                        animate(plan.rig, &plan.anim, &entry.binding, pose);
+                    }
+                }
+                if matches!(
+                    part.pose,
+                    crate::plan::Pose::Rig | crate::plan::Pose::Keyframes
+                ) {
+                    for slot in &plan.hide {
+                        if let Some(i) = entry.binding.get(*slot) {
+                            pose[i].scale = Vec3::ZERO;
+                        }
+                    }
+                    for (slot, rot) in &plan.rot_overrides {
+                        if let Some(i) = entry.binding.get(*slot) {
+                            pose[i].rot = Vec3::from(*rot) * (std::f32::consts::PI / 180.0);
+                        }
+                    }
+                }
+                world.resize(n, Mat4::IDENTITY);
+                evaluate(&entry.model, pose, world);
+            }
+            cached = Some((pj.mi, part.pose));
+            if pj.part == 0 && !plan.attachments.is_empty() {
+                let mut zero_scale = false;
+                attach_pose.clear();
+                attach_pose.extend(pose.iter().map(|p| {
+                    zero_scale |= p.scale.cmpeq(Vec3::ZERO).any();
+                    Pose {
+                        scale: Vec3::select(p.scale.cmpeq(Vec3::ZERO), Vec3::ONE, p.scale),
+                        ..*p
+                    }
+                }));
+                attach_world.resize(n, Mat4::IDENTITY);
+                if zero_scale {
+                    evaluate(&entry.model, attach_pose, attach_world);
+                } else {
+                    attach_world.copy_from_slice(world);
+                }
+                for m in attach_world.iter_mut() {
+                    *m = *xf * *m;
+                }
+            }
+            let part_xf = *xf * Mat4::from_translation(part.offset);
+            for (o, w) in out[cursor..cursor + n].iter_mut().zip(world.iter()) {
+                *o = crate::gpu::Bone34::from_mat(&(part_xf * *w));
+            }
+            cursor += n;
+        }
+    });
+}
+const MAX_BOLTS: usize = 64;
+
 pub struct EntityScene {
     pub(crate) gpu: EntityRenderer,
     assets: Arc<SceneAssets>,
@@ -68,10 +187,13 @@ pub struct EntityScene {
     quad: Option<ModelId>,
     catalog: Catalog,
     items: ItemGeometry,
-    plan: Plan,
-    scratch_pose: Vec<Pose>,
-    scratch_world: Vec<Mat4>,
-    base_world: Vec<Mat4>,
+    jobs: Vec<Job>,
+    camera: [f64; 3],
+    billboard: Mat4,
+    sprite_models: FxHashMap<[u32; 4], ModelId>,
+    bolts: FxHashMap<u32, ModelId>,
+    block_top: Option<BlockTop>,
+    shadows: bool,
     tags: Vec<TagSource>,
     stats: SceneStats,
 }
@@ -86,6 +208,12 @@ impl EntityScene {
         assets: Arc<SceneAssets>,
     ) -> Result<Self, Error> {
         let mut textures = TextureCache::default();
+        textures.register("dyn:black", || {
+            crate::assets::ImageRgba::solid(2, 2, [0, 0, 0, 255])
+        });
+        textures.register("dyn:white", || {
+            crate::assets::ImageRgba::solid(2, 2, [255, 255, 255, 255])
+        });
         textures.register("dyn:hitbox", || {
             crate::assets::ImageRgba::solid(2, 2, [255, 40, 200, 110])
         });
@@ -99,13 +227,36 @@ impl EntityScene {
             models: Vec::new(),
             model_index: FxHashMap::default(),
             textures,
-            plan: Plan::default(),
-            scratch_pose: Vec::new(),
-            scratch_world: Vec::new(),
-            base_world: Vec::new(),
+            jobs: Vec::new(),
+            camera: [0.0; 3],
+            billboard: Mat4::IDENTITY,
+            sprite_models: FxHashMap::default(),
+            bolts: FxHashMap::default(),
+            block_top: None,
+            shadows: true,
             tags: Vec::new(),
             stats: SceneStats::default(),
         })
+    }
+
+    /// Camera used for sprite entities and fishing lines; `yaw` and `pitch` in degrees (vanilla convention).
+    pub fn set_camera(&mut self, position: [f64; 3], yaw: f32, pitch: f32) {
+        self.camera = position;
+        self.billboard = Mat4::from_quat(Quat::from_euler(
+            glam::EulerRot::YXZ,
+            std::f32::consts::PI - yaw.to_radians(),
+            -pitch.to_radians(),
+            0.0,
+        ));
+    }
+
+    /// Lets entities cast blob shadows on the top surface of the block below them.
+    pub fn set_block_top(&mut self, block_top: Option<BlockTop>) {
+        self.block_top = block_top;
+    }
+
+    pub fn set_shadows(&mut self, enabled: bool) {
+        self.shadows = enabled;
     }
 
     pub fn assets(&self) -> &Arc<SceneAssets> {
@@ -157,14 +308,59 @@ impl EntityScene {
         }
         self.tags.clear();
         self.stats = SceneStats::default();
+        let mut views: Vec<EntityView<'a>> = Vec::new();
+        let mut jobs = std::mem::take(&mut self.jobs);
+        let mut total_bones = 0usize;
+        let mut count = 0usize;
         for view in entities {
             self.stats.entities += 1;
-            self.emit(registries, &view);
+            if jobs.len() == count {
+                jobs.push(Job::default());
+            }
+            self.plan_entity(registries, &view, &mut jobs[count], &mut total_bones);
+            views.push(view);
+            count += 1;
         }
+        let jobs_slice = &mut jobs[..count];
+        let Some((base, bones)) = self.gpu.alloc_bones(total_bones) else {
+            self.stats.skipped += count;
+            self.jobs = jobs;
+            return;
+        };
+        let mut rest = bones;
+        let mut slices: Vec<&mut [crate::gpu::Bone34]> = Vec::with_capacity(count);
+        for job in jobs_slice.iter() {
+            let (head, tail) = rest.split_at_mut(job.bones);
+            slices.push(head);
+            rest = tail;
+        }
+        let models = &self.models;
+        let bound = &self.bound;
+        if count >= PARALLEL_MIN {
+            use rayon::prelude::*;
+            jobs_slice
+                .par_iter_mut()
+                .zip(slices.into_par_iter())
+                .for_each(|(job, out)| eval_job(job, out, models, bound));
+        } else {
+            for (job, out) in jobs_slice.iter_mut().zip(slices) {
+                eval_job(job, out, models, bound);
+            }
+        }
+        for (job, view) in jobs_slice.iter().zip(&views) {
+            self.finish(view, job, base);
+        }
+        self.jobs = jobs;
     }
 
-    fn emit(&mut self, registries: &dyn Registries, v: &EntityView<'_>) {
-        let mut plan = std::mem::take(&mut self.plan);
+    fn plan_entity(
+        &mut self,
+        registries: &dyn Registries,
+        v: &EntityView<'_>,
+        job: &mut Job,
+        total: &mut usize,
+    ) {
+        let plan = &mut job.plan;
         plan.clear();
         plan.anim = crate::catalog::base_anim(v);
         {
@@ -173,98 +369,80 @@ impl EntityScene {
                 assets: &self.assets,
                 tex: &mut self.textures,
             };
-            self.catalog.build(&mut cx, v, &mut plan);
+            self.catalog.build(&mut cx, v, plan);
         }
         self.textures.flush(&mut self.gpu);
-        let xf = entity_transform(v, &plan);
-        let light = v.light;
-        let hurt = v.hurt || v.death_time > 0.0;
-        let mut base_ready = false;
+        job.xf = entity_transform(v, plan);
+        job.parts.clear();
+        job.bones = 0;
+        job.base_model = None;
         for (index, part) in plan.parts.iter().enumerate() {
             let Some(mi) = self.model_entry(&part.layer) else {
                 self.stats.skipped += 1;
                 continue;
             };
-            let entry = &self.models[mi];
-            let n = entry.rest.len();
-            self.scratch_pose.clear();
-            self.scratch_pose.extend_from_slice(&entry.rest);
-            match part.pose {
-                crate::plan::Pose::Rig => {
-                    animate(plan.rig, &plan.anim, &entry.binding, &mut self.scratch_pose)
-                }
-                crate::plan::Pose::Rest => {}
-                crate::plan::Pose::Keyframes => {
-                    for &(name, seconds, weight) in &plan.keyframes {
-                        let assets = &self.assets;
-                        let bound = self.bound.entry((mi, name)).or_insert_with(|| {
-                            assets
-                                .animations
-                                .get(name)
-                                .map(|def| BoundAnimation::bind(def, &entry.model))
-                        });
-                        if let Some(anim) = bound {
-                            anim.apply(seconds, weight, &mut self.scratch_pose);
-                        }
-                    }
-                    animate(plan.rig, &plan.anim, &entry.binding, &mut self.scratch_pose);
-                }
+            let n = self.models[mi].rest.len();
+            if *total + n > crate::gpu::MAX_BONES {
+                self.stats.skipped += 1;
+                continue;
             }
-            if matches!(
-                part.pose,
-                crate::plan::Pose::Rig | crate::plan::Pose::Keyframes
-            ) {
-                for slot in &plan.hide {
-                    if let Some(i) = entry.binding.get(*slot) {
-                        self.scratch_pose[i].scale = Vec3::ZERO;
-                    }
+            if part.pose == crate::plan::Pose::Keyframes {
+                for &(name, _, _) in &plan.keyframes {
+                    let assets = &self.assets;
+                    let model = &self.models[mi].model;
+                    self.bound.entry((mi, name)).or_insert_with(|| {
+                        assets
+                            .animations
+                            .get(name)
+                            .map(|def| BoundAnimation::bind(def, model))
+                    });
                 }
-                for (slot, rot) in &plan.rot_overrides {
-                    if let Some(i) = entry.binding.get(*slot) {
-                        self.scratch_pose[i].rot =
-                            Vec3::from(*rot) * (std::f32::consts::PI / 180.0);
-                    }
-                }
-            }
-            self.scratch_world.resize(n, Mat4::IDENTITY);
-            evaluate(&entry.model, &self.scratch_pose, &mut self.scratch_world);
-            if index == 0 && !plan.attachments.is_empty() {
-                self.base_world.clear();
-                self.base_world
-                    .extend(self.scratch_world.iter().map(|m| xf * *m));
-                base_ready = true;
             }
             let tex = self
                 .textures
                 .resolve(&part.texture, &mut self.gpu, &self.assets);
-            let model_id = entry.id;
-            let part_xf = xf * Mat4::from_translation(part.offset);
-            let Some((base, out)) = self.gpu.alloc_bones(n) else {
-                self.stats.skipped += 1;
-                continue;
-            };
-            for (o, w) in out.iter_mut().zip(&self.scratch_world) {
-                *o = crate::gpu::Bone34::from_mat(&(part_xf * *w));
+            if index == 0 {
+                job.base_model = Some(mi);
             }
+            job.parts.push(PartJob {
+                mi,
+                tex,
+                part: index,
+                bone_off: *total as u32,
+            });
+            *total += n;
+            job.bones += n;
+        }
+    }
+
+    fn finish(&mut self, v: &EntityView<'_>, job: &Job, base: u32) {
+        let plan = &job.plan;
+        let hurt = v.hurt || v.death_time > 0.0;
+        for pj in &job.parts {
+            let part = &plan.parts[pj.part];
             self.gpu.push(&PartInstance {
-                model: model_id,
-                texture: tex,
+                model: self.models[pj.mi].id,
+                texture: pj.tex,
                 pipeline: part.pipeline,
-                bone_base: base,
+                bone_base: base + pj.bone_off,
                 tint: part.tint,
                 hurt: hurt && part.hurt,
                 fullbright: part.fullbright,
-                block_light: light[0],
-                sky_light: light[1],
+                block_light: v.light[0],
+                sky_light: v.light[1],
                 uv_offset: part.uv_offset,
                 origin: v.pos,
             });
             self.stats.parts += 1;
         }
-        if base_ready {
-            self.emit_attachments(v, &plan);
+        if let Some(bm) = job.base_model
+            && !plan.attachments.is_empty()
+            && job.parts.first().is_some_and(|p| p.part == 0)
+        {
+            self.emit_attachments(v, plan, job, bm);
         }
-        self.emit_free(v, &plan);
+        self.emit_free(v, plan);
+        self.emit_shadow(v, plan);
         if let Some(name) = v.custom_name {
             let height = mcr_data::v26_3()
                 .entity_type_info(v.type_id as u32)
@@ -275,54 +453,105 @@ impl EntityScene {
                 anchor: [v.pos[0], v.pos[1] + height + 0.5, v.pos[2]],
             });
         }
-        self.plan = plan;
     }
 
-    fn emit_attachments(&mut self, v: &EntityView<'_>, plan: &Plan) {
-        let Some(base_model) = self
-            .model_index
-            .get(&*plan.parts[0].layer)
-            .copied()
-            .flatten()
-        else {
-            return;
-        };
+    fn emit_attachments(&mut self, v: &EntityView<'_>, plan: &Plan, job: &Job, base_model: usize) {
+        let xf = job.xf;
         for attach in &plan.attachments {
-            let Some(bone) = self.models[base_model].model.bone(attach.bone) else {
+            let model = &self.models[base_model].model;
+            let Some(bone) = model.bone(attach.bone) else {
                 continue;
             };
-            let parent = self.base_world[bone as usize];
-            let AttachKind::Item { source, context } = &attach.kind else {
+            let mut frame = if attach.offset == Vec3::ZERO {
+                job.attach_world[bone as usize]
+            } else {
+                let parent = model.bones[bone as usize]
+                    .parent
+                    .map_or(xf, |p| job.attach_world[p as usize]);
+                let mut pose = job.attach_pose[bone as usize];
+                pose.pos += attach.offset;
+                parent * pose.matrix()
+            };
+            frame *= attach.pre;
+            if let Some(name) = attach.rx_of
+                && let Some(i) = model.bone(name)
+            {
+                frame *= Mat4::from_rotation_x(job.attach_pose[i as usize].rot.x);
+            }
+            frame *= attach.post;
+            let geo = match &attach.kind {
+                AttachKind::Item { source, context } => {
+                    let stack = match source {
+                        ItemSource::Equipment(slot) => v.item(*slot),
+                        ItemSource::Data(index) => v.stack(*index),
+                    };
+                    let Some(stack) = stack else { continue };
+                    self.items.item(stack, *context)
+                }
+                AttachKind::Block { state } => self.items.block(*state),
+            };
+            let Some(geo) = geo else { continue };
+            let glint = match &attach.kind {
+                AttachKind::Item { source, .. } => match source {
+                    ItemSource::Equipment(slot) => v.item(*slot),
+                    ItemSource::Data(index) => v.stack(*index),
+                }
+                .is_some_and(crate::equipment::has_glint),
+                AttachKind::Block { .. } => false,
+            };
+            self.push_geo(&geo, frame, v, glint);
+        }
+    }
+
+    fn push_geo(
+        &mut self,
+        geo: &crate::items::ItemGeo,
+        matrix: Mat4,
+        v: &EntityView<'_>,
+        glint: bool,
+    ) {
+        for part in &geo.parts {
+            let model_id = *part.model_id.get_or_init(|| self.gpu.add_model(&part.mesh));
+            let tex = self
+                .textures
+                .resolve(&part.texture, &mut self.gpu, &self.assets);
+            let Some((base, out)) = self.gpu.alloc_bones(1) else {
                 continue;
             };
-            let stack = match source {
-                ItemSource::Equipment(slot) => v.item(*slot),
-                ItemSource::Data(index) => v.stack(*index),
-            };
-            let Some(stack) = stack else { continue };
-            let Some(geo) = self.items.item(stack, *context) else {
-                continue;
-            };
-            for part in &geo.parts {
-                let model_id = *part.model_id.get_or_init(|| self.gpu.add_model(&part.mesh));
-                let tex = self
-                    .textures
-                    .resolve(&part.texture, &mut self.gpu, &self.assets);
+            out[0] = crate::gpu::Bone34::from_mat(&(matrix * part.local));
+            self.gpu.push(&PartInstance {
+                model: model_id,
+                texture: tex,
+                pipeline: part.pipeline,
+                bone_base: base,
+                tint: part.tint,
+                hurt: false,
+                fullbright: false,
+                block_light: v.light[0],
+                sky_light: v.light[1],
+                uv_offset: [0.0; 2],
+                origin: v.pos,
+            });
+            self.stats.parts += 1;
+            if glint {
+                let tex =
+                    self.textures
+                        .resolve("misc/enchanted_glint_item", &mut self.gpu, &self.assets);
                 let Some((base, out)) = self.gpu.alloc_bones(1) else {
                     continue;
                 };
-                out[0] = crate::gpu::Bone34::from_mat(&(parent * attach.local * part.local));
+                out[0] = crate::gpu::Bone34::from_mat(&(matrix * part.local));
                 self.gpu.push(&PartInstance {
                     model: model_id,
                     texture: tex,
-                    pipeline: part.pipeline,
+                    pipeline: crate::gpu::Pipeline::Additive,
                     bone_base: base,
-                    tint: part.tint,
+                    tint: [160, 100, 255, 150],
                     hurt: false,
-                    fullbright: false,
+                    fullbright: true,
                     block_light: v.light[0],
                     sky_light: v.light[1],
-                    uv_offset: [0.0; 2],
+                    uv_offset: glint_scroll(v.age_ticks),
                     origin: v.pos,
                 });
                 self.stats.parts += 1;
@@ -331,33 +560,6 @@ impl EntityScene {
     }
 
     fn emit_free(&mut self, v: &EntityView<'_>, plan: &Plan) {
-        let push_geo =
-            |this: &mut Self, geo: &crate::items::ItemGeo, matrix: Mat4, v: &EntityView<'_>| {
-                for part in &geo.parts {
-                    let model_id = *part.model_id.get_or_init(|| this.gpu.add_model(&part.mesh));
-                    let tex = this
-                        .textures
-                        .resolve(&part.texture, &mut this.gpu, &this.assets);
-                    let Some((base, out)) = this.gpu.alloc_bones(1) else {
-                        continue;
-                    };
-                    out[0] = crate::gpu::Bone34::from_mat(&(matrix * part.local));
-                    this.gpu.push(&PartInstance {
-                        model: model_id,
-                        texture: tex,
-                        pipeline: part.pipeline,
-                        bone_base: base,
-                        tint: part.tint,
-                        hurt: false,
-                        fullbright: false,
-                        block_light: v.light[0],
-                        sky_light: v.light[1],
-                        uv_offset: [0.0; 2],
-                        origin: v.pos,
-                    });
-                    this.stats.parts += 1;
-                }
-            };
         for item in &plan.free_items {
             let stack = match item.source {
                 ItemSource::Equipment(s) => v.item(s),
@@ -372,20 +574,71 @@ impl EntityScene {
             } else {
                 Mat4::IDENTITY
             };
-            push_geo(self, &geo, item.local * lift, v);
+            let mut m = item.local * lift;
+            if item.billboard {
+                m = m * self.billboard * item.post;
+            }
+            self.push_geo(&geo, m, v, crate::equipment::has_glint(stack));
         }
         for g in &plan.free_geo {
             match g {
                 crate::plan::FreeGeo::Block { state, local } => {
                     if let Some(geo) = self.items.block(*state) {
-                        push_geo(self, &geo, *local, v);
+                        self.push_geo(&geo, *local, v, false);
                     }
                 }
                 crate::plan::FreeGeo::Model { id, local } => {
                     if let Some(geo) = self.items.model(id) {
-                        push_geo(self, &geo, *local, v);
+                        self.push_geo(&geo, *local, v, false);
                     }
                 }
+                crate::plan::FreeGeo::Sprite {
+                    texture,
+                    uv,
+                    local,
+                    post,
+                    tint,
+                    translucent,
+                    billboard,
+                } => {
+                    let mut m = *local;
+                    if *billboard {
+                        m *= self.billboard;
+                    }
+                    m *= *post;
+                    let pipeline = if *translucent {
+                        crate::gpu::Pipeline::Translucent
+                    } else {
+                        crate::gpu::Pipeline::Cutout
+                    };
+                    self.push_sprite(texture, *uv, m, *tint, pipeline, v);
+                }
+                crate::plan::FreeGeo::Line { a, b, width } => {
+                    let rel = Vec3::new(
+                        (v.pos[0] - self.camera[0]) as f32,
+                        (v.pos[1] - self.camera[1]) as f32,
+                        (v.pos[2] - self.camera[2]) as f32,
+                    );
+                    let mid = (*a + *b) * 0.5;
+                    let view = (rel + mid).normalize_or_zero();
+                    let along = *b - *a;
+                    let side = along.cross(view).normalize_or_zero() * *width;
+                    let m = Mat4::from_cols(
+                        side.extend(0.0),
+                        along.extend(0.0),
+                        view.extend(0.0),
+                        mid.extend(1.0),
+                    );
+                    self.push_sprite(
+                        "dyn:black",
+                        [0.0, 0.0, 1.0, 1.0],
+                        m,
+                        [255; 4],
+                        crate::gpu::Pipeline::Cutout,
+                        v,
+                    );
+                }
+                crate::plan::FreeGeo::Bolt { seed } => self.push_bolt(*seed, v),
                 crate::plan::FreeGeo::Quad {
                     texture,
                     size,
@@ -417,6 +670,150 @@ impl EntityScene {
                 }
             }
         }
+    }
+
+    fn push_sprite(
+        &mut self,
+        texture: &str,
+        uv: [f32; 4],
+        matrix: Mat4,
+        tint: [u8; 4],
+        pipeline: crate::gpu::Pipeline,
+        v: &EntityView<'_>,
+    ) {
+        let key = uv.map(f32::to_bits);
+        let model = match self.sprite_models.get(&key) {
+            Some(m) => *m,
+            None => {
+                let n = [0.0, 0.0, 1.0];
+                let vertices = [
+                    ([-0.5, -0.5], [uv[0], uv[3]]),
+                    ([0.5, -0.5], [uv[2], uv[3]]),
+                    ([0.5, 0.5], [uv[2], uv[1]]),
+                    ([-0.5, 0.5], [uv[0], uv[1]]),
+                ]
+                .iter()
+                .map(|(p, uv)| crate::cube::Vertex {
+                    pos: [p[0], p[1], 0.0],
+                    bone: 0,
+                    normal: n,
+                    uv: *uv,
+                })
+                .collect();
+                let id = self
+                    .gpu
+                    .add_model(&Model::from_geometry(vertices, vec![0, 1, 2, 0, 2, 3]));
+                self.sprite_models.insert(key, id);
+                id
+            }
+        };
+        let tex = self.textures.resolve(texture, &mut self.gpu, &self.assets);
+        let Some((base, out)) = self.gpu.alloc_bones(1) else {
+            return;
+        };
+        out[0] = crate::gpu::Bone34::from_mat(&matrix);
+        self.gpu.push(&PartInstance {
+            model,
+            texture: tex,
+            pipeline,
+            bone_base: base,
+            tint,
+            hurt: false,
+            fullbright: pipeline != crate::gpu::Pipeline::Cutout || tint[3] < 255,
+            block_light: v.light[0],
+            sky_light: v.light[1],
+            uv_offset: [0.0; 2],
+            origin: v.pos,
+        });
+        self.stats.parts += 1;
+    }
+
+    fn push_bolt(&mut self, seed: u32, v: &EntityView<'_>) {
+        if self.bolts.len() >= MAX_BOLTS {
+            let ids: Vec<ModelId> = self.bolts.drain().map(|(_, id)| id).collect();
+            for id in ids {
+                self.gpu.free_model(id);
+            }
+        }
+        let model = match self.bolts.get(&seed) {
+            Some(m) => *m,
+            None => {
+                let id = self.gpu.add_model(&crate::effects::lightning_model(seed));
+                self.bolts.insert(seed, id);
+                id
+            }
+        };
+        let tex = self
+            .textures
+            .resolve("dyn:white", &mut self.gpu, &self.assets);
+        let Some((base, out)) = self.gpu.alloc_bones(1) else {
+            return;
+        };
+        out[0] = crate::gpu::Bone34::from_mat(&Mat4::IDENTITY);
+        self.gpu.push(&PartInstance {
+            model,
+            texture: tex,
+            pipeline: crate::gpu::Pipeline::Additive,
+            bone_base: base,
+            tint: [115, 115, 128, 30],
+            hurt: false,
+            fullbright: true,
+            block_light: 15,
+            sky_light: 15,
+            uv_offset: [0.0; 2],
+            origin: v.pos,
+        });
+        self.stats.parts += 1;
+    }
+
+    fn emit_shadow(&mut self, v: &EntityView<'_>, plan: &Plan) {
+        if !self.shadows || v.invisible || plan.parts.is_empty() {
+            return;
+        }
+        let Some(top) = &self.block_top else { return };
+        let Some(name) = mcr_data::v26_3().entity_type_name(v.type_id as u32) else {
+            return;
+        };
+        let Some(radius) = self
+            .assets
+            .renderers
+            .0
+            .get(name)
+            .and_then(|r| r.shadow_radius)
+        else {
+            return;
+        };
+        let radius = radius * v.scale * plan.scale * plan.extra_scale.x.abs().max(1.0);
+        if radius <= 0.0 || v.death_time > 0.0 {
+            return;
+        }
+        let (bx, bz) = (v.pos[0].floor() as i32, v.pos[2].floor() as i32);
+        let by = (v.pos[1] - 1e-4).floor() as i32;
+        let mut ground = None;
+        for dy in 0..=MAX_SHADOW_DROP {
+            if let Some(h) = top(bx, by - dy, bz) {
+                ground = Some(f64::from(by - dy) + f64::from(h.clamp(0.0, 1.0)));
+                break;
+            }
+        }
+        let Some(ground) = ground else { return };
+        let drop = (v.pos[1] - ground) as f32;
+        let strength = 0.5 * (1.0 - drop / (2.0 * radius.max(0.5)));
+        if drop < -0.05 || strength <= 0.0 {
+            return;
+        }
+        let alpha = (strength.clamp(0.0, 1.0) * 255.0) as u8;
+        let matrix = Mat4::from_translation(Vec3::new(0.0, -drop + 0.015, 0.0))
+            * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+            * Mat4::from_scale(Vec3::splat(radius * 2.0));
+        self.push_sprite(
+            "misc/shadow",
+            [0.0, 0.0, 1.0, 1.0],
+            matrix,
+            [0, 0, 0, alpha],
+            crate::gpu::Pipeline::Translucent,
+            v,
+        );
     }
 
     fn quad_model(&mut self) -> ModelId {
@@ -514,9 +911,22 @@ fn entity_transform(v: &EntityView<'_>, plan: &Plan) -> Mat4 {
         let fall = ((v.death_time - 1.0) / 20.0 * 1.6).max(0.0).sqrt().min(1.0);
         m *= Mat4::from_quat(Quat::from_rotation_z((fall * plan.flip).to_radians()));
     }
+    m *= plan.post_rot;
     m * Mat4::from_translation(plan.extra_offset)
         * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
         * Mat4::from_scale(plan.extra_scale)
         * Mat4::from_translation(Vec3::new(0.0, -1.501, 0.0))
         * Mat4::from_scale(Vec3::splat(MODEL_SCALE))
+}
+
+impl std::fmt::Debug for EntityScene {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EntityScene")
+            .field("stats", &self.stats)
+            .finish_non_exhaustive()
+    }
+}
+
+fn glint_scroll(age: f32) -> [f32; 2] {
+    [(age * 0.01).fract(), (age * 0.007).fract()]
 }

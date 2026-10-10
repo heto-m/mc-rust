@@ -59,6 +59,9 @@ impl std::fmt::Debug for Builder {
 #[derive(Debug)]
 pub struct Catalog {
     builders: Vec<Builder>,
+    names: Vec<&'static str>,
+    decos: Vec<crate::extras::Deco>,
+    kf: Vec<bool>,
 }
 
 pub(crate) const fn simple_entry(
@@ -113,6 +116,8 @@ pub fn base_anim(v: &EntityView<'_>) -> AnimIn {
         swim_amount: if pose == Pose::Swimming { 1.0 } else { 0.0 },
         fall_flying: pose == Pose::FallFlying,
         main_right: true,
+        entity_id: v.id,
+        in_water: !v.on_ground,
         ..AnimIn::default()
     }
 }
@@ -121,12 +126,21 @@ impl Catalog {
     pub fn new() -> Self {
         let version = mcr_data::v26_3();
         let mut builders = Vec::new();
+        let (mut names, mut decos, mut kf) = (Vec::new(), Vec::new(), Vec::new());
         let mut id = 0u32;
         while let Some(name) = version.entity_type_name(id) {
             builders.push(crate::mobs::builder_for(name));
+            names.push(name);
+            decos.push(crate::extras::deco_for(crate::mobs::short(name)));
+            kf.push(crate::kf::has_animation(name));
             id += 1;
         }
-        Catalog { builders }
+        Catalog {
+            builders,
+            names,
+            decos,
+            kf,
+        }
     }
 
     pub fn build(&self, cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
@@ -139,7 +153,12 @@ impl Catalog {
             Builder::Simple(s) => simple(s, v, plan),
             Builder::Func(f) => f(cx, v, plan),
         }
-        crate::kf::drive(cx, v, plan);
+        if let (Some(&deco), Some(&name)) = (self.decos.get(index), self.names.get(index)) {
+            crate::extras::decorate(deco, crate::mobs::short(name), v, plan);
+        }
+        if self.kf.get(index).copied().unwrap_or(false) {
+            crate::kf::drive(cx, v, plan);
+        }
     }
 
     /// Whether a type has a dedicated renderer rather than the hitbox fallback.

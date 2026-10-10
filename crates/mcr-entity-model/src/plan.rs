@@ -80,12 +80,30 @@ impl Part {
     }
 }
 
-/// A static item or block model attached to a bone of the first part.
+/// A static item or block model attached to a bone of the first part: the bone matrix (with
+/// `offset` sixteenths added to its position, like vanilla's `part.x += n`), then `pre`, an
+/// optional X rotation by the current pitch of bone `rx_of`, and `post`.
 #[derive(Debug, Clone)]
 pub struct Attach {
     pub bone: &'static str,
     pub kind: AttachKind,
-    pub local: Mat4,
+    pub offset: Vec3,
+    pub pre: Mat4,
+    pub rx_of: Option<&'static str>,
+    pub post: Mat4,
+}
+
+impl Attach {
+    pub fn new(bone: &'static str, kind: AttachKind, pre: Mat4) -> Self {
+        Attach {
+            bone,
+            kind,
+            offset: Vec3::ZERO,
+            pre,
+            rx_of: None,
+            post: Mat4::IDENTITY,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +151,7 @@ pub struct Plan {
     pub rot_overrides: Vec<(crate::rig::Slot, [f32; 3])>,
     pub free_items: Vec<FreeItem>,
     pub free_geo: Vec<FreeGeo>,
+    pub post_rot: Mat4,
 }
 
 impl Default for Plan {
@@ -155,6 +174,7 @@ impl Default for Plan {
             rot_overrides: Vec::new(),
             free_items: Vec::new(),
             free_geo: Vec::new(),
+            post_rot: Mat4::IDENTITY,
         }
     }
 }
@@ -177,6 +197,7 @@ impl Plan {
         self.rot_overrides.clear();
         self.free_items.clear();
         self.free_geo.clear();
+        self.post_rot = Mat4::IDENTITY;
     }
 
     pub fn push(&mut self, part: Part) -> &mut Part {
@@ -192,6 +213,8 @@ pub struct FreeItem {
     pub context: ItemContext,
     pub local: Mat4,
     pub ground_lift: bool,
+    pub billboard: bool,
+    pub post: Mat4,
 }
 
 /// Static textured geometry (paintings, block models) in block units around the entity origin.
@@ -210,5 +233,24 @@ pub enum FreeGeo {
         size: [f32; 2],
         local: Mat4,
         tint: [u8; 4],
+    },
+    /// A textured quad (uv rectangle `[u0, v0, u1, v1]`), optionally turned toward the camera.
+    Sprite {
+        texture: &'static str,
+        uv: [f32; 4],
+        local: Mat4,
+        post: Mat4,
+        tint: [u8; 4],
+        translucent: bool,
+        billboard: bool,
+    },
+    /// A camera-facing ribbon between two points relative to the entity.
+    Line {
+        a: Vec3,
+        b: Vec3,
+        width: f32,
+    },
+    Bolt {
+        seed: u32,
     },
 }

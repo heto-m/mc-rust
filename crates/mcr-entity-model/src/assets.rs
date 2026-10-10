@@ -197,6 +197,7 @@ pub struct SceneAssets {
     pub resources: Arc<ResourceManager>,
     pub layers: LayerSet,
     pub animations: AnimationSet,
+    pub renderers: crate::data::RendererSet,
     pub items: Arc<ItemModels>,
     pub equippables: HashMap<String, Equippable>,
     equipment: std::sync::Mutex<HashMap<String, Option<Arc<EquipmentInfo>>>>,
@@ -223,6 +224,8 @@ impl SceneAssets {
             resources,
             layers: LayerSet::load(extracted.join("entity_models.json"))?,
             animations: AnimationSet::load(extracted.join("animations.json"))?,
+            renderers: crate::data::RendererSet::load(extracted.join("entity_renderers.json"))
+                .unwrap_or_else(|_| crate::data::RendererSet(HashMap::new())),
             items,
             equippables,
             equipment: Default::default(),

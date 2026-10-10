@@ -316,6 +316,8 @@ impl EntityRenderer {
             label: Some("entity"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
             ..Default::default()
         });
         let globals = device.create_buffer(&wgpu::BufferDescriptor {

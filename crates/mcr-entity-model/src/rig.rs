@@ -5,7 +5,7 @@ use glam::Vec3;
 use crate::model::{BoneId, Model};
 use crate::pose::Pose;
 
-const DEG: f32 = PI / 180.0;
+pub(crate) const DEG: f32 = PI / 180.0;
 const ABSENT: BoneId = BoneId::MAX;
 
 macro_rules! slots {
@@ -45,6 +45,44 @@ slots! {
     Tentacle0 = "tentacle0", Tentacle1 = "tentacle1", Tentacle2 = "tentacle2", Tentacle3 = "tentacle3",
     Tentacle4 = "tentacle4", Tentacle5 = "tentacle5", Tentacle6 = "tentacle6", Tentacle7 = "tentacle7",
     Tentacle8 = "tentacle8",
+    InnerRoot = "root",
+    BodyBack = "body_back", UpperMouth = "upper_mouth", LowerMouth = "lower_mouth", Eye = "eye",
+    Spike0 = "spike0", Spike1 = "spike1", Spike2 = "spike2", Spike3 = "spike3", Spike4 = "spike4",
+    Spike5 = "spike5", Spike6 = "spike6", Spike7 = "spike7", Spike8 = "spike8", Spike9 = "spike9",
+    Spike10 = "spike10", Spike11 = "spike11",
+    Tail0 = "tail0", Tail3 = "tail3", Tail4 = "tail4", Tail5 = "tail5", Tail6 = "tail6",
+    Tail7 = "tail7", Tail8 = "tail8", Tail9 = "tail9", Tail10 = "tail10", Tail11 = "tail11",
+    Neck = "neck", Neck0 = "neck0", Neck1 = "neck1", Neck2 = "neck2", Neck3 = "neck3", Neck4 = "neck4",
+    Jaw = "jaw",
+    LeftWingBase = "left_wing_base", RightWingBase = "right_wing_base",
+    LeftWingTip = "left_wing_tip", RightWingTip = "right_wing_tip",
+    TailBase = "tail_base", TailTip = "tail_tip",
+    CenterHead = "center_head", LeftHead = "left_head", RightHead = "right_head", Ribcage = "ribcage",
+    Part0 = "part0", Part1 = "part1", Part2 = "part2", Part3 = "part3", Part4 = "part4",
+    Part5 = "part5", Part6 = "part6", Part7 = "part7", Part8 = "part8", Part9 = "part9",
+    Part10 = "part10", Part11 = "part11",
+    Cube0 = "cube0", Cube1 = "cube1", Cube2 = "cube2", Cube3 = "cube3", Cube4 = "cube4",
+    Cube5 = "cube5", Cube6 = "cube6", Cube7 = "cube7",
+    Lid = "lid",
+    LeftFrontLegTip = "left_front_leg_tip", LeftFrontFoot = "left_front_foot",
+    LeftHindLegTip = "left_hind_leg_tip", LeftHindFoot = "left_hind_foot",
+    RightFrontLegTip = "right_front_leg_tip", RightFrontFoot = "right_front_foot",
+    RightHindLegTip = "right_hind_leg_tip", RightHindFoot = "right_hind_foot",
+    LeftBottomBristle = "left_bottom_bristle", LeftMiddleBristle = "left_middle_bristle",
+    LeftTopBristle = "left_top_bristle", RightBottomBristle = "right_bottom_bristle",
+    RightMiddleBristle = "right_middle_bristle", RightTopBristle = "right_top_bristle",
+    Bristle0 = "bristle0", Bristle1 = "bristle1", Bristle2 = "bristle2",
+    LeftBlueFin = "left_blue_fin", RightBlueFin = "right_blue_fin",
+    Segment0 = "segment0", Segment1 = "segment1", Segment2 = "segment2", Segment3 = "segment3",
+    Segment4 = "segment4", Segment5 = "segment5",
+    BackFin = "back_fin", Stinger = "stinger", FrontLegs = "front_legs", MiddleLegs = "middle_legs",
+    BackLegs = "back_legs",
+    LeftFrontBristle = "left_front_bristle",
+    EggBelly = "egg_belly",
+    LeftHorn = "left_horn", RightHorn = "right_horn",
+    Feet = "feet",
+    Layer0 = "layer0", Layer1 = "layer1", Layer2 = "layer2", Segment6 = "segment6",
+    OuterGlass = "outer_glass", InnerGlass = "inner_glass", Base = "base",
 }
 
 const SLOT_COUNT: usize = Slot::ALL.len();
@@ -62,6 +100,13 @@ impl Binding {
             if let Some(id) = model.bone(name) {
                 ids[*slot as usize] = id;
             }
+        }
+        let nested = model
+            .bones
+            .iter()
+            .position(|b| b.name == "root" && b.parent == Some(0));
+        if let Some(i) = nested {
+            ids[Slot::InnerRoot as usize] = i as BoneId;
         }
         Binding { ids }
     }
@@ -85,10 +130,18 @@ pub enum ArmPose {
     Spyglass,
     TootHorn,
     Brush,
+    Spear,
 }
 
 impl ArmPose {
-    fn two_handed(self) -> bool {
+    pub(crate) fn two_handed(self) -> bool {
+        matches!(
+            self,
+            ArmPose::BowAndArrow | ArmPose::CrossbowCharge | ArmPose::CrossbowHold
+        )
+    }
+
+    pub(crate) fn affects_offhand(self) -> bool {
         matches!(
             self,
             ArmPose::BowAndArrow
@@ -97,13 +150,30 @@ impl ArmPose {
                 | ArmPose::CrossbowHold
         )
     }
+}
 
-    fn affects_offhand(self) -> bool {
-        matches!(
-            self,
-            ArmPose::BowAndArrow | ArmPose::CrossbowCharge | ArmPose::CrossbowHold
-        )
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IllagerPose {
+    #[default]
+    Crossed,
+    Neutral,
+    Attacking,
+    Spellcasting,
+    BowAndArrow,
+    CrossbowHold,
+    CrossbowCharge,
+    Celebrating,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PiglinPose {
+    #[default]
+    Default,
+    Dancing,
+    MeleeAttack,
+    CrossbowHold,
+    CrossbowCharge,
+    Admiring,
 }
 
 /// Inputs of vanilla's `setupAnim` that the rigs consume; angles in degrees.
@@ -131,7 +201,44 @@ pub struct AnimIn {
     pub use_ticks: f32,
     pub unhappy: bool,
     pub lie_down: f32,
-    pub extra: [f32; 4],
+    pub main_hand_empty: bool,
+    pub holding_bow: bool,
+    pub illager: IllagerPose,
+    pub piglin: PiglinPose,
+    pub charge_max: f32,
+    pub head_roll: f32,
+    pub in_water: bool,
+    pub squish: f32,
+    pub tail_angle: f32,
+    pub shake: f32,
+    pub stand: f32,
+    pub eat: f32,
+    pub feed: f32,
+    pub peek: f32,
+    pub charging: bool,
+    pub holding: f32,
+    pub flap: f32,
+    pub tentacle: f32,
+    pub puff: u8,
+    pub carrying: bool,
+    pub creepy: bool,
+    pub sit_amount: f32,
+    pub roll: f32,
+    pub lie_on_back: f32,
+    pub sneeze: f32,
+    pub scared: bool,
+    pub crouch_amount: f32,
+    pub sleeping: bool,
+    pub entity_id: i32,
+    pub has_chest: bool,
+    pub on_land: bool,
+    pub rearing: bool,
+    pub has_stinger: bool,
+    pub item_held: bool,
+    pub bristle: f32,
+    pub attack_ticks: f32,
+    pub offer_ticks: f32,
+    pub donkey: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +248,8 @@ pub enum HumanoidStyle {
     Skeleton,
     Illager,
     Piglin,
+    ZombifiedPiglin,
+    Drowned,
     ArmorStand,
 }
 
@@ -149,6 +258,7 @@ pub enum Rig {
     Static,
     Look,
     Humanoid(HumanoidStyle),
+    Illager,
     Quadruped,
     Creeper,
     Chicken,
@@ -179,19 +289,30 @@ pub enum Rig {
     Strider,
     Allay,
     Vex,
+    Pufferfish,
+    Guardian,
+    Dragon,
+    Wither,
+    Ravager,
+    Shulker,
+    Dolphin,
+    Panda,
+    Witch,
+    Silverfish,
+    Crystal,
 }
 
-struct R<'a> {
-    b: &'a Binding,
-    pose: &'a mut [Pose],
+pub(crate) struct R<'a> {
+    pub(crate) b: &'a Binding,
+    pub(crate) pose: &'a mut [Pose],
 }
 
 impl R<'_> {
-    fn p(&mut self, s: Slot) -> Option<&mut Pose> {
+    pub(crate) fn p(&mut self, s: Slot) -> Option<&mut Pose> {
         self.b.get(s).map(|i| &mut self.pose[i])
     }
 
-    fn rot(&mut self, s: Slot, x: Option<f32>, y: Option<f32>, z: Option<f32>) {
+    pub(crate) fn rot(&mut self, s: Slot, x: Option<f32>, y: Option<f32>, z: Option<f32>) {
         if let Some(p) = self.p(s) {
             if let Some(x) = x {
                 p.rot.x = x;
@@ -205,35 +326,59 @@ impl R<'_> {
         }
     }
 
-    fn rx(&mut self, s: Slot, v: f32) {
+    pub(crate) fn rx(&mut self, s: Slot, v: f32) {
         self.rot(s, Some(v), None, None);
     }
 
-    fn ry(&mut self, s: Slot, v: f32) {
+    pub(crate) fn ry(&mut self, s: Slot, v: f32) {
         self.rot(s, None, Some(v), None);
     }
 
-    fn rz(&mut self, s: Slot, v: f32) {
+    pub(crate) fn rz(&mut self, s: Slot, v: f32) {
         self.rot(s, None, None, Some(v));
     }
 
-    fn add_rot(&mut self, s: Slot, d: Vec3) {
+    pub(crate) fn add_rot(&mut self, s: Slot, d: Vec3) {
         if let Some(p) = self.p(s) {
             p.rot += d;
         }
     }
 
-    fn add_pos(&mut self, s: Slot, d: Vec3) {
+    pub(crate) fn set_pos(&mut self, s: Slot, v: Vec3) {
+        if let Some(p) = self.p(s) {
+            p.pos = v;
+        }
+    }
+
+    pub(crate) fn pos(&self, s: Slot) -> Vec3 {
+        self.b.get(s).map_or(Vec3::ZERO, |i| self.pose[i].pos)
+    }
+
+    pub(crate) fn rotate_by(&mut self, s: Slot, q: glam::Quat) {
+        if let Some(p) = self.p(s) {
+            let old = glam::Quat::from_euler(glam::EulerRot::ZYX, p.rot.z, p.rot.y, p.rot.x);
+            let (z, y, x) = (old * q).to_euler(glam::EulerRot::ZYX);
+            p.rot = Vec3::new(x, y, z);
+        }
+    }
+
+    pub(crate) fn hide(&mut self, s: Slot) {
+        if let Some(p) = self.p(s) {
+            p.scale = Vec3::ZERO;
+        }
+    }
+
+    pub(crate) fn add_pos(&mut self, s: Slot, d: Vec3) {
         if let Some(p) = self.p(s) {
             p.pos += d;
         }
     }
 
-    fn rotation(&self, s: Slot) -> Vec3 {
+    pub(crate) fn rotation(&self, s: Slot) -> Vec3 {
         self.b.get(s).map_or(Vec3::ZERO, |i| self.pose[i].rot)
     }
 
-    fn look(&mut self, a: &AnimIn) {
+    pub(crate) fn look(&mut self, a: &AnimIn) {
         if self.b.get(Slot::Head).is_some() {
             self.rot(
                 Slot::Head,
@@ -248,11 +393,11 @@ impl R<'_> {
     }
 }
 
-fn cos(x: f32) -> f32 {
+pub(crate) fn cos(x: f32) -> f32 {
     x.cos()
 }
 
-fn lerp(t: f32, a: f32, b: f32) -> f32 {
+pub(crate) fn lerp(t: f32, a: f32, b: f32) -> f32 {
     a + t * (b - a)
 }
 
@@ -262,7 +407,8 @@ pub fn animate(rig: Rig, a: &AnimIn, b: &Binding, pose: &mut [Pose]) {
     match rig {
         Rig::Static => {}
         Rig::Look => r.look(a),
-        Rig::Humanoid(style) => humanoid(&mut r, a, style),
+        Rig::Humanoid(style) => crate::rig_humanoid::humanoid(&mut r, a, style),
+        Rig::Illager => crate::rig_humanoid::illager(&mut r, a),
         Rig::Quadruped => {
             r.look(a);
             legs4(&mut r, a, 1.0);
@@ -301,8 +447,39 @@ pub fn animate(rig: Rig, a: &AnimIn, b: &Binding, pose: &mut [Pose]) {
             r.ry(Slot::LeftLeg, 0.0);
         }
         Rig::Feline => feline(&mut r, a),
-        Rig::Wolf => wolf(&mut r, a),
-        Rig::Slime => {}
+        Rig::Wolf => crate::rig_mobs::wolf(&mut r, a),
+        Rig::Slime => crate::rig_mobs::slime(&mut r, a),
+        Rig::Fish => crate::rig_mobs::fish(&mut r, a),
+        Rig::Pufferfish => crate::rig_mobs::pufferfish(&mut r, a),
+        Rig::Squid => crate::rig_mobs::squid(&mut r, a),
+        Rig::Blaze => crate::rig_mobs::blaze(&mut r, a),
+        Rig::Ghast => crate::rig_mobs::ghast(&mut r, a),
+        Rig::Enderman => crate::rig_mobs::enderman(&mut r, a),
+        Rig::SnowGolem => crate::rig_mobs::snow_golem(&mut r, a),
+        Rig::IronGolem => crate::rig_mobs::iron_golem(&mut r, a),
+        Rig::Guardian => crate::rig_mobs::guardian(&mut r, a),
+        Rig::Phantom => crate::rig_mobs::phantom(&mut r, a),
+        Rig::Dragon => crate::rig_mobs::dragon(&mut r, a),
+        Rig::Wither => crate::rig_mobs::wither(&mut r, a),
+        Rig::Equine => crate::rig_mobs::equine(&mut r, a),
+        Rig::Llama => crate::rig_mobs::llama(&mut r, a),
+        Rig::Strider => crate::rig_mobs::strider(&mut r, a),
+        Rig::Hoglin => crate::rig_mobs::hoglin(&mut r, a),
+        Rig::Ravager => crate::rig_mobs::ravager(&mut r, a),
+        Rig::Shulker => crate::rig_mobs::shulker(&mut r, a),
+        Rig::Vex => crate::rig_mobs::vex(&mut r, a),
+        Rig::Allay => crate::rig_mobs::allay(&mut r, a),
+        Rig::Parrot => crate::rig_mobs::parrot(&mut r, a),
+        Rig::Endermite => crate::rig_mobs::endermite(&mut r, a, false),
+        Rig::Silverfish => crate::rig_mobs::endermite(&mut r, a, true),
+        Rig::Dolphin => crate::rig_mobs::dolphin(&mut r, a),
+        Rig::Bee => crate::rig_mobs::bee(&mut r, a),
+        Rig::Turtle => crate::rig_mobs::turtle(&mut r, a),
+        Rig::Polar => crate::rig_mobs::polar_bear(&mut r, a),
+        Rig::Panda => crate::rig_mobs::panda(&mut r, a),
+        Rig::Fox => crate::rig_mobs::fox(&mut r, a),
+        Rig::Witch => crate::rig_mobs::witch(&mut r, a),
+        Rig::Crystal => crate::rig_mobs::crystal(&mut r, a),
         _ => {
             r.look(a);
         }
@@ -406,340 +583,6 @@ fn feline(r: &mut R, a: &AnimIn) {
         r.rz(Slot::RightHind, -0.5);
         r.add_pos(Slot::RightHind, Vec3::new(0.8 * age, 2.0 * age, 0.0));
     }
-}
-
-fn wolf(r: &mut R, a: &AnimIn) {
-    let (pos, sp) = (a.walk_pos, a.walk_speed);
-    r.look(a);
-    if a.sitting {
-        r.add_pos(Slot::UpperBody, Vec3::new(0.0, 0.0, 0.0));
-    }
-    if !a.sitting {
-        r.rx(Slot::RightHind, cos(pos * 0.6662) * 1.4 * sp);
-        r.rx(Slot::LeftHind, cos(pos * 0.6662 + PI) * 1.4 * sp);
-        r.rx(Slot::RightFront, cos(pos * 0.6662 + PI) * 1.4 * sp);
-        r.rx(Slot::LeftFront, cos(pos * 0.6662) * 1.4 * sp);
-    }
-}
-
-fn humanoid(r: &mut R, a: &AnimIn, style: HumanoidStyle) {
-    let head_x = a.head_pitch * DEG;
-    let head_y = a.head_yaw * DEG;
-    r.look(a);
-    if a.fall_flying {
-        r.rx(Slot::Head, -FRAC_PI_4);
-    }
-    let (pos, sp) = (a.walk_pos, a.walk_speed);
-    r.rx(Slot::RightArm, cos(pos * 0.6662 + PI) * 2.0 * sp * 0.5);
-    r.rx(Slot::LeftArm, cos(pos * 0.6662) * 2.0 * sp * 0.5);
-    r.rot(
-        Slot::RightLeg,
-        Some(cos(pos * 0.6662) * 1.4 * sp),
-        Some(0.005),
-        Some(0.005),
-    );
-    r.rot(
-        Slot::LeftLeg,
-        Some(cos(pos * 0.6662 + PI) * 1.4 * sp),
-        Some(-0.005),
-        Some(-0.005),
-    );
-    if a.passenger {
-        r.add_rot(Slot::RightArm, Vec3::new(-PI / 5.0, 0.0, 0.0));
-        r.add_rot(Slot::LeftArm, Vec3::new(-PI / 5.0, 0.0, 0.0));
-        r.rot(
-            Slot::RightLeg,
-            Some(-1.4137167),
-            Some(PI / 10.0),
-            Some(0.07853982),
-        );
-        r.rot(
-            Slot::LeftLeg,
-            Some(-1.4137167),
-            Some(-PI / 10.0),
-            Some(-0.07853982),
-        );
-    }
-
-    let prioritize_right = if a.use_ticks > 0.0 {
-        a.main_right
-    } else {
-        let off_is_right = !a.main_right;
-        let off_pose = if off_is_right {
-            a.right_arm
-        } else {
-            a.left_arm
-        };
-        if off_pose.two_handed() {
-            a.main_right
-        } else {
-            off_is_right
-        }
-    };
-    if prioritize_right {
-        pose_arm(r, a, true, head_x, head_y);
-        if !a.right_arm.affects_offhand() {
-            pose_arm(r, a, false, head_x, head_y);
-        }
-    } else {
-        pose_arm(r, a, false, head_x, head_y);
-        if !a.left_arm.affects_offhand() {
-            pose_arm(r, a, true, head_x, head_y);
-        }
-    }
-
-    attack(r, a, head_x);
-    match style {
-        HumanoidStyle::Zombie => zombie_arms(r, a),
-        HumanoidStyle::Skeleton => {
-            if a.aggressive && a.right_arm != ArmPose::BowAndArrow {
-                let s2 = (a.attack * PI).sin();
-                let s1 = ((1.0 - (1.0 - a.attack) * (1.0 - a.attack)) * PI).sin();
-                r.rz(Slot::RightArm, 0.0);
-                r.rz(Slot::LeftArm, 0.0);
-                r.ry(Slot::RightArm, -(0.1 - s2 * 0.6));
-                r.ry(Slot::LeftArm, 0.1 - s2 * 0.6);
-                r.rx(Slot::RightArm, -FRAC_PI_2 - (s2 * 1.2 - s1 * 0.4));
-                r.rx(Slot::LeftArm, -FRAC_PI_2 - (s2 * 1.2 - s1 * 0.4));
-                bob(r, Slot::RightArm, a.age, 1.0);
-                bob(r, Slot::LeftArm, a.age, -1.0);
-            }
-        }
-        HumanoidStyle::Illager => {
-            if a.aggressive {
-                if let Some(p) = r.p(Slot::Arms) {
-                    p.scale = Vec3::ZERO;
-                }
-            } else {
-                for s in [Slot::LeftArm, Slot::RightArm] {
-                    if let Some(p) = r.p(s) {
-                        p.scale = Vec3::ZERO;
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    if a.crouching {
-        r.rx(Slot::Body, 0.5);
-        r.add_rot(Slot::RightArm, Vec3::new(0.4, 0.0, 0.0));
-        r.add_rot(Slot::LeftArm, Vec3::new(0.4, 0.0, 0.0));
-        r.add_pos(Slot::RightLeg, Vec3::new(0.0, 0.0, 4.0));
-        r.add_pos(Slot::LeftLeg, Vec3::new(0.0, 0.0, 4.0));
-        r.add_pos(Slot::Head, Vec3::new(0.0, 4.2, 0.0));
-        r.add_pos(Slot::Body, Vec3::new(0.0, 3.2, 0.0));
-        r.add_pos(Slot::LeftArm, Vec3::new(0.0, 3.2, 0.0));
-        r.add_pos(Slot::RightArm, Vec3::new(0.0, 3.2, 0.0));
-    }
-    if a.right_arm != ArmPose::Spyglass {
-        bob(r, Slot::RightArm, a.age, 1.0);
-    }
-    if a.left_arm != ArmPose::Spyglass {
-        bob(r, Slot::LeftArm, a.age, -1.0);
-    }
-    if a.swim_amount > 0.0 {
-        swim(r, a);
-    }
-}
-
-fn bob(r: &mut R, s: Slot, age: f32, scale: f32) {
-    r.add_rot(
-        s,
-        Vec3::new(
-            scale * (age * 0.067).sin() * 0.05,
-            0.0,
-            scale * ((age * 0.09).cos() * 0.05 + 0.05),
-        ),
-    );
-}
-
-fn zombie_arms(r: &mut R, a: &AnimIn) {
-    let raise = !a.baby || a.right_arm == ArmPose::Empty && a.left_arm == ArmPose::Empty;
-    let drop = if raise {
-        -PI / if a.aggressive { 1.5 } else { 2.25 }
-    } else {
-        0.0
-    };
-    let ay = (if raise { 1.0 } else { -1.0 }) * (a.attack * PI).sin();
-    let ax = ((1.0 - (1.0 - a.attack) * (1.0 - a.attack)) * PI).sin();
-    let x = drop + ay * 1.2 - ax * 0.4;
-    let y = 0.1 - ay * 0.6;
-    r.rot(
-        Slot::RightArm,
-        Some(x),
-        Some(if raise { -y } else { y }),
-        Some(0.0),
-    );
-    r.rot(
-        Slot::LeftArm,
-        Some(x),
-        Some(if raise { y } else { -y }),
-        Some(0.0),
-    );
-}
-
-fn pose_arm(r: &mut R, a: &AnimIn, right: bool, head_x: f32, head_y: f32) {
-    let (arm, other) = if right {
-        (Slot::RightArm, Slot::LeftArm)
-    } else {
-        (Slot::LeftArm, Slot::RightArm)
-    };
-    let pose = if right { a.right_arm } else { a.left_arm };
-    let arm_x = r.rotation(arm).x;
-    match pose {
-        ArmPose::Empty => r.ry(arm, 0.0),
-        ArmPose::Item => {
-            r.rot(arm, Some(arm_x * 0.5 - PI / 10.0), Some(0.0), None);
-        }
-        ArmPose::Block => {
-            let side = if right { -30.0 } else { 30.0 } * DEG;
-            r.rot(
-                arm,
-                Some(arm_x * 0.5 - 0.9424779 + head_x.clamp(-PI * 4.0 / 9.0, 0.43633232)),
-                Some(side + head_y.clamp(-PI / 6.0, PI / 6.0)),
-                None,
-            );
-        }
-        ArmPose::BowAndArrow => {
-            let (ry, ly) = if right {
-                (-0.1 + head_y, 0.1 + head_y + 0.4)
-            } else {
-                (-0.1 + head_y - 0.4, 0.1 + head_y)
-            };
-            r.ry(Slot::RightArm, ry);
-            r.ry(Slot::LeftArm, ly);
-            r.rx(Slot::RightArm, -FRAC_PI_2 + head_x);
-            r.rx(Slot::LeftArm, -FRAC_PI_2 + head_x);
-        }
-        ArmPose::ThrowTrident => {
-            r.rot(arm, Some(arm_x * 0.5 - PI), Some(0.0), None);
-        }
-        ArmPose::CrossbowCharge => {
-            let (arm_main, arm_off) = (arm, other);
-            let progress = (a.use_ticks / 25.0).clamp(0.0, 1.0);
-            let sign = if right { 1.0 } else { -1.0 };
-            r.ry(arm_main, 0.4 * -sign + head_y * 0.0);
-            r.ry(arm_off, 0.6 * sign);
-            r.rx(arm_main, -FRAC_PI_2 + head_x + 0.1);
-            r.rx(arm_off, 1.5 + head_x - (1.5 - 0.6) * progress);
-            let _ = arm_off;
-        }
-        ArmPose::CrossbowHold => {
-            let sign = if right { 1.0 } else { -1.0 };
-            r.ry(arm, -0.3 * sign + head_y);
-            r.ry(other, 0.6 * sign + head_y);
-            r.rx(arm, -FRAC_PI_2 + head_x + 0.1);
-            r.rx(other, -1.5 + head_x);
-        }
-        ArmPose::Spyglass => {
-            let crouch = if a.crouching { PI / 12.0 } else { 0.0 };
-            let side = if right { -PI / 12.0 } else { PI / 12.0 };
-            r.rot(
-                arm,
-                Some((head_x - 1.9198622 - crouch).clamp(-2.4, 3.3)),
-                Some(head_y + side),
-                None,
-            );
-        }
-        ArmPose::TootHorn => {
-            let side = if right { -PI / 6.0 } else { PI / 6.0 };
-            r.rot(
-                arm,
-                Some(head_x.clamp(-1.2, 1.2) - 1.4835298),
-                Some(head_y + side),
-                None,
-            );
-        }
-        ArmPose::Brush => {
-            r.rot(arm, Some(arm_x * 0.5 - PI / 5.0), Some(0.0), None);
-        }
-    }
-}
-
-fn attack(r: &mut R, a: &AnimIn, head_x: f32) {
-    let t = a.attack;
-    if t <= 0.0 {
-        return;
-    }
-    let mut body_y = (t.sqrt() * PI * 2.0).sin() * 0.2;
-    if a.swing_left {
-        body_y = -body_y;
-    }
-    r.ry(Slot::Body, body_y);
-    let age_scale = if a.baby { 0.5 } else { 1.0 };
-    if let Some(p) = r.p(Slot::RightArm) {
-        p.pos.z = body_y.sin() * 5.0 * age_scale;
-        p.pos.x = -body_y.cos() * 5.0 * age_scale;
-        p.rot.y += body_y;
-    }
-    if let Some(p) = r.p(Slot::LeftArm) {
-        p.pos.z = -body_y.sin() * 5.0 * age_scale;
-        p.pos.x = body_y.cos() * 5.0 * age_scale;
-        p.rot.y += body_y;
-        p.rot.x += body_y;
-    }
-    let ease = 1.0 - (1.0 - t).powi(4);
-    let aa = (ease * PI).sin();
-    let bb = (t * PI).sin() * -(head_x - 0.7) * 0.75;
-    let arm = if a.swing_left {
-        Slot::LeftArm
-    } else {
-        Slot::RightArm
-    };
-    if let Some(p) = r.p(arm) {
-        p.rot.x -= aa * 1.2 + bb;
-        p.rot.y += body_y * 2.0;
-        p.rot.z += (t * PI).sin() * -0.4;
-    }
-}
-
-fn swim(r: &mut R, a: &AnimIn) {
-    let sa = a.swim_amount;
-    if !a.fall_flying {
-        let hx = r.rotation(Slot::Head).x;
-        r.rx(Slot::Head, lerp(sa, hx, -FRAC_PI_4));
-    }
-    let swim_pos = a.walk_pos % 26.0;
-    let quad = |x: f32| -65.0 * x + x * x;
-    if a.use_ticks <= 0.0 {
-        for (arm, sign) in [(Slot::LeftArm, 1.0f32), (Slot::RightArm, -1.0)] {
-            let cur = r.rotation(arm);
-            let (x, z) = if swim_pos < 14.0 {
-                (0.0, PI + sign * 1.8707964 * quad(swim_pos) / quad(14.0))
-            } else if swim_pos < 22.0 {
-                let t = (swim_pos - 14.0) / 8.0;
-                (
-                    FRAC_PI_2 * t,
-                    if sign > 0.0 {
-                        5.012389 - 1.8707964 * t
-                    } else {
-                        1.2707963 + 1.8707964 * t
-                    },
-                )
-            } else if swim_pos < 26.0 {
-                let t = (swim_pos - 22.0) / 4.0;
-                (FRAC_PI_2 - FRAC_PI_2 * t, PI)
-            } else {
-                (cur.x, cur.z)
-            };
-            r.rot(
-                arm,
-                Some(lerp(sa, cur.x, x)),
-                Some(lerp(sa, cur.y, PI)),
-                Some(lerp(sa, cur.z, z)),
-            );
-        }
-    }
-    let lx = r.rotation(Slot::LeftLeg).x;
-    let rx = r.rotation(Slot::RightLeg).x;
-    r.rx(
-        Slot::LeftLeg,
-        lerp(sa, lx, 0.3 * cos(a.walk_pos * 0.33333334 + PI)),
-    );
-    r.rx(
-        Slot::RightLeg,
-        lerp(sa, rx, 0.3 * cos(a.walk_pos * 0.33333334)),
-    );
 }
 
 #[cfg(test)]

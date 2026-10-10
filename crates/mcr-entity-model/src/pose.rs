@@ -18,6 +18,9 @@ impl Pose {
     };
 
     pub fn matrix(&self) -> Mat4 {
+        if self.rot == Vec3::ZERO {
+            return Mat4::from_scale_rotation_translation(self.scale, Quat::IDENTITY, self.pos);
+        }
         let rotation = Quat::from_euler(EulerRot::ZYX, self.rot.z, self.rot.y, self.rot.x);
         Mat4::from_scale_rotation_translation(self.scale, rotation, self.pos)
     }

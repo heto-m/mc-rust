@@ -4,10 +4,13 @@ use uuid::Uuid;
 
 use crate::catalog::{BuildFn, PlanCx, hitbox};
 use crate::equipment::{add_layers, humanoid_armor};
+use crate::hands::{
+    HandFamily, arm_items, hand_attach, is_item, is_spear, item_name, player_poses, set_pose,
+};
 use crate::idx;
 use crate::mobs::{short, variant_name};
 use crate::plan::{Attach, AttachKind, ItemContext, ItemSource, Part, Plan};
-use crate::rig::{ArmPose, HumanoidStyle, Rig, Slot};
+use crate::rig::{ArmPose, HumanoidStyle, IllagerPose, PiglinPose, Rig, Slot};
 use crate::view::{EntityView, slot};
 
 struct Hum {
@@ -20,6 +23,21 @@ struct Hum {
     style: HumanoidStyle,
     outer: Option<(&'static str, &'static str, &'static str)>,
     baby_index: u8,
+    kind: Kind,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Plain,
+    Drowned,
+    Skeleton,
+    Piglin,
+    Brute,
+    ZombifiedPiglin,
+    Vindicator,
+    Pillager,
+    Evoker,
+    Illusioner,
 }
 
 const BASE: Hum = Hum {
@@ -32,6 +50,7 @@ const BASE: Hum = Hum {
     style: HumanoidStyle::Plain,
     outer: None,
     baby_index: 255,
+    kind: Kind::Plain,
 };
 
 static ZOMBIE: Hum = Hum {
@@ -66,6 +85,8 @@ static DROWNED: Hum = Hum {
         "entity/zombie/drowned_outer_layer",
         "entity/zombie/drowned_outer_layer_baby",
     )),
+    style: HumanoidStyle::Drowned,
+    kind: Kind::Drowned,
     ..ZOMBIE
 };
 static GIANT: Hum = Hum {
@@ -84,6 +105,8 @@ static ZOMBIFIED_PIGLIN: Hum = Hum {
     baby_tex: "entity/piglin/zombified_piglin_baby",
     armor: "zombified_piglin",
     baby_armor: "zombified_piglin_baby",
+    style: HumanoidStyle::ZombifiedPiglin,
+    kind: Kind::ZombifiedPiglin,
     ..ZOMBIE
 };
 static PIGLIN: Hum = Hum {
@@ -95,6 +118,7 @@ static PIGLIN: Hum = Hum {
     baby_armor: "piglin_baby",
     style: HumanoidStyle::Piglin,
     baby_index: idx::PIGLIN_BABY,
+    kind: Kind::Piglin,
     ..BASE
 };
 static PIGLIN_BRUTE: Hum = Hum {
@@ -105,6 +129,7 @@ static PIGLIN_BRUTE: Hum = Hum {
     armor: "piglin_brute",
     baby_armor: "piglin_brute",
     baby_index: 255,
+    kind: Kind::Brute,
     ..PIGLIN
 };
 static SKELETON: Hum = Hum {
@@ -115,6 +140,7 @@ static SKELETON: Hum = Hum {
     armor: "skeleton",
     baby_armor: "skeleton",
     style: HumanoidStyle::Skeleton,
+    kind: Kind::Skeleton,
     ..BASE
 };
 static STRAY: Hum = Hum {
@@ -176,6 +202,7 @@ static EVOKER: Hum = Hum {
     tex: "entity/illager/evoker",
     baby_tex: "entity/illager/evoker",
     style: HumanoidStyle::Illager,
+    kind: Kind::Evoker,
     ..BASE
 };
 static ILLUSIONER: Hum = Hum {
@@ -183,6 +210,7 @@ static ILLUSIONER: Hum = Hum {
     baby_layer: "minecraft:illusioner#main",
     tex: "entity/illager/illusioner",
     baby_tex: "entity/illager/illusioner",
+    kind: Kind::Illusioner,
     ..EVOKER
 };
 static PILLAGER: Hum = Hum {
@@ -190,6 +218,7 @@ static PILLAGER: Hum = Hum {
     baby_layer: "minecraft:pillager#main",
     tex: "entity/illager/pillager",
     baby_tex: "entity/illager/pillager",
+    kind: Kind::Pillager,
     ..EVOKER
 };
 static VINDICATOR: Hum = Hum {
@@ -197,6 +226,7 @@ static VINDICATOR: Hum = Hum {
     baby_layer: "minecraft:vindicator#main",
     tex: "entity/illager/vindicator",
     baby_tex: "entity/illager/vindicator",
+    kind: Kind::Vindicator,
     ..EVOKER
 };
 
@@ -241,70 +271,159 @@ pub(crate) fn builder(name: &str) -> Option<BuildFn> {
     })
 }
 
-/// Local transform from an arm bone (sixteenths) to item model space (blocks).
-pub fn hand_local(left: bool, baby: bool, skeleton: bool) -> Mat4 {
-    let (ox, oy, oz) = if baby {
-        (0.0, 1.0, -4.5)
-    } else {
-        (1.0, 2.0, -10.0)
-    };
-    let x = if left { -ox } else { ox } / 16.0;
-    let pre = if skeleton {
-        Mat4::from_translation(Vec3::new(if left { -1.0 } else { 1.0 }, 0.0, 0.0))
-    } else {
-        Mat4::IDENTITY
-    };
-    pre * Mat4::from_scale(Vec3::splat(16.0))
-        * Mat4::from_rotation_x(-90f32.to_radians())
-        * Mat4::from_rotation_y(180f32.to_radians())
-        * Mat4::from_translation(Vec3::new(x, oy / 16.0, oz / 16.0))
+fn left_handed(v: &EntityView<'_>) -> bool {
+    v.mob_flag(1)
 }
 
-fn holds_bow(v: &EntityView<'_>) -> bool {
-    v.item(slot::MAINHAND)
-        .is_some_and(|s| mcr_data::v26_3().item_name(s.item as u32) == Some("minecraft:bow"))
-}
-
+/// Attaches main- and off-hand items at the arms and records handedness for the rigs.
 fn attach_hands(
     v: &EntityView<'_>,
     plan: &mut Plan,
+    family: HandFamily,
     left_handed: bool,
     baby: bool,
-    skeleton: bool,
 ) {
-    for (equip, left) in [(slot::MAINHAND, left_handed), (slot::OFFHAND, !left_handed)] {
-        if v.item(equip).is_none() {
+    for (stack, left, is_main) in arm_items(v, left_handed) {
+        if stack.is_none() {
             continue;
         }
-        plan.attachments.push(Attach {
-            bone: if left { "left_arm" } else { "right_arm" },
-            kind: AttachKind::Item {
-                source: ItemSource::Equipment(equip),
-                context: if left {
-                    ItemContext::LeftHand
-                } else {
-                    ItemContext::RightHand
-                },
-            },
-            local: hand_local(left, baby, skeleton),
-        });
-        if equip == slot::MAINHAND {
-            let pose = ArmPose::Item;
-            if left {
-                plan.anim.left_arm = pose;
-            } else {
-                plan.anim.right_arm = pose;
-            }
-        } else if left {
-            plan.anim.left_arm = ArmPose::Item;
+        let equip = if is_main {
+            slot::MAINHAND
         } else {
-            plan.anim.right_arm = ArmPose::Item;
+            slot::OFFHAND
+        };
+        let context = if left {
+            ItemContext::LeftHand
+        } else {
+            ItemContext::RightHand
+        };
+        plan.attachments.push(hand_attach(
+            family,
+            left,
+            baby,
+            ItemSource::Equipment(equip),
+            context,
+        ));
+        if is_spear(stack) {
+            set_pose(plan, left, ArmPose::Spear);
         }
     }
 }
 
+fn set_handedness(v: &EntityView<'_>, plan: &mut Plan, left_handed: bool) {
+    plan.anim.main_hand_empty = v.item(slot::MAINHAND).is_none();
+    plan.anim.main_right = !left_handed;
+    plan.anim.swing_left = left_handed;
+}
+
+fn attach_head_item(cx: &PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan, bone: &'static str) {
+    let Some(stack) = v.item(slot::HEAD) else {
+        return;
+    };
+    if crate::equipment::equippable(cx, stack).is_some_and(|(_, s)| s == "head") {
+        return;
+    }
+    let pre = Mat4::from_scale(Vec3::splat(16.0))
+        * Mat4::from_translation(Vec3::new(0.0, -0.25, 0.0))
+        * Mat4::from_rotation_y(std::f32::consts::PI)
+        * Mat4::from_scale(Vec3::new(0.625, -0.625, -0.625));
+    plan.attachments.push(Attach::new(
+        bone,
+        AttachKind::Item {
+            source: ItemSource::Equipment(slot::HEAD),
+            context: ItemContext::Head,
+        },
+        pre,
+    ));
+}
+
+fn casting(v: &EntityView<'_>) -> bool {
+    v.byte(17).is_some_and(|c| c != 0)
+}
+
+fn illager_pose(c: &Hum, v: &EntityView<'_>, aggressive: bool) -> IllagerPose {
+    let celebrating = v.boolean(16);
+    match c.kind {
+        Kind::Evoker => {
+            if casting(v) {
+                IllagerPose::Spellcasting
+            } else if celebrating {
+                IllagerPose::Celebrating
+            } else {
+                IllagerPose::Crossed
+            }
+        }
+        Kind::Illusioner => {
+            if casting(v) {
+                IllagerPose::Spellcasting
+            } else if aggressive {
+                IllagerPose::BowAndArrow
+            } else {
+                IllagerPose::Crossed
+            }
+        }
+        Kind::Vindicator => {
+            if aggressive {
+                IllagerPose::Attacking
+            } else if celebrating {
+                IllagerPose::Celebrating
+            } else {
+                IllagerPose::Neutral
+            }
+        }
+        Kind::Pillager => {
+            if v.boolean(idx::PILLAGER_CHARGING) {
+                IllagerPose::CrossbowCharge
+            } else if is_item(v.item(slot::MAINHAND), "minecraft:crossbow") {
+                IllagerPose::CrossbowHold
+            } else if aggressive {
+                IllagerPose::Attacking
+            } else {
+                IllagerPose::Neutral
+            }
+        }
+        _ => IllagerPose::Crossed,
+    }
+}
+
+fn piglin_pose(kind: Kind, v: &EntityView<'_>, aggressive: bool) -> PiglinPose {
+    let main = v.item(slot::MAINHAND);
+    let crossbow = is_item(main, "minecraft:crossbow");
+    let melee = main
+        .and_then(item_name)
+        .is_some_and(|n| n.ends_with("_sword") || n.ends_with("_axe"));
+    if kind == Kind::Brute {
+        return if aggressive && melee {
+            PiglinPose::MeleeAttack
+        } else {
+            PiglinPose::Default
+        };
+    }
+    if v.boolean(idx::PIGLIN_DANCING) {
+        PiglinPose::Dancing
+    } else if is_item(v.item(slot::OFFHAND), "minecraft:gold_ingot") {
+        PiglinPose::Admiring
+    } else if aggressive && melee {
+        PiglinPose::MeleeAttack
+    } else if v.boolean(idx::PIGLIN_CHARGING) {
+        PiglinPose::CrossbowCharge
+    } else if aggressive && crossbow {
+        PiglinPose::CrossbowHold
+    } else {
+        PiglinPose::Default
+    }
+}
+
 fn hum(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan, c: &Hum) {
-    plan.rig = Rig::Humanoid(c.style);
+    let illager = matches!(
+        c.kind,
+        Kind::Evoker | Kind::Illusioner | Kind::Pillager | Kind::Vindicator
+    );
+    plan.rig = if illager {
+        Rig::Illager
+    } else {
+        Rig::Humanoid(c.style)
+    };
     let baby =
         c.baby_index != 255 && matches!(v.raw(c.baby_index), Some(EntityDataValue::Boolean(true)));
     plan.anim.baby = baby;
@@ -317,26 +436,56 @@ fn hum(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan, c: &Hum) {
     if let Some((l, t, bt)) = c.outer {
         plan.push(Part::new(l, if baby { bt } else { t }).overlay().no_hurt());
     }
-    let left_handed = v.mob_flag(1);
-    attach_hands(
-        v,
-        plan,
-        left_handed,
-        baby,
-        c.style == HumanoidStyle::Skeleton,
-    );
-    if c.style == HumanoidStyle::Skeleton && plan.anim.aggressive && holds_bow(v) {
-        if left_handed {
-            plan.anim.left_arm = ArmPose::BowAndArrow;
+    let lefty = left_handed(v);
+    let aggressive = plan.anim.aggressive;
+    let show_item = match c.kind {
+        Kind::Vindicator => aggressive,
+        Kind::Evoker => casting(v),
+        Kind::Illusioner => aggressive || casting(v),
+        _ => true,
+    };
+    if show_item {
+        let family = if c.style == HumanoidStyle::Skeleton {
+            HandFamily::Skeleton
         } else {
-            plan.anim.right_arm = ArmPose::BowAndArrow;
-        }
+            HandFamily::Default
+        };
+        attach_hands(v, plan, family, lefty, baby);
     }
-    plan.anim.main_right = !left_handed;
+    set_handedness(v, plan, lefty);
+    let main_item = v.item(slot::MAINHAND);
+    match c.kind {
+        Kind::Skeleton => {
+            plan.anim.holding_bow = is_item(main_item, "minecraft:bow");
+            if aggressive && plan.anim.holding_bow {
+                set_pose(plan, lefty, ArmPose::BowAndArrow);
+            }
+        }
+        Kind::Drowned => {
+            if aggressive && is_item(main_item, "minecraft:trident") {
+                set_pose(plan, lefty, ArmPose::ThrowTrident);
+            }
+        }
+        Kind::Piglin | Kind::Brute => {
+            plan.anim.piglin = piglin_pose(c.kind, v, aggressive);
+            plan.anim.charge_max = 25.0;
+            plan.anim.use_ticks = v.use_ticks;
+        }
+        Kind::Evoker | Kind::Illusioner | Kind::Pillager | Kind::Vindicator => {
+            plan.anim.illager = illager_pose(c, v, aggressive);
+            plan.anim.charge_max = 25.0;
+            plan.anim.use_ticks = v.use_ticks;
+            if c.kind != Kind::Illusioner {
+                plan.hide.push(Slot::Hat);
+            }
+        }
+        _ => {}
+    }
     if !c.armor.is_empty() {
         let prefix = if baby { c.baby_armor } else { c.armor };
         humanoid_armor(cx, v, plan, prefix, baby);
     }
+    attach_head_item(cx, v, plan, "head");
     if c.layer == "minecraft:enderman#main" {
         plan.push(Part::new("minecraft:enderman#main", "entity/enderman/enderman_eyes").eyes());
     }
@@ -435,7 +584,9 @@ fn villager(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan, zombie: bo
             },
             baby,
         );
-        attach_hands(v, plan, false, baby, false);
+        let lefty = left_handed(v);
+        attach_hands(v, plan, HandFamily::Default, lefty, baby);
+        set_handedness(v, plan, lefty);
     }
     let _ = variant_name;
 }
@@ -486,7 +637,8 @@ fn armor_stand(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         pose(idx::ARMOR_STAND_RIGHT_LEG_POSE, [1.0, 0.0, 1.0]),
     ));
     humanoid_armor(cx, v, plan, prefix, false);
-    attach_hands(v, plan, false, small, false);
+    attach_hands(v, plan, HandFamily::Default, false, false);
+    attach_head_item(cx, v, plan, "head");
 }
 
 const DEFAULT_SKINS: [&str; 9] = [
@@ -559,8 +711,15 @@ fn player(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
             mcr_protocol::types::entity_data::HumanoidArm::Left
         ))
     ) || pv.left_handed;
-    plan.anim.main_right = !left_handed;
-    attach_hands(v, plan, left_handed, false, false);
+    set_handedness(v, plan, left_handed);
+    let family = if slim {
+        HandFamily::Slim
+    } else {
+        HandFamily::Default
+    };
+    attach_hands(v, plan, family, left_handed, false);
+    player_poses(v, plan, left_handed);
+    attach_head_item(cx, v, plan, "head");
     let prefix = if slim { "player_slim" } else { "player" };
     humanoid_armor(cx, v, plan, prefix, false);
     if let Some(chest) = v.item(slot::CHEST)

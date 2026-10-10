@@ -81,6 +81,10 @@ pub(crate) fn builder(name: &str) -> Option<BuildFn> {
         "block_display" => block_display,
         "item_display" => item_display,
         "arrow" | "spectral_arrow" => arrow,
+        "firework_rocket" => firework,
+        "experience_orb" => xp_orb,
+        "fishing_bobber" => bobber,
+        "lightning_bolt" => lightning,
         "snowball" | "egg" | "ender_pearl" | "experience_bottle" | "splash_potion"
         | "lingering_potion" | "eye_of_ender" | "fireball" | "small_fireball"
         | "dragon_fireball" => thrown_item,
@@ -122,18 +126,107 @@ fn item_entity(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
             local: Mat4::from_translation(Vec3::new(0.0, bob, 0.0) + off)
                 * Mat4::from_rotation_y(spin),
             ground_lift: true,
+            billboard: false,
+            post: Mat4::IDENTITY,
         });
     }
 }
 
-fn thrown_item(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+fn thrown_item(_cx: &mut PlanCx<'_>, _v: &EntityView<'_>, plan: &mut Plan) {
     plan.skip_rotation = true;
     plan.free_items.push(FreeItem {
         source: ItemSource::Data(idx::ITEM_STACK),
         context: ItemContext::Ground,
-        local: Mat4::from_translation(Vec3::new(0.0, 0.125, 0.0))
-            * Mat4::from_rotation_y(v.age_ticks * 0.3),
+        local: Mat4::from_translation(Vec3::new(0.0, 0.125, 0.0)),
         ground_lift: false,
+        billboard: true,
+        post: Mat4::IDENTITY,
+    });
+}
+
+fn firework(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+    plan.skip_rotation = true;
+    let angled = v.boolean(10);
+    let post = if angled {
+        Mat4::from_rotation_z(std::f32::consts::PI)
+            * Mat4::from_rotation_y(std::f32::consts::PI)
+            * Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2)
+    } else {
+        Mat4::IDENTITY
+    };
+    plan.free_items.push(FreeItem {
+        source: ItemSource::Data(idx::ITEM_STACK),
+        context: ItemContext::Ground,
+        local: Mat4::from_translation(Vec3::new(0.0, 0.125, 0.0)),
+        ground_lift: false,
+        billboard: true,
+        post,
+    });
+}
+
+fn xp_orb(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+    plan.skip_rotation = true;
+    let icon = match v.object_data {
+        2477.. => 10,
+        1237..=2476 => 9,
+        617..=1236 => 8,
+        307..=616 => 7,
+        149..=306 => 6,
+        73..=148 => 5,
+        37..=72 => 4,
+        17..=36 => 3,
+        7..=16 => 2,
+        3..=6 => 1,
+        _ => 0,
+    };
+    let (u, w) = ((icon % 4) as f32 * 0.25, (icon / 4) as f32 * 0.25);
+    let phase = v.age_ticks / 2.0;
+    let r = ((phase.sin() + 1.0) * 0.5 * 255.0) as u8;
+    let b = (((phase + std::f32::consts::PI * 4.0 / 3.0).sin() + 1.0) * 0.1 * 255.0) as u8;
+    plan.free_geo.push(FreeGeo::Sprite {
+        texture: "entity/experience/experience_orb",
+        uv: [u, w, u + 0.25, w + 0.25],
+        local: Mat4::from_translation(Vec3::new(0.0, 0.1, 0.0)),
+        post: Mat4::from_scale(Vec3::splat(0.3))
+            * Mat4::from_translation(Vec3::new(0.0, 0.25, 0.0)),
+        tint: [r, 255, b, 128],
+        translucent: true,
+        billboard: true,
+    });
+}
+
+fn bobber(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+    plan.skip_rotation = true;
+    plan.free_geo.push(FreeGeo::Sprite {
+        texture: "entity/fishing/fishing_hook",
+        uv: [0.0, 0.0, 1.0, 1.0],
+        local: Mat4::IDENTITY,
+        post: Mat4::from_scale(Vec3::splat(0.5)),
+        tint: [255; 4],
+        translucent: false,
+        billboard: true,
+    });
+    if let Some(t) = v.tether {
+        let d = Vec3::new(
+            (t[0] - v.pos[0]) as f32,
+            (t[1] - v.pos[1]) as f32 - 0.25,
+            (t[2] - v.pos[2]) as f32,
+        );
+        let point = |a: f32| Vec3::new(d.x * a, d.y * (a * a + a) * 0.5 + 0.25, d.z * a);
+        for i in 0..16 {
+            plan.free_geo.push(FreeGeo::Line {
+                a: point(i as f32 / 16.0),
+                b: point((i + 1) as f32 / 16.0),
+                width: 0.015,
+            });
+        }
+    }
+}
+
+fn lightning(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+    plan.skip_rotation = true;
+    plan.free_geo.push(FreeGeo::Bolt {
+        seed: (v.id as u32).wrapping_mul(2654435761),
     });
 }
 
@@ -198,6 +291,8 @@ fn item_frame(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
                 * Mat4::from_rotation_z((rotation * 45.0).to_radians())
                 * Mat4::from_scale(Vec3::splat(0.5)),
             ground_lift: false,
+            billboard: false,
+            post: Mat4::IDENTITY,
         });
     }
 }
@@ -249,7 +344,7 @@ fn painting(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     });
 }
 
-fn state_by_name(name: &str) -> i32 {
+pub(crate) fn state_by_name(name: &str) -> i32 {
     let v = mcr_data::v26_3();
     v.block_by_name(name)
         .and_then(|b| v.block_info(b))
@@ -323,6 +418,8 @@ fn item_display(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         context,
         local: display_transform(v),
         ground_lift: false,
+        billboard: false,
+        post: Mat4::IDENTITY,
     });
 }
 

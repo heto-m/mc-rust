@@ -327,6 +327,17 @@ impl ItemGeometry {
     }
 
     pub fn item(&mut self, stack: &ItemStack, context: ItemContext) -> Option<Arc<ItemGeo>> {
+        if stack.components.is_empty() {
+            let key = Key {
+                item: stack.item,
+                dyed: 0,
+                model_hash: 0,
+                context,
+            };
+            if let Some(hit) = self.cache.get(&key) {
+                return hit.clone();
+            }
+        }
         let version = mcr_data::v26_3();
         let name = version.item_name(u32::try_from(stack.item).ok()?)?;
         let props = StackProps {

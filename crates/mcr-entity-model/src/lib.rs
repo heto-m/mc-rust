@@ -3,8 +3,11 @@ mod assets;
 mod catalog;
 mod cube;
 mod data;
+mod effects;
 mod equipment;
+mod extras;
 mod gpu;
+mod hands;
 mod humanoids;
 pub mod idx;
 mod items;
@@ -15,6 +18,8 @@ mod model;
 mod plan;
 mod pose;
 mod rig;
+mod rig_humanoid;
+mod rig_mobs;
 mod scene;
 mod skin;
 mod texcache;
@@ -40,8 +45,10 @@ pub use items::clone_count;
 pub use model::{Bone, BoneId, Model};
 pub use plan::{Attach, AttachKind, ItemContext, ItemSource, Part, Plan};
 pub use pose::{Pose, evaluate};
-pub use rig::{AnimIn, ArmPose, Binding, HumanoidStyle, Rig, Slot, animate};
-pub use scene::{EntityScene, FrameParams, NameTag, SceneStats};
+pub use rig::{
+    AnimIn, ArmPose, Binding, HumanoidStyle, IllagerPose, PiglinPose, Rig, Slot, animate,
+};
+pub use scene::{BlockTop, EntityScene, FrameParams, NameTag, SceneStats};
 pub use texcache::TextureCache;
 pub use view::{EntityData, EntityView, NoData, PlayerView, Registries, Skin, slot};
 
