@@ -2,6 +2,8 @@ package dev.mcr.bridge.mixin;
 
 import dev.mcr.bridge.McrCrash;
 import dev.mcr.bridge.McrFrame;
+import dev.mcr.bridge.net.GameplayKeys;
+import dev.mcr.bridge.net.McrNet;
 import java.io.File;
 import net.minecraft.CrashReport;
 import net.minecraft.client.Minecraft;
@@ -16,6 +18,18 @@ abstract class MinecraftMixin {
     @Inject(method = "runTick", at = @At("HEAD"))
     private void mcr$awaitFrame(boolean advanceGameTime, CallbackInfo ci) {
         McrFrame.awaitFrame((Minecraft) (Object) this);
+    }
+
+    @Inject(method = "runTick", at = @At("TAIL"))
+    private void mcr$flushNet(boolean advanceGameTime, CallbackInfo ci) {
+        McrNet.endOfTick();
+    }
+
+    @Inject(method = "handleKeybinds", at = @At("HEAD"))
+    private void mcr$rustOwnsGameplayKeys(CallbackInfo ci) {
+        if (McrNet.bridged()) {
+            GameplayKeys.suppress(((Minecraft) (Object) this).options);
+        }
     }
 
     @Inject(method = "crash", at = @At("HEAD"))

@@ -25,6 +25,7 @@ use crate::error::{ClientError, Result};
 use crate::events::{ClientEvent, DisconnectReason};
 use crate::handler::core_pack;
 use crate::packs::{PackReply, PackRequest};
+use crate::relay::{ClientHooks, Relay, Relayed};
 use crate::state::{ClientState, Outbox, resource_pack_responses};
 
 const MAX_FRAMES_PER_PUMP: usize = 8192;
@@ -57,6 +58,7 @@ pub struct Client {
     pub(crate) destroy_delay: u8,
     pub(crate) using: Option<crate::use_item::UsingItem>,
     pub(crate) ride: Option<crate::riding::Ride>,
+    relay: Option<Box<dyn Relay>>,
 }
 
 const MAX_CUSTOM_ACTION_BYTES: usize = 65_600;
@@ -75,6 +77,11 @@ fn plain_json_text(json: &str) -> Component {
 
 impl Client {
     pub fn connect(config: ClientConfig) -> Result<Self> {
+        Self::connect_hooked(config, ClientHooks::default())
+    }
+
+    /// Connects with a frame tap on the reader thread and a relay polled on the game thread.
+    pub fn connect_hooked(config: ClientConfig, hooks: ClientHooks) -> Result<Self> {
         let ids = PacketIds::v26_3();
         let phase = Arc::new(AtomicU8::new(Phase::Login as u8));
         let compression_id = ids
@@ -96,9 +103,20 @@ impl Client {
             (config.host.as_str(), config.port),
             ConnectOptions {
                 inbound_hook: Some(hook),
+                frame_tap: hooks.frame_tap,
                 connect_timeout: Some(config.connect_timeout),
             },
-        )?;
+        );
+        let mut relay = hooks.relay;
+        let conn = match conn {
+            Ok(conn) => conn,
+            Err(e) => {
+                if let Some(r) = relay.as_mut() {
+                    r.closed(&e.to_string());
+                }
+                return Err(e.into());
+            }
+        };
         let (name, uuid) = match &config.online {
             Some(a) => (
                 config.name.clone(),
@@ -129,6 +147,7 @@ impl Client {
             destroy_delay: 0,
             using: None,
             ride: None,
+            relay,
         };
         let intent = if client.config.transfer {
             Intent::Transfer
@@ -157,6 +176,7 @@ impl Client {
             }
             self.flush_pack_replies()?;
             self.flush_dialog_replies()?;
+            self.flush_relay()?;
             match self.conn.recv_timeout(Duration::from_millis(50)) {
                 Some(Event::Frame(f)) => self.handle_frame(f)?,
                 Some(Event::Closed(reason)) => return Err(self.closed(reason.to_string())),
@@ -168,6 +188,9 @@ impl Client {
 
     fn closed(&mut self, reason: String) -> ClientError {
         self.set_phase(Phase::Closed);
+        if let Some(r) = self.relay.as_mut() {
+            r.closed(&reason);
+        }
         if !self
             .events
             .iter()
@@ -304,6 +327,11 @@ impl Client {
                 self.set_phase(Phase::Configuration);
                 self.send_client_information()?;
             }
+            LoginClientbound::CustomQuery(_)
+                if self
+                    .relay
+                    .as_ref()
+                    .is_some_and(|r| r.answers_custom_queries()) => {}
             LoginClientbound::CustomQuery(p) => {
                 self.send_login(&LoginServerbound::CustomQueryAnswer(l::CustomQueryAnswer {
                     transaction_id: p.transaction_id,
@@ -617,9 +645,40 @@ impl Client {
         }
     }
 
+    fn flush_relay(&mut self) -> Result<()> {
+        let Some(mut relay) = self.relay.take() else {
+            return Ok(());
+        };
+        let mut result = Ok(());
+        relay.poll(self.phase, &mut |item| {
+            if result.is_ok() {
+                result = self.relayed(item);
+            }
+        });
+        self.relay = Some(relay);
+        result
+    }
+
+    fn relayed(&mut self, item: Relayed<'_>) -> Result<()> {
+        match item {
+            Relayed::Frame { id, payload } => self.conn.send(id, payload)?,
+            Relayed::Chat(text) if self.phase == Phase::Play => self.send_chat(text)?,
+            Relayed::Command(command) if self.phase == Phase::Play => self.send_command(command)?,
+            Relayed::Chat(_) | Relayed::Command(_) => {}
+            Relayed::Disconnect(reason) => {
+                self.set_phase(Phase::Closed);
+                self.events
+                    .push_back(ClientEvent::Disconnected(DisconnectReason::Local));
+                return Err(ClientError::Disconnected(Box::new(Component::text(reason))));
+            }
+        }
+        Ok(())
+    }
+
     fn pump(&mut self) -> Result<()> {
         self.flush_pack_replies()?;
         self.flush_dialog_replies()?;
+        self.flush_relay()?;
         for _ in 0..MAX_FRAMES_PER_PUMP {
             match self.conn.try_recv() {
                 Some(Event::Frame(f)) => self.handle_frame(f)?,
@@ -641,6 +700,9 @@ impl Client {
             self.update_using_item();
             self.player_tick(input)?;
             self.send_play(&PlayServerbound::ClientTickEnd(sb::ClientTickEnd))?;
+            if let Some(r) = self.relay.as_mut() {
+                r.tick_end(self.ticks, &self.state.player);
+            }
         }
         self.ticks += 1;
         Ok(())

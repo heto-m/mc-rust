@@ -50,6 +50,8 @@ pub struct ShellConfig {
     pub name: String,
     pub render_distance: Option<i32>,
     pub connect: Option<String>,
+    /// Set in mod mode: every connection is mirrored to Java.
+    pub mod_net: Option<crate::mods::ModNet>,
 }
 
 pub struct Shell {
@@ -477,9 +479,15 @@ impl Shell {
         config.dialog_link = Some(dialog_link);
         self.dialogs = Some(dialog_end);
         self.current_address = address.to_owned();
+        let hooks = self
+            .cfg
+            .mod_net
+            .as_ref()
+            .map(|m| m.link.hooks(&config.host, config.port))
+            .unwrap_or_default();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let result = Client::connect(config).map_err(|e| match e {
+            let result = Client::connect_hooked(config, hooks).map_err(|e| match e {
                 ClientError::Transferred(target) => ConnectFailure::Transfer(*target),
                 other => ConnectFailure::Message(sanitize_for_log(&other.to_string())),
             });
@@ -489,6 +497,18 @@ impl Shell {
         if with_screen {
             let (screen, _status) = ConnectingScreen::with_text("lang:connect.connecting");
             self.push(Box::new(screen));
+        }
+    }
+
+    /// Java's multiplayer screen asked to join; Rust connects and Java follows the stream.
+    fn poll_mod_connects(&mut self) {
+        let Some(net) = &self.cfg.mod_net else { return };
+        let requests = net.take_connect_requests();
+        if let Some(address) = requests.last()
+            && self.play.is_none()
+            && self.connecting.is_none()
+        {
+            self.connect(&address.clone(), true);
         }
     }
 
@@ -548,6 +568,7 @@ impl Shell {
         let now = Instant::now();
         self.last_frame = now;
         self.poll_connect();
+        self.poll_mod_connects();
         self.poll_packs();
         self.poll_dialogs();
         if let Some(play) = &mut self.play {

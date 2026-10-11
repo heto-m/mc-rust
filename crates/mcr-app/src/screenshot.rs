@@ -153,6 +153,7 @@ pub fn run_shell(opts: &crate::cli::Options, out: &Path) -> Result<()> {
         name: opts.name.clone(),
         render_distance: opts.render_distance_set.then_some(opts.render_distance),
         connect: opts.connect.clone(),
+        mod_net: None,
     };
     let mut shell = Shell::new(renderer, config)?;
     let connecting = opts.connect.is_some();

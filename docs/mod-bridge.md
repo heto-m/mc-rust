@@ -62,7 +62,7 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
 | Shaders | Frontend `GlslCompiler` already emits SPIR-V (shaderc). The backend gets `SpvModule` plus flattened bindings (set 0, binding = uniform index) → Rust splits combined image samplers → naga `spv-in` → wgpu | Rust |
 | Window | SDL3 `offscreen` video driver (hint set in `RenderSystem.initBackendSystem`), so `Window` works on a fake window. Size and scale are pushed per frame | Rust |
 | Input | Drained at `SDLEventHandler.pollEvents` into `KeyboardHandler.keyPress/charTyped`, `MouseHandler.onButton/onMove/onScroll`. `InputConstants.isKeyDown/grabMouse/releaseMouse` and `ClipboardManager` are redirected | Rust |
-| Network | `Connection.connect` is redirected to a `BridgeChannel` (netty `EmbeddedChannel`) carrying vanilla codecs, so `ConnectScreen` runs unchanged while Rust connects. Outbound packets are filtered by (phase, packet class) | Rust owns socket and state |
+| Network | `Connection.connect` is redirected to a `BridgeChannel` (netty `EmbeddedChannel` confined to the render thread by its own event loop) carrying vanilla codecs, so `ConnectScreen` runs unchanged while Rust connects. Frames travel in two net rings (32 MiB in, 4 MiB out) tagged with phase and session; outbound packets are filtered by (phase, packet class), chat goes to Rust as text | Rust owns socket and state |
 | Player | Rust's local player and camera overwrite `LocalPlayer`/`Camera` every tick and frame. Vanilla gameplay keybinds are suppressed in Java | Rust |
 | World | Java keeps its own `ClientLevel`/`ClientChunkCache`. Terrain compile and draw are disabled (`LevelRenderer.compileSections`, `ChunkSectionsToRender.renderGroup`) | duplicated, see below |
 | Sound | `SoundEngine` logic kept. `Library.init`/`acquireChannel` and `Channel`/`Listener` methods forward to `mcr-audio` | Rust plays |
@@ -89,9 +89,13 @@ off-heap section arrays (`BitStorage` is an interface), if measurements say it p
 ## Policies
 
 - Mod mode is opt-in (mods folder non-empty and enabled). Without mods, no JVM starts.
-- Java resolves no remote host names (`jdk.net.hosts.file` with only localhost). Rust owns DNS and sockets.
+- Java resolves no remote host names (`jdk.net.hosts.file` with only localhost, `ServerNameResolver` returns
+  unresolved addresses), and `Connection.connect` outside `ConnectScreen` throws. Rust owns DNS and sockets. Java's
+  HTTP (skins, mod web APIs) is to go through a Rust loopback `CONNECT` proxy with an allow-list (`mod-net-bridge`
+  design; task in `mod-entity-render-hooks`).
   `System.exit` or a crash in Java freezes or parks the VM for good: the bridge detaches, and mcr exits the
-  process on shutdown instead of destroying the VM.
+  process on shutdown instead of destroying the VM. A detached net bridge copies and forwards nothing; the native
+  client keeps playing.
 - With mods, Java has GUI authority: screens, HUD and chat come from Java. Native screens remain for mcr-only UI
   (mod manager, debug, crash fallback). On a Java crash, mcr detaches the bridge and continues natively.
 - Rust answers every vanilla protocol acknowledgement. From Java it forwards only custom payloads, custom query

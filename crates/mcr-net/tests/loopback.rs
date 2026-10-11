@@ -152,3 +152,59 @@ fn local_close_flushes_queued_frames_and_joins() {
     conn.close();
     assert_eq!(server.join().unwrap(), (0..100).collect::<Vec<_>>());
 }
+
+#[test]
+fn frame_tap_sees_every_frame_once_in_order_before_the_game_thread() {
+    const FRAMES: i32 = 2000;
+    const FIRST: i32 = 0x100;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut enc = FrameEncoder::new();
+        send(
+            &mut enc,
+            &mut s,
+            &[(SET_COMPRESSION, &THRESHOLD.to_be_bytes())],
+        );
+        enc.set_compression(THRESHOLD);
+        for chunk in (FIRST..FIRST + FRAMES).collect::<Vec<_>>().chunks(64) {
+            let bodies: Vec<Vec<u8>> = chunk.iter().map(|&i| pattern(i as usize % 600)).collect();
+            let frames: Vec<(i32, &[u8])> = chunk
+                .iter()
+                .zip(&bodies)
+                .map(|(&i, b)| (i, b.as_slice()))
+                .collect();
+            send(&mut enc, &mut s, &frames);
+        }
+        s.shutdown(Shutdown::Both).unwrap();
+    });
+    let (tx, rx) = std::sync::mpsc::channel::<(i32, Vec<u8>)>();
+    let opts = ConnectOptions {
+        inbound_hook: Some(Box::new(|id, payload| {
+            (id == SET_COMPRESSION)
+                .then(|| Switch::Compression(i32::from_be_bytes(payload.try_into().unwrap())))
+        })),
+        frame_tap: Some(Box::new(move |id, payload| {
+            let _ = tx.send((id, payload.to_vec()));
+        })),
+        ..Default::default()
+    };
+    let conn = Connection::connect_with(addr, opts).unwrap();
+    let mut game = Vec::new();
+    while let Event::Frame(f) = conn.recv_timeout(WAIT).expect("timed out") {
+        let tapped = rx
+            .try_recv()
+            .expect("the tap runs before the game thread sees a frame");
+        assert_eq!((tapped.0, tapped.1.as_slice()), (f.id, &f.payload[..]));
+        game.push(f.id);
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "the tap saw a frame the game thread did not"
+    );
+    let mut want = vec![SET_COMPRESSION];
+    want.extend(FIRST..FIRST + FRAMES);
+    assert_eq!(game, want);
+    server.join().unwrap();
+}

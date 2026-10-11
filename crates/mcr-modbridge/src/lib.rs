@@ -3,6 +3,7 @@
 mod abi;
 mod events;
 mod launch;
+pub mod net;
 mod pacer;
 
 use std::path::PathBuf;
@@ -20,6 +21,7 @@ pub use launch::{
     BOOT_JAR, BRIDGE_JAR, BridgeConfig, LAUNCH_MANIFEST, LaunchManifest, LaunchPlan, plan,
     prepare_game_dir,
 };
+pub use net::NetLink;
 pub use pacer::{FRAME_RATE, TICK_RATE, TickClock};
 
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -130,10 +132,13 @@ impl Bridge {
                     }
                 };
                 event.log();
+                if let Ok(shared) = abi::shared() {
+                    shared.net.detach();
+                }
                 abi::emit(event);
             })?;
         let controls = pacer::Controls::new(config.width, config.height);
-        let pacer = pacer::spawn(writer, &shared.bell, controls.clone())?;
+        let pacer = pacer::spawn(writer, shared, controls.clone())?;
         Ok(Self {
             events,
             controls,
@@ -141,6 +146,15 @@ impl Bridge {
             watcher: Some(watcher),
             vm: VmState::Running,
         })
+    }
+
+    /// The packet bridge; one per process like the VM.
+    pub fn net(&self) -> NetLink {
+        NetLink::new(
+            &abi::shared()
+                .expect("the bridge started with its shared state")
+                .net,
+        )
     }
 
     /// Stops posting frames (Java stays blocked in its wait) or resumes.

@@ -43,6 +43,8 @@ pub enum Dep {
     Module(String),
     /// `fabric-launch`: the class path and game jar from `.cache/fabric/launch.json`.
     FabricLaunch,
+    /// `fabric-api-module <name>`: one module jar nested in the pinned Fabric API test mod.
+    FabricApiModule(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +132,7 @@ pub fn parse_deps(text: &str) -> Result<Vec<Dep>> {
         match line.split_whitespace().collect::<Vec<_>>()[..] {
             ["module", name] => deps.push(Dep::Module(name.to_owned())),
             ["fabric-launch"] => deps.push(Dep::FabricLaunch),
+            ["fabric-api-module", name] => deps.push(Dep::FabricApiModule(name.to_owned())),
             _ => bail!("bad {DEPS_FILE} line `{line}`"),
         }
     }
@@ -186,7 +189,7 @@ pub fn build_order(modules: Vec<Module>) -> Result<Vec<Module>> {
         let ready = pending.iter().position(|m| {
             m.deps.iter().all(|d| match d {
                 Dep::Module(dep) => ordered.iter().any(|o| &o.name == dep),
-                Dep::FabricLaunch => true,
+                Dep::FabricLaunch | Dep::FabricApiModule(_) => true,
             })
         });
         match ready {
@@ -287,9 +290,62 @@ fn class_path(module: &Module, dirs: &Dirs) -> Result<(Vec<PathBuf>, Vec<PathBuf
                 cp.extend(launch_class_path(&text, dirs.cache)?);
                 inputs.push(launch);
             }
+            Dep::FabricApiModule(name) => {
+                let jar = fabric_api_module(name, dirs)?;
+                cp.push(jar.clone());
+                inputs.push(jar);
+            }
         }
     }
     Ok((cp, inputs))
+}
+
+/// Extracts `META-INF/jars/<name>-<version>.jar` from the Fabric API jar the launch manifest pins.
+fn fabric_api_module(name: &str, dirs: &Dirs) -> Result<PathBuf> {
+    let launch = dirs.cache.join(FABRIC_LAUNCH);
+    let text = fs::read_to_string(&launch).with_context(|| {
+        format!(
+            "{} missing; run `cargo xtask fabric-fetch` first",
+            launch.display()
+        )
+    })?;
+    let root: Value = serde_json::from_str(&text).context("launch.json is not JSON")?;
+    let api = root["test_mods"]
+        .as_array()
+        .context("launch.json has no test_mods")?
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|p| {
+            Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("fabric-api-"))
+        })
+        .map(|p| dirs.cache.join(p))
+        .context("launch.json pins no fabric-api jar")?;
+    let out = dirs.out.join("deps").join(format!("{name}.jar"));
+    if out.is_file() && fs::metadata(&out)?.modified()? >= fs::metadata(&api)?.modified()? {
+        return Ok(out);
+    }
+    let mut zip = zip::ZipArchive::new(fs::File::open(&api)?)
+        .with_context(|| format!("reading {}", api.display()))?;
+    let prefix = format!("META-INF/jars/{name}-");
+    let entry = zip
+        .file_names()
+        .filter_map(Result::ok)
+        .map(std::borrow::Cow::into_owned)
+        .find(|n| {
+            n.strip_prefix(&prefix).is_some_and(|rest| {
+                rest.starts_with(|c: char| c.is_ascii_digit()) && rest.ends_with(".jar")
+            })
+        })
+        .with_context(|| format!("{} has no nested {name} jar", api.display()))?;
+    fs::create_dir_all(out.parent().context("deps dir")?)?;
+    let mut file = zip.by_name(&entry)?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut bytes)?;
+    fs::write(&out, bytes)?;
+    Ok(out)
 }
 
 pub fn launch_class_path(launch_json: &str, cache: &Path) -> Result<Vec<PathBuf>> {
@@ -574,8 +630,13 @@ echo jar > "$out"
     #[test]
     fn deps_parse_and_order_errors() {
         assert_eq!(
-            parse_deps("module a\n\n# c\nfabric-launch\n").unwrap(),
-            [Dep::Module("a".into()), Dep::FabricLaunch]
+            parse_deps("module a\n\n# c\nfabric-launch\nfabric-api-module fabric-api-base\n")
+                .unwrap(),
+            [
+                Dep::Module("a".into()),
+                Dep::FabricLaunch,
+                Dep::FabricApiModule("fabric-api-base".into())
+            ]
         );
         assert!(parse_deps("modules a").is_err());
         let m = |name: &str, dep: &str| Module {

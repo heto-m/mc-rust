@@ -250,6 +250,7 @@ fn capture(
         ConnectOptions {
             inbound_hook: Some(hook),
             connect_timeout: Some(Duration::from_secs(10)),
+            ..Default::default()
         },
     )?;
 

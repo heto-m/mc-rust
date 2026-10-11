@@ -75,6 +75,10 @@ impl ChunkStore {
         self.columns.is_empty()
     }
 
+    pub fn positions(&self) -> impl Iterator<Item = ChunkPos> + '_ {
+        self.columns.keys().copied()
+    }
+
     pub fn column(&self, pos: ChunkPos) -> Option<&ChunkColumn> {
         self.columns.get(&pos)
     }

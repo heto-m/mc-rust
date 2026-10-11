@@ -100,10 +100,11 @@ struct App {
     stats: StatWindow,
     ready_reported: bool,
     exit: bool,
+    mod_net: Option<mods::ModNet>,
 }
 
 impl App {
-    fn new(opts: Options, launched: Instant) -> Self {
+    fn new(opts: Options, launched: Instant, mod_net: Option<mods::ModNet>) -> Self {
         Self {
             opts,
             launched,
@@ -115,6 +116,7 @@ impl App {
             stats: StatWindow::default(),
             ready_reported: false,
             exit: false,
+            mod_net,
         }
     }
 
@@ -145,7 +147,10 @@ impl App {
             renderer.has_timestamps()
         );
         self.scene = Some(if self.opts.world.is_none() && !self.opts.synthetic {
-            Scene::Shell(Box::new(Shell::new(renderer, shell_config(&self.opts))?))
+            Scene::Shell(Box::new(Shell::new(
+                renderer,
+                shell_config(&self.opts, self.mod_net.clone()),
+            )?))
         } else if self.opts.synthetic {
             self.synthetic_scene(renderer)?
         } else {
@@ -417,7 +422,7 @@ impl ApplicationHandler for App {
     }
 }
 
-fn shell_config(opts: &Options) -> ShellConfig {
+fn shell_config(opts: &Options, mod_net: Option<mods::ModNet>) -> ShellConfig {
     ShellConfig {
         game_dir: opts.game_dir.clone(),
         jar: opts.jar.clone(),
@@ -425,6 +430,7 @@ fn shell_config(opts: &Options) -> ShellConfig {
         name: opts.name.clone(),
         render_distance: opts.render_distance_set.then_some(opts.render_distance),
         connect: opts.connect.clone(),
+        mod_net,
     }
 }
 
@@ -456,7 +462,8 @@ fn main() -> Result<()> {
     };
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let result = event_loop.run_app(&mut App::new(opts, launched));
+    let mod_net = mod_host.as_ref().map(mods::ModHost::net);
+    let result = event_loop.run_app(&mut App::new(opts, launched, mod_net));
     if let Some(host) = mod_host {
         host.finish();
     }

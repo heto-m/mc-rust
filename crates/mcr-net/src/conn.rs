@@ -16,12 +16,15 @@ const WRITE_BATCH: usize = 64 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub type InboundHook = Box<dyn FnMut(i32, &[u8]) -> Option<Switch> + Send>;
+pub type FrameTap = Box<dyn FnMut(i32, &[u8]) + Send>;
 
 #[derive(Default)]
 pub struct ConnectOptions {
     /// Runs on the reader thread for every decoded frame; a returned [`Switch`] takes effect
     /// before the next frame is parsed.
     pub inbound_hook: Option<InboundHook>,
+    /// Observes every decoded frame on the reader thread, in order, before the game thread gets it.
+    pub frame_tap: Option<FrameTap>,
     pub connect_timeout: Option<Duration>,
 }
 
@@ -29,6 +32,7 @@ impl std::fmt::Debug for ConnectOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectOptions")
             .field("inbound_hook", &self.inbound_hook.is_some())
+            .field("frame_tap", &self.frame_tap.is_some())
             .field("connect_timeout", &self.connect_timeout)
             .finish()
     }
@@ -128,7 +132,13 @@ impl Connection {
             let (shared, stream) = (shared.clone(), stream.try_clone()?);
             std::thread::Builder::new()
                 .name("mcr-net-reader".into())
-                .spawn(move || run_reader(stream, shared, ev_tx, opts.inbound_hook, in_pool))?
+                .spawn(move || {
+                    let hooks = ReaderHooks {
+                        inbound: opts.inbound_hook,
+                        tap: opts.frame_tap,
+                    };
+                    run_reader(stream, shared, ev_tx, hooks, in_pool)
+                })?
         };
         let writer = {
             let (shared, pool) = (shared.clone(), out_pool.clone());
@@ -229,14 +239,19 @@ impl Drop for Connection {
     }
 }
 
+struct ReaderHooks {
+    inbound: Option<InboundHook>,
+    tap: Option<FrameTap>,
+}
+
 fn run_reader(
     mut stream: TcpStream,
     shared: Arc<Shared>,
     events: Sender<Event>,
-    mut hook: Option<InboundHook>,
+    mut hooks: ReaderHooks,
     pool: BufPool,
 ) {
-    let err = read_loop(&mut stream, &shared, &events, &mut hook, pool);
+    let err = read_loop(&mut stream, &shared, &events, &mut hooks, pool);
     let reason = shared.fail(err);
     let _ = events.send(Event::Closed(reason));
 }
@@ -245,7 +260,7 @@ fn read_loop(
     stream: &mut TcpStream,
     shared: &Shared,
     events: &Sender<Event>,
-    hook: &mut Option<InboundHook>,
+    hooks: &mut ReaderHooks,
     pool: BufPool,
 ) -> NetError {
     let mut dec = FrameDecoder::new(pool);
@@ -253,8 +268,15 @@ fn read_loop(
         loop {
             match dec.next_frame() {
                 Ok(Some(frame)) => {
-                    if let Some(switch) = hook.as_mut().and_then(|h| h(frame.id, &frame.payload)) {
+                    if let Some(switch) = hooks
+                        .inbound
+                        .as_mut()
+                        .and_then(|h| h(frame.id, &frame.payload))
+                    {
                         dec.apply(switch);
+                    }
+                    if let Some(tap) = hooks.tap.as_mut() {
+                        tap(frame.id, &frame.payload);
                     }
                     if events.send(Event::Frame(frame)).is_err() {
                         return NetError::LocalClose;

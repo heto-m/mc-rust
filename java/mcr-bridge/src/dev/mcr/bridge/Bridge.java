@@ -9,7 +9,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.invoke.MethodHandle;
 import java.nio.charset.StandardCharsets;
 
-/** The bridge's view of mcr: its extension table, the control ring and the report downcall. */
+/** The bridge's view of mcr: its extension table, the control and net rings, and the report downcall. */
 public final class Bridge {
     private static final int MAX_REPORT_BYTES = 16 << 10;
 
@@ -19,12 +19,16 @@ public final class Bridge {
     private final MethodHandle report;
     final Ring control;
     final Doorbell controlBell;
+    public final Ring netIn;
+    public final Ring netOut;
 
     private Bridge(NativeTable table) {
         this.sharedAddress = downcall(table, BridgeAbi.Entry.SHARED_ADDRESS);
         this.report = downcall(table, BridgeAbi.Entry.REPORT);
         this.control = Ring.at(shared(BridgeAbi.SHARED_CONTROL_RING));
         this.controlBell = new Doorbell(shared(BridgeAbi.SHARED_CONTROL_BELL));
+        this.netIn = Ring.at(shared(BridgeAbi.SHARED_NET_IN_RING));
+        this.netOut = Ring.at(shared(BridgeAbi.SHARED_NET_OUT_RING));
     }
 
     private static MethodHandle downcall(NativeTable table, BridgeAbi.Entry entry) {

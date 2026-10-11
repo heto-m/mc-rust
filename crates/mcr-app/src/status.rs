@@ -49,8 +49,8 @@ pub fn ping(address: &str) -> Result<PingResult, PingError> {
     let conn = Connection::connect_with(
         (host.as_str(), port),
         ConnectOptions {
-            inbound_hook: None,
             connect_timeout: Some(TIMEOUT),
+            ..Default::default()
         },
     )
     .map_err(net)?;

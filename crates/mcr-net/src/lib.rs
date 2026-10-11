@@ -14,7 +14,7 @@ pub use codec::{
     FrameDecoder, FrameEncoder, InboundFrame, MAX_FRAME_LEN, MAX_UNCOMPRESSED_LEN, SECRET_LEN,
     Switch,
 };
-pub use conn::{ConnectOptions, Connection, Event, InboundHook};
+pub use conn::{ConnectOptions, Connection, Event, FrameTap, InboundHook};
 pub use error::NetError;
 pub use pool::{BufPool, PooledBuf};
 pub use zlib::{Deflater, Inflater};

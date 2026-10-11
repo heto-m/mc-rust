@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use mcr_jvm::{Doorbell, PushError, RingWriter};
 
-use crate::abi::{Frame, MSG_FRAME, MSG_SHUTDOWN};
+use crate::abi::{Frame, MSG_FRAME, MSG_SHUTDOWN, Shared};
 
 pub const FRAME_RATE: u32 = 60;
 pub const TICK_RATE: f64 = 20.0;
@@ -49,9 +49,20 @@ fn pack(width: u32, height: u32) -> u32 {
 }
 
 pub(crate) fn spawn(
+    writer: RingWriter,
+    shared: &'static Shared,
+    controls: Arc<Controls>,
+) -> std::io::Result<JoinHandle<()>> {
+    run(writer, &shared.bell, controls, move || {
+        shared.net.flush_spill()
+    })
+}
+
+fn run(
     mut writer: RingWriter,
     bell: &'static Doorbell,
     controls: Arc<Controls>,
+    before_frame: impl Fn() + Send + 'static,
 ) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("mcr-bridge-pacer".into())
@@ -66,6 +77,7 @@ pub(crate) fn spawn(
                 if controls.paused.load(Ordering::Acquire) {
                     last = now;
                 } else {
+                    before_frame();
                     let (ticks_to_do, partial_tick) = clock.advance(now - last);
                     last = now;
                     let size = controls.size.load(Ordering::Relaxed);
@@ -142,7 +154,7 @@ mod tests {
         let bell: &'static Doorbell = Box::leak(Box::new(Doorbell::new()));
         let controls = Controls::new(854, 480);
         let mut reader = ring.reader().unwrap();
-        let handle = spawn(ring.writer().unwrap(), bell, controls.clone()).unwrap();
+        let handle = run(ring.writer().unwrap(), bell, controls.clone(), || {}).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         controls.stop.store(true, Ordering::Release);
         handle.join().unwrap();

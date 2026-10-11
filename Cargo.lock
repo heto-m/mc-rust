@@ -1757,7 +1757,14 @@ dependencies = [
 name = "mcr-modbridge"
 version = "0.1.0"
 dependencies = [
+ "criterion 0.5.1",
+ "mcr-auth",
+ "mcr-buf",
+ "mcr-client",
  "mcr-jvm",
+ "mcr-net",
+ "mcr-physics",
+ "mcr-protocol",
  "serde_json",
  "thiserror 2.0.21",
  "tracing",

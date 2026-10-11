@@ -23,6 +23,7 @@ struct Table {
     variant_by_id: Box<[u16]>,
     id_by_variant: Box<[i32]>,
     id_by_name: HashMap<&'static str, i32>,
+    names: Box<[&'static str]>,
 }
 
 /// Packet ids of one protocol version, resolved once from the data crate.
@@ -86,6 +87,7 @@ impl PacketIds {
             variant_by_id: variant_by_id.into(),
             id_by_variant: id_by_variant.into(),
             id_by_name,
+            names: S::NAMES.iter().map(|&n| short(n)).collect(),
         };
         Ok(())
     }
@@ -98,6 +100,20 @@ impl PacketIds {
     ) -> Option<i32> {
         let table = &self.tables[slot(state, direction)];
         table.id_by_name.get(short(name)).copied()
+    }
+
+    /// The packet's report name without the `minecraft:` prefix.
+    pub fn name_by_id(
+        &self,
+        state: ProtocolState,
+        direction: Direction,
+        id: i32,
+    ) -> Option<&'static str> {
+        let variant = self.variant(state, direction, id)?;
+        self.tables[slot(state, direction)]
+            .names
+            .get(variant)
+            .copied()
     }
 
     pub(crate) fn variant(
@@ -115,5 +131,20 @@ impl PacketIds {
 
     pub(crate) fn id(&self, state: ProtocolState, direction: Direction, variant: usize) -> i32 {
         self.tables[slot(state, direction)].id_by_variant[variant]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_round_trip_ids() {
+        let ids = PacketIds::v26_3();
+        let (play, sb) = (ProtocolState::Play, Direction::Serverbound);
+        let id = ids.id_by_name(play, sb, "keep_alive").unwrap();
+        assert_eq!(ids.name_by_id(play, sb, id), Some("keep_alive"));
+        assert_eq!(ids.name_by_id(play, sb, 10_000), None);
+        assert_eq!(ids.name_by_id(play, sb, -1), None);
     }
 }

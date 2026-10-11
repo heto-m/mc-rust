@@ -1,5 +1,6 @@
 package dev.mcr.bridge;
 
+import dev.mcr.bridge.net.McrNet;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import net.minecraft.client.Minecraft;
@@ -32,9 +33,13 @@ public final class McrFrame {
             return;
         }
         Bridge bridge = Bridge.get();
+        McrNet.init(Thread.currentThread());
         while (true) {
             int seen = bridge.controlBell.seq();
             if (drain(bridge, minecraft)) {
+                if (!stopping) {
+                    McrNet.pump(minecraft);
+                }
                 return;
             }
             bridge.controlBell.await(seen, -1);

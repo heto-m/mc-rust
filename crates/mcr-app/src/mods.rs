@@ -1,20 +1,35 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use mcr_modbridge::{Bridge, BridgeConfig, SHUTDOWN_TIMEOUT};
+use mcr_modbridge::{Bridge, BridgeConfig, BridgeEvent, NetLink, SHUTDOWN_TIMEOUT};
 
 use crate::cli::Options;
 
 pub const CACHE_DIR: &str = ".cache";
 
-/// The headless Fabric boot running next to the native client; for now it only logs.
+/// The headless Fabric boot running next to the native client; Java mirrors every connection.
 pub struct ModHost {
     stop: Arc<AtomicBool>,
     thread: JoinHandle<Bridge>,
+    net: ModNet,
+}
+
+/// What the shell needs from the mod host: hooks for each connection and Java's join requests.
+#[derive(Debug, Clone)]
+pub struct ModNet {
+    pub link: NetLink,
+    connects: Arc<Mutex<Vec<String>>>,
+}
+
+impl ModNet {
+    /// Addresses Java's own `ConnectScreen` asked Rust to join, oldest first.
+    pub fn take_connect_requests(&self) -> Vec<String> {
+        std::mem::take(&mut *self.connects.lock().unwrap_or_else(PoisonError::into_inner))
+    }
 }
 
 pub fn mod_jars(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -47,6 +62,11 @@ impl ModHost {
         config.width = opts.size.0;
         config.height = opts.size.1;
         let mut bridge = Bridge::start(config).context("starting the Fabric bridge")?;
+        let net = ModNet {
+            link: bridge.net(),
+            connects: Arc::new(Mutex::new(Vec::new())),
+        };
+        let connects = net.connects.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let thread = std::thread::Builder::new()
@@ -55,11 +75,21 @@ impl ModHost {
                 while !flag.load(Ordering::Acquire) {
                     if let Some(event) = bridge.next_event(Duration::from_millis(100)) {
                         eprintln!("[mods] {event:?}");
+                        if let BridgeEvent::ConnectRequested { address, .. } = event {
+                            connects
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .push(address);
+                        }
                     }
                 }
                 bridge
             })?;
-        Ok(Some(Self { stop, thread }))
+        Ok(Some(Self { stop, thread, net }))
+    }
+
+    pub fn net(&self) -> ModNet {
+        self.net.clone()
     }
 
     /// A Java side that exited or crashed is frozen for good, so the process exits here.

@@ -3,6 +3,7 @@
 - [ ] 1.2 Disable terrain draws/uploads, sky, clouds, weather, world border, Java block outline/destroy extraction; force classic transparency
 - [ ] 1.3 Vanilla particle filter in `ParticleEngine.createParticle`
 - [ ] 1.4 Camera and projection from `FrameBegin`
+- [ ] 1.5 Loopback HTTP `CONNECT` proxy owned by Rust for Java's skin, profile and mod web requests (`-Dhttp(s).proxyHost`/`proxyPort`, allow-list from Mojang hosts plus mod policy; the hosts file stays localhost-only), decided in `mod-net-bridge`
 
 ## 2. Slots
 - [ ] 2.1 `McrFrame.cut(slot)` hooks in the main pass and `POST_WORLD` scoping
