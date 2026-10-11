@@ -59,6 +59,17 @@ fn main() -> Result<()> {
                     println!("chat: {}", sanitize_for_log(&message.to_plain_string()))
                 }
                 ClientEvent::Died { .. } => println!("died"),
+                ClientEvent::Sound {
+                    sound: mcr_buf::IdOr::Id(id),
+                    pos,
+                    ..
+                } => println!(
+                    "sound {} at {pos:?}",
+                    mcr_data::v26_3()
+                        .registry("minecraft:sound_event")
+                        .and_then(|r| r.name_of(id as u32))
+                        .unwrap_or("?")
+                ),
                 ClientEvent::PlayerTeleported { id } => println!("teleport {id}"),
                 ClientEvent::Disconnected(reason) => {
                     println!("disconnected: {}", reason.to_log_string())

@@ -7,6 +7,10 @@ use mcr_protocol::types::entity_data::EntityDataValue;
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
+const TNT_FUSE: u8 = 8;
+const TNT_DEFAULT_FUSE: i32 = 80;
+pub const MINECART_TNT_FUSE: i32 = 80;
+
 pub const MAX_ENTITIES: usize = 1 << 16;
 const MAX_SIMULATED_PER_TICK: usize = 4096;
 const MAX_PASSENGERS: usize = 4096;
@@ -148,6 +152,8 @@ pub struct Entity {
     pub effects: FxHashMap<i32, MobEffect>,
     pub attributes: FxHashMap<i32, AttributeState>,
     pub sim: Option<SimShape>,
+    /// `MinecartTNT.fuse`: client-side, primed by entity event 70; -1 while unlit.
+    pub fuse: i32,
     sim_ticks: u32,
     interpolation_left: u8,
 }
@@ -176,8 +182,43 @@ impl Entity {
             effects: FxHashMap::default(),
             attributes: FxHashMap::default(),
             sim: None,
+            fuse: -1,
             sim_ticks: 0,
             interpolation_left: 0,
+        }
+    }
+
+    /// `fuseRemainingInTicks` of the TNT renderers: primed TNT reads its synched fuse, a TNT minecart
+    /// its client fuse.
+    pub fn fuse_remaining(&self, partial: f32) -> Option<f32> {
+        let fuse = if self.is_primed_tnt() {
+            self.tnt_fuse()
+        } else if self.fuse > -1 {
+            self.fuse
+        } else {
+            return None;
+        };
+        Some(fuse as f32 - partial + 1.0)
+    }
+
+    pub fn is_primed_tnt(&self) -> bool {
+        self.sim.is_some_and(|s| s.kind == BodyKind::Tnt)
+    }
+
+    fn tnt_fuse(&self) -> i32 {
+        match self.data.get(&TNT_FUSE) {
+            Some(EntityDataValue::Int(f)) => *f,
+            _ => TNT_DEFAULT_FUSE,
+        }
+    }
+
+    /// The fuse countdown both TNT entities run on the client between server updates.
+    fn tick_fuse(&mut self) {
+        if self.is_primed_tnt() {
+            let fuse = self.tnt_fuse().saturating_sub(1);
+            self.data.insert(TNT_FUSE, EntityDataValue::Int(fuse));
+        } else if self.fuse > 0 {
+            self.fuse -= 1;
         }
     }
 
@@ -407,6 +448,7 @@ impl Entities {
             {
                 continue;
             }
+            entity.tick_fuse();
             match entity.sim {
                 Some(_) if simulated >= MAX_SIMULATED_PER_TICK => {}
                 Some(shape) => {
@@ -505,6 +547,27 @@ mod tests {
         assert_eq!(all.get(2).unwrap().vehicle, None);
         all.remove(1);
         assert_eq!(all.get(3).unwrap().vehicle, None);
+    }
+
+    #[test]
+    fn tnt_fuses_count_down_on_the_client() {
+        let mut tnt = Entity::new(1, Uuid::nil(), 0, [0.0; 3]);
+        tnt.sim = Some(SimShape {
+            kind: BodyKind::Tnt,
+            width: 0.98,
+            height: 0.98,
+        });
+        assert_eq!(tnt.fuse_remaining(0.0), Some(81.0));
+        tnt.data.insert(TNT_FUSE, EntityDataValue::Int(9));
+        tnt.tick_fuse();
+        assert_eq!(tnt.fuse_remaining(0.5), Some(8.5));
+        let mut cart = Entity::new(2, Uuid::nil(), 0, [0.0; 3]);
+        cart.tick_fuse();
+        assert_eq!(cart.fuse_remaining(0.0), None);
+        cart.fuse = 1;
+        cart.tick_fuse();
+        cart.tick_fuse();
+        assert_eq!(cart.fuse, 0, "stays at zero until the server removes it");
     }
 
     #[test]

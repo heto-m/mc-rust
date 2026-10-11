@@ -160,6 +160,7 @@ impl PlayerPhysics {
                 if !self.abilities.flying {
                     self.abilities.flying = true;
                     just_toggled = true;
+                    self.abilities_changed = true;
                 }
             } else if !was_jumping && input.jump {
                 if self.jump_trigger_time == 0 {
@@ -170,6 +171,7 @@ impl PlayerPhysics {
                         self.jump_from_ground(w);
                     }
                     just_toggled = true;
+                    self.abilities_changed = true;
                     self.jump_trigger_time = 0;
                 }
             }
@@ -201,6 +203,7 @@ impl PlayerPhysics {
         self.living_ai_step(input, w);
         if self.on_ground && self.abilities.flying && !self.spectator {
             self.abilities.flying = false;
+            self.abilities_changed = true;
         }
     }
 

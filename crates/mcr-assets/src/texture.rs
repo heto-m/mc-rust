@@ -29,12 +29,57 @@ pub struct Animation {
     pub interpolate: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `MipmapStrategy` of a texture's `.mcmeta`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MipStrategy {
+    #[default]
+    Auto,
+    Mean,
+    Cutout,
+    StrictCutout,
+    DarkCutout,
+}
+
+/// The `texture` section of a `.mcmeta`: how the mip chain keeps cutout coverage.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MipSettings {
+    pub strategy: MipStrategy,
+    pub cutoff_bias: f32,
+}
+
+impl MipSettings {
+    /// The alpha test the coverage is preserved for, or `None` for a plain mean.
+    fn cutout_ref(self, frames: &[Vec<u8>]) -> Option<f32> {
+        let strategy = match self.strategy {
+            MipStrategy::Auto
+                if frames
+                    .iter()
+                    .any(|f| f.as_chunks::<4>().0.iter().any(|p| p[3] == 0)) =>
+            {
+                MipStrategy::Cutout
+            }
+            MipStrategy::Auto => MipStrategy::Mean,
+            s => s,
+        };
+        match strategy {
+            MipStrategy::StrictCutout => Some(STRICT_ALPHA_REF),
+            MipStrategy::Cutout | MipStrategy::DarkCutout => Some(ALPHA_REF),
+            MipStrategy::Mean | MipStrategy::Auto => None,
+        }
+    }
+}
+
+const ALPHA_REF: f32 = 0.5;
+const STRICT_ALPHA_REF: f32 = 0.3;
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Sprite {
     pub width: u32,
     pub height: u32,
     pub frames: Vec<Vec<u8>>,
     pub animation: Option<Animation>,
+    pub mip: MipSettings,
 }
 
 #[derive(Deserialize)]
@@ -54,8 +99,15 @@ struct AnimationJson {
 }
 
 #[derive(Deserialize)]
+struct TextureJson {
+    mipmap_strategy: Option<MipStrategy>,
+    alpha_cutoff_bias: Option<f32>,
+}
+
+#[derive(Deserialize)]
 struct McmetaJson {
     animation: Option<AnimationJson>,
+    texture: Option<TextureJson>,
 }
 
 fn decode_png(name: &str, bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
@@ -94,23 +146,32 @@ fn decode_png(name: &str, bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
 
 pub fn decode_sprite(name: &str, png: &[u8], mcmeta: Option<&[u8]>) -> Result<Sprite> {
     let (width, height, rgba) = decode_png(name, png)?;
-    let animation = match mcmeta {
+    let (animation, texture) = match mcmeta {
         Some(bytes) => {
             let meta: McmetaJson =
                 serde_json::from_slice(bytes).map_err(|source| AssetError::Json {
                     path: format!("{name}.mcmeta"),
                     source,
                 })?;
-            meta.animation
+            (meta.animation, meta.texture)
         }
-        None => None,
+        None => (None, None),
     };
+    let mip = texture.map_or_else(MipSettings::default, |t| MipSettings {
+        strategy: t.mipmap_strategy.unwrap_or_default(),
+        cutoff_bias: t
+            .alpha_cutoff_bias
+            .filter(|b| b.is_finite())
+            .unwrap_or(0.0)
+            .clamp(-1.0, 1.0),
+    });
     let Some(anim) = animation else {
         return Ok(Sprite {
             width,
             height,
             frames: vec![rgba],
             animation: None,
+            mip,
         });
     };
 
@@ -179,6 +240,7 @@ pub fn decode_sprite(name: &str, png: &[u8], mcmeta: Option<&[u8]>) -> Result<Sp
         height: fh,
         frames,
         animation,
+        mip,
     })
 }
 
@@ -217,6 +279,7 @@ pub fn missing_sprite() -> Sprite {
         height: 16,
         frames: vec![data],
         animation: None,
+        mip: MipSettings::default(),
     }
 }
 
@@ -230,6 +293,71 @@ pub fn classify(rgba: &[u8]) -> Transparency {
         }
     }
     result
+}
+
+/// `MipmapGenerator.alphaTestCoverage`: the share of 4x4 bilinear subsamples that pass `alpha_ref`.
+fn alpha_coverage(rgba: &[u8], width: u32, height: u32, alpha_ref: f32, scale: f32) -> f32 {
+    if width < 2 || height < 2 {
+        // Vanilla divides by zero here; the NaN keeps the scale at 1 and only the bias applies.
+        return f32::NAN;
+    }
+    let a = |x: u32, y: u32| {
+        (f32::from(rgba[((y * width + x) * 4 + 3) as usize]) / 255.0 * scale).clamp(0.0, 1.0)
+    };
+    let mut coverage = 0.0;
+    for y in 0..height - 1 {
+        for x in 0..width - 1 {
+            let (a00, a10, a01, a11) = (a(x, y), a(x + 1, y), a(x, y + 1), a(x + 1, y + 1));
+            let mut hits = 0u32;
+            for sy in 0..4 {
+                let fy = (sy as f32 + 0.5) / 4.0;
+                for sx in 0..4 {
+                    let fx = (sx as f32 + 0.5) / 4.0;
+                    let v = a00 * (1.0 - fx) * (1.0 - fy)
+                        + a10 * fx * (1.0 - fy)
+                        + a01 * (1.0 - fx) * fy
+                        + a11 * fx * fy;
+                    hits += u32::from(v > alpha_ref);
+                }
+            }
+            coverage += hits as f32 / 16.0;
+        }
+    }
+    coverage / ((width - 1) * (height - 1)) as f32
+}
+
+/// `MipmapGenerator.scaleAlphaToCoverage`: rescales a mip's alpha so as much of it passes the cutout
+/// test as at the base level, then adds the texture's cutoff bias.
+fn keep_coverage(rgba: &mut [u8], width: u32, height: u32, cut: CutoutMip) {
+    let (mut lo, mut hi, mut scale) = (0.0f32, 4.0f32, 1.0f32);
+    let (mut best, mut best_err) = (1.0f32, f32::MAX);
+    for _ in 0..5 {
+        let current = alpha_coverage(rgba, width, height, cut.alpha_ref, scale);
+        let err = (current - cut.coverage).abs();
+        if err < best_err {
+            (best, best_err) = (scale, err);
+        }
+        if current < cut.coverage {
+            lo = scale;
+        } else if current > cut.coverage {
+            hi = scale;
+        } else {
+            break;
+        }
+        scale = (lo + hi) * 0.5;
+    }
+    for p in rgba.as_chunks_mut::<4>().0 {
+        let a = f32::from(p[3]) / 255.0 * best + cut.bias + 0.025;
+        p[3] = (a.clamp(0.0, 1.0) * 255.0) as u8;
+    }
+}
+
+/// What one layer's mips must preserve, from its base level.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CutoutMip {
+    alpha_ref: f32,
+    coverage: f32,
+    bias: f32,
 }
 
 /// Alpha-weighted 2x2 box filter; odd edges clamp.
@@ -321,6 +449,7 @@ struct GroupBuilder {
     height: u32,
     data: Vec<u8>,
     layers: u32,
+    cutouts: Vec<Option<CutoutMip>>,
 }
 
 #[derive(Debug)]
@@ -357,15 +486,22 @@ impl TextureArrayBuilder {
                 height: key.1,
                 data: Vec::new(),
                 layers: 0,
+                cutouts: Vec::new(),
             });
             self.groups.len() - 1
         });
         let group = &mut self.groups[group_idx];
         let first_layer = group.layers;
         let mut transparency = Transparency::Opaque;
+        let alpha_ref = sprite.mip.cutout_ref(&sprite.frames);
         for frame in &sprite.frames {
             group.data.extend_from_slice(frame);
             group.layers += 1;
+            group.cutouts.push(alpha_ref.map(|alpha_ref| CutoutMip {
+                alpha_ref,
+                coverage: alpha_coverage(frame, sprite.width, sprite.height, alpha_ref, 1.0),
+                bias: sprite.mip.cutoff_bias,
+            }));
             transparency = transparency.max(classify(frame));
         }
         let slot = SpriteSlot {
@@ -422,8 +558,11 @@ impl TextureArrayBuilder {
                     let prev = mips.last().unwrap();
                     let mut next = Vec::new();
                     let mut dims = (w, h);
-                    for layer in prev.chunks_exact(layer_len) {
-                        let (nw, nh, data) = downsample(layer, w, h);
+                    for (layer, cut) in prev.chunks_exact(layer_len).zip(&g.cutouts) {
+                        let (nw, nh, mut data) = downsample(layer, w, h);
+                        if let Some(cut) = cut {
+                            keep_coverage(&mut data, nw, nh, *cut);
+                        }
                         dims = (nw, nh);
                         next.extend_from_slice(&data);
                     }
@@ -450,6 +589,57 @@ impl TextureArrayBuilder {
 mod tests {
     use super::*;
     use crate::testutil::{png_bytes, solid_png};
+
+    fn strands() -> Vec<u8> {
+        (0..16 * 16)
+            .flat_map(|i| {
+                if i % 4 == 0 {
+                    [40, 120, 40, 255]
+                } else {
+                    [0; 4]
+                }
+            })
+            .collect()
+    }
+
+    fn mip_coverage(meta: Option<&[u8]>) -> Vec<f32> {
+        let sprite = decode_sprite("kelp", &png_bytes(16, 16, &strands()), meta).unwrap();
+        let mut b = TextureArrayBuilder::new(4);
+        b.add(SpriteId(0), &sprite);
+        let g = &b.build().groups[0];
+        (1..4)
+            .map(|level| {
+                let (w, h) = g.mip_size(level);
+                alpha_coverage(g.layer_bytes(level, 0), w, h, ALPHA_REF, 1.0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cutout_mips_keep_thin_strands_visible() {
+        let base = alpha_coverage(&strands(), 16, 16, ALPHA_REF, 1.0);
+        let biased = br#"{"texture":{"alpha_cutoff_bias":0.1}}"#;
+        for (level, c) in mip_coverage(Some(biased)).into_iter().take(2).enumerate() {
+            assert!(c >= base * 0.75, "mip {}: {c} vs base {base}", level + 1);
+        }
+        let mean = br#"{"texture":{"mipmap_strategy":"mean"}}"#;
+        assert_eq!(
+            mip_coverage(Some(mean))[1],
+            0.0,
+            "a plain mean loses the strands"
+        );
+    }
+
+    #[test]
+    fn texture_section_parses_strategy_and_bias() {
+        let meta = br#"{"texture":{"mipmap_strategy":"strict_cutout","alpha_cutoff_bias":0.1}}"#;
+        let s = decode_sprite("t", &solid_png(16, 16, [1, 2, 3, 255]), Some(meta)).unwrap();
+        assert_eq!(s.mip.strategy, MipStrategy::StrictCutout);
+        assert!((s.mip.cutoff_bias - 0.1).abs() < 1e-6);
+        assert_eq!(s.mip.cutout_ref(&s.frames), Some(STRICT_ALPHA_REF));
+        let opaque = decode_sprite("t", &solid_png(16, 16, [1, 2, 3, 255]), None).unwrap();
+        assert_eq!(opaque.mip.cutout_ref(&opaque.frames), None);
+    }
 
     #[test]
     fn decodes_plain_png_of_any_size() {

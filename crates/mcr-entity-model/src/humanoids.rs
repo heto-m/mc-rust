@@ -1,5 +1,5 @@
 use glam::{Mat4, Vec3};
-use mcr_protocol::types::entity_data::EntityDataValue;
+use mcr_protocol::types::entity_data::{EntityDataValue, Pose};
 use uuid::Uuid;
 
 use crate::catalog::{BuildFn, PlanCx, hitbox};
@@ -484,6 +484,7 @@ fn hum(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan, c: &Hum) {
     if !c.armor.is_empty() {
         let prefix = if baby { c.baby_armor } else { c.armor };
         humanoid_armor(cx, v, plan, prefix, baby);
+        wings(cx, v, plan, baby);
     }
     attach_head_item(cx, v, plan, "head");
     if c.layer == "minecraft:enderman#main" {
@@ -584,6 +585,7 @@ fn villager(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan, zombie: bo
             },
             baby,
         );
+        wings(cx, v, plan, baby);
         let lefty = left_handed(v);
         attach_hands(v, plan, HandFamily::Default, lefty, baby);
         set_handedness(v, plan, lefty);
@@ -598,7 +600,10 @@ fn armor_stand(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     let no_base = flags & 8 != 0;
     plan.rig = Rig::Humanoid(HumanoidStyle::ArmorStand);
     plan.anim.baby = small;
-    plan.body_yaw_offset = 0.0;
+    plan.body_yaw_offset = match v.events.wiggle {
+        Some(w) if w < 5.0 => -(w / 1.5 * std::f32::consts::PI).sin() * 3.0,
+        _ => 0.0,
+    };
     let (layer, prefix) = if small {
         ("minecraft:armor_stand_small#main", "armor_stand_small")
     } else {
@@ -637,6 +642,7 @@ fn armor_stand(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         pose(idx::ARMOR_STAND_RIGHT_LEG_POSE, [1.0, 0.0, 1.0]),
     ));
     humanoid_armor(cx, v, plan, prefix, false);
+    wings(cx, v, plan, small);
     attach_hands(v, plan, HandFamily::Default, false, false);
     attach_head_item(cx, v, plan, "head");
 }
@@ -722,19 +728,61 @@ fn player(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     attach_head_item(cx, v, plan, "head");
     let prefix = if slim { "player_slim" } else { "player" };
     humanoid_armor(cx, v, plan, prefix, false);
-    if let Some(chest) = v.item(slot::CHEST)
-        && equippable_wings(cx, chest).is_some()
-    {
-        add_layers(cx, plan, chest, "chest", "wings", "minecraft:elytra#main");
-        if let Some(last) = plan.parts.last_mut() {
-            last.offset = Vec3::new(0.0, 0.0, 2.0);
-        }
-    }
+    wings(cx, v, plan, false);
+    plan.post_rot = avatar_rotation(v);
     let _ = hitbox;
 }
 
-fn equippable_wings(cx: &PlanCx<'_>, stack: &mcr_protocol::types::ItemStack) -> Option<()> {
-    let (asset, _) = crate::equipment::equippable(cx, stack)?;
-    let info = cx.assets.equipment(&asset)?;
-    info.layers.contains_key("wings").then_some(())
+/// `AvatarRenderer.setupRotations` on top of the living turn: riptide spin, glide pitch and roll, swim.
+pub(crate) fn avatar_rotation(v: &EntityView<'_>) -> Mat4 {
+    let spin = v.living_flag(2);
+    let mut m = Mat4::IDENTITY;
+    if spin {
+        m = Mat4::from_rotation_x((-90.0 - v.pitch).to_radians())
+            * Mat4::from_rotation_y((v.age_ticks * -75.0).to_radians());
+    }
+    if v.shared_flag(7) || v.pose() == Pose::FallFlying {
+        if !spin {
+            m *= Mat4::from_rotation_x((v.glide.scale() * (-90.0 - v.pitch)).to_radians());
+        }
+        if let Some(y) = v.glide.y_rot {
+            m *= Mat4::from_rotation_y(y);
+        }
+    } else if v.pose() == Pose::Swimming && !spin {
+        let x = if v.shared_flag(4) {
+            -90.0 - v.pitch
+        } else {
+            -90.0
+        };
+        m *= Mat4::from_rotation_x(x.to_radians())
+            * Mat4::from_translation(Vec3::new(0.0, -1.0, 0.3));
+    }
+    m
+}
+
+/// `WingsLayer` with `ElytraModel.setupAnim`: 2px behind the body, lowered while crouching.
+fn wings(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan, baby: bool) {
+    let Some(chest) = v.item(slot::CHEST) else {
+        return;
+    };
+    let model = if baby {
+        "minecraft:elytra_baby#main"
+    } else {
+        "minecraft:elytra#main"
+    };
+    let before = plan.parts.len();
+    if !add_layers(cx, plan, chest, "chest", "wings", model) {
+        return;
+    }
+    let y = if v.pose() == Pose::Crouching {
+        3.0
+    } else {
+        0.0
+    };
+    for part in &mut plan.parts[before..] {
+        part.offset = Vec3::new(0.0, y, 2.0);
+    }
+    let [x, ry, z] = v.glide.wings.map(f32::to_degrees);
+    plan.rot_overrides.push((Slot::LeftWing, [x, ry, z]));
+    plan.rot_overrides.push((Slot::RightWing, [x, -ry, -z]));
 }

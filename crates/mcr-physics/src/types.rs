@@ -144,4 +144,6 @@ pub struct MovementOutput {
     pub sprint_command: Option<bool>,
     /// The player just began gliding and the server must be told.
     pub start_fall_flying: bool,
+    /// Creative flight was toggled and the server must be told (`onUpdateAbilities`).
+    pub abilities_changed: bool,
 }

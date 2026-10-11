@@ -1,5 +1,6 @@
 //! Turns the client's entity state into per-frame [`EntityView`]s and draws them.
 
+use std::f32::consts::PI;
 use std::sync::Arc;
 
 use mcr_client::{ClientEvent, ClientState, Entity};
@@ -8,8 +9,8 @@ use mcr_entity_model::mcr_protocol::types::ItemStack;
 use mcr_entity_model::mcr_protocol::types::entity_data::{EntityDataValue, Pose as DataPose};
 use mcr_entity_model::wgpu;
 use mcr_entity_model::{
-    EntityData, EntityScene, EntityView, FrameParams, LightInfo, PlayerView, Registries,
-    SceneAssets, TargetFormats, slot,
+    EntityData, EntityScene, EntityView, FrameParams, Glide, LightInfo, PlayerView, Registries,
+    SceneAssets, TargetFormats, hidden_while_fresh, slot,
 };
 use mcr_physics::Pose as PhysPose;
 use mcr_render::{Camera, Frustum};
@@ -22,6 +23,7 @@ const DEATH_TICKS: i32 = 20;
 const HEAD_BODY_LIMIT: f32 = 50.0;
 const WALK_SMOOTHING: f32 = 0.4;
 const CULL_MARGIN: f32 = 0.5;
+const FRESH_HIDE_DIST_SQ: f64 = 12.25;
 const NON_LIVING: &[&str] = &[
     "item",
     "orb",
@@ -108,6 +110,92 @@ pub struct Track {
     death: i32,
     seen: u64,
     living: bool,
+    glide: GlideTrack,
+}
+
+/// `LivingEntity.fallFlyTicks` and `ElytraAnimationState`, ticked with the entity.
+#[derive(Debug, Clone, Copy)]
+struct GlideTrack {
+    ticks: u32,
+    wings: [f32; 3],
+    prev_wings: [f32; 3],
+    vel: [f64; 3],
+    prev_vel: [f64; 3],
+}
+
+impl Default for GlideTrack {
+    fn default() -> Self {
+        Self {
+            ticks: 0,
+            wings: Glide::REST_WINGS,
+            prev_wings: Glide::REST_WINGS,
+            vel: [0.0; 3],
+            prev_vel: [0.0; 3],
+        }
+    }
+}
+
+impl GlideTrack {
+    fn tick(&mut self, gliding: bool, crouching: bool, vel: [f64; 3]) {
+        self.prev_vel = self.vel;
+        self.vel = vel;
+        self.ticks = if gliding {
+            self.ticks.saturating_add(1)
+        } else {
+            0
+        };
+        self.prev_wings = self.wings;
+        let target = if gliding {
+            let len = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
+            let ratio = if vel[1] < 0.0 && len > 0.0 {
+                1.0 - (-vel[1] / len).powf(1.5) as f32
+            } else {
+                1.0
+            };
+            [
+                lerp(PI / 12.0, PI / 9.0, ratio),
+                0.0,
+                lerp(-PI / 12.0, -PI / 2.0, ratio),
+            ]
+        } else if crouching {
+            [PI * 2.0 / 9.0, 0.087_266_46, -PI / 4.0]
+        } else {
+            Glide::REST_WINGS
+        };
+        for (w, t) in self.wings.iter_mut().zip(target) {
+            *w += (t - *w) * 0.3;
+        }
+    }
+
+    /// `extractFlightData` plus the `speedValue` of `HumanoidMobRenderer`.
+    fn view(&self, partial: f32, yaw: f32, pitch: f32, gliding: bool) -> Glide {
+        let wings = std::array::from_fn(|i| lerp(self.prev_wings[i], self.wings[i], partial));
+        if !gliding {
+            return Glide {
+                wings,
+                ..Glide::default()
+            };
+        }
+        let p = f64::from(partial);
+        let mx = self.prev_vel[0] + (self.vel[0] - self.prev_vel[0]) * p;
+        let mz = self.prev_vel[2] + (self.vel[2] - self.prev_vel[2]) * p;
+        let (yaw, pitch) = (f64::from(yaw).to_radians(), f64::from(pitch).to_radians());
+        let (lx, lz) = (-yaw.sin() * pitch.cos(), yaw.cos() * pitch.cos());
+        let (m2, l2) = (mx * mx + mz * mz, lx * lx + lz * lz);
+        let y_rot = (m2 > 1.0e-5 && l2 > 1.0e-5).then(|| {
+            let dot = (mx * lx + mz * lz) / (m2.sqrt() * l2.sqrt());
+            let sign = mx * lz - mz * lx;
+            (sign.signum() * dot.abs().min(1.0).acos()) as f32
+        });
+        let v = self.vel;
+        let speed = ((v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) / 0.2) as f32;
+        Glide {
+            ticks: self.ticks as f32 + partial,
+            y_rot,
+            speed: (speed * speed * speed).max(1.0),
+            wings,
+        }
+    }
 }
 
 impl Track {
@@ -133,6 +221,7 @@ impl Track {
             death: 0,
             seen: 0,
             living,
+            glide: GlideTrack::default(),
         }
     }
 
@@ -142,6 +231,7 @@ impl Track {
             *self = Track::new(local.feet, local.yaw, local.yaw, local.pitch, true);
         }
         self.advance(local.feet, local.yaw, local.yaw, local.pitch, local.dead);
+        self.glide.tick(local.gliding, local.crouching, local.vel);
         if !local.dead {
             self.death = 0;
         }
@@ -213,6 +303,9 @@ pub struct LocalSample {
     pub yaw: f32,
     pub pitch: f32,
     pub dead: bool,
+    pub gliding: bool,
+    pub crouching: bool,
+    pub vel: [f64; 3],
 }
 
 pub struct EntityLayer {
@@ -251,6 +344,7 @@ pub struct FrameCtx<'a> {
     pub show_local: bool,
     pub local_swing: f32,
     pub local_using: bool,
+    pub events: &'a crate::entity_events::EntityEvents,
 }
 
 impl EntityLayer {
@@ -338,6 +432,14 @@ impl EntityLayer {
                 .or_insert_with(|| Track::new(e.pos, e.yaw, e.head_yaw, e.pitch, living));
             t.seen = tick;
             t.advance(e.pos, e.yaw, e.head_yaw, e.pitch, dead);
+            if living {
+                let gliding = matches!(e.data.get(&0), Some(EntityDataValue::Byte(f)) if *f as u8 & 0x80 != 0);
+                let crouching = matches!(
+                    e.data.get(&6),
+                    Some(EntityDataValue::Pose(DataPose::Crouching))
+                );
+                t.glide.tick(gliding, crouching, e.velocity);
+            }
         }
         let tick = self.tick;
         self.tracks.retain(|_, t| t.seen == tick);
@@ -358,6 +460,9 @@ impl EntityLayer {
         }
         if physics.swimming {
             flags |= 0x10;
+        }
+        if physics.fall_flying {
+            flags |= 0x80u8 as i8;
         }
         self.local_data.insert(0, EntityDataValue::Byte(flags));
         let pose = match physics.pose {
@@ -418,6 +523,7 @@ impl EntityLayer {
                 1.0,
             );
             v.equipment = Some(&*local_equipment);
+            apply_events(&mut v, cx.events.view(local_id, cx.partial));
             v.attack_time = cx.local_swing;
             v.player = PlayerView {
                 crouching: cx.state.player.physics.crouching,
@@ -435,6 +541,13 @@ impl EntityLayer {
             .iter()
             .filter_map(|(id, t)| {
                 let e = cx.state.entities.get(*id)?;
+                let name = data.entity_type_name(e.kind as u32).unwrap_or("");
+                if t.age < 2
+                    && hidden_while_fresh(name)
+                    && dist_sq(e.pos, cx.state.player.pos()) < FRESH_HIDE_DIST_SQ
+                {
+                    return None;
+                }
                 let (w, h) = type_size(data, e.kind);
                 let scale = scale_attribute
                     .and_then(|a| e.attributes.get(&a))
@@ -474,6 +587,8 @@ impl EntityLayer {
                 view.on_ground = e.on_ground || (t.pos[1] - t.prev_pos[1]).abs() < 1.0e-3;
                 view.object_data = e.object_data;
                 view.equipment = Some(&e.equipment);
+                view.fuse = e.fuse_remaining(cx.partial);
+                apply_events(&mut view, cx.events.view(e.id, cx.partial));
                 if e.kind == *player_type {
                     view.player = PlayerView {
                         crouching: view.pose() == DataPose::Crouching,
@@ -607,6 +722,10 @@ fn type_size(data: &'static mcr_data::Version, kind: i32) -> (f32, f32) {
         .map_or((0.6, 1.8), |i| (i.width, i.height))
 }
 
+fn dist_sq(a: [f64; 3], b: [f64; 3]) -> f64 {
+    (0..3).map(|i| (a[i] - b[i]) * (a[i] - b[i])).sum()
+}
+
 fn lerp3(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
 }
@@ -659,7 +778,7 @@ pub fn light_at(chunks: &ChunkStore, pos: [f64; 3], eye_height: f32) -> [u8; 2] 
     let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
     [
         column.block_light(lx, y, lz).unwrap_or(0),
-        column.sky_light(lx, y, lz).unwrap_or(15),
+        column.sky_light_or_above(lx, y, lz).unwrap_or(15),
     ]
 }
 
@@ -696,7 +815,16 @@ fn make_view<'a>(
         0.0
     };
     v.invisible = v.shared_flag(5);
+    let gliding = v.shared_flag(7) || v.pose() == DataPose::FallFlying;
+    v.glide = t.glide.view(partial, v.yaw, v.pitch, gliding);
     v
+}
+
+fn apply_events(v: &mut EntityView<'_>, ev: crate::entity_events::EventView) {
+    v.events = ev.anim;
+    v.attack_ticks = ev.attack_ticks;
+    v.offer_ticks = ev.offer_ticks;
+    v.shake = ev.shake;
 }
 
 /// View-projection of the vanilla hand: fixed 70 degrees, no world rotation.
@@ -756,6 +884,9 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             dead,
+            gliding: false,
+            crouching: false,
+            vel: [0.0; 3],
         };
         let mut t = Track::new([0.0; 3], 0.0, 0.0, 0.0, true);
         t.death = 1;
@@ -805,5 +936,51 @@ mod tests {
         assert!(!is_living("minecraft:item"));
         assert!(is_living("minecraft:zombie"));
         assert!(is_living("minecraft:villager"));
+    }
+
+    #[test]
+    fn elytra_wings_spread_toward_vanilla_targets() {
+        let mut g = GlideTrack::default();
+        for _ in 0..40 {
+            g.tick(true, false, [1.0, 0.0, 0.0]);
+        }
+        let w = g.view(1.0, 0.0, 0.0, true).wings;
+        assert!(
+            (w[0] - PI / 9.0).abs() < 1e-4 && (w[2] + PI / 2.0).abs() < 1e-4,
+            "{w:?}"
+        );
+        for _ in 0..40 {
+            g.tick(true, false, [0.0, -1.0, 0.0]);
+        }
+        let w = g.view(1.0, 0.0, 0.0, true).wings;
+        assert!(
+            (w[0] - PI / 12.0).abs() < 1e-4 && (w[2] + PI / 12.0).abs() < 1e-4,
+            "{w:?}"
+        );
+        for _ in 0..40 {
+            g.tick(false, true, [0.0; 3]);
+        }
+        let w = g.view(1.0, 0.0, 0.0, false).wings;
+        assert!((w[1] - 0.087_266_46).abs() < 1e-4 && (w[2] + PI / 4.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn glide_view_counts_ticks_rolls_and_damps_limbs() {
+        let mut g = GlideTrack::default();
+        for _ in 0..3 {
+            g.tick(true, false, [1.0, 0.0, 0.0]);
+        }
+        let v = g.view(0.5, 0.0, 0.0, true);
+        assert_eq!(v.ticks, 3.5);
+        assert!((v.y_rot.unwrap() - PI / 2.0).abs() < 1e-5, "{:?}", v.y_rot);
+        assert!((v.speed - 125.0).abs() < 1e-3);
+        let left = g.view(0.5, 90.0, 0.0, true);
+        assert!(
+            left.y_rot.unwrap().abs() < 1e-3,
+            "flying where it looks: no roll"
+        );
+        g.tick(false, false, [0.0; 3]);
+        let v = g.view(0.5, 0.0, 0.0, false);
+        assert_eq!((v.ticks, v.y_rot, v.speed), (0.0, None, 1.0));
     }
 }

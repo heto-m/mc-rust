@@ -337,6 +337,7 @@ pub struct Play {
     target: Option<Target>,
     ambience: Ambience,
     loops: EntityLoops,
+    entity_events: crate::entity_events::EntityEvents,
     movement: MovementSounds,
     placed_seen: bool,
     started: Instant,
@@ -470,6 +471,7 @@ impl Play {
             target: None,
             ambience: Ambience::new(data, Box::new(move |path| data_assets.read(path))),
             loops: EntityLoops::new(data),
+            entity_events: Default::default(),
             movement: MovementSounds::new(data),
             placed_seen: false,
             started: now,
@@ -621,6 +623,9 @@ impl Play {
             yaw: self.yaw,
             pitch: self.pitch,
             dead: state.player.dead,
+            gliding: state.player.physics.fall_flying,
+            crouching: state.player.physics.crouching,
+            vel: state.player.physics.vel,
         };
         if let Some(entities) = &mut self.entities {
             entities.tick(state, sample);
@@ -661,11 +666,22 @@ impl Play {
             });
         }
         let rain = if running {
+            let mut cx = crate::entity_events::EventCx {
+                state,
+                effects: &mut self.effects,
+                audio: self.audio.as_mut(),
+            };
+            self.entity_events.tick(&mut cx);
             self.effects
                 .tick(state, DVec3::from(self.cur_eye), &self.options)
         } else {
             None
         };
+        for s in std::mem::take(&mut self.effects.sounds) {
+            if let Some(audio) = &mut self.audio {
+                audio.play(s.name, Some(s.pos), s.volume, s.pitch, SoundSource::Ambient);
+            }
+        }
         if let (Some(rain), Some(audio)) = (rain, &mut self.audio) {
             let at = rain.pos.map(|v| f64::from(v) + 0.5);
             if rain.above {
@@ -758,6 +774,12 @@ impl Play {
         }
         if let ClientEvent::EntityEvent { entity_id, event } = &event {
             self.loops.on_entity_event(*entity_id, *event);
+            let mut cx = crate::entity_events::EventCx {
+                state: &self.world.client.state,
+                effects: &mut self.effects,
+                audio: self.audio.as_mut(),
+            };
+            self.entity_events.on_event(&mut cx, *entity_id, *event);
         }
         match event {
             ClientEvent::EntityEvent {
@@ -838,6 +860,7 @@ impl Play {
             ClientEvent::MapUpdated(id) => self.sync_map(id),
             ClientEvent::Respawned => {
                 self.effects.clear();
+                self.entity_events.clear();
                 if let Some(entities) = &mut self.entities {
                     entities.clear();
                 }
@@ -2200,6 +2223,11 @@ impl Play {
                 .hand
                 .as_ref()
                 .map_or(0.0, |h| h.swing_progress(partial));
+            layer.scene.set_camera(
+                camera.position.to_array(),
+                180.0 - camera.yaw.to_degrees(),
+                -camera.pitch.to_degrees(),
+            );
             layer.update(&FrameCtx {
                 state,
                 partial,
@@ -2207,6 +2235,7 @@ impl Play {
                 show_local: self.perspective != Perspective::First,
                 local_swing: swing,
                 local_using: self.using_item,
+                events: &self.entity_events,
             });
             let params = layer.frame_params(camera, aspect, env);
             layer.scene.prepare(&params);

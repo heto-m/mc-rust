@@ -76,6 +76,70 @@ pub struct PlayerView<'a> {
     pub left_handed: bool,
 }
 
+/// Elytra flight state (`extractFlightData`, `ElytraAnimationState`), with the partial tick applied.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Glide {
+    /// `fallFlyingTimeInTicks`; 0 when not gliding.
+    pub ticks: f32,
+    /// `flyingYRot` in radians, when both movement and look have a horizontal part.
+    pub y_rot: Option<f32>,
+    /// `speedValue`: limb swing is divided by it.
+    pub speed: f32,
+    /// Left wing rotation (x, y, z) in radians.
+    pub wings: [f32; 3],
+}
+
+impl Glide {
+    pub const REST_WINGS: [f32; 3] = [
+        std::f32::consts::PI / 12.0,
+        0.0,
+        -std::f32::consts::PI / 12.0,
+    ];
+
+    /// `AvatarRenderState.fallFlyingScale`.
+    pub fn scale(&self) -> f32 {
+        (self.ticks * self.ticks / 100.0).clamp(0.0, 1.0)
+    }
+}
+
+impl Default for Glide {
+    fn default() -> Self {
+        Self {
+            ticks: 0.0,
+            y_rot: None,
+            speed: 1.0,
+            wings: Self::REST_WINGS,
+        }
+    }
+}
+
+/// Client-side animation state started by entity events, with the partial tick applied.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EventAnim {
+    /// Sheep `eatAnimationTick`, 40 down to 0.
+    pub eat: f32,
+    /// Goat `lowerHeadTick`, 0 to 20.
+    pub ram: f32,
+    /// Ravager stun ticks left, 40 down to 0.
+    pub stunned: f32,
+    /// Ravager roar progress after the stun, 0 to 1.
+    pub roar: f32,
+    /// Warden tendril shiver, 1 down to 0.
+    pub tendril: f32,
+    /// Ticks since a keyframe animation was started: warden and creaking attacks.
+    pub attack: Option<f32>,
+    pub sonic_boom: Option<f32>,
+    pub invulnerable: Option<f32>,
+    pub peek: Option<f32>,
+    pub hop: Option<f32>,
+    /// Armor stand ticks since it was hit.
+    pub wiggle: Option<f32>,
+    /// Evoker fangs bite progress; 0 keeps them hidden.
+    pub bite: f32,
+    /// Ticks since the squid's tentacle phase was resynced.
+    pub tentacle_sync: Option<f32>,
+}
+
 #[derive(Clone, Copy)]
 pub struct EntityView<'a> {
     pub id: i32,
@@ -99,6 +163,10 @@ pub struct EntityView<'a> {
     pub shake: f32,
     pub attack_ticks: f32,
     pub offer_ticks: f32,
+    pub events: EventAnim,
+    pub glide: Glide,
+    /// `fuseRemainingInTicks` of primed TNT and lit TNT minecarts, with the partial tick applied.
+    pub fuse: Option<f32>,
     pub tether: Option<[f64; 3]>,
     pub data: &'a dyn EntityData,
     pub equipment: Option<&'a [ItemStack; 8]>,
@@ -144,6 +212,9 @@ impl<'a> EntityView<'a> {
             shake: 0.0,
             attack_ticks: 0.0,
             offer_ticks: 0.0,
+            events: EventAnim::default(),
+            glide: Glide::default(),
+            fuse: None,
             tether: None,
             data,
             equipment: None,

@@ -322,7 +322,7 @@ pub(crate) fn build_instances(
                     p.color[0] * lm[0],
                     p.color[1] * lm[1],
                     p.color[2] * lm[2],
-                    p.color[3],
+                    sim::alpha(p, partial),
                 ],
                 roll: [
                     p.prev_roll + (p.roll - p.prev_roll) * partial,

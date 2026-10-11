@@ -494,6 +494,7 @@ impl ClientState {
                 if p.entity_id == self.player.entity_id && (24..=28).contains(&p.event_id) {
                     self.player.permission_level = (p.event_id - 24) as u8;
                 }
+                self.apply_entity_event(p.entity_id, p.event_id);
                 out.event(ClientEvent::EntityEvent {
                     entity_id: p.entity_id,
                     event: p.event_id,

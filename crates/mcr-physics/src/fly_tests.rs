@@ -77,3 +77,66 @@ fn hostile_velocities_do_not_panic_the_glide() {
         let _ = p.fall_flying_movement([v, v, v]);
     }
 }
+
+fn creative_glider(pos: [f64; 3], flying: bool) -> PlayerPhysics {
+    let mut p = glider(pos);
+    p.abilities.may_fly = true;
+    p.abilities.flying = flying;
+    p
+}
+
+/// Press and release space: the two output flags of both ticks.
+fn tap(p: &mut PlayerPhysics, w: &TestWorld) -> (bool, bool) {
+    let jump = PlayerInput {
+        jump: true,
+        ..PlayerInput::default()
+    };
+    let down = p.tick(&jump, w);
+    let up = p.tick(&PlayerInput::default(), w);
+    (
+        down.start_fall_flying || up.start_fall_flying,
+        down.abilities_changed || up.abilities_changed,
+    )
+}
+
+#[test]
+fn creative_flyer_with_an_elytra_does_not_glide_on_space() {
+    let w = TestWorld::flat("minecraft:stone", 0);
+    let mut p = creative_glider([0.5, 40.0, 0.5], true);
+    p.tick(&PlayerInput::default(), &w);
+    let (glide, _) = tap(&mut p, &w);
+    assert!(!glide && !p.fall_flying && p.abilities.flying);
+}
+
+#[test]
+fn double_tap_toggles_creative_flight_with_an_elytra_equipped() {
+    let w = TestWorld::flat("minecraft:stone", 0);
+    let mut p = creative_glider([0.5, 0.0, 0.5], false);
+    for _ in 0..3 {
+        p.tick(&PlayerInput::default(), &w);
+    }
+    assert!(p.on_ground);
+    let (_, changed) = tap(&mut p, &w);
+    assert!(!changed && !p.abilities.flying);
+    let (glide, changed) = tap(&mut p, &w);
+    assert!(changed && p.abilities.flying);
+    assert!(!glide && !p.fall_flying);
+    tap(&mut p, &w);
+    let (_, changed) = tap(&mut p, &w);
+    assert!(changed && !p.abilities.flying);
+}
+
+#[test]
+fn landing_ends_creative_flight_and_reports_it() {
+    let w = TestWorld::flat("minecraft:stone", 0);
+    let mut p = creative_glider([0.5, 0.3, 0.5], true);
+    let sneak = PlayerInput {
+        sneak: true,
+        ..PlayerInput::default()
+    };
+    let mut changed = false;
+    for _ in 0..20 {
+        changed |= p.tick(&sneak, &w).abilities_changed;
+    }
+    assert!(!p.abilities.flying && changed);
+}

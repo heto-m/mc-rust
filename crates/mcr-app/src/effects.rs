@@ -13,6 +13,7 @@ use mcr_protocol::play::clientbound::world::{
     ExplosionParticle, LevelParticles, ParticleRandomization,
 };
 use mcr_protocol::types::Particle;
+use mcr_protocol::types::component::{FireworkExplosion, FireworkShape};
 use mcr_render::glam::DVec3;
 use mcr_render::{
     CloudMode, CloudSettings, DestroyDecal, EffectAssets, EffectImage, Environment, Precipitation,
@@ -30,6 +31,52 @@ const TOTEM_TICKS: u8 = 30;
 const CRIT_TICKS: u8 = 3;
 const MAX_EXPLOSION_PARTICLES: i64 = 512;
 const MAX_PENDING_EXPLOSIONS: usize = 64;
+const MAX_FIREWORKS: usize = 64;
+const FAR_FIREWORK_SQ: f64 = 256.0;
+const BLACK_FIREWORK: u32 = 0x1E1B1B;
+const CREEPER_SHAPE: &[[f64; 2]] = &[
+    [0.0, 0.2],
+    [0.2, 0.2],
+    [0.2, 0.6],
+    [0.6, 0.6],
+    [0.6, 0.2],
+    [0.2, 0.2],
+    [0.2, 0.0],
+    [0.4, 0.0],
+    [0.4, -0.6],
+    [0.2, -0.6],
+    [0.2, -0.4],
+    [0.0, -0.4],
+];
+const STAR_SHAPE: &[[f64; 2]] = &[
+    [0.0, 1.0],
+    [0.3455, 0.309],
+    [0.9511, 0.309],
+    [0.379_591_836_734_693_9, -0.126_530_612_244_897_95],
+    [0.612_244_897_959_183_7, -0.804_081_632_653_061_2],
+    [0.0, -0.359_183_673_469_387_73],
+];
+
+/// A sound an effect asks the app to play at a world position.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectSound {
+    pub name: &'static str,
+    pub pos: [f64; 3],
+    pub volume: f32,
+    pub pitch: f32,
+}
+
+/// Vanilla's `FireworkParticles.Starter`: one explosion every other tick, then the twinkle sound.
+#[derive(Debug, Clone)]
+struct FireworkStarter {
+    pos: [f64; 3],
+    vel: [f64; 3],
+    explosions: Vec<FireworkExplosion>,
+    sound: bool,
+    life: u32,
+    lifetime: u32,
+    twinkle: bool,
+}
 
 /// Vanilla's `TrackingEmitter`: bursts of a particle around an entity for a few ticks.
 #[derive(Debug, Clone, Copy)]
@@ -129,7 +176,7 @@ pub(crate) fn light_at(chunks: &ChunkStore, x: i32, y: i32, z: i32) -> Option<(u
     let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
     Some((
         column.block_light(lx, y, lz).unwrap_or(0),
-        column.sky_light(lx, y, lz).unwrap_or(15),
+        column.sky_light_or_above(lx, y, lz).unwrap_or(15),
     ))
 }
 
@@ -247,6 +294,9 @@ pub struct WorldEffects {
     counter: u32,
     trackers: Vec<Tracker>,
     explosions: Vec<PendingExplosion>,
+    fireworks: Vec<FireworkStarter>,
+    camera: DVec3,
+    pub sounds: Vec<EffectSound>,
 }
 
 impl std::fmt::Debug for WorldEffects {
@@ -274,11 +324,16 @@ impl WorldEffects {
             counter: 0,
             trackers: Vec::new(),
             explosions: Vec::new(),
+            fireworks: Vec::new(),
+            camera: DVec3::ZERO,
+            sounds: Vec::new(),
         }
     }
 
     pub fn clear(&mut self) {
         self.particles.clear();
+        self.fireworks.clear();
+        self.sounds.clear();
         self.breaking.clear();
         self.flash_ticks = 0;
     }
@@ -408,6 +463,205 @@ impl WorldEffects {
             randomization: ParticleRandomization::Default,
             count,
         });
+    }
+
+    /// Vanilla `ClientLevel.addParticle`: thinned out by the particle setting, nothing beyond 32 blocks.
+    pub fn add_particle(&mut self, particle: &Particle, pos: [f64; 3], vel: [f64; 3]) {
+        let shown = match self.status {
+            ParticleStatus::All => true,
+            ParticleStatus::Decreased => self.random_unit() >= 1.0 / 3.0,
+            ParticleStatus::Minimal => false,
+        };
+        if shown {
+            self.particles.add_particle(particle, pos, vel);
+        }
+    }
+
+    /// Vanilla `ClientLevel.createFireworks`: a few poofs without explosions, else a starter.
+    pub fn fireworks(
+        &mut self,
+        pos: [f64; 3],
+        vel: [f64; 3],
+        explosions: &[FireworkExplosion],
+        sound: bool,
+    ) {
+        if !pos.iter().chain(&vel).all(|v| v.is_finite()) {
+            return;
+        }
+        if explosions.is_empty() {
+            let poof = particle_id("minecraft:poof");
+            let count = 2 + (self.random_unit() * 3.0) as usize;
+            for _ in 0..count {
+                let v = [self.gaussian() * 0.05, 0.005, self.gaussian() * 0.05];
+                self.add_particle(&poof, pos, v);
+            }
+            return;
+        }
+        if self.fireworks.len() >= MAX_FIREWORKS {
+            return;
+        }
+        let twinkle = explosions.iter().any(|e| e.has_twinkle);
+        self.fireworks.push(FireworkStarter {
+            pos,
+            vel,
+            explosions: explosions.to_vec(),
+            sound,
+            life: 0,
+            lifetime: explosions.len() as u32 * 2 - 1 + if twinkle { 15 } else { 0 },
+            twinkle,
+        });
+    }
+
+    fn gaussian(&mut self) -> f64 {
+        let (u, v) = (self.random_unit().max(1.0e-12), self.random_unit());
+        (-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * v).cos()
+    }
+
+    fn tick_fireworks(&mut self) {
+        let mut starters = std::mem::take(&mut self.fireworks);
+        for s in &mut starters {
+            let far = self.camera.distance_squared(DVec3::from_array(s.pos)) >= FAR_FIREWORK_SQ;
+            if s.life == 0 && s.sound {
+                let large = s.explosions.len() >= 3
+                    || s.explosions
+                        .iter()
+                        .any(|e| e.shape == FireworkShape::LargeBall);
+                let name = match (large, far) {
+                    (true, true) => "entity.firework_rocket.large_blast_far",
+                    (true, false) => "entity.firework_rocket.large_blast",
+                    (false, true) => "entity.firework_rocket.blast_far",
+                    (false, false) => "entity.firework_rocket.blast",
+                };
+                let pitch = 0.95 + self.random_unit() as f32 * 0.1;
+                self.sounds.push(EffectSound {
+                    name,
+                    pos: s.pos,
+                    volume: 20.0,
+                    pitch,
+                });
+            }
+            if s.life % 2 == 0
+                && let Some(e) = s.explosions.get((s.life / 2) as usize)
+            {
+                let e = e.clone();
+                self.explode(s, &e);
+            }
+            s.life += 1;
+            if s.life > s.lifetime && s.twinkle && s.sound {
+                let name = if far {
+                    "entity.firework_rocket.twinkle_far"
+                } else {
+                    "entity.firework_rocket.twinkle"
+                };
+                let pitch = 0.9 + self.random_unit() as f32 * 0.15;
+                self.sounds.push(EffectSound {
+                    name,
+                    pos: s.pos,
+                    volume: 20.0,
+                    pitch,
+                });
+            }
+        }
+        starters.retain(|s| s.life <= s.lifetime);
+        self.fireworks = starters;
+    }
+
+    fn pick(&mut self, list: &[u32]) -> u32 {
+        list[((self.random_unit() * list.len() as f64) as usize).min(list.len() - 1)]
+    }
+
+    fn explode(&mut self, s: &FireworkStarter, e: &FireworkExplosion) {
+        let colors: Vec<u32> = if e.colors.is_empty() {
+            vec![BLACK_FIREWORK]
+        } else {
+            e.colors
+                .iter()
+                .take(64)
+                .map(|c| *c as u32 & 0xFF_FFFF)
+                .collect()
+        };
+        let fades: Vec<u32> = e
+            .fade_colors
+            .iter()
+            .take(64)
+            .map(|c| *c as u32 & 0xFF_FFFF)
+            .collect();
+        let mut velocities = Vec::new();
+        match e.shape {
+            FireworkShape::SmallBall => self.firework_ball(0.25, 2, &mut velocities),
+            FireworkShape::LargeBall => self.firework_ball(0.5, 4, &mut velocities),
+            FireworkShape::Star => self.firework_shape(STAR_SHAPE, false, &mut velocities),
+            FireworkShape::Creeper => self.firework_shape(CREEPER_SHAPE, true, &mut velocities),
+            FireworkShape::Burst => {
+                let (bx, bz) = (self.gaussian() * 0.05, self.gaussian() * 0.05);
+                for _ in 0..70 {
+                    velocities.push([
+                        s.vel[0] * 0.5 + self.gaussian() * 0.15 + bx,
+                        s.vel[1] * 0.5 + self.random_unit() * 0.5,
+                        s.vel[2] * 0.5 + self.gaussian() * 0.15 + bz,
+                    ]);
+                }
+            }
+        }
+        for vel in velocities {
+            let color = self.pick(&colors);
+            let fade = (!fades.is_empty()).then(|| self.pick(&fades));
+            self.particles.firework_spark(
+                s.pos,
+                vel,
+                mcr_particles::Spark {
+                    color,
+                    fade,
+                    trail: e.has_trail,
+                    twinkle: e.has_twinkle,
+                    trailed: false,
+                },
+            );
+        }
+        self.particles.firework_flash(s.pos, colors[0]);
+    }
+
+    fn firework_ball(&mut self, speed: f64, steps: i32, out: &mut Vec<[f64; 3]>) {
+        for y in -steps..=steps {
+            for x in -steps..=steps {
+                let mut z = -steps;
+                while z <= steps {
+                    let v = [x, y, z]
+                        .map(|c| f64::from(c) + (self.random_unit() - self.random_unit()) * 0.5);
+                    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt() / speed
+                        + self.gaussian() * 0.05;
+                    out.push(v.map(|c| c / len));
+                    if y != -steps && y != steps && x != -steps && x != steps {
+                        z += steps * 2 - 1;
+                    }
+                    z += 1;
+                }
+            }
+        }
+    }
+
+    fn firework_shape(&mut self, coords: &[[f64; 2]], flat: bool, out: &mut Vec<[f64; 3]>) {
+        let speed = 0.5;
+        let [sx, sy] = coords[0];
+        out.push([sx * speed, sy * speed, 0.0]);
+        let base = self.random_unit() * std::f64::consts::PI;
+        let step = if flat { 0.034 } else { 0.34 };
+        for i in 0..3 {
+            let angle = base + f64::from(i) * std::f64::consts::PI * step;
+            let (mut ox, mut oy) = (sx, sy);
+            for &[tx, ty] in &coords[1..] {
+                for k in 1..=4 {
+                    let t = f64::from(k) * 0.25;
+                    let x = (ox + (tx - ox) * t) * speed;
+                    let y = (oy + (ty - oy) * t) * speed;
+                    let (z, x) = (x * angle.sin(), x * angle.cos());
+                    for flip in [-1.0, 1.0] {
+                        out.push([x * flip, y, z * flip]);
+                    }
+                }
+                (ox, oy) = (tx, ty);
+            }
+        }
     }
 
     pub fn block_break(&mut self, state: &ClientState, pos: BlockPos, block: i32) {
@@ -600,6 +854,8 @@ impl WorldEffects {
     ) -> Option<RainSound> {
         self.flash_ticks = self.flash_ticks.saturating_sub(1);
         self.particles.set_camera(camera);
+        self.camera = camera;
+        self.tick_fireworks();
         let world = ClientParticleWorld(state);
         self.particles.tick(&world);
         self.tick_trackers(state);
@@ -784,6 +1040,14 @@ mod underwater_tests {
         assert!((env.fog_end - 96.0).abs() < 1e-3);
         assert!(env.fog_color[2] > env.fog_color[0]);
     }
+}
+
+pub fn particle_id(name: &str) -> Particle {
+    let id = mcr_data::v26_3()
+        .registry("minecraft:particle_type")
+        .and_then(|r| r.id_of(name))
+        .map_or(0, |id| id as i32);
+    Particle::Simple(id)
 }
 
 fn is_air(state: &ClientState, at: [f64; 3]) -> bool {

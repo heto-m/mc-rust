@@ -52,6 +52,7 @@ pub(crate) enum Kind {
     Campfire,
     Sweep,
     Animated,
+    Flash,
     Spell,
     Town,
     Terrain,
@@ -73,6 +74,17 @@ pub(crate) enum Data {
     Transition { from: u32, to: u32, scale: f32 },
     Argb(u32),
     Rect { rect: Uv, tint: [f32; 3] },
+    Firework(Spark),
+}
+
+/// A coloured firework spark; `trailed` spawns it half-aged like vanilla's trail copies.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Spark {
+    pub color: u32,
+    pub fade: Option<u32>,
+    pub trail: bool,
+    pub twinkle: bool,
+    pub trailed: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -167,9 +179,8 @@ pub(crate) fn kind_of(name: &str) -> (Kind, Pool) {
         "sweep_attack" => opaque(Sweep),
         "totem_of_undying" | "end_rod" | "firework" => trans(Animated),
         "witch" | "effect" | "instant_effect" | "entity_effect" => trans(Spell),
-        "block_marker" | "elder_guardian" | "flash" | "vibration" | "trail" | "shriek" => {
-            opaque(Skip)
-        }
+        "flash" => trans(Flash),
+        "block_marker" | "elder_guardian" | "vibration" | "trail" | "shriek" => opaque(Skip),
         _ => opaque(Generic),
     }
 }
@@ -552,10 +563,28 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
                     p.aux = [0.949, 0.871, 0.788, 1.0, 0.0, 0.0];
                 }
                 _ => {
-                    p.gravity = -0.004;
+                    p.gravity = 0.1;
                     p.life = 48 + rng.below(12) as i32;
-                    p.color = [1.0, 0.75 + rng.f32() * 0.25, 0.4 + rng.f32() * 0.3, 1.0];
-                    p.aux = [1.0, 0.85, 0.6, 1.0, 0.0, 0.0];
+                    p.color = [1.0, 1.0, 1.0, 0.99];
+                    if let Data::Firework(spark) = s.data {
+                        let [r, g, b] = rgb(spark.color);
+                        p.color = [r, g, b, 0.99];
+                        let [fr, fg, fb] = rgb(spark.fade.unwrap_or(0));
+                        let flag = |b: bool| if b { 1.0 } else { 0.0 };
+                        p.aux = [
+                            fr,
+                            fg,
+                            fb,
+                            flag(spark.fade.is_some()),
+                            flag(spark.twinkle),
+                            flag(spark.trail),
+                        ];
+                        if spark.trailed {
+                            p.age = p.life / 2;
+                        }
+                    } else {
+                        p.aux = [0.0; 6];
+                    }
                 }
             }
             p
@@ -625,6 +654,17 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             p.size /= 2.0;
             p.rect = rect;
             p.sub = [rng.f32() * 3.0, rng.f32() * 3.0];
+            p
+        }
+        Kind::Flash => {
+            let mut p = base(pos, rng);
+            p.life = 4;
+            p.physics = false;
+            p.light_mode = Light::Full;
+            if let Data::Argb(c) = s.data {
+                let [r, g, b] = rgb(c);
+                p.color = [r, g, b, 1.0];
+            }
             p
         }
         Kind::Generic => {
@@ -976,6 +1016,30 @@ pub(crate) fn tick(p: &mut P, t: &mut Tick) -> bool {
                     }
                 }
             }
+            if p.kind == Kind::Animated
+                && p.aux[5] > 0.5
+                && p.age < p.life / 2
+                && (p.age + p.life) % 2 == 0
+            {
+                let color = p.color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u32);
+                let fade = p.aux.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u32);
+                queue(
+                    t,
+                    Spawn {
+                        type_id: p.type_id,
+                        pos: p.pos,
+                        aux: DVec3::ZERO,
+                        data: Data::Firework(Spark {
+                            color: color[0] << 16 | color[1] << 8 | color[2],
+                            fade: (p.aux[3] > 0.5)
+                                .then_some(fade[0] << 16 | fade[1] << 8 | fade[2]),
+                            trail: false,
+                            twinkle: p.aux[4] > 0.5,
+                            trailed: true,
+                        }),
+                    },
+                );
+            }
         }
         _ => {}
     }
@@ -1072,7 +1136,22 @@ pub(crate) fn quad_size(p: &P, partial: f32) -> f32 {
             p.size * (1.0 - s * s)
         }
         Kind::Seed => 0.0,
+        Kind::Flash => 7.1 * ((p.age as f32 + partial - 1.0) * 0.25 * std::f32::consts::PI).sin(),
+        Kind::Animated if p.aux[4] > 0.5 && !twinkle_visible(p) => 0.0,
         _ => p.size,
+    }
+}
+
+/// Vanilla's twinkling sparks skip every other three-tick window after the first third of life.
+fn twinkle_visible(p: &P) -> bool {
+    p.age < p.life / 3 || (p.age + p.life) / 3 % 2 == 0
+}
+
+pub(crate) fn alpha(p: &P, partial: f32) -> f32 {
+    if p.kind == Kind::Flash {
+        0.6 - (p.age as f32 + partial - 1.0) * 0.25 * 0.5
+    } else {
+        p.color[3]
     }
 }
 

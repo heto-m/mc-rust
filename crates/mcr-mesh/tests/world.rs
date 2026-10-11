@@ -62,6 +62,27 @@ fn snapshot_includes_neighbour_borders_light_and_biomes() {
 }
 
 #[test]
+fn absent_sky_sections_take_the_bottom_of_the_next_lit_section() {
+    let mut s = store();
+    let mut nibbles = LightNibbles::default();
+    nibbles.set(3, 0, 3, 4);
+    s.apply_light(
+        ChunkPos::new(0, 0),
+        LightData {
+            sky: vec![LightUpdate {
+                section: 7,
+                data: Some(nibbles),
+            }],
+            block: vec![],
+        },
+    );
+    let input = MeshInput::snapshot(&s, SectionPos::new(0, 0, 0), 2).unwrap();
+    assert_eq!(input.light[pidx(3, 3, 3)] >> 4, 4);
+    assert_eq!(input.light[pidx(3, 12, 3)] >> 4, 4);
+    assert_eq!(input.light[pidx(5, 3, 5)] >> 4, 0, "deep water stays dark");
+}
+
+#[test]
 fn biome_window_reads_neighbour_columns() {
     let mut s = store();
     let mut column = ChunkColumn::empty(&config());

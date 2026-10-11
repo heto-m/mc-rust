@@ -41,6 +41,7 @@ fn hostile_instance_and_bone_counts_are_capped() {
             bone_base: base,
             tint: [255; 4],
             hurt: false,
+            flash: false,
             fullbright: false,
             block_light: 0,
             sky_light: 15,

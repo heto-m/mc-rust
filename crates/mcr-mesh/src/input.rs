@@ -112,14 +112,18 @@ impl MeshInput {
     }
 
     fn copy_light(&mut self, column: &ChunkColumn, index: usize, dx: i32, dy: i32, dz: i32) {
-        let sky = column.sky_light_section((index as i32 + 1 + dy) as usize);
-        let block = column.block_light_section((index as i32 + 1 + dy) as usize);
+        let slot = (index as i32 + 1 + dy) as usize;
+        let (sky, above) = match column.sky_light_section(slot) {
+            None | Some(LightSlot::Absent) => (column.sky_light_above(slot), true),
+            present => (present, false),
+        };
+        let block = column.block_light_section(slot);
         let (xr, yr, zr) = (border_range(dx), border_range(dy), border_range(dz));
         for y in yr.clone() {
             for z in zr.clone() {
                 for x in xr.clone() {
                     let (lx, ly, lz) = ((x & 15) as usize, (y & 15) as usize, (z & 15) as usize);
-                    let s = light_at(sky, lx, ly, lz, 15);
+                    let s = light_at(sky, lx, if above { 0 } else { ly }, lz, 15);
                     let b = light_at(block, lx, ly, lz, 0);
                     self.light[pidx(x, y, z)] = s << 4 | b;
                 }

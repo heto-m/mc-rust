@@ -13,6 +13,7 @@ mod digging;
 mod digging_tests;
 mod edits;
 mod entity;
+mod entity_events;
 mod error;
 mod events;
 mod gamestate;

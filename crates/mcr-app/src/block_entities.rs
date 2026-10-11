@@ -316,7 +316,7 @@ impl BlockEntities {
             let (lx, lz) = ((p[0] & 15) as usize, (p[2] & 15) as usize);
             [
                 column.block_light(lx, p[1], lz).unwrap_or(0),
-                column.sky_light(lx, p[1], lz).unwrap_or(15),
+                column.sky_light_or_above(lx, p[1], lz).unwrap_or(15),
             ]
         });
         self.scene.prepare(&frame);

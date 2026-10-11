@@ -50,6 +50,7 @@ pub struct PlayerPhysics {
     /// Living-entity flag 4 as the server reports it.
     pub spin_attack_flag: bool,
     pub(crate) fall_flying_started: bool,
+    pub(crate) abilities_changed: bool,
     pub(crate) fluid: FluidState,
     pub(crate) was_touching_water: bool,
     pub(crate) was_eye_in_water: bool,
@@ -120,6 +121,7 @@ impl PlayerPhysics {
             spin_attack_ticks: 0,
             spin_attack_flag: false,
             fall_flying_started: false,
+            abilities_changed: false,
             fluid: FluidState::default(),
             was_touching_water: false,
             was_eye_in_water: false,
@@ -370,6 +372,7 @@ impl PlayerPhysics {
             input: out_input,
             sprint_command,
             start_fall_flying: std::mem::take(&mut self.fall_flying_started),
+            abilities_changed: std::mem::take(&mut self.abilities_changed),
         }
     }
 }

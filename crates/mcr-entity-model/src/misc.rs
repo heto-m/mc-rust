@@ -86,10 +86,27 @@ pub(crate) fn builder(name: &str) -> Option<BuildFn> {
         "fishing_bobber" => bobber,
         "lightning_bolt" => lightning,
         "snowball" | "egg" | "ender_pearl" | "experience_bottle" | "splash_potion"
-        | "lingering_potion" | "eye_of_ender" | "fireball" | "small_fireball"
-        | "dragon_fireball" => thrown_item,
+        | "lingering_potion" | "eye_of_ender" | "fireball" | "small_fireball" => thrown_item,
+        "dragon_fireball" => dragon_fireball,
         _ => return None,
     })
+}
+
+/// `ThrowableProjectile`, `Fireball` and `EyeOfEnder` skip their first two ticks within 3.5 blocks of
+/// the camera entity, so a fresh throw does not cover the screen.
+pub fn hidden_while_fresh(type_name: &str) -> bool {
+    matches!(
+        short(type_name),
+        "snowball"
+            | "egg"
+            | "ender_pearl"
+            | "experience_bottle"
+            | "splash_potion"
+            | "lingering_potion"
+            | "eye_of_ender"
+            | "fireball"
+            | "small_fireball"
+    )
 }
 
 fn hash01(id: i32, salt: u32) -> f32 {
@@ -132,15 +149,39 @@ fn item_entity(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     }
 }
 
-fn thrown_item(_cx: &mut PlanCx<'_>, _v: &EntityView<'_>, plan: &mut Plan) {
+/// `ThrownItemRenderer`: the ground-context item turned to the camera, one copy, no bob or spin.
+fn thrown_item(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+    let (scale, bright) = match cx.type_name(v).map(short) {
+        Some("fireball") => (3.0, true),
+        Some("small_fireball") => (0.75, true),
+        Some("eye_of_ender") => (1.0, true),
+        _ => (1.0, false),
+    };
     plan.skip_rotation = true;
+    plan.bright = bright;
     plan.free_items.push(FreeItem {
         source: ItemSource::Data(idx::ITEM_STACK),
         context: ItemContext::Ground,
-        local: Mat4::from_translation(Vec3::new(0.0, 0.125, 0.0)),
+        local: Mat4::from_scale(Vec3::splat(scale)),
         ground_lift: false,
         billboard: true,
         post: Mat4::IDENTITY,
+    });
+}
+
+/// `DragonFireballRenderer`: a camera-facing quad, twice block size, full block light.
+fn dragon_fireball(_cx: &mut PlanCx<'_>, _v: &EntityView<'_>, plan: &mut Plan) {
+    plan.skip_rotation = true;
+    plan.bright = true;
+    plan.free_geo.push(FreeGeo::Sprite {
+        texture: "entity/enderdragon/dragon_fireball",
+        uv: [0.0, 0.0, 1.0, 1.0],
+        local: Mat4::IDENTITY,
+        post: Mat4::from_scale(Vec3::splat(2.0))
+            * Mat4::from_translation(Vec3::new(0.0, 0.25, 0.0)),
+        tint: [255; 4],
+        translucent: false,
+        billboard: true,
     });
 }
 
@@ -376,14 +417,29 @@ fn falling_block(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     });
 }
 
+/// `TntRenderer.getSwellAmount`: the last ten fuse ticks grow the block by up to 30%.
+pub fn tnt_swell(fuse: f32) -> f32 {
+    let g = (1.0 - fuse / 10.0).clamp(0.0, 1.0);
+    let g = g * g;
+    g * g * 0.3
+}
+
+/// `TntRenderer.isLit`: white in alternating five-tick windows.
+pub fn tnt_lit(fuse: f32) -> bool {
+    fuse >= 0.0 && (fuse / 5.0) as i32 % 2 == 0
+}
+
 fn tnt(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     plan.skip_rotation = true;
-    let fuse = v.int(8).unwrap_or(80) as f32 - 0.0;
-    let mut scale = 1.0;
-    if fuse < 10.0 {
-        let g = (1.0 - fuse / 10.0).clamp(0.0, 1.0);
-        scale = 1.0 + (g * g * g * g) * 0.3;
-    }
+    let fuse = v
+        .fuse
+        .unwrap_or_else(|| v.int(idx::TNT_FUSE).unwrap_or(80) as f32 + 1.0);
+    let scale = if fuse < 10.0 {
+        1.0 + tnt_swell(fuse)
+    } else {
+        1.0
+    };
+    plan.flash = tnt_lit(fuse);
     let state = match v.raw(idx::TNT_BLOCK) {
         Some(EntityDataValue::BlockState(s)) => *s,
         _ => state_by_name("minecraft:tnt"),
@@ -394,6 +450,49 @@ fn tnt(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
             * Mat4::from_scale(Vec3::splat(scale))
             * Mat4::from_translation(Vec3::new(-0.5, -0.5, -0.5)),
     });
+}
+
+fn state_with(name: &str, props: &[(&str, &str)]) -> i32 {
+    let v = mcr_data::v26_3();
+    let Some(info) = v.block_by_name(name).and_then(|b| v.block_info(b)) else {
+        return 0;
+    };
+    (info.states.0..info.states.1)
+        .find(|&s| {
+            props
+                .iter()
+                .all(|p| v.state_properties(s).any(|(k, val)| (k, val) == *p))
+        })
+        .unwrap_or(info.default_state) as i32
+}
+
+/// `getDisplayBlockState` and `getDisplayOffset` of each minecart type.
+fn minecart_contents(name: &str, v: &EntityView<'_>) -> Option<(i32, i32)> {
+    let (block, offset) = match name {
+        "tnt_minecart" => (state_by_name("minecraft:tnt"), 6),
+        "chest_minecart" => (state_by_name("minecraft:chest"), 8),
+        "furnace_minecart" => {
+            let lit = if v.boolean(idx::MINECART_FURNACE_FUEL) {
+                "true"
+            } else {
+                "false"
+            };
+            (
+                state_with("minecraft:furnace", &[("facing", "north"), ("lit", lit)]),
+                6,
+            )
+        }
+        "hopper_minecart" => (state_by_name("minecraft:hopper"), 1),
+        "spawner_minecart" => (state_by_name("minecraft:spawner"), 6),
+        "command_block_minecart" => (state_by_name("minecraft:command_block"), 6),
+        _ => (0, 6),
+    };
+    let block = match v.raw(idx::MINECART_DISPLAY_BLOCK) {
+        Some(EntityDataValue::OptionalBlockState(Some(s))) => *s,
+        _ => block,
+    };
+    let offset = v.int(idx::MINECART_DISPLAY_OFFSET).unwrap_or(offset);
+    (block != 0).then_some((block, offset.clamp(-64, 64)))
 }
 
 fn display_transform(v: &EntityView<'_>) -> Mat4 {
@@ -451,6 +550,7 @@ fn boat(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         .to_owned();
     let dir = if chest { "chest_boat" } else { "boat" };
     plan.rig = Rig::Static;
+    plan.model_y = 0.0;
     plan.extra_offset = Vec3::new(0.0, 0.375, 0.0);
     plan.spin = std::f32::consts::FRAC_PI_2;
     plan.body_yaw_offset = 0.0;
@@ -463,12 +563,30 @@ fn boat(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
 fn minecart(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     let name = short(cx.type_name(v).unwrap_or("minecraft:minecart")).to_owned();
     plan.rig = Rig::Static;
+    plan.model_y = 0.0;
     plan.extra_offset = Vec3::new(0.0, 0.375, 0.0);
     plan.spin = std::f32::consts::FRAC_PI_2;
     plan.push(Part::new(
         format!("minecraft:{name}#main"),
         "entity/minecart/minecart",
     ));
+    let Some((state, offset)) = minecart_contents(&name, v) else {
+        return;
+    };
+    let mut local = Mat4::from_rotation_y((180.0 - v.body_yaw).to_radians() + plan.spin)
+        * Mat4::from_translation(Vec3::new(0.0, 0.375, 0.0))
+        * Mat4::from_scale(Vec3::splat(0.75))
+        * Mat4::from_translation(Vec3::new(-0.5, (offset - 8) as f32 / 16.0, 0.5))
+        * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+    if let Some(fuse) = v.fuse {
+        if fuse > -1.0 && fuse < 10.0 {
+            let swell = tnt_swell(fuse);
+            local *= Mat4::from_translation(Vec3::new(-swell * 0.5, 0.0, -swell * 0.5))
+                * Mat4::from_scale(Vec3::splat(1.0 + swell));
+        }
+        plan.flash = tnt_lit(fuse);
+    }
+    plan.free_geo.push(FreeGeo::Block { state, local });
 }
 
 fn arrow(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
@@ -481,9 +599,57 @@ fn arrow(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         "entity/projectiles/arrow"
     };
     plan.rig = Rig::Static;
+    plan.model_y = 0.0;
     plan.skip_rotation = true;
     plan.spin = -(v.yaw - 90.0).to_radians();
     plan.tilt = v.pitch;
     plan.extra_scale = Vec3::new(-1.0, 1.0, 1.0) * 0.05625 * 16.0;
     plan.push(Part::new("minecraft:arrow#main", tex).no_hurt());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::camera_orientation;
+
+    #[test]
+    fn billboards_face_the_camera_upright() {
+        for (yaw, pitch) in [(0.0f32, 0.0f32), (90.0, 0.0), (-135.0, 40.0), (30.0, -70.0)] {
+            let (a, b) = (yaw.to_radians(), pitch.to_radians());
+            let forward = Vec3::new(-a.sin() * b.cos(), -b.sin(), a.cos() * b.cos());
+            let m = camera_orientation(yaw, pitch);
+            let front = m.transform_vector3(Vec3::Z);
+            assert!((front + forward).length() < 1e-5, "{yaw} {pitch}: {front}");
+            let up = m.transform_vector3(Vec3::Y);
+            assert!(up.dot(forward).abs() < 1e-5 && up.y >= 0.0, "{up}");
+        }
+    }
+
+    #[test]
+    fn tnt_flashes_in_five_tick_windows() {
+        let lit: Vec<bool> = (0..=20).map(|f| tnt_lit(f as f32)).collect();
+        for (f, l) in lit.iter().enumerate() {
+            assert_eq!(*l, (f / 5) % 2 == 0, "fuse {f}");
+        }
+        assert!(tnt_lit(4.99) && !tnt_lit(5.0) && tnt_lit(10.0));
+        assert!(!tnt_lit(-0.5), "an unlit minecart never flashes");
+    }
+
+    #[test]
+    fn tnt_swells_over_the_last_ten_ticks() {
+        assert_eq!(tnt_swell(10.0), 0.0);
+        assert_eq!(tnt_swell(80.0), 0.0);
+        assert!((tnt_swell(5.0) - 0.5f32.powi(4) * 0.3).abs() < 1e-7);
+        assert!((tnt_swell(0.0) - 0.3).abs() < 1e-7);
+        assert!((tnt_swell(-3.0) - 0.3).abs() < 1e-7);
+        assert!(tnt_swell(2.0) > tnt_swell(3.0));
+    }
+
+    #[test]
+    fn fresh_throws_hide_like_vanilla_projectiles() {
+        assert!(hidden_while_fresh("minecraft:snowball"));
+        assert!(hidden_while_fresh("minecraft:small_fireball"));
+        assert!(!hidden_while_fresh("minecraft:item"));
+        assert!(!hidden_while_fresh("minecraft:dragon_fireball"));
+    }
 }

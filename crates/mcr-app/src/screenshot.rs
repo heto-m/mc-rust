@@ -62,6 +62,25 @@ pub fn run(opts: &crate::cli::Options, out: &Path, launched: Instant) -> Result<
     let pixels = engine.render.renderer.read_offscreen()?;
     write_png(out, width, height, &pixels)?;
     println!("wrote {}", out.display());
+    let stem = out.file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
+    for i in 0..opts.frames {
+        if let Some(step) = opts.frame_step {
+            let cam = &mut engine.game.camera;
+            cam.position += step.position;
+            cam.yaw += step.yaw;
+            cam.pitch += step.pitch;
+            engine.render.sync_camera(&engine.game);
+        }
+        engine.tick()?;
+        engine.draw();
+        let pixels = engine.render.renderer.read_offscreen()?;
+        write_png(
+            &out.with_file_name(format!("{stem}-f{i:03}.png")),
+            width,
+            height,
+            &pixels,
+        )?;
+    }
     if opts.bench_frames > 0 {
         bench(&mut engine, opts, out)?;
     }

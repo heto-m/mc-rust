@@ -1,4 +1,5 @@
-//! Looping sounds vanilla starts on the client for entities: elytra wind, bees, guardian beams.
+//! Sounds vanilla keeps updating on the client for entities: elytra wind, bees, guardian beams,
+//! sniffer digging.
 
 use mcr_audio::{
     ElytraLoop, GuardianBeam, LoopLevel, SoundSource, VoiceId, bee_level, is_angry, nearest,
@@ -7,7 +8,7 @@ use mcr_audio::{
 use mcr_client::ClientState;
 use mcr_data::Version;
 use mcr_entity_model::idx;
-use mcr_protocol::types::entity_data::EntityDataValue;
+use mcr_protocol::types::entity_data::{EntityDataValue, SnifferState};
 use rustc_hash::FxHashMap;
 
 use crate::audio::Audio;
@@ -15,6 +16,10 @@ use crate::audio::Audio;
 pub const MAX_BEES: usize = 12;
 const MAX_GUARDIANS: usize = 16;
 const GUARDIAN_ATTACK_EVENT: i8 = 21;
+const SNIFFER_DIGGING_EVENT: i8 = 63;
+const MAX_SNIFFERS: usize = 16;
+/// The event can arrive a tick before the synched state turns to digging.
+const SNIFFER_GRACE_TICKS: u8 = 2;
 
 #[derive(Debug)]
 struct ElytraVoice {
@@ -45,6 +50,8 @@ pub struct EntityLoops {
     bees: FxHashMap<i32, BeeVoice>,
     beams: FxHashMap<i32, GuardianVoice>,
     pending_beams: Vec<i32>,
+    sniffers: FxHashMap<i32, (VoiceId, u8)>,
+    pending_sniffers: Vec<i32>,
     candidates: Vec<(i32, f64)>,
     starts: Vec<i32>,
     stops: Vec<i32>,
@@ -76,6 +83,10 @@ impl EntityLoops {
             audio.stop_voice(g.voice);
         }
         self.pending_beams.clear();
+        for (_, (v, _)) in self.sniffers.drain() {
+            audio.stop_voice(v);
+        }
+        self.pending_sniffers.clear();
         self.was_gliding = false;
     }
 
@@ -83,12 +94,55 @@ impl EntityLoops {
         if event == GUARDIAN_ATTACK_EVENT && self.pending_beams.len() < MAX_GUARDIANS {
             self.pending_beams.push(entity_id);
         }
+        if event == SNIFFER_DIGGING_EVENT && self.pending_sniffers.len() < MAX_SNIFFERS {
+            self.pending_sniffers.push(entity_id);
+        }
     }
 
     pub fn tick(&mut self, state: &ClientState, audio: &mut Audio) {
         self.tick_elytra(state, audio);
         self.tick_bees(state, audio);
         self.tick_beams(state, audio);
+        self.tick_sniffers(state, audio);
+    }
+
+    /// Vanilla's `SnifferSoundInstance`: one digging sound that follows the sniffer and stops with the dig.
+    fn tick_sniffers(&mut self, state: &ClientState, audio: &mut Audio) {
+        for id in std::mem::take(&mut self.pending_sniffers) {
+            let Some(e) = state.entities.get(id) else {
+                continue;
+            };
+            if flag(&e.data, idx::SILENT) {
+                continue;
+            }
+            if let Some((old, _)) = self.sniffers.remove(&id) {
+                audio.stop_voice(old);
+            }
+            if self.sniffers.len() < MAX_SNIFFERS
+                && let Some(voice) = audio.play(
+                    "entity.sniffer.digging",
+                    Some(e.pos),
+                    1.0,
+                    1.0,
+                    SoundSource::Neutral,
+                )
+            {
+                self.sniffers.insert(id, (voice, 0));
+            }
+        }
+        self.sniffers.retain(|&id, (voice, age)| {
+            *age = age.saturating_add(1);
+            match state.entities.get(id) {
+                Some(e) if *age <= SNIFFER_GRACE_TICKS || sniffer_digs(e) => {
+                    audio.set_voice_position(*voice, e.pos);
+                    true
+                }
+                _ => {
+                    audio.stop_voice(*voice);
+                    false
+                }
+            }
+        });
     }
 
     fn tick_elytra(&mut self, state: &ClientState, audio: &mut Audio) {
@@ -227,6 +281,15 @@ impl EntityLoops {
             true
         });
     }
+}
+
+fn sniffer_digs(e: &mcr_client::Entity) -> bool {
+    matches!(
+        e.data.get(&idx::SNIFFER_STATE),
+        Some(EntityDataValue::SnifferState(
+            SnifferState::Digging | SnifferState::Searching
+        ))
+    )
 }
 
 fn bee_angry(e: &mcr_client::Entity, game_time: i64) -> bool {

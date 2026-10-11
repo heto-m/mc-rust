@@ -190,6 +190,7 @@ pub struct EntityScene {
     jobs: Vec<Job>,
     camera: [f64; 3],
     billboard: Mat4,
+    flash: bool,
     sprite_models: FxHashMap<[u32; 4], ModelId>,
     bolts: FxHashMap<u32, ModelId>,
     block_top: Option<BlockTop>,
@@ -231,6 +232,7 @@ impl EntityScene {
             jobs: Vec::new(),
             camera: [0.0; 3],
             billboard: Mat4::IDENTITY,
+            flash: false,
             sprite_models: FxHashMap::default(),
             bolts: FxHashMap::default(),
             block_top: None,
@@ -244,12 +246,7 @@ impl EntityScene {
     /// Camera used for sprite entities and fishing lines; `yaw` and `pitch` in degrees (vanilla convention).
     pub fn set_camera(&mut self, position: [f64; 3], yaw: f32, pitch: f32) {
         self.camera = position;
-        self.billboard = Mat4::from_quat(Quat::from_euler(
-            glam::EulerRot::YXZ,
-            std::f32::consts::PI - yaw.to_radians(),
-            -pitch.to_radians(),
-            0.0,
-        ));
+        self.billboard = camera_orientation(yaw, pitch);
     }
 
     /// Lets entities cast blob shadows on the top surface of the block below them.
@@ -462,6 +459,7 @@ impl EntityScene {
                 bone_base: base + pj.bone_off,
                 tint: part.tint,
                 hurt: hurt && part.hurt,
+                flash: false,
                 fullbright: part.fullbright,
                 block_light: v.light[0],
                 sky_light: v.light[1],
@@ -563,6 +561,7 @@ impl EntityScene {
                 bone_base: base,
                 tint: part.tint,
                 hurt: false,
+                flash: self.flash,
                 fullbright: false,
                 block_light: light[0],
                 sky_light: light[1],
@@ -585,6 +584,7 @@ impl EntityScene {
                     bone_base: base,
                     tint: [160, 100, 255, 150],
                     hurt: false,
+                    flash: false,
                     fullbright: true,
                     block_light: light[0],
                     sky_light: light[1],
@@ -597,6 +597,12 @@ impl EntityScene {
     }
 
     fn emit_free(&mut self, v: &EntityView<'_>, plan: &Plan) {
+        let mut lit = *v;
+        if plan.bright {
+            lit.light[0] = 15;
+        }
+        let v = &lit;
+        self.flash = plan.flash;
         for item in &plan.free_items {
             let stack = match item.source {
                 ItemSource::Equipment(s) => v.item(s),
@@ -707,6 +713,7 @@ impl EntityScene {
                         bone_base: base,
                         tint: *tint,
                         hurt: false,
+                        flash: false,
                         fullbright: false,
                         block_light: v.light[0],
                         sky_light: v.light[1],
@@ -717,6 +724,7 @@ impl EntityScene {
                 }
             }
         }
+        self.flash = false;
     }
 
     fn push_sprite(
@@ -766,6 +774,7 @@ impl EntityScene {
             bone_base: base,
             tint,
             hurt: false,
+            flash: false,
             fullbright: pipeline != crate::gpu::Pipeline::Cutout || tint[3] < 255,
             block_light: v.light[0],
             sky_light: v.light[1],
@@ -804,6 +813,7 @@ impl EntityScene {
             bone_base: base,
             tint: [115, 115, 128, 30],
             hurt: false,
+            flash: false,
             fullbright: true,
             block_light: 15,
             sky_light: 15,
@@ -950,6 +960,16 @@ impl EntityScene {
     }
 }
 
+/// Vanilla `Camera.rotation()`: billboards drawn with it face the camera.
+pub(crate) fn camera_orientation(yaw: f32, pitch: f32) -> Mat4 {
+    Mat4::from_quat(Quat::from_euler(
+        glam::EulerRot::YXZ,
+        std::f32::consts::PI - yaw.to_radians(),
+        -pitch.to_radians(),
+        0.0,
+    ))
+}
+
 /// Maps model space (sixteenths, y down) to world space around the entity's own origin.
 fn entity_transform(v: &EntityView<'_>, plan: &Plan) -> Mat4 {
     let yaw = if plan.skip_rotation {
@@ -975,7 +995,7 @@ fn entity_transform(v: &EntityView<'_>, plan: &Plan) -> Mat4 {
     m * Mat4::from_translation(plan.extra_offset)
         * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
         * Mat4::from_scale(plan.extra_scale)
-        * Mat4::from_translation(Vec3::new(0.0, -1.501, 0.0))
+        * Mat4::from_translation(Vec3::new(0.0, -plan.model_y, 0.0))
         * Mat4::from_scale(Vec3::splat(MODEL_SCALE))
 }
 

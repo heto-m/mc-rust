@@ -89,7 +89,11 @@ pub fn decorate(deco: Deco, name: &str, v: &EntityView<'_>, plan: &mut Plan) {
         }
         Deco::Squid => {
             plan.rig = Rig::Squid;
-            let t = (age * 0.1 + v.id as f32 * 0.37) % (PI * 2.0);
+            let phase = v
+                .events
+                .tentacle_sync
+                .map_or(age * 0.1 + v.id as f32 * 0.37, |t| t * 0.1);
+            let t = phase % (PI * 2.0);
             plan.anim.tentacle = if t < PI {
                 let k = t / PI;
                 (k * k * PI).sin() * PI * 0.25
@@ -131,8 +135,28 @@ pub fn decorate(deco: Deco, name: &str, v: &EntityView<'_>, plan: &mut Plan) {
                 );
             }
         }
-        Deco::Hoglin => plan.rig = Rig::Hoglin,
-        Deco::Ravager => plan.rig = Rig::Ravager,
+        Deco::Hoglin => {
+            plan.rig = Rig::Hoglin;
+            plan.anim.attack_ticks = v.attack_ticks;
+        }
+        Deco::Ravager => {
+            plan.rig = Rig::Ravager;
+            plan.anim.attack_ticks = v.attack_ticks;
+            plan.anim.stunned = v.events.stunned;
+            plan.anim.roar = v.events.roar;
+        }
+        Deco::Goat => {
+            if v.events.ram > 0.0 {
+                let max = if plan.anim.baby { 52.5 } else { 30.0 };
+                plan.anim.head_x = Some(v.events.ram / 20.0 * max * PI / 180.0);
+            }
+        }
+        Deco::Sheep => {
+            let (pos, angle) = sheep_head(v.events.eat);
+            let age_scale = if plan.anim.baby { 0.5 } else { 1.0 };
+            plan.anim.head_dy = pos * 9.0 * age_scale;
+            plan.anim.head_x = angle;
+        }
         Deco::Turtle => {
             plan.rig = Rig::Turtle;
             plan.anim.on_land = v.on_ground;
@@ -482,6 +506,28 @@ pub enum Deco {
     Wither,
     EnderDragon,
     EndCrystal,
+    Goat,
+    Sheep,
+}
+
+/// Vanilla sheep `getHeadEatPositionScale` and `getHeadEatAngleScale`; `None` keeps the look pitch.
+pub(crate) fn sheep_head(eat: f32) -> (f32, Option<f32>) {
+    if eat <= 0.0 {
+        return (0.0, None);
+    }
+    let pos = if (4.0..=36.0).contains(&eat) {
+        1.0
+    } else if eat < 4.0 {
+        eat / 4.0
+    } else {
+        -(eat - 40.0) / 4.0
+    };
+    let angle = if eat > 4.0 && eat <= 36.0 {
+        PI / 5.0 + 0.219_911_49 * ((eat - 4.0) / 32.0 * 28.7).sin()
+    } else {
+        PI / 5.0
+    };
+    (pos, Some(angle))
 }
 
 pub fn deco_for(name: &str) -> Deco {
@@ -520,6 +566,8 @@ pub fn deco_for(name: &str) -> Deco {
         "wither" => Deco::Wither,
         "ender_dragon" => Deco::EnderDragon,
         "end_crystal" => Deco::EndCrystal,
+        "goat" => Deco::Goat,
+        "sheep" => Deco::Sheep,
         _ => Deco::None,
     }
 }

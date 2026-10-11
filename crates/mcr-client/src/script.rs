@@ -3,7 +3,7 @@
 //! Lines: `wait <secs>`, `wait_loaded`, `walk <yaw> <ticks> [sprint]`, `square <side_ticks>`, `jump`,
 //! `look <yaw> <pitch>`, `chat <text>`, `cmd <command>`, `dig <x> <y> <z>`,
 //! `place <x> <y> <z> <down|up|north|south|west|east>`, `inventory`, `respawn`, `slot <0-8>`,
-//! `report`. `#` starts a comment.
+//! `report`, `entities <type>` (logs the synched data of every entity of that type). `#` starts a comment.
 
 use std::collections::VecDeque;
 
@@ -30,6 +30,7 @@ pub enum Step {
     Respawn,
     Slot(u8),
     Report,
+    Entities(String),
 }
 
 fn facing(name: &str) -> Option<Facing> {
@@ -93,6 +94,7 @@ pub fn parse(text: &str) -> std::result::Result<Vec<Step>, String> {
             "respawn" => Step::Respawn,
             "slot" => Step::Slot(int(0)?.clamp(0, 8) as u8),
             "report" => Step::Report,
+            "entities" => Step::Entities(rest.trim().to_owned()),
             _ => return Err(err("unknown step")),
         });
     }
@@ -279,6 +281,18 @@ impl Runner {
                 }
                 Step::Respawn => client.respawn()?,
                 Step::Slot(s) => client.select_hotbar(s)?,
+                Step::Entities(kind) => {
+                    let data = mcr_data::v26_3();
+                    let name = format!("minecraft:{}", kind.trim_start_matches("minecraft:"));
+                    for e in client.state.entities.iter() {
+                        if data.entity_type_name(e.kind as u32) != Some(name.as_str()) {
+                            continue;
+                        }
+                        let mut fields: Vec<_> = e.data.iter().collect();
+                        fields.sort_by_key(|(i, _)| **i);
+                        self.log.push(format!("entity {} {name} {fields:?}", e.id));
+                    }
+                }
                 Step::Report => {
                     let p = &client.state.player;
                     self.log.push(format!(

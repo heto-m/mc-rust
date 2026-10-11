@@ -46,6 +46,12 @@ fn closeup() {
     if let Some(o) = off {
         eq[5] = item(&o);
     }
+    if let Ok(c) = std::env::var("CU_CHEST") {
+        eq[3] = item(&c);
+    }
+    if let Ok(d) = std::env::var("CU_ITEMDATA") {
+        data = data.with(8, V::ItemStack(item(&d)));
+    }
     let reg = TestRegistries::vanilla();
     let (w, hh) = (600u32, 600u32);
     let dist = env_f("CU_DIST", 3.5);
@@ -62,7 +68,17 @@ fn closeup() {
         v.head_yaw = env_f("CU_HEADYAW", 0.0);
         v.on_ground = env_f("CU_GROUND", 1.0) > 0.5;
         v.death_time = env_f("CU_DEATH", 0.0);
-        h.scene.update(&reg, std::iter::once(v));
+        v.glide.ticks = env_f("CU_GLIDE", 0.0);
+        v.fuse = std::env::var("CU_FUSE").ok().and_then(|f| f.parse().ok());
+        if let Ok(r) = std::env::var("CU_YROT") {
+            v.glide.y_rot = r.parse().ok();
+        }
+        if let Ok(w) = std::env::var("CU_WINGS") {
+            let w: Vec<f32> = w.split(',').filter_map(|x| x.parse().ok()).collect();
+            if let [x, y, z] = w[..] {
+                v.glide.wings = [x, y, z];
+            }
+        }
         let a = az.to_radians();
         let cam = Camera {
             position: DVec3::new(
@@ -73,6 +89,11 @@ fn closeup() {
             target: Vec3::new(0.0, cy, 0.0),
             fov_deg: 35.0,
         };
+        let d = cam.target.as_dvec3() - cam.position;
+        let yaw = (-d.x).atan2(d.z).to_degrees() as f32;
+        let pitch = (-d.y / d.length()).asin().to_degrees() as f32;
+        h.scene.set_camera(cam.position.to_array(), yaw, pitch);
+        h.scene.update(&reg, std::iter::once(v));
         strips.push(h.render(&cam.frame(w, hh), w, hh));
     }
     let mut all: Vec<u8> = Vec::new();

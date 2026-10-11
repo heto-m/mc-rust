@@ -57,6 +57,23 @@ mod tests {
     }
 
     #[test]
+    fn water_dims_sky_light_by_one_per_block() {
+        let v = v26_3();
+        for name in [
+            "minecraft:water",
+            "minecraft:kelp_plant",
+            "minecraft:seagrass",
+        ] {
+            let id = v.block_by_name(name).unwrap();
+            assert_eq!(
+                v.light_block(v.block_info(id).unwrap().default_state),
+                1,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn bottom_slab_collision() {
         let v = v26_3();
         let slab = v.block_by_name("minecraft:stone_slab").unwrap();

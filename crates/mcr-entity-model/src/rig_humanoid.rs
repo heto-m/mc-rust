@@ -22,7 +22,7 @@ pub(crate) fn humanoid(r: &mut R, a: &AnimIn, style: HumanoidStyle) {
     if a.fall_flying {
         r.rx(Slot::Head, -FRAC_PI_4);
     }
-    let (pos, sp) = (a.walk_pos, a.walk_speed);
+    let (pos, sp) = (a.walk_pos, a.walk_speed / a.speed_value.max(1.0));
     r.rx(Slot::RightArm, cos(pos * 0.6662 + PI) * 2.0 * sp * 0.5);
     r.rx(Slot::LeftArm, cos(pos * 0.6662) * 2.0 * sp * 0.5);
     r.rot(

@@ -3,8 +3,9 @@ use mcr_protocol::types::entity_data::{ArmadilloState, EntityDataValue, Pose, Sn
 use crate::catalog::PlanCx;
 use crate::idx;
 use crate::plan::{Plan, Pose as PartPose};
-use crate::rig::Rig;
+use crate::rig::{Rig, Slot};
 use crate::view::EntityView;
+use std::f32::consts::PI;
 
 /// Seconds into a looping or repeating animation of `length` seconds driven by the entity's age.
 fn cycle(v: &EntityView<'_>, length: f32, speed: f32) -> f32 {
@@ -20,6 +21,18 @@ fn walk(plan: &mut Plan, v: &EntityView<'_>, name: &'static str, speed: f32, sca
     if weight > 0.0 {
         plan.keyframes
             .push((name, v.limb_swing * 0.05 * speed, weight));
+    }
+}
+
+/// The armadillo's peek pose when it was already scared before the client saw it.
+const PEEK_SECONDS: f32 = 2.5;
+
+/// A one-shot animation `ticks` after its event, dropped once it has played out.
+fn once(plan: &mut Plan, name: &'static str, ticks: Option<f32>, length: f32) {
+    if let Some(t) = ticks
+        && t * 0.05 <= length
+    {
+        plan.keyframes.push((name, t * 0.05, 1.0));
     }
 }
 
@@ -65,9 +78,16 @@ pub fn drive(cx: &PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
                     "ArmadilloAnimation.ARMADILLO_ROLL_UP",
                 )
             };
+            let peek = if baby {
+                "BabyArmadilloAnimation.ARMADILLO_BABY_PEEK"
+            } else {
+                "ArmadilloAnimation.ARMADILLO_PEEK"
+            };
             match state {
-                ArmadilloState::Rolling | ArmadilloState::Scared => {
-                    plan.keyframes.push((roll, 10.0, 1.0));
+                ArmadilloState::Rolling => plan.keyframes.push((roll, 10.0, 1.0)),
+                ArmadilloState::Scared => {
+                    let seconds = v.events.peek.map_or(PEEK_SECONDS, |t| t * 0.05);
+                    plan.keyframes.push((peek, seconds, 1.0));
                 }
                 _ => walk(plan, v, walk_name, 16.0, 2.5),
             }
@@ -138,6 +158,25 @@ pub fn drive(cx: &PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
             if len > 0.0 {
                 plan.keyframes.push((n, cycle(v, len, 1.0), 1.0));
             }
+            once(
+                plan,
+                "WardenAnimation.WARDEN_ATTACK",
+                v.events.attack,
+                0.33333,
+            );
+            once(
+                plan,
+                "WardenAnimation.WARDEN_SONIC_BOOM",
+                v.events.sonic_boom,
+                3.0,
+            );
+            let tendril = v.events.tendril * ((v.age_ticks * 2.25).cos() * PI * 0.1).to_degrees();
+            if tendril != 0.0 {
+                plan.rot_overrides
+                    .push((Slot::LeftTendril, [tendril, 0.0, 0.0]));
+                plan.rot_overrides
+                    .push((Slot::RightTendril, [-tendril, 0.0, 0.0]));
+            }
         }
         "minecraft:bat" => {
             let resting = v.byte(idx::BAT_FLAGS).unwrap_or(0) & 1 != 0;
@@ -149,14 +188,13 @@ pub fn drive(cx: &PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
             plan.keyframes.push((n, cycle(v, 0.5, 1.0), 1.0));
         }
         "minecraft:rabbit" => {
-            if v.limb_amount > 0.01 {
+            if let Some(t) = v.events.hop {
                 let n = if baby {
                     "BabyRabbitAnimation.HOP"
                 } else {
                     "RabbitAnimation.HOP"
                 };
-                plan.keyframes
-                    .push((n, cycle(v, 0.75, 1.5), v.limb_amount.min(1.0)));
+                plan.keyframes.push((n, t * 0.05, 1.0));
             }
         }
         "minecraft:copper_golem" => {
@@ -167,7 +205,21 @@ pub fn drive(cx: &PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
                 1.0,
             ));
         }
-        "minecraft:creaking" => walk(plan, v, "CreakingAnimation.CREAKING_WALK", 2.0, 2.5),
+        "minecraft:creaking" => {
+            walk(plan, v, "CreakingAnimation.CREAKING_WALK", 2.0, 2.5);
+            once(
+                plan,
+                "CreakingAnimation.CREAKING_ATTACK",
+                v.events.attack,
+                0.7083,
+            );
+            once(
+                plan,
+                "CreakingAnimation.CREAKING_INVULNERABLE",
+                v.events.invulnerable,
+                0.2917,
+            );
+        }
         _ => return,
     }
     plan.rig = Rig::Static;

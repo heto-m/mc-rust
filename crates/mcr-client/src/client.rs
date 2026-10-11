@@ -39,6 +39,9 @@ pub enum Phase {
     Closed = 3,
 }
 
+/// Vanilla `EntityEvent.USE_ITEM_COMPLETE`: the server finished the local player's item use.
+const USE_ITEM_COMPLETE: i8 = 9;
+
 #[derive(Debug)]
 pub struct Client {
     conn: Connection,
@@ -530,14 +533,23 @@ impl Client {
         let mut reconfigure = false;
         let mut closed = None;
         let mut transfer = None;
+        let mut use_completed = false;
+        let local = self.state.player.entity_id;
         for event in &out.events {
             match event {
+                ClientEvent::EntityEvent {
+                    entity_id,
+                    event: USE_ITEM_COMPLETE,
+                } if *entity_id == local => use_completed = true,
                 ClientEvent::Joined { .. } => self.joined = true,
                 ClientEvent::Reconfiguring => reconfigure = true,
                 ClientEvent::Transfer { host, port } => transfer = Some((host.clone(), *port)),
                 ClientEvent::Disconnected(DisconnectReason::Server(r)) => closed = Some(r.clone()),
                 _ => {}
             }
+        }
+        if use_completed {
+            self.stop_using_local();
         }
         for request in std::mem::take(&mut out.dialogs) {
             if let Some(link) = &self.config.dialog_link {
@@ -775,6 +787,12 @@ impl Client {
         let out = player.physics.tick(&keys, &self.state.chunks);
         let entity_id = player.entity_id;
         self.apply_firework_boosts();
+        if out.abilities_changed {
+            let flying = self.state.player.physics.abilities.flying;
+            self.send_play(&PlayServerbound::PlayerAbilities(sb::PlayerAbilities {
+                flying,
+            }))?;
+        }
         if out.start_fall_flying {
             self.send_play(&PlayServerbound::PlayerCommand(sb::PlayerCommand {
                 entity_id,

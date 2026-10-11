@@ -73,6 +73,8 @@ pub struct PartInstance {
     pub bone_base: u32,
     pub tint: [u8; 4],
     pub hurt: bool,
+    /// The white overlay of `TntMinecartRenderer.submitWhiteSolidBlock`.
+    pub flash: bool,
     pub fullbright: bool,
     pub block_light: u8,
     pub sky_light: u8,
@@ -552,6 +554,7 @@ impl EntityRenderer {
         }
         let flags = u32::from(inst.fullbright)
             | u32::from(inst.hurt) << 1
+            | u32::from(inst.flash) << 2
             | u32::from(inst.block_light.min(15)) << 8
             | u32::from(inst.sky_light.min(15)) << 12;
         self.frame_instances.push((

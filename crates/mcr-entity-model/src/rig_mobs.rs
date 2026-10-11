@@ -623,11 +623,18 @@ pub(crate) fn ravager(r: &mut R, a: &AnimIn) {
         }
     } else {
         let y_off = -sin(r.rotation(Slot::Neck).x);
+        let stunned = a.stunned > 0.0;
         if let Some(p) = r.p(Slot::Neck) {
             p.pos = Vec3::new(0.0, -7.0 - y_off, 5.5);
-            p.rot.x = 0.0;
+            p.rot.x = if stunned { 0.21991149 } else { 0.0 };
+            if stunned {
+                p.pos.x = sin(a.stunned / 40.0 * 10.0) * 3.0;
+            }
         }
-        r.rx(Slot::Mouth, PI * 0.01);
+        r.rx(Slot::Mouth, PI * if stunned { 0.05 } else { 0.01 });
+        if !stunned && a.roar > 0.0 {
+            r.rx(Slot::Mouth, FRAC_PI_2 * sin(a.roar * PI * 0.25));
+        }
     }
     r.rot(
         Slot::Head,
@@ -1111,6 +1118,23 @@ pub(crate) fn witch(r: &mut R, a: &AnimIn) {
     }
 }
 
+pub(crate) fn evoker_fangs(r: &mut R, a: &AnimIn) {
+    let bite = a.bite;
+    let amount = (bite * 2.0).min(1.0);
+    let amount = 1.0 - amount * amount * amount;
+    r.rz(Slot::UpperJaw, PI - amount * 0.35 * PI);
+    r.rz(Slot::LowerJaw, PI + amount * 0.35 * PI);
+    r.add_pos(
+        Slot::Base,
+        Vec3::new(0.0, -(bite + sin(bite * 2.7)) * 7.2, 0.0),
+    );
+    let scale = if bite > 0.9 { (1.0 - bite) / 0.1 } else { 1.0 };
+    if let Some(p) = r.p(Slot::Root) {
+        p.pos.y = 24.0 - 20.0 * scale;
+        p.scale = Vec3::splat(scale);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1204,6 +1228,61 @@ mod tests {
         ];
         let (m, pose) = run(Rig::Equine, &names, a);
         assert!((pose[m.bone("body").unwrap() as usize].rot.x + FRAC_PI_4).abs() < 1e-5);
+    }
+
+    #[test]
+    fn evoker_fangs_open_rise_and_shrink_away() {
+        let names = ["base", "upper_jaw", "lower_jaw"];
+        let bite = |bite: f32| {
+            let (m, pose) = run(
+                Rig::Fangs,
+                &names,
+                AnimIn {
+                    bite,
+                    ..AnimIn::default()
+                },
+            );
+            let get = |n: &str| pose[m.bone(n).unwrap() as usize];
+            (get("upper_jaw").rot.z, get("base").pos.y, pose[0].scale.x)
+        };
+        let (jaw, base, scale) = bite(0.05);
+        assert!((jaw - PI * 0.65).abs() < 0.01 && base < 0.0 && scale == 1.0);
+        let (open, _, _) = bite(0.5);
+        assert!((open - PI).abs() < 1e-5);
+        assert!((bite(0.95).2 - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn stunned_ravager_shakes_its_neck() {
+        let a = AnimIn {
+            stunned: 30.0,
+            ..AnimIn::default()
+        };
+        let (m, pose) = run(Rig::Ravager, &["neck", "mouth"], a);
+        let neck = pose[m.bone("neck").unwrap() as usize];
+        assert!((neck.rot.x - 0.21991149).abs() < 1e-6);
+        assert!((neck.pos.x - (7.5f32).sin() * 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn gliding_damps_the_limb_swing_by_speed_value() {
+        use crate::rig::HumanoidStyle;
+        let mut data = rustc_hash::FxHashMap::default();
+        data.insert(
+            0u8,
+            mcr_protocol::types::entity_data::EntityDataValue::Byte(0x80u8 as i8),
+        );
+        let mut v = crate::view::EntityView::named("minecraft:player", &data);
+        v.limb_amount = 1.0;
+        v.glide.speed = 125.0;
+        let a = crate::catalog::base_anim(&v);
+        assert!(a.fall_flying && a.speed_value == 125.0);
+        let names = ["head", "right_leg", "left_leg", "right_arm", "left_arm"];
+        let (m, pose) = run(Rig::Humanoid(HumanoidStyle::Plain), &names, a);
+        let leg = pose[m.bone("right_leg").unwrap() as usize];
+        assert!((leg.rot.x - 1.4 / 125.0).abs() < 1e-6, "{}", leg.rot.x);
+        let head = pose[m.bone("head").unwrap() as usize];
+        assert!((head.rot.x + std::f32::consts::FRAC_PI_4).abs() < 1e-6);
     }
 
     #[test]

@@ -11,6 +11,7 @@ use mcr_protocol::types::{ItemStack, UntrustedItemStack, Vec3d, Vec3f};
 use crate::client::Client;
 use crate::error::Result;
 use crate::inventory::PLAYER_MENU_ID;
+use crate::state::ClientState;
 
 #[derive(Debug, Clone)]
 pub struct Digging {
@@ -20,6 +21,29 @@ pub struct Digging {
     pub item: ItemStack,
     pub progress: f32,
     pub ticks: u32,
+}
+
+impl ClientState {
+    /// `LocalPlayer.drop`: the held stack shrinks before the server answers. `None` for spectators,
+    /// who never send the drop; otherwise whether anything left the hand.
+    pub(crate) fn predict_drop(&mut self, whole_stack: bool) -> Option<bool> {
+        use mcr_protocol::types::game::GameType;
+        if self.player.game_mode == GameType::Spectator {
+            return None;
+        }
+        let held = crate::inventory::HOTBAR_START + usize::from(self.player.held_slot);
+        Some(match self.inventory.player.slots.get_mut(held) {
+            Some(stack) if !stack.is_empty() => {
+                if whole_stack || stack.count <= 1 {
+                    *stack = ItemStack::default();
+                } else {
+                    stack.count -= 1;
+                }
+                true
+            }
+            _ => false,
+        })
+    }
 }
 
 fn now_millis() -> i64 {
@@ -330,21 +354,8 @@ impl Client {
 
     /// Vanilla `MultiPlayerGameMode.dropItem`: removes the predicted stack from the hand at once; true if anything left it.
     pub fn drop_item(&mut self, whole_stack: bool) -> Result<bool> {
-        use mcr_protocol::types::game::GameType;
-        if self.state.player.game_mode == GameType::Spectator {
+        let Some(dropped) = self.state.predict_drop(whole_stack) else {
             return Ok(false);
-        }
-        let held = crate::inventory::HOTBAR_START + usize::from(self.state.player.held_slot);
-        let dropped = match self.state.inventory.player.slots.get_mut(held) {
-            Some(stack) if !stack.is_empty() => {
-                if whole_stack || stack.count <= 1 {
-                    *stack = ItemStack::default();
-                } else {
-                    stack.count -= 1;
-                }
-                true
-            }
-            _ => false,
         };
         self.simple_action(if whole_stack {
             sb::PlayerActionKind::DropAllItems
@@ -561,5 +572,61 @@ impl Client {
             id,
             command: command.chars().take(32500).collect(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mcr_protocol::types::game::GameType;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::config::ClientConfig;
+    use crate::inventory::HOTBAR_START;
+
+    fn holding(count: i32) -> ClientState {
+        let mut s = ClientState::new(&ClientConfig::default(), Uuid::nil());
+        s.player.held_slot = 2;
+        let item = s.data.item_by_name("minecraft:cobblestone").unwrap() as i32;
+        s.inventory.player.slots[HOTBAR_START + 2] = ItemStack::new(item, count);
+        s
+    }
+
+    fn held(s: &ClientState) -> i32 {
+        let stack = &s.inventory.player.slots[HOTBAR_START + 2];
+        if stack.is_empty() { 0 } else { stack.count }
+    }
+
+    #[test]
+    fn dropping_one_item_shrinks_the_held_stack() {
+        let mut s = holding(5);
+        assert_eq!(s.predict_drop(false), Some(true));
+        assert_eq!(held(&s), 4);
+        let mut last = holding(1);
+        assert_eq!(last.predict_drop(false), Some(true));
+        assert_eq!(held(&last), 0);
+    }
+
+    #[test]
+    fn dropping_the_stack_empties_the_hand() {
+        let mut s = holding(64);
+        assert_eq!(s.predict_drop(true), Some(true));
+        assert_eq!(held(&s), 0);
+    }
+
+    #[test]
+    fn an_empty_hand_still_sends_but_drops_nothing() {
+        let mut s = holding(1);
+        s.inventory.player.slots[HOTBAR_START + 2] = ItemStack::default();
+        assert_eq!(s.predict_drop(false), Some(false));
+        assert_eq!(s.predict_drop(true), Some(false));
+    }
+
+    #[test]
+    fn spectators_never_drop() {
+        let mut s = holding(5);
+        s.player.game_mode = GameType::Spectator;
+        assert_eq!(s.predict_drop(true), None);
+        assert_eq!(held(&s), 5);
     }
 }

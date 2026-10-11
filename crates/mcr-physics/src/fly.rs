@@ -21,8 +21,10 @@ impl PlayerPhysics {
         ]
     }
 
+    /// `Player#canGlide`: never while creative flying.
     pub(crate) fn can_glide(&self) -> bool {
-        !self.on_ground
+        !self.abilities.flying
+            && !self.on_ground
             && !self.passenger
             && self.effects.levitation.is_none()
             && self.glider_equipped

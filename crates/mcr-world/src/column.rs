@@ -256,6 +256,28 @@ impl ChunkColumn {
         slot.get(x, (y & 15) as usize, z)
     }
 
+    /// The first sky light section above light section `index` that holds data.
+    pub fn sky_light_above(&self, index: usize) -> Option<&LightSlot> {
+        self.sky
+            .get(index + 1..)?
+            .iter()
+            .find(|s| !matches!(s, LightSlot::Absent))
+    }
+
+    /// Sky light as vanilla's `SkyLightSectionStorage` reads it: a section without data takes the
+    /// bottom row of the next section above that has some, and 15 when none does.
+    pub fn sky_light_or_above(&self, x: usize, y: i32, z: usize) -> Option<u8> {
+        let index = self.light_index(y)?;
+        match self.sky.get(index)? {
+            LightSlot::Absent => Some(
+                self.sky_light_above(index)
+                    .and_then(|s| s.get(x, 0, z))
+                    .unwrap_or(15),
+            ),
+            slot => slot.get(x, (y & 15) as usize, z),
+        }
+    }
+
     pub fn block_light(&self, x: usize, y: i32, z: usize) -> Option<u8> {
         let slot = self.block.get(self.light_index(y)?)?;
         slot.get(x, (y & 15) as usize, z)
@@ -352,5 +374,32 @@ mod tests {
         hm.data[0] = 5;
         assert_eq!(hm.first_available(0, 0, -64), -59);
         assert_eq!(hm.first_available(1, 0, -64), -64);
+    }
+
+    #[test]
+    fn absent_sky_sections_read_the_bottom_of_the_next_lit_one() {
+        let mut c = ChunkColumn::empty(&cfg());
+        let mut nib = LightNibbles::default();
+        nib.set(2, 0, 3, 7);
+        c.apply_light(LightData {
+            sky: vec![LightUpdate {
+                section: 10,
+                data: Some(nib),
+            }],
+            block: vec![],
+        });
+        assert_eq!(c.sky_light(2, 40, 3), None);
+        assert_eq!(c.sky_light_or_above(2, 40, 3), Some(7));
+        assert_eq!(c.sky_light_or_above(0, 40, 0), Some(0));
+        assert_eq!(
+            c.sky_light_or_above(2, 85, 3),
+            Some(0),
+            "sections with data read as is"
+        );
+        assert_eq!(
+            c.sky_light_or_above(2, 120, 3),
+            Some(15),
+            "above every lit section"
+        );
     }
 }

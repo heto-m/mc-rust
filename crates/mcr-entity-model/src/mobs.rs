@@ -307,14 +307,6 @@ static SIMPLE: &[(&str, Simple)] = &[
         Rig::Static,
     ),
     simple_entry(
-        "minecraft:evoker_fangs",
-        "minecraft:evoker_fangs#main",
-        None,
-        "entity/illager/evoker_fangs",
-        None,
-        Rig::Static,
-    ),
-    simple_entry(
         "minecraft:llama_spit",
         "minecraft:llama_spit#main",
         None,
@@ -419,6 +411,7 @@ pub(crate) fn builder_for(name: &str) -> Builder {
         "minecraft:wither" => Builder::Func(wither),
         "minecraft:breeze" => Builder::Func(breeze),
         "minecraft:creaking" => Builder::Func(creaking),
+        "minecraft:evoker_fangs" => Builder::Func(evoker_fangs),
         "minecraft:ender_dragon" => Builder::Func(dragon),
         "minecraft:zombie_nautilus" => Builder::Func(zombie_nautilus),
         "minecraft:sulfur_cube" => Builder::Func(sulfur_cube),
@@ -576,8 +569,13 @@ fn wolf(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     } else {
         "minecraft:wolf#main"
     };
-    plan.push(Part::new(layer, format!("entity/wolf/{stem}{state}{b}")));
-    if tame && let Some(DyeValue(c)) = dye_int(v, idx::WOLF_COLLAR) {
+    let main = plan.push(Part::new(layer, format!("entity/wolf/{stem}{state}{b}")));
+    if v.shake > 0.0 {
+        let shade = (0.75 + v.shake / 2.0 * 0.25).min(1.0);
+        let c = (shade * 255.0) as u32;
+        *main = main.clone().tint(c << 16 | c << 8 | c);
+    }
+    if tame && let Some(DyeValue(c)) = collar(v, idx::WOLF_COLLAR) {
         plan.push(
             Part::new(layer, format!("entity/wolf/wolf_collar{b}"))
                 .tint(dye_rgb(c))
@@ -599,8 +597,11 @@ fn wolf(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
 
 pub struct DyeValue(pub i32);
 
-fn dye_int(v: &EntityView<'_>, index: u8) -> Option<DyeValue> {
-    v.int(index).map(DyeValue)
+const DEFAULT_COLLAR: i32 = 14;
+
+/// The server omits synched values still at their default, so a missing collar is vanilla's red.
+fn collar(v: &EntityView<'_>, index: u8) -> Option<DyeValue> {
+    Some(DyeValue(v.int(index).unwrap_or(DEFAULT_COLLAR)))
 }
 
 fn cat(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
@@ -629,7 +630,7 @@ fn cat(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     let b = if baby { "_baby" } else { "" };
     let layer = format!("minecraft:cat{b}#main");
     plan.push(Part::new(layer, format!("entity/cat/cat_{variant}{b}")));
-    if tame && let Some(DyeValue(c)) = dye_int(v, idx::CAT_COLLAR) {
+    if tame && let Some(DyeValue(c)) = collar(v, idx::CAT_COLLAR) {
         plan.push(
             Part::new(
                 format!("minecraft:cat{b}#collar"),
@@ -1069,6 +1070,20 @@ fn creaking(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     if v.boolean(idx::CREAKING_ACTIVE) {
         plan.push(Part::new("minecraft:creaking#eyes", "entity/creaking/creaking_eyes").eyes());
     }
+}
+
+/// Vanilla draws the fangs only once the bite has started.
+fn evoker_fangs(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+    if v.events.bite <= 0.0 {
+        return;
+    }
+    plan.rig = Rig::Fangs;
+    plan.anim.bite = v.events.bite;
+    plan.body_yaw_offset = 90.0;
+    plan.push(Part::new(
+        "minecraft:evoker_fangs#main",
+        "entity/illager/evoker_fangs",
+    ));
 }
 
 fn dragon(_cx: &mut PlanCx<'_>, _v: &EntityView<'_>, plan: &mut Plan) {

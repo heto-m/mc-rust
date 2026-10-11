@@ -209,3 +209,73 @@ fn explosion_emitter_works_without_sprites_like_the_real_jar() {
     e.tick(&OpenWorld);
     assert!(e.count() > 6);
 }
+
+fn spark(trail: bool, twinkle: bool) -> Spark {
+    Spark {
+        color: 0xFF0000,
+        fade: Some(0x0000FF),
+        trail,
+        twinkle,
+        trailed: false,
+    }
+}
+
+#[test]
+fn firework_sparks_carry_colour_and_fall() {
+    let mut e = engine();
+    e.firework_spark([0.0; 3], [0.0; 3], spark(false, false));
+    let p = &e.pools[Pool::Translucent as usize][0];
+    assert_eq!(p.color, [1.0, 0.0, 0.0, 0.99]);
+    assert!((48..60).contains(&p.life));
+    e.tick(&OpenWorld);
+    assert!(e.pools[Pool::Translucent as usize][0].vel.y < 0.0);
+}
+
+#[test]
+fn trailing_sparks_leave_half_aged_copies() {
+    let mut e = engine();
+    e.firework_spark([0.0; 3], [0.0; 3], spark(true, false));
+    for _ in 0..4 {
+        e.tick(&OpenWorld);
+    }
+    let pool = &e.pools[Pool::Translucent as usize];
+    assert!(pool.len() > 1);
+    assert!(
+        pool[1..]
+            .iter()
+            .all(|c| c.age >= c.life / 2 && c.aux[5] == 0.0)
+    );
+}
+
+#[test]
+fn twinkling_sparks_blink_after_the_first_third() {
+    let mut e = engine();
+    e.firework_spark([0.0; 3], [0.0; 3], spark(false, true));
+    let mut p = e.pools[Pool::Translucent as usize][0].clone();
+    p.age = 0;
+    assert!(sim::quad_size(&p, 0.0) > 0.0);
+    let hidden = (p.life / 3..p.life)
+        .filter(|&age| {
+            p.age = age;
+            sim::quad_size(&p, 0.0) == 0.0
+        })
+        .count();
+    assert!(hidden > 0 && hidden < (p.life - p.life / 3) as usize);
+}
+
+#[test]
+fn firework_flash_grows_and_fades_over_four_ticks() {
+    let mut e = engine();
+    e.firework_flash([0.0; 3], 0x00FF00);
+    let p = e.pools[Pool::Translucent as usize][0].clone();
+    assert_eq!(p.life, 4);
+    assert_eq!(&p.color[..3], &[0.0, 1.0, 0.0]);
+    let mut q = p.clone();
+    q.age = 2;
+    assert!((sim::quad_size(&q, 0.0) - 7.1 * (0.25f32 * std::f32::consts::PI).sin()).abs() < 1e-4);
+    assert!(sim::alpha(&q, 0.0) < sim::alpha(&p, 1.0));
+    for _ in 0..5 {
+        e.tick(&OpenWorld);
+    }
+    assert_eq!(e.count(), 0);
+}

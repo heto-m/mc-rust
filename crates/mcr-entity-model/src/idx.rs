@@ -112,5 +112,7 @@ pub const FALLING_BLOCK_POS: u8 = 8;
 pub const END_CRYSTAL_SHOW_BOTTOM: u8 = 9;
 pub const MINECART_DISPLAY_BLOCK: u8 = 11;
 pub const MINECART_DISPLAY_OFFSET: u8 = 12;
+pub const TNT_FUSE: u8 = 8;
 pub const TNT_BLOCK: u8 = 9;
+pub const MINECART_FURNACE_FUEL: u8 = 13;
 pub const BOAT_HURT: u8 = 8;

@@ -84,7 +84,7 @@ pub fn build(input: &DebugInput<'_>) -> DebugOverlay {
     if let Some(column) = state.chunks.column(chunk) {
         let lx = (block[0] & 15) as usize;
         let lz = (block[2] & 15) as usize;
-        let sky = column.sky_light(lx, block[1], lz);
+        let sky = column.sky_light_or_above(lx, block[1], lz);
         let blk = column.block_light(lx, block[1], lz);
         left.push(format!(
             "Client Light: {} ({} sky, {} block)",

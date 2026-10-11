@@ -28,6 +28,8 @@ pub struct Options {
     pub bench_frames: u32,
     pub bench_views: Vec<Camera>,
     pub bench_modes: bool,
+    pub frames: u32,
+    pub frame_step: Option<Camera>,
     pub occlusion: bool,
     pub visibility_graph: bool,
     pub mods: Option<PathBuf>,
@@ -56,6 +58,8 @@ impl Default for Options {
             bench_frames: 0,
             bench_views: Vec::new(),
             bench_modes: false,
+            frames: 0,
+            frame_step: None,
             occlusion: true,
             visibility_graph: true,
             mods: None,
@@ -64,7 +68,7 @@ impl Default for Options {
 }
 
 pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect host[:port]] [--render-distance N] [--no-vsync] [--no-occlusion] [--no-graph]
-           [--jar <client.jar>] [--screenshot out.png [--camera x,y,z,yaw,pitch] [--size WxH]]
+           [--jar <client.jar>] [--screenshot out.png [--camera x,y,z,yaw,pitch] [--size WxH] [--frames N [--frame-step dx,dy,dz,dyaw,dpitch]]]
            [--autofly blocks_per_s] [--bench frames [--bench-view x,y,z,yaw,pitch]... [--bench-modes]]
        connect mode: [--name <name>] [--game-dir dir] [--assets-dir dir] [--autopilot script]
            [--screenshot out.png [--after-ticks N]]
@@ -137,6 +141,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                     .parse()
                     .map_err(|_| "--bench needs a frame count")?;
             }
+            "--frames" => {
+                opts.frames = value(&arg, &mut args)?
+                    .parse()
+                    .ok()
+                    .filter(|n| *n <= 1000)
+                    .ok_or("--frames needs a count up to 1000")?;
+            }
+            "--frame-step" => opts.frame_step = Some(parse_camera(&value(&arg, &mut args)?)?),
             "--bench-view" => opts
                 .bench_views
                 .push(parse_camera(&value(&arg, &mut args)?)?),

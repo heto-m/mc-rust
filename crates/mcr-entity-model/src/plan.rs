@@ -154,7 +154,15 @@ pub struct Plan {
     pub free_items: Vec<FreeItem>,
     pub free_geo: Vec<FreeGeo>,
     pub post_rot: Mat4,
+    /// Free items and sprites use full block light (`getBlockLightLevel` returning 15).
+    pub bright: bool,
+    /// Free geometry is drawn with the white overlay (lit TNT).
+    pub flash: bool,
+    /// `LivingEntityRenderer`'s model drop below the flipped origin; non-living renderers skip it.
+    pub model_y: f32,
 }
+
+pub const LIVING_MODEL_Y: f32 = 1.501;
 
 impl Default for Plan {
     fn default() -> Self {
@@ -177,6 +185,9 @@ impl Default for Plan {
             free_items: Vec::new(),
             free_geo: Vec::new(),
             post_rot: Mat4::IDENTITY,
+            bright: false,
+            flash: false,
+            model_y: LIVING_MODEL_Y,
         }
     }
 }
@@ -200,6 +211,9 @@ impl Plan {
         self.free_items.clear();
         self.free_geo.clear();
         self.post_rot = Mat4::IDENTITY;
+        self.bright = false;
+        self.flash = false;
+        self.model_y = LIVING_MODEL_Y;
     }
 
     pub fn push(&mut self, part: Part) -> &mut Part {

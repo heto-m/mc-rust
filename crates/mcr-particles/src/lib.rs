@@ -27,7 +27,7 @@ use mcr_render::{EffectImage, Environment, OverlayCtx};
 
 pub use atlas::{ParticleAtlas, Uv};
 pub use names::PARTICLE_NAMES;
-pub use sim::POOL_CAP;
+pub use sim::{POOL_CAP, Spark};
 
 use atlas::{DynamicSlots, to_slot};
 use render::Gpu;
@@ -243,6 +243,39 @@ impl ParticleEngine {
             count,
             true,
         );
+    }
+
+    /// Vanilla `level.addParticle`: one particle with exact velocity, skipped beyond the view range.
+    pub fn add_particle(&mut self, particle: &Particle, pos: [f64; 3], vel: [f64; 3]) {
+        self.emit_inner(particle, pos, vel, [1.0; 3], 0, false);
+    }
+
+    /// A firework explosion spark; colours are `0xRRGGBB`.
+    pub fn firework_spark(&mut self, pos: [f64; 3], vel: [f64; 3], spark: Spark) {
+        let (pos, vel) = (DVec3::from_array(pos), DVec3::from_array(vel));
+        if !pos.is_finite() || !vel.is_finite() {
+            return;
+        }
+        self.add(Spawn {
+            type_id: sim::type_id("firework"),
+            pos,
+            aux: vel,
+            data: Data::Firework(spark),
+        });
+    }
+
+    /// The bright flash at a firework burst.
+    pub fn firework_flash(&mut self, pos: [f64; 3], rgb: u32) {
+        let pos = DVec3::from_array(pos);
+        if !pos.is_finite() {
+            return;
+        }
+        self.add(Spawn {
+            type_id: sim::type_id("flash"),
+            pos,
+            aux: DVec3::ZERO,
+            data: Data::Argb(0xFF00_0000 | rgb),
+        });
     }
 
     pub fn emit_packet(&mut self, packet: &LevelParticles) {

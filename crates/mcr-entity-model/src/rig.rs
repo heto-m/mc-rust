@@ -82,6 +82,8 @@ slots! {
     LeftHorn = "left_horn", RightHorn = "right_horn",
     Feet = "feet",
     Layer0 = "layer0", Layer1 = "layer1", Layer2 = "layer2", Segment6 = "segment6",
+    LeftTendril = "left_tendril", RightTendril = "right_tendril",
+    UpperJaw = "upper_jaw", LowerJaw = "lower_jaw",
     OuterGlass = "outer_glass", InnerGlass = "inner_glass", Base = "base",
 }
 
@@ -195,6 +197,8 @@ pub struct AnimIn {
     pub aggressive: bool,
     pub swim_amount: f32,
     pub fall_flying: bool,
+    /// `speedValue` while gliding; values below 1 count as 1.
+    pub speed_value: f32,
     pub right_arm: ArmPose,
     pub left_arm: ArmPose,
     pub main_right: bool,
@@ -239,6 +243,13 @@ pub struct AnimIn {
     pub attack_ticks: f32,
     pub offer_ticks: f32,
     pub donkey: bool,
+    /// Absolute head pitch (radians) replacing the look pitch: grazing sheep, ramming goats.
+    pub head_x: Option<f32>,
+    /// Extra head drop in model sixteenths.
+    pub head_dy: f32,
+    pub stunned: f32,
+    pub roar: f32,
+    pub bite: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,6 +311,7 @@ pub enum Rig {
     Witch,
     Silverfish,
     Crystal,
+    Fangs,
 }
 
 pub(crate) struct R<'a> {
@@ -411,6 +423,10 @@ pub fn animate(rig: Rig, a: &AnimIn, b: &Binding, pose: &mut [Pose]) {
         Rig::Illager => crate::rig_humanoid::illager(&mut r, a),
         Rig::Quadruped => {
             r.look(a);
+            if let Some(x) = a.head_x {
+                r.rx(Slot::Head, x);
+            }
+            r.add_pos(Slot::Head, Vec3::new(0.0, a.head_dy, 0.0));
             legs4(&mut r, a, 1.0);
         }
         Rig::Creeper => {
@@ -480,6 +496,7 @@ pub fn animate(rig: Rig, a: &AnimIn, b: &Binding, pose: &mut [Pose]) {
         Rig::Fox => crate::rig_mobs::fox(&mut r, a),
         Rig::Witch => crate::rig_mobs::witch(&mut r, a),
         Rig::Crystal => crate::rig_mobs::crystal(&mut r, a),
+        Rig::Fangs => crate::rig_mobs::evoker_fangs(&mut r, a),
         _ => {
             r.look(a);
         }

@@ -19,6 +19,9 @@ struct Instance {
     origin: vec3<f32>,
 }
 
+// The overlay texture's white row at u = 1 has alpha 0.25: three quarters white.
+const WHITE_OVERLAY: f32 = 0.75;
+
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var<storage, read> bones: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> instances: array<Instance>;
@@ -41,6 +44,7 @@ struct VertexOut {
     @location(3) @interpolate(flat) tint: vec4<f32>,
     @location(4) @interpolate(flat) hurt: f32,
     @location(5) fog_dist: vec2<f32>,
+    @location(6) @interpolate(flat) flash: f32,
 }
 
 fn unpack_rgba(c: u32) -> vec4<f32> {
@@ -85,6 +89,7 @@ fn vs_main(v: VertexIn) -> VertexOut {
     out.layer = inst.layer;
     out.tint = unpack_rgba(inst.tint);
     out.hurt = f32((inst.flags >> 1u) & 1u);
+    out.flash = f32((inst.flags >> 2u) & 1u);
     out.fog_dist = vec2<f32>(length(p + inst.origin), max(length((p + inst.origin).xz), abs(p.y + inst.origin.y)));
     return out;
 }
@@ -113,6 +118,7 @@ fn fs_cutout(in: VertexOut) -> @location(0) vec4<f32> {
     }
     var rgb = c.rgb * in.tint.rgb;
     rgb = mix(rgb, vec3<f32>(1.0, 0.0, 0.0), in.hurt * 0.3);
+    rgb = mix(rgb, vec3<f32>(1.0), in.flash * WHITE_OVERLAY);
     return vec4<f32>(finish(fogged(rgb * in.shade, in.fog_dist)), 1.0);
 }
 
@@ -124,6 +130,7 @@ fn fs_blend(in: VertexOut) -> @location(0) vec4<f32> {
     }
     var rgb = c.rgb * in.tint.rgb;
     rgb = mix(rgb, vec3<f32>(1.0, 0.0, 0.0), in.hurt * 0.3);
+    rgb = mix(rgb, vec3<f32>(1.0), in.flash * WHITE_OVERLAY);
     return vec4<f32>(finish(fogged(rgb * in.shade, in.fog_dist)), c.a * in.tint.a);
 }
 

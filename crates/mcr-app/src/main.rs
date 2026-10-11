@@ -9,6 +9,8 @@ mod editors;
 mod effects;
 mod engine;
 mod entities;
+mod entity_class;
+mod entity_events;
 mod entity_loops;
 mod fly;
 mod game;

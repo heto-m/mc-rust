@@ -46,15 +46,18 @@ pub use gpu::{
 pub use humanoids::default_skin;
 pub use items::clone_count;
 pub use maps::{MapDecoration, stack_map_id};
+pub use misc::hidden_while_fresh;
 pub use model::{Bone, BoneId, Model};
-pub use plan::{Attach, AttachKind, ItemContext, ItemSource, Part, Plan};
+pub use plan::{Attach, AttachKind, FreeGeo, ItemContext, ItemSource, Part, Plan};
 pub use pose::{Pose, evaluate};
 pub use rig::{
     AnimIn, ArmPose, Binding, HumanoidStyle, IllagerPose, PiglinPose, Rig, Slot, animate,
 };
 pub use scene::{BlockTop, EntityScene, FrameParams, NameTag, SceneStats};
 pub use texcache::TextureCache;
-pub use view::{EntityData, EntityView, NoData, PlayerView, Registries, Skin, slot};
+pub use view::{
+    EntityData, EntityView, EventAnim, Glide, NoData, PlayerView, Registries, Skin, slot,
+};
 
 pub use glam;
 pub use mcr_protocol;
