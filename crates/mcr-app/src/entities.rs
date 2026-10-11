@@ -136,6 +136,17 @@ impl Track {
         }
     }
 
+    /// Vanilla replaces the local player on respawn, so a living sample never keeps the death pose.
+    fn advance_local(&mut self, local: &LocalSample) {
+        if self.age == 0 {
+            *self = Track::new(local.feet, local.yaw, local.yaw, local.pitch, true);
+        }
+        self.advance(local.feet, local.yaw, local.yaw, local.pitch, local.dead);
+        if !local.dead {
+            self.death = 0;
+        }
+    }
+
     fn advance(&mut self, pos: [f64; 3], yaw: f32, head: f32, pitch: f32, dead: bool) {
         self.prev_pos = self.pos;
         self.prev_yaw = self.yaw;
@@ -283,6 +294,7 @@ impl EntityLayer {
 
     pub fn clear(&mut self) {
         self.tracks.clear();
+        self.local = Track::new([0.0; 3], 0.0, 0.0, 0.0, true);
     }
 
     pub fn local_death_time(&self) -> i32 {
@@ -330,11 +342,7 @@ impl EntityLayer {
         }
         let tick = self.tick;
         self.tracks.retain(|_, t| t.seen == tick);
-        if self.local.age == 0 {
-            self.local = Track::new(local.feet, local.yaw, local.yaw, local.pitch, true);
-        }
-        self.local
-            .advance(local.feet, local.yaw, local.yaw, local.pitch, local.dead);
+        self.local.advance_local(&local);
         self.local.hurt = state.player.hurt_time;
     }
 
@@ -740,6 +748,24 @@ mod tests {
         assert!(!in_view(&cull, [f64::NAN, 0.0, -5.0], 0.6, 1.8));
         assert!(!in_view(&cull, [0.0, f64::INFINITY, -5.0], 0.6, 1.8));
         assert!(!in_view(&cull, [0.0, 0.0, -1.0e9], 0.6, 1.8));
+    }
+
+    #[test]
+    fn local_death_pose_ends_when_alive_again() {
+        let sample = |dead| LocalSample {
+            feet: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            dead,
+        };
+        let mut t = Track::new([0.0; 3], 0.0, 0.0, 0.0, true);
+        t.death = 1;
+        for _ in 0..40 {
+            t.advance_local(&sample(true));
+        }
+        assert_eq!(t.death, DEATH_TICKS);
+        t.advance_local(&sample(false));
+        assert_eq!(t.death, 0);
     }
 
     #[test]
