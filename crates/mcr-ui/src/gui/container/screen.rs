@@ -4,7 +4,8 @@ use mcr_protocol::types::text::Component;
 use super::click::{ClickMachine, SlotGeometry, can_quick_replace, quick_craft_place_count};
 use super::kind::{ContainerLayout, MenuKind, SlotKind};
 use crate::gui::env::{Env, GameView, RenderCx, is_empty};
-use crate::gui::input::{Key, MouseButton, UiInput};
+use crate::gui::input::{Key, MouseButton, UiInput, contains};
+use crate::gui::recipe_book::RecipeBook;
 use crate::gui::screen::{ClickType, ContainerClick, Screen, ScreenAction};
 use crate::gui::widgets::WidgetSet;
 use crate::items::StackView;
@@ -40,6 +41,7 @@ pub struct ContainerScreen {
     pub(super) anvil_item: Option<ItemStack>,
     pub(super) anvil_sent: String,
     pub(super) book_layout: Option<crate::gui::book::PageLayout>,
+    pub(super) recipes: Option<RecipeBook>,
 }
 
 impl ContainerScreen {
@@ -61,6 +63,7 @@ impl ContainerScreen {
             anvil_item: None,
             anvil_sent: String::new(),
             book_layout: None,
+            recipes: RecipeBook::for_menu(kind),
         }
     }
 
@@ -266,9 +269,19 @@ pub(super) fn max_stack(stack: &ItemStack) -> i32 {
 impl Screen for ContainerScreen {
     fn init(&mut self, width: i32, height: i32) {
         self.gui = (width, height);
-        self.left = (width - self.layout.width) / 2;
+        if let Some(book) = &mut self.recipes {
+            book.resize((width, height));
+        }
+        self.left = self.wanted_left();
         self.top = (height - self.layout.height) / 2;
         self.setup_widgets();
+    }
+
+    fn tick(&mut self, env: &mut Env<'_>, out: &mut Vec<ScreenAction>) {
+        if let Some(book) = &mut self.recipes {
+            book.tick(env.view, &self.layout);
+            book.take_actions(out);
+        }
     }
 
     fn slot_center(&self, index: usize) -> Option<(i32, i32)> {
@@ -285,19 +298,33 @@ impl Screen for ContainerScreen {
             self.render_book(cx);
             return;
         }
+        self.sync_left();
+        if self
+            .recipes
+            .as_ref()
+            .is_some_and(RecipeBook::is_narrow_open)
+        {
+            self.render_recipes(cx);
+            return;
+        }
         self.sync(cx);
         self.draw_background(cx);
         self.widgets.render(cx);
         self.draw_labels(cx);
         self.draw_slots(cx);
+        self.draw_ghost(cx);
         self.draw_foreground(cx);
+        self.render_recipes(cx);
         self.draw_carried(cx);
         if is_empty(cx.view.carried())
             && let Some(h) = self.hovered_slot()
-            && let Some(stack) = cx.view.slot(h).filter(|s| !s.is_empty())
         {
-            let lines = cx.item_tooltip(stack);
-            cx.set_tooltip(lines);
+            if let Some(stack) = cx.view.slot(h).filter(|s| !s.is_empty()) {
+                let lines = cx.item_tooltip(stack);
+                cx.set_tooltip(lines);
+            } else if let Some(book) = &self.recipes {
+                book.ghost_tooltip(cx, h);
+            }
         }
     }
 
@@ -306,6 +333,9 @@ impl Screen for ContainerScreen {
             return self.book_input(env, input, out);
         }
         let view = env.view;
+        if self.recipe_input(env, input, out) {
+            return true;
+        }
         match *input {
             UiInput::MousePress {
                 x,
@@ -398,6 +428,9 @@ impl ContainerScreen {
         out: &mut Vec<ScreenAction>,
     ) {
         for click in clicks {
+            if let (Some(book), Ok(slot)) = (&mut self.recipes, usize::try_from(click.slot)) {
+                book.crafting_slot_clicked(slot, &self.layout);
+            }
             self.crafter_hook(view, click, out);
             out.push(ScreenAction::ContainerClick(click));
         }
@@ -436,11 +469,86 @@ impl ContainerScreen {
         }
     }
 
+    fn wanted_left(&self) -> i32 {
+        match &self.recipes {
+            Some(book) => book.container_left(self.layout.width),
+            None => (self.gui.0 - self.layout.width) / 2,
+        }
+    }
+
+    fn sync_left(&mut self) {
+        let left = self.wanted_left();
+        if left != self.left {
+            self.left = left;
+            self.setup_widgets();
+        }
+    }
+
+    fn render_recipes(&mut self, cx: &mut RenderCx<'_, '_>) {
+        if let Some(book) = &mut self.recipes {
+            book.render(cx, self.left);
+        }
+    }
+
+    fn draw_ghost(&mut self, cx: &mut RenderCx<'_, '_>) {
+        let big = self.layout.kind != MenuKind::PlayerInventory;
+        if let Some(book) = &mut self.recipes {
+            book.render_ghost(cx, &self.layout, (self.left, self.top), big);
+        }
+    }
+
+    /// Lets the recipe book take the input first; true when it consumed it.
+    fn recipe_input(
+        &mut self,
+        env: &mut Env<'_>,
+        input: &UiInput,
+        out: &mut Vec<ScreenAction>,
+    ) -> bool {
+        let Some(book) = &mut self.recipes else {
+            return false;
+        };
+        if let UiInput::MousePress {
+            x,
+            y,
+            button: MouseButton::Left,
+            ..
+        } = *input
+            && contains(book.button_rect(self.left), x, y)
+            && !env.view.spectator()
+        {
+            book.toggle();
+            book.take_actions(out);
+            out.push(ScreenAction::ClickSound);
+            self.sync_left();
+            return true;
+        }
+        let used = book.input(env, input, out);
+        self.sync_left();
+        if used {
+            return true;
+        }
+        let Some(book) = &self.recipes else {
+            return false;
+        };
+        match *input {
+            UiInput::MousePress { x, y, .. } if book.is_open() => {
+                let outside_beside =
+                    contains([self.left - 147, self.top, 147, self.layout.height], x, y);
+                book.is_narrow_open() || outside_beside
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn text_focused(&self) -> bool {
-        self.widgets
-            .focused()
-            .and_then(|id| self.widgets.edit(id))
-            .is_some_and(|e| e.active && e.editable)
+        self.recipes
+            .as_ref()
+            .is_some_and(RecipeBook::capturing_text)
+            || self
+                .widgets
+                .focused()
+                .and_then(|id| self.widgets.edit(id))
+                .is_some_and(|e| e.active && e.editable)
     }
 }
 

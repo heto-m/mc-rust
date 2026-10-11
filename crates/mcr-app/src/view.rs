@@ -4,8 +4,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use mcr_client::{Client, ClientState, SuggestSource};
+use mcr_protocol::play::clientbound::ui::{
+    PositionedAdvancement, RecipeBookEntry, RecipeBookSettings, RecipeDisplay, SlotDisplay,
+};
+use mcr_protocol::types::component::HolderSet;
 use mcr_protocol::types::item::ItemStack;
 use mcr_ui::{CommandSuggester, GameView, Suggestion, SuggestionSet};
+use rustc_hash::FxHashMap;
 
 pub struct StateView<'a> {
     pub state: &'a ClientState,
@@ -67,6 +72,65 @@ impl GameView for StateView<'_> {
 
     fn operator_tab(&self) -> bool {
         self.operator_items && self.state.player.can_use_game_master_blocks()
+    }
+
+    fn recipe_book_revision(&self) -> u64 {
+        self.state.gameplay.recipe_book.revision
+    }
+
+    fn recipe_entries(&self) -> Vec<&RecipeBookEntry> {
+        self.state.gameplay.recipe_book.entries.values().collect()
+    }
+
+    fn recipe_settings(&self) -> RecipeBookSettings {
+        self.state.gameplay.recipe_book.settings
+    }
+
+    fn resolve_display(&self, display: &SlotDisplay) -> Vec<ItemStack> {
+        mcr_client::resolve_slot_display(display, &self.state.registries, self.state.data)
+    }
+
+    fn holder_items(&self, set: &HolderSet) -> Vec<i32> {
+        mcr_client::holder_items(set, &self.state.registries)
+    }
+
+    fn ghost_recipe(&self) -> Option<(u64, &RecipeDisplay)> {
+        let id = self.container().id;
+        self.state
+            .gameplay
+            .ghost_recipe
+            .as_ref()
+            .filter(|g| g.container_id == id)
+            .map(|g| (g.revision, &g.display))
+    }
+
+    fn advancements_revision(&self) -> u64 {
+        self.state.gameplay.advancements.revision
+    }
+
+    fn advancement_defs(&self) -> Vec<&PositionedAdvancement> {
+        self.state.gameplay.advancements.ordered_defs().collect()
+    }
+
+    fn advancement_progress(&self, id: &str) -> Option<&FxHashMap<String, Option<i64>>> {
+        self.state.gameplay.advancements.progress.get(id)
+    }
+
+    fn advancement_selected_tab(&self) -> Option<&str> {
+        self.state.gameplay.advancements.selected_tab.as_deref()
+    }
+
+    fn stats_revision(&self) -> u64 {
+        self.state.gameplay.stats_revision
+    }
+
+    fn stat(&self, stat_type: i32, id: i32) -> i32 {
+        self.state
+            .gameplay
+            .stats
+            .get(&(stat_type, id))
+            .copied()
+            .unwrap_or(0)
     }
 
     fn item_tags_matching(&self, query: &str) -> Vec<(String, Vec<i32>)> {

@@ -109,6 +109,14 @@ impl Client {
         }))
     }
 
+    pub fn seen_advancements(&mut self, tab: Option<&str>) -> Result<()> {
+        let packet = match tab.and_then(|t| mcr_buf::Identifier::parse(t).ok()) {
+            Some(id) => sb::SeenAdvancements::OpenedTab(id),
+            None => sb::SeenAdvancements::ClosedScreen,
+        };
+        self.send_play(&S::SeenAdvancements(packet))
+    }
+
     pub fn place_recipe(&mut self, recipe: i32, use_max_items: bool) -> Result<()> {
         let container_id = self.open_container_id();
         self.send_play(&S::PlaceRecipe(sb::PlaceRecipe {
@@ -133,6 +141,16 @@ impl Client {
         open: bool,
         filtering: bool,
     ) -> Result<()> {
+        let book = &mut self.state.gameplay.recipe_book;
+        let slot = match book_type {
+            sb::RecipeBookType::Crafting => &mut book.settings.crafting,
+            sb::RecipeBookType::Furnace => &mut book.settings.furnace,
+            sb::RecipeBookType::BlastFurnace => &mut book.settings.blast_furnace,
+            sb::RecipeBookType::Smoker => &mut book.settings.smoker,
+        };
+        slot.open = open;
+        slot.filtering = filtering;
+        book.revision += 1;
         self.send_play(&S::RecipeBookChangeSettings(sb::RecipeBookChangeSettings {
             book_type,
             open,

@@ -10,6 +10,8 @@ pub const MAX_SUB_DIALOGS: usize = 64;
 pub const MAX_TEXT_LENGTH: usize = 4096;
 pub const MAX_TEMPLATE: usize = 4096;
 const MAX_WIDTH: i32 = 1024;
+pub const MAX_COLUMNS: usize = 64;
+pub const MAX_LINES: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AfterAction {
@@ -257,7 +259,9 @@ fn width(c: &Compound, key: &str, default: i32) -> Option<i32> {
 fn columns(c: &Compound) -> Option<usize> {
     match c.get("columns") {
         None => Some(2),
-        Some(v) => usize::try_from(v.as_i32()?).ok().filter(|&n| n > 0),
+        Some(v) => usize::try_from(v.as_i32()?)
+            .ok()
+            .filter(|n| (1..=MAX_COLUMNS).contains(n)),
     }
 }
 
@@ -436,7 +440,11 @@ fn input(c: &Compound) -> Option<Input> {
                     Some(Multiline {
                         max_lines: match m.get("max_lines") {
                             None => None,
-                            Some(n) => Some(usize::try_from(n.as_i32()?).ok().filter(|&n| n > 0)?),
+                            Some(n) => Some(
+                                usize::try_from(n.as_i32()?)
+                                    .ok()
+                                    .filter(|n| (1..=MAX_LINES).contains(n))?,
+                            ),
                         },
                         height: match m.get("height") {
                             None => None,
@@ -483,7 +491,7 @@ fn input(c: &Compound) -> Option<Input> {
                 None => None,
                 Some(v) => Some(v.as_f32().filter(|s| *s > 0.0 && s.is_finite())?),
             };
-            if !start.is_finite() || !end.is_finite() {
+            if !start.is_finite() || !end.is_finite() || !(end - start).is_finite() {
                 return None;
             }
             if let Some(i) = initial
@@ -679,5 +687,17 @@ mod tests {
         let value = |k: &str| (k == "a").then(|| "1".to_owned());
         assert_eq!(instantiate("x $(a) $(b) $(", value), "x 1  $(");
         assert_eq!(escape_without_quotes(r#"a"b\c"#), r#"a\"b\\c"#);
+    }
+
+    #[test]
+    fn hostile_sizes_are_rejected() {
+        for body in [
+            r#"{type:"multi_action",title:"T",columns:2000000000,actions:[{label:"a"}]}"#,
+            r#"{type:"notice",title:"T",inputs:[{type:"text",key:"k",label:"L",multiline:{max_lines:2000000000}}]}"#,
+            r#"{type:"notice",title:"T",inputs:[{type:"number_range",key:"k",label:"L",start:-3e38f,end:3e38f}]}"#,
+            r#"{type:"notice",title:"T",inputs:[{type:"number_range",key:"k",label:"L",start:0f,end:1f,step:NaNf}]}"#,
+        ] {
+            assert!(Dialog::from_nbt(&snbt(body)).is_none(), "{body}");
+        }
     }
 }

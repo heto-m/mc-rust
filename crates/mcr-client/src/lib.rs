@@ -34,6 +34,7 @@ mod player;
 mod registry;
 mod riding;
 pub mod script;
+mod slot_display;
 mod social;
 mod state;
 mod toast;
@@ -56,7 +57,7 @@ pub use events::{
     BlockEditor, ChatKind, ClientEvent, DamageEffects, DisconnectReason, sanitize_for_log,
 };
 pub use gamestate::{
-    Advancements, GameplayState, MapData, Merchant, RecipeBook, SignEditor, Waypoints,
+    Advancements, GameplayState, GhostRecipe, MapData, Merchant, RecipeBook, SignEditor, Waypoints,
 };
 pub use inventory::{
     Container, Inventory, OUTSIDE_SLOT, PLAYER_MENU_ID, ServerUpdate, inventory_index_to_menu_slot,
@@ -68,6 +69,7 @@ pub use pickup::Pickup;
 pub use player::LocalPlayer;
 pub use registry::{Dimension, Registries, Registry, RegistryItem};
 pub use riding::{Ride, Sim};
+pub use slot_display::{holder_items, resolve as resolve_slot_display};
 pub use social::{
     BossBar, ChatMessage, ChatState, Objective, PlayerInfo, PlayerList, Score, Scoreboard, TabList,
     Team, Titles,

@@ -1,5 +1,10 @@
+use mcr_protocol::play::clientbound::ui::{
+    PositionedAdvancement, RecipeBookEntry, RecipeBookSettings, RecipeDisplay, SlotDisplay,
+};
+use mcr_protocol::types::component::HolderSet;
 use mcr_protocol::types::item::ItemStack;
 use mcr_protocol::types::text::Component;
+use rustc_hash::FxHashMap;
 
 use super::assets::ScreenAssets;
 use super::tooltip::TooltipLines;
@@ -129,6 +134,59 @@ pub trait GameView {
     /// Item tags whose id contains `query` (or `namespace:path` parts) with their item ids.
     fn item_tags_matching(&self, _query: &str) -> Vec<(String, Vec<i32>)> {
         Vec::new()
+    }
+
+    /// Bumped whenever recipes are added or removed or the book settings change.
+    fn recipe_book_revision(&self) -> u64 {
+        0
+    }
+
+    fn recipe_entries(&self) -> Vec<&RecipeBookEntry> {
+        Vec::new()
+    }
+
+    fn recipe_settings(&self) -> RecipeBookSettings {
+        RecipeBookSettings::default()
+    }
+
+    /// Every stack a slot display cycles through.
+    fn resolve_display(&self, _display: &SlotDisplay) -> Vec<ItemStack> {
+        Vec::new()
+    }
+
+    fn holder_items(&self, _set: &HolderSet) -> Vec<i32> {
+        Vec::new()
+    }
+
+    /// The server's outline for the open crafting grid with a counter that changes per packet.
+    fn ghost_recipe(&self) -> Option<(u64, &RecipeDisplay)> {
+        None
+    }
+
+    fn advancements_revision(&self) -> u64 {
+        0
+    }
+
+    fn advancement_defs(&self) -> Vec<&PositionedAdvancement> {
+        Vec::new()
+    }
+
+    /// Criterion name to the instant it was obtained, when it was.
+    fn advancement_progress(&self, _id: &str) -> Option<&FxHashMap<String, Option<i64>>> {
+        None
+    }
+
+    fn advancement_selected_tab(&self) -> Option<&str> {
+        None
+    }
+
+    /// Zero until the server answered a stats request.
+    fn stats_revision(&self) -> u64 {
+        0
+    }
+
+    fn stat(&self, _stat_type: i32, _id: i32) -> i32 {
+        0
     }
 }
 
@@ -273,6 +331,20 @@ impl<'a, 'f> RenderCx<'a, 'f> {
         let view = view.with_trim_materials(self.view.trim_materials());
         let item = view.view(0.0);
         self.icons.draw_with_decorations(self.frame, &item, x, y);
+    }
+
+    /// A stack drawn without its count or durability, like vanilla's `fakeItem`.
+    pub fn fake_item(&mut self, stack: &ItemStack, x: i32, y: i32) {
+        self.fake_item_sized(stack, x, y, 16);
+    }
+
+    pub fn fake_item_sized(&mut self, stack: &ItemStack, x: i32, y: i32, size: i32) {
+        let Some(view) = StackView::new(stack) else {
+            return;
+        };
+        let view = view.with_trim_materials(self.view.trim_materials());
+        let item = view.view(0.0);
+        self.icons.draw_sized(self.frame, &item, x, y, size, size);
     }
 
     pub fn stack_opt(&mut self, stack: Option<&ItemStack>, x: i32, y: i32) {

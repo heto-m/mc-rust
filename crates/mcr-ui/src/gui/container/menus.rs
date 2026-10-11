@@ -564,7 +564,7 @@ impl ContainerScreen {
                 0 => 200,
                 d => d,
             };
-            let progress = (view.data(0) as f32 / duration as f32).clamp(0.0, 1.0);
+            let progress = fraction(view.data(0), duration);
             let h = (progress * 13.0).ceil() as i32 + 1;
             self.region(
                 cx,
@@ -574,11 +574,7 @@ impl ContainerScreen {
             );
         }
         let (cooked, total) = (view.data(2), view.data(3));
-        let burn = if total != 0 && cooked != 0 {
-            (cooked as f32 / total as f32).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        let burn = fraction(cooked, total);
         let w = (burn * 24.0).ceil() as i32;
         if w > 0 {
             self.region(
@@ -610,7 +606,7 @@ impl ContainerScreen {
         }
         let (ticks, total) = (view.data(0), view.data(2));
         if ticks > 0 && total > 0 {
-            let len = (28.0 * (1.0 - ticks as f32 / total as f32)) as i32;
+            let len = (28.0 * (1.0 - fraction(ticks, total))) as i32;
             if len > 0 {
                 self.region(
                     cx,
@@ -1272,5 +1268,27 @@ impl ContainerScreen {
         let used = self.widgets.input(env, input, &mut events);
         self.widget_events(&events, out);
         used
+    }
+}
+
+fn fraction(value: i32, total: i32) -> f32 {
+    if total <= 0 || value <= 0 {
+        return 0.0;
+    }
+    (value as f32 / total as f32).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fraction;
+
+    #[test]
+    fn progress_survives_hostile_totals() {
+        assert_eq!(fraction(5, 0), 0.0);
+        assert_eq!(fraction(5, -3), 0.0);
+        assert_eq!(fraction(-5, 10), 0.0);
+        assert_eq!(fraction(i32::MAX, 1), 1.0);
+        assert_eq!(fraction(i32::MIN, i32::MIN), 0.0);
+        assert_eq!(fraction(1, 2), 0.5);
     }
 }

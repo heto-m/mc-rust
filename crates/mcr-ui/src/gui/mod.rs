@@ -1,3 +1,4 @@
+mod advancements;
 mod assets;
 mod blocks;
 mod book;
@@ -13,12 +14,15 @@ mod input;
 mod list;
 mod menus;
 mod multiline;
+mod recipe_book;
 mod screen;
 mod server_list;
 mod sign;
+mod stats;
 mod tooltip;
 mod widgets;
 
+pub use advancements::AdvancementsScreen;
 pub use assets::ScreenAssets;
 pub use blocks::{
     CommandBlockInfo, CommandBlockScreen, JigsawBlockScreen, JigsawInfo, MinecartCommandInfo,
@@ -51,5 +55,6 @@ pub use server_list::{
     ServerEntry, ServerListScreen, ServerStatus, ServerStore, SharedServers,
 };
 pub use sign::{SignEditScreen, SignInfo};
+pub use stats::StatsScreen;
 pub use tooltip::{TooltipLine, TooltipLines, draw_tooltip, tooltip_position};
 pub use widgets::{Button, CycleButton, Slider, Widget, WidgetEvent, WidgetEventKind, WidgetSet};

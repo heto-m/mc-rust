@@ -6,14 +6,17 @@ use mcr_protocol::play::clientbound::entity::{
 };
 use mcr_protocol::play::clientbound::ui::{
     Advancement, MapDecoration, MapItemData, MerchantOffer, MerchantOffers, PositionedAdvancement,
-    RecipeBookAdd, RecipeBookEntry, RecipeBookSettings, UpdateAdvancements,
+    RecipeBookAdd, RecipeBookEntry, RecipeBookSettings, RecipeDisplay, UpdateAdvancements,
 };
 use mcr_protocol::types::game::{Hand, SignSide};
 use rustc_hash::FxHashMap;
 
+use crate::slot_display::entry_weight;
 use crate::toast::{MAX_TOASTS_PER_PACKET, ToastEvent, recipe_toast, stack_of};
 
 pub const MAX_RECIPES: usize = 1 << 13;
+pub const MAX_RECIPE_WEIGHT: usize = 1024;
+pub const MAX_RECIPE_BOOK_WEIGHT: usize = 1 << 20;
 pub const MAX_ADVANCEMENTS: usize = 4096;
 pub const MAX_CRITERIA: usize = 1 << 14;
 pub const MAX_CRITERIA_PER_ADVANCEMENT: usize = 64;
@@ -44,28 +47,55 @@ pub(crate) fn insert_bounded<K: Clone + Eq + std::hash::Hash, V>(
 pub struct RecipeBook {
     pub entries: FxHashMap<i32, RecipeBookEntry>,
     pub settings: RecipeBookSettings,
+    pub revision: u64,
+    weight: usize,
 }
 
 impl RecipeBook {
     pub fn add(&mut self, packet: RecipeBookAdd) -> Vec<ToastEvent> {
+        self.revision += 1;
         if packet.replace {
             self.entries.clear();
+            self.weight = 0;
         }
         let mut toasts = Vec::new();
         for e in packet.entries {
+            let weight = entry_weight(&e.contents, MAX_RECIPE_WEIGHT);
+            if weight >= MAX_RECIPE_WEIGHT {
+                continue;
+            }
             if toasts.len() < MAX_TOASTS_PER_PACKET
                 && let Some(toast) = recipe_toast(&e)
             {
                 toasts.push(toast);
             }
-            insert_bounded(&mut self.entries, MAX_RECIPES, e.contents.id, e);
+            self.take(e.contents.id);
+            while (self.entries.len() >= MAX_RECIPES
+                || self.weight + weight > MAX_RECIPE_BOOK_WEIGHT)
+                && let Some(&victim) = self.entries.keys().next()
+            {
+                self.take(victim);
+            }
+            self.weight += weight;
+            self.entries.insert(e.contents.id, e);
         }
         toasts
     }
 
     pub fn remove(&mut self, ids: impl IntoIterator<Item = i32>) {
+        self.revision += 1;
         for id in ids {
-            self.entries.remove(&id);
+            self.take(id);
+        }
+    }
+
+    pub fn weight(&self) -> usize {
+        self.weight
+    }
+
+    fn take(&mut self, id: i32) {
+        if let Some(old) = self.entries.remove(&id) {
+            self.weight -= entry_weight(&old.contents, MAX_RECIPE_WEIGHT);
         }
     }
 }
@@ -76,12 +106,16 @@ pub struct Advancements {
     pub progress: FxHashMap<String, FxHashMap<String, Option<i64>>>,
     pub selected_tab: Option<String>,
     pub show: bool,
+    pub revision: u64,
+    /// Definition ids in the order the server sent them, which is the tab order.
+    pub order: Vec<String>,
 }
 
 impl Advancements {
     /// Returns toasts for advancements this update completed, never on the initial sync.
     pub fn apply(&mut self, p: UpdateAdvancements) -> Vec<ToastEvent> {
         let mut toasts = Vec::new();
+        self.revision += 1;
         let reset = p.reset;
         let touched: Vec<(String, bool)> = p
             .progress
@@ -92,6 +126,7 @@ impl Advancements {
         if p.reset {
             self.defs.clear();
             self.progress.clear();
+            self.order.clear();
         }
         for id in p.removed {
             self.defs.remove(id.as_str());
@@ -99,8 +134,12 @@ impl Advancements {
         }
         for a in p.added {
             let key = a.id.as_str().to_owned();
+            if !self.defs.contains_key(&key) {
+                self.order.push(key.clone());
+            }
             insert_bounded(&mut self.defs, MAX_ADVANCEMENTS, key, a);
         }
+        self.order.retain(|id| self.defs.contains_key(id));
         self.progress.retain(|id, _| self.defs.contains_key(id));
         let mut total: usize = self.progress.values().map(FxHashMap::len).sum();
         for (id, criteria) in p.progress.0 {
@@ -137,6 +176,10 @@ impl Advancements {
             }
         }
         toasts
+    }
+
+    pub fn ordered_defs(&self) -> impl Iterator<Item = &PositionedAdvancement> {
+        self.order.iter().filter_map(|id| self.defs.get(id))
     }
 
     pub fn advancement(&self, id: &str) -> Option<&Advancement> {
@@ -257,6 +300,14 @@ pub struct SignEditor {
     pub side: SignSide,
 }
 
+/// The recipe the server wants outlined in the open crafting grid.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GhostRecipe {
+    pub revision: u64,
+    pub container_id: i32,
+    pub display: RecipeDisplay,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GameplayState {
     pub recipe_book: RecipeBook,
@@ -264,6 +315,9 @@ pub struct GameplayState {
     pub maps: FxHashMap<i32, MapData>,
     pub merchant: Option<Merchant>,
     pub stats: FxHashMap<(i32, i32), i32>,
+    pub stats_revision: u64,
+    pub ghost_recipe: Option<GhostRecipe>,
+    pub ghost_counter: u64,
     pub waypoints: Waypoints,
     pub sign_editor: Option<SignEditor>,
     pub book_editor: Option<Hand>,
@@ -277,6 +331,15 @@ impl GameplayState {
         if let Some(map) = self.maps.get_mut(&p.map_id) {
             map.apply(p);
         }
+    }
+
+    pub fn set_ghost_recipe(&mut self, container_id: i32, display: RecipeDisplay) {
+        self.ghost_counter += 1;
+        self.ghost_recipe = Some(GhostRecipe {
+            revision: self.ghost_counter,
+            container_id,
+            display,
+        });
     }
 
     pub fn set_stat(&mut self, kind: i32, stat: i32, value: i32) {

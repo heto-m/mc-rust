@@ -67,6 +67,19 @@ pub enum ScreenAction {
     OpenOptions,
     OpenAdvancements,
     OpenStats,
+    RecipeBookSettings {
+        book_type: mcr_protocol::play::serverbound::RecipeBookType,
+        open: bool,
+        filtering: bool,
+    },
+    PlaceRecipe {
+        recipe: i32,
+        max_items: bool,
+    },
+    RecipeSeen(i32),
+    /// An advancements tab was opened, or `None` when the screen closed.
+    SeenAdvancements(Option<String>),
+    RequestStats,
     OpenUrl(String),
     CopyToClipboard(String),
     ClickSound,
@@ -129,6 +142,24 @@ impl std::fmt::Debug for ScreenAction {
             Self::OpenOptions => f.write_str("OpenOptions"),
             Self::OpenAdvancements => f.write_str("OpenAdvancements"),
             Self::OpenStats => f.write_str("OpenStats"),
+            Self::RecipeBookSettings {
+                book_type,
+                open,
+                filtering,
+            } => f
+                .debug_struct("RecipeBookSettings")
+                .field("book_type", book_type)
+                .field("open", open)
+                .field("filtering", filtering)
+                .finish(),
+            Self::PlaceRecipe { recipe, max_items } => f
+                .debug_struct("PlaceRecipe")
+                .field("recipe", recipe)
+                .field("max_items", max_items)
+                .finish(),
+            Self::RecipeSeen(r) => f.debug_tuple("RecipeSeen").field(r).finish(),
+            Self::SeenAdvancements(t) => f.debug_tuple("SeenAdvancements").field(t).finish(),
+            Self::RequestStats => f.write_str("RequestStats"),
             Self::OpenUrl(u) => f.debug_tuple("OpenUrl").field(u).finish(),
             Self::CopyToClipboard(t) => f.debug_tuple("CopyToClipboard").field(t).finish(),
             Self::ClickSound => f.write_str("ClickSound"),

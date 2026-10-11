@@ -835,6 +835,7 @@ impl ClientState {
             }
             P::RecipeBookSettings(p) => {
                 self.gameplay.recipe_book.settings = p;
+                self.gameplay.recipe_book.revision += 1;
                 out.event(ClientEvent::RecipeBookUpdated);
             }
             P::UpdateAdvancements(p) => {
@@ -843,7 +844,12 @@ impl ClientState {
                 }
                 out.event(ClientEvent::AdvancementsUpdated);
             }
+            P::PlaceGhostRecipe(p) => {
+                self.gameplay
+                    .set_ghost_recipe(p.container_id, p.recipe_display);
+            }
             P::SelectAdvancementsTab(p) => {
+                self.gameplay.advancements.revision += 1;
                 self.gameplay.advancements.selected_tab = p.tab.map(|t| t.as_str().to_owned());
             }
             P::MapItemData(p) => {
@@ -859,6 +865,7 @@ impl ClientState {
                 for (stat, value) in p.stats.0.into_iter().take(crate::gamestate::MAX_STATS) {
                     self.gameplay.set_stat(stat.stat_type, stat.value, value.0);
                 }
+                self.gameplay.stats_revision += 1;
                 out.event(ClientEvent::StatsUpdated);
             }
             P::Waypoint(p) => self.gameplay.waypoints.apply(p),

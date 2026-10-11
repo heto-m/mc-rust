@@ -85,6 +85,7 @@ struct Keys {
     chat: usize,
     command: usize,
     inventory: usize,
+    advancements: usize,
     playerlist: usize,
     pick: usize,
     gui: usize,
@@ -112,6 +113,7 @@ impl Keys {
             chat: i("key.chat"),
             command: i("key.command"),
             inventory: i("key.inventory"),
+            advancements: i("key.advancements"),
             playerlist: i("key.playerlist"),
             pick: i("key.pickItem"),
             gui: i("key.toggleGui"),
@@ -1351,6 +1353,12 @@ impl Play {
         self.stack.push(screen);
     }
 
+    pub fn open_advancements(&mut self) {
+        if !self.busy() && self.closed.is_none() {
+            self.push_screen(Box::new(mcr_ui::AdvancementsScreen::new()));
+        }
+    }
+
     pub fn open_pause(&mut self) {
         if !self.busy() && self.closed.is_none() {
             self.push_screen(Box::new(PauseScreen::new(false, false)));
@@ -1641,6 +1649,31 @@ impl Play {
                         audio.click();
                     }
                 }
+                ScreenAction::OpenAdvancements => {
+                    self.push_screen(Box::new(mcr_ui::AdvancementsScreen::new()));
+                }
+                ScreenAction::OpenStats => {
+                    self.push_screen(Box::new(mcr_ui::StatsScreen::new()));
+                }
+                ScreenAction::RequestStats => {
+                    self.net(Client::request_stats);
+                }
+                ScreenAction::SeenAdvancements(tab) => {
+                    self.net(|c| c.seen_advancements(tab.as_deref()));
+                }
+                ScreenAction::RecipeBookSettings {
+                    book_type,
+                    open,
+                    filtering,
+                } => {
+                    self.net(|c| c.set_recipe_book_settings(book_type, open, filtering));
+                }
+                ScreenAction::PlaceRecipe { recipe, max_items } => {
+                    self.net(|c| c.place_recipe(recipe, max_items));
+                }
+                ScreenAction::RecipeSeen(recipe) => {
+                    self.net(|c| c.mark_recipe_seen(recipe));
+                }
                 ScreenAction::Quit => self.quit = true,
                 ScreenAction::ResourcePackAnswer(accepted) => self.pack_answers.push(accepted),
                 _ => {}
@@ -1721,6 +1754,8 @@ impl Play {
             self.open_chat("/");
         } else if i == k.inventory {
             self.open_inventory();
+        } else if i == k.advancements {
+            self.open_advancements();
         } else if i == k.drop {
             let whole = self.ctrl_held;
             self.net(|c| c.drop_item(whole));

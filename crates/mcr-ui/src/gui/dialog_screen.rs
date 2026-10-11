@@ -117,6 +117,9 @@ impl NumberSpec {
         };
         let initial = self.initial_scaled();
         let steps = ((in_range - initial) / step).round();
+        if !steps.is_finite() {
+            return in_range;
+        }
         let result = initial + steps * step;
         let pos = self.to_slider(result);
         if (0.0..=1.0).contains(&pos) {
@@ -680,7 +683,7 @@ impl DialogScreen {
     }
 
     fn button_grid(&mut self, buttons: &[ActionButton], columns: usize) -> Row {
-        let columns = columns.max(1);
+        let columns = columns.clamp(1, super::dialog::MAX_COLUMNS);
         let mut rows: Vec<Vec<&ActionButton>> = Vec::new();
         let full = buttons.len() / columns * columns;
         for chunk in buttons[..full].chunks(columns) {
