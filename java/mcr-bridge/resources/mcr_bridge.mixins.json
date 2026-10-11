@@ -5,6 +5,7 @@
   "compatibilityLevel": "JAVA_25",
   "client": [
     "BootstrapMixin",
+    "ClientCommonPacketListenerImplMixin",
     "ClientInputAccessor",
     "ClientPacketListenerMixin",
     "ClientShutdownWatchdogMixin",

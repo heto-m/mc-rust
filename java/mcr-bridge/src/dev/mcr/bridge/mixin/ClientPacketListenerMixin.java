@@ -3,11 +3,8 @@ package dev.mcr.bridge.mixin;
 import dev.mcr.bridge.BridgeAbi;
 import dev.mcr.bridge.net.McrNet;
 import dev.mcr.bridge.net.NetProbe;
-import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
-import org.jspecify.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -28,15 +25,6 @@ abstract class ClientPacketListenerMixin {
     private void mcr$command(String command, CallbackInfo ci) {
         if (McrNet.bridged()) {
             McrNet.sendChat(BridgeAbi.CHAT_COMMAND, command);
-            ci.cancel();
-        }
-    }
-
-    @Inject(method = "sendUnattendedCommand", at = @At("HEAD"), cancellable = true)
-    private void mcr$unattendedCommand(String command, @Nullable Screen screenAfterCommand, CallbackInfo ci) {
-        if (McrNet.bridged()) {
-            McrNet.sendChat(BridgeAbi.CHAT_COMMAND, command);
-            Minecraft.getInstance().gui.setScreen(screenAfterCommand);
             ci.cancel();
         }
     }
