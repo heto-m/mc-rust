@@ -27,6 +27,7 @@ pub struct SimShape {
 #[derive(Debug, Clone, Default)]
 pub struct SimKinds {
     by_type: FxHashMap<i32, SimShape>,
+    pub player_type: i32,
 }
 
 impl SimKinds {
@@ -58,7 +59,13 @@ impl SimKinds {
                 Some((id as i32, shape))
             })
             .collect();
-        Self { by_type }
+        let player_type = data
+            .entity_type_by_name("minecraft:player")
+            .map_or(-1, |id| id as i32);
+        Self {
+            by_type,
+            player_type,
+        }
     }
 
     pub fn get(&self, entity_type: i32) -> Option<SimShape> {
@@ -73,6 +80,8 @@ pub(crate) struct SimContext<'a, W: CollisionWorld + ?Sized> {
     pub scratch: &'a mut BodyScratch,
     /// Mid-eye of the local player, which XP orbs home toward.
     pub follow: Option<[f64; 3]>,
+    /// Set while the world is frozen: only entities of this type (players) and mounts keep ticking.
+    pub frozen_except: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -380,6 +389,12 @@ impl Entities {
     pub(crate) fn tick<W: CollisionWorld + ?Sized>(&mut self, cx: &mut SimContext<'_, W>) {
         let mut simulated = 0usize;
         for entity in self.map.values_mut() {
+            if cx
+                .frozen_except
+                .is_some_and(|player| entity.kind != player && entity.passengers.is_empty())
+            {
+                continue;
+            }
             match entity.sim {
                 Some(_) if simulated >= MAX_SIMULATED_PER_TICK => {}
                 Some(shape) => {

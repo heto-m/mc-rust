@@ -230,3 +230,73 @@ fn reconfiguration_round_trip_and_disconnect() {
     assert_eq!(client.state.player.teleports_received, 1);
     server.join().unwrap();
 }
+
+fn serve_transfer(listener: TcpListener) {
+    let (stream, _) = listener.accept().unwrap();
+    let mut peer = Peer::new(stream);
+    peer.recv_until(ProtocolState::Handshake, "intention");
+    peer.recv_until(ProtocolState::Login, "hello");
+    peer.login(LoginClientbound::LoginFinished(LoginFinished {
+        profile: GameProfile {
+            id: Uuid::nil(),
+            name: "Bot".into(),
+            properties: vec![],
+        },
+        session_id: Uuid::nil(),
+    }));
+    peer.recv_until(ProtocolState::Login, "login_acknowledged");
+    peer.config(ConfigClientbound::ResetChat(
+        mcr_protocol::configuration::ResetChat,
+    ));
+    registries(&mut peer);
+    enter_play(&mut peer);
+    peer.recv_until(ProtocolState::Play, "accept_teleportation");
+    peer.play(PlayClientbound::StoreCookie(
+        mcr_protocol::common::StoreCookie {
+            key: Identifier::parse("lobby:ticket").unwrap(),
+            payload: mcr_buf::ByteArray(b"seat-7"),
+        },
+    ));
+    peer.play(PlayClientbound::Transfer(mcr_protocol::common::Transfer {
+        host: "game.example".into(),
+        port: 25570,
+    }));
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+#[test]
+fn transfer_closes_the_session_and_carries_cookies() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || serve_transfer(listener));
+
+    let mut cfg = ClientConfig::default();
+    cfg.host = "127.0.0.1".into();
+    cfg.port = port;
+    let mut client = Client::connect(cfg.clone()).expect("join mock server");
+    let mut events: Vec<ClientEvent> = client.drain_events().collect();
+    let mut error = None;
+    for _ in 0..200 {
+        if let Err(e) = client.tick(&PlayerInput::default()) {
+            error = Some(e);
+            break;
+        }
+        events.extend(client.drain_events());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    events.extend(client.drain_events());
+    assert!(events.iter().any(|e| matches!(e, ClientEvent::ChatCleared)));
+    let Some(mcr_client::ClientError::Transferred(target)) = error else {
+        panic!("expected a transfer, got {error:?}");
+    };
+    assert_eq!((target.host.as_str(), target.port), ("game.example", 25570));
+    assert_eq!(
+        target.cookies.get("lobby:ticket").map(Vec::as_slice),
+        Some(&b"seat-7"[..])
+    );
+    assert!(client.is_closed());
+    let next = cfg.for_transfer(&target);
+    assert!(next.transfer && next.cookies.contains_key("lobby:ticket"));
+    assert_eq!(next.host, "game.example");
+    server.join().unwrap();
+}

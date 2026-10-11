@@ -7,6 +7,7 @@
 //! - `set_cloud_settings` when the options change.
 
 mod assets;
+mod border;
 mod clouds;
 mod destroy;
 mod random;
@@ -19,6 +20,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 
 pub use assets::{EffectAssets, EffectImage};
+pub use border::WorldBorderVisual;
 pub use clouds::{CloudMode, CloudSettings};
 pub use destroy::{DestroyDecal, MAX_BOXES_PER_DECAL, MAX_DECALS};
 pub use weather::{MAX_WEATHER_RADIUS, MIN_WEATHER_RADIUS, Precipitation, WeatherSource};
@@ -42,6 +44,7 @@ mod slot {
     pub const RAIN: usize = 6;
     pub const SNOW: usize = 7;
     pub const DESTROY: usize = 8;
+    pub const BORDER: usize = 9;
 }
 
 #[repr(C)]
@@ -75,6 +78,7 @@ struct Plan {
     rain: u32,
     snow: u32,
     destroy: u32,
+    border: u32,
 }
 
 struct Textures {
@@ -83,6 +87,7 @@ struct Textures {
     rain: wgpu::TextureView,
     snow: wgpu::TextureView,
     destroy: wgpu::TextureView,
+    forcefield: wgpu::TextureView,
 }
 
 struct Groups {
@@ -92,6 +97,7 @@ struct Groups {
     rain: wgpu::BindGroup,
     snow: wgpu::BindGroup,
     destroy: wgpu::BindGroup,
+    border: wgpu::BindGroup,
 }
 
 struct Pipelines {
@@ -103,6 +109,7 @@ struct Pipelines {
     clouds_flat: wgpu::RenderPipeline,
     weather: wgpu::RenderPipeline,
     destroy: wgpu::RenderPipeline,
+    border: wgpu::RenderPipeline,
 }
 
 pub(crate) struct Effects {
@@ -116,6 +123,7 @@ pub(crate) struct Effects {
     cloud_buffer: wgpu::Buffer,
     weather_buffer: wgpu::Buffer,
     destroy_buffer: wgpu::Buffer,
+    border_buffer: wgpu::Buffer,
     dummy_storage: wgpu::Buffer,
     sampler_clamp: wgpu::Sampler,
     sampler_repeat: wgpu::Sampler,
@@ -128,6 +136,7 @@ pub(crate) struct Effects {
     cloud_uploaded: bool,
     weather: weather::Columns,
     decals: Vec<DestroyDecal>,
+    border: Option<(WorldBorderVisual, f64)>,
     plan: Plan,
     time: (u64, f32),
 }
@@ -380,6 +389,7 @@ impl Effects {
                 true,
                 Some(wgpu::Face::Back),
             ),
+            border: make("world border", "vs_quad", "fs_border", overlay, true, None),
         };
 
         let (sky_vertices, sky_layout) = sky::build_static();
@@ -429,6 +439,11 @@ impl Effects {
                 "destroy vertices",
                 (MAX_DESTROY_QUADS * 4 * size_of::<FxVertex>()) as u64,
             ),
+            border_buffer: storage_buffer(
+                device,
+                "border vertices",
+                (border::MAX_BORDER_QUADS * 4 * size_of::<FxVertex>()) as u64,
+            ),
             dummy_storage: storage_buffer(device, "effect dummy", 64),
             sampler_clamp: sampler(wgpu::FilterMode::Nearest, wgpu::AddressMode::ClampToEdge),
             sampler_repeat: sampler(wgpu::FilterMode::Nearest, wgpu::AddressMode::Repeat),
@@ -448,6 +463,7 @@ impl Effects {
                 snow_quads: 0,
             },
             decals: Vec::new(),
+            border: None,
             plan: Plan::default(),
             time: (0, 0.0),
         }
@@ -464,6 +480,7 @@ impl Effects {
             rain: texture_array(d, q, "rain", &[&assets.rain]),
             snow: texture_array(d, q, "snow", &[&assets.snow]),
             destroy: texture_array(d, q, "destroy", &destroy),
+            forcefield: texture_array(d, q, "forcefield", &[&assets.forcefield]),
         };
         let group = |tex: &wgpu::TextureView,
                      sampler: &wgpu::Sampler,
@@ -538,6 +555,12 @@ impl Effects {
                 &self.destroy_buffer,
                 dummy,
             ),
+            border: group(
+                &textures.forcefield,
+                &self.sampler_repeat,
+                &self.border_buffer,
+                dummy,
+            ),
         });
         self.textures = Some(textures);
         self.clouds.set_texture(&assets.clouds);
@@ -568,6 +591,11 @@ impl Effects {
                 .filter(|d| d.stage < 10)
                 .cloned(),
         );
+    }
+
+    /// The border walls to draw within `distance` blocks of the camera, or `None` to hide them.
+    pub(crate) fn set_border(&mut self, border: Option<WorldBorderVisual>, distance: f64) {
+        self.border = border.map(|b| (b, distance));
     }
 
     pub(crate) fn update_weather(
@@ -708,6 +736,13 @@ impl Effects {
             self.plan.destroy = (verts.len() / 4) as u32;
             uniforms[slot::DESTROY] = FxUniform::new(Mat4::IDENTITY, [1.0; 4]);
         }
+        if let Some((b, distance)) = self.border.filter(|(b, d)| b.visible_from(camera, *d)) {
+            let verts = border::build(&b, camera, distance);
+            self.queue
+                .write_buffer(&self.border_buffer, 0, bytemuck::cast_slice(&verts));
+            self.plan.border = (verts.len() / 4) as u32;
+            uniforms[slot::BORDER] = FxUniform::new(Mat4::IDENTITY, [1.0; 4]);
+        }
         let mut bytes = vec![0u8; (SLOT * SLOTS) as usize];
         for (i, u) in uniforms.iter().enumerate() {
             let at = i * SLOT as usize;
@@ -759,6 +794,11 @@ impl Effects {
             pass.set_pipeline(&self.pipelines.destroy);
             pass.set_bind_group(1, &g.destroy, &at(slot::DESTROY));
             pass.draw(0..p.destroy * 6, 0..1);
+        }
+        if p.border > 0 {
+            pass.set_pipeline(&self.pipelines.border);
+            pass.set_bind_group(1, &g.border, &at(slot::BORDER));
+            pass.draw(0..p.border * 6, 0..1);
         }
         if p.rain + p.snow > 0 {
             pass.set_pipeline(&self.pipelines.weather);

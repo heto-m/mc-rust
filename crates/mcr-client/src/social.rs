@@ -1,14 +1,17 @@
 use std::collections::VecDeque;
+use std::time::Instant;
 
+use mcr_nbt::Value;
 use mcr_protocol::play::clientbound::player::{
     PackedSignature, PlayerInfoAction, PlayerInfoUpdate,
 };
 use mcr_protocol::play::clientbound::ui::{
     BossBarColor, BossBarFlags, BossBarOverlay, DisplaySlot, NumberFormat, ObjectiveDisplay,
-    ObjectiveRenderType, TeamAction, TeamParameters,
+    ObjectiveRenderType, TeamAction, TeamColor, TeamParameters,
 };
 use mcr_protocol::types::Component;
 use mcr_protocol::types::game::{GameType, MessageSignature};
+use mcr_protocol::types::text::{Color, NamedColor, Style};
 use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
@@ -163,12 +166,59 @@ impl PlayerList {
     }
 }
 
+pub const MAX_TAB_ENTRIES: usize = 80;
+
+impl PlayerList {
+    /// Listed players in vanilla's tab order: list order (highest first), spectators last, team name, then name ignoring case.
+    pub fn tab_order<'a>(&'a self, board: &Scoreboard) -> Vec<&'a PlayerInfo> {
+        let team = |p: &PlayerInfo| board.team_of(&p.name).unwrap_or("");
+        let order = |a: &&PlayerInfo, b: &&PlayerInfo| {
+            b.list_order
+                .cmp(&a.list_order)
+                .then_with(|| {
+                    (a.game_mode == GameType::Spectator).cmp(&(b.game_mode == GameType::Spectator))
+                })
+                .then_with(|| team(a).cmp(team(b)))
+                .then_with(|| caseless_cmp(&a.name, &b.name))
+        };
+        let mut list: Vec<&PlayerInfo> = self.players.values().filter(|p| p.listed).collect();
+        if list.len() > MAX_TAB_ENTRIES {
+            list.select_nth_unstable_by(MAX_TAB_ENTRIES, order);
+            list.truncate(MAX_TAB_ENTRIES);
+        }
+        list.sort_by(order);
+        list
+    }
+}
+
+/// The tab list name: the server's display name, else the team-formatted profile name; spectators in italics.
+pub fn tab_name(info: &PlayerInfo, board: &Scoreboard) -> Component {
+    let name = match &info.display_name {
+        Some(d) => d.clone(),
+        None => board.format_member(&info.name, Component::text(info.name.clone())),
+    };
+    if info.game_mode == GameType::Spectator {
+        Component::text("")
+            .styled(Style {
+                italic: Some(true),
+                ..Style::default()
+            })
+            .with(name)
+    } else {
+        name
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TabList {
     pub header: Component,
     pub footer: Component,
 }
 
+pub const OVERLAY_TICKS: i32 = 60;
+const DEFAULT_TITLE_TIMES: (i32, i32, i32) = (10, 70, 20);
+
+/// Title, subtitle and action bar with vanilla's tick-driven timing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Titles {
     pub title: Option<Component>,
@@ -177,49 +227,180 @@ pub struct Titles {
     pub fade_in: i32,
     pub stay: i32,
     pub fade_out: i32,
+    /// Ticks left on screen; the title shows only while this is positive.
+    pub title_time: i32,
+    pub overlay_time: i32,
 }
 
 impl Default for Titles {
     fn default() -> Self {
+        let (fade_in, stay, fade_out) = DEFAULT_TITLE_TIMES;
         Self {
             title: None,
             subtitle: None,
             action_bar: None,
-            fade_in: 10,
-            stay: 70,
-            fade_out: 20,
+            fade_in,
+            stay,
+            fade_out,
+            title_time: 0,
+            overlay_time: 0,
         }
     }
 }
 
 impl Titles {
+    fn total(&self) -> i32 {
+        self.fade_in
+            .saturating_add(self.stay)
+            .saturating_add(self.fade_out)
+    }
+
+    pub fn set_title(&mut self, title: Component) {
+        self.title = Some(title);
+        self.title_time = self.total();
+    }
+
+    pub fn set_subtitle(&mut self, subtitle: Component) {
+        self.subtitle = Some(subtitle);
+    }
+
+    pub fn set_overlay(&mut self, text: Component) {
+        self.action_bar = Some(text);
+        self.overlay_time = OVERLAY_TICKS;
+    }
+
+    pub fn set_times(&mut self, fade_in: i32, stay: i32, fade_out: i32) {
+        if fade_in >= 0 {
+            self.fade_in = fade_in;
+        }
+        if stay >= 0 {
+            self.stay = stay;
+        }
+        if fade_out >= 0 {
+            self.fade_out = fade_out;
+        }
+        if self.title_time > 0 {
+            self.title_time = self.total();
+        }
+    }
+
     pub fn clear(&mut self, reset_times: bool) {
         self.title = None;
         self.subtitle = None;
-        self.action_bar = None;
+        self.title_time = 0;
         if reset_times {
-            self.fade_in = 10;
-            self.stay = 70;
-            self.fade_out = 20;
+            (self.fade_in, self.stay, self.fade_out) = DEFAULT_TITLE_TIMES;
         }
     }
+
+    pub fn tick(&mut self) {
+        if self.overlay_time > 0 {
+            self.overlay_time -= 1;
+        }
+        if self.title_time > 0 {
+            self.title_time -= 1;
+            if self.title_time <= 0 {
+                self.title = None;
+                self.subtitle = None;
+            }
+        }
+    }
+
+    /// Title opacity this frame, `None` when nothing is shown.
+    pub fn title_alpha(&self, partial: f32) -> Option<u8> {
+        if self.title.is_none() || self.title_time <= 0 {
+            return None;
+        }
+        let t = self.title_time as f32 - partial;
+        let mut alpha = 255.0;
+        if self.title_time > self.fade_out.saturating_add(self.stay) {
+            alpha = (self.total() as f32 - t) * 255.0 / self.fade_in as f32;
+        }
+        if self.title_time <= self.fade_out {
+            alpha = t * 255.0 / self.fade_out as f32;
+        }
+        let alpha = (alpha as i32).clamp(0, 255) as u8;
+        (alpha > 0).then_some(alpha)
+    }
+
+    pub fn overlay_alpha(&self, partial: f32) -> Option<u8> {
+        if self.action_bar.is_none() || self.overlay_time <= 0 {
+            return None;
+        }
+        let t = self.overlay_time as f32 - partial;
+        let alpha = ((t * 255.0 / 20.0) as i32).min(255);
+        (alpha > 0).then_some(alpha as u8)
+    }
 }
+
+const BOSS_LERP_MILLIS: f32 = 100.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BossBar {
     pub name: Component,
+    /// Target progress as last sent by the server.
     pub progress: f32,
     pub color: BossBarColor,
     pub overlay: BossBarOverlay,
     pub flags: BossBarFlags,
+    /// Position in vanilla's insertion-ordered overlay.
+    pub order: u64,
+    pub prev_progress: f32,
+    pub changed_at: Option<Instant>,
 }
 
-pub fn boss_bars_insert(bars: &mut FxHashMap<Uuid, BossBar>, id: Uuid, bar: BossBar) -> bool {
-    if !bars.contains_key(&id) && bars.len() >= MAX_BOSS_BARS {
-        return false;
+impl BossBar {
+    pub fn new(
+        name: Component,
+        progress: f32,
+        color: BossBarColor,
+        overlay: BossBarOverlay,
+        flags: BossBarFlags,
+    ) -> Self {
+        Self {
+            name,
+            progress,
+            color,
+            overlay,
+            flags,
+            order: 0,
+            prev_progress: progress,
+            changed_at: None,
+        }
+    }
+
+    pub fn displayed_progress(&self, now: Instant) -> f32 {
+        let Some(at) = self.changed_at else {
+            return self.progress;
+        };
+        let t = (now.saturating_duration_since(at).as_secs_f32() * 1000.0 / BOSS_LERP_MILLIS)
+            .clamp(0.0, 1.0);
+        self.prev_progress + (self.progress - self.prev_progress) * t
+    }
+
+    pub fn set_progress(&mut self, progress: f32, now: Instant) {
+        self.prev_progress = self.displayed_progress(now);
+        self.progress = progress;
+        self.changed_at = Some(now);
+    }
+}
+
+/// Re-adding a known id keeps its slot, like vanilla's linked map.
+pub fn boss_bars_insert(bars: &mut FxHashMap<Uuid, BossBar>, id: Uuid, mut bar: BossBar) -> bool {
+    match bars.get(&id) {
+        Some(old) => bar.order = old.order,
+        None if bars.len() >= MAX_BOSS_BARS => return false,
+        None => bar.order = bars.values().map(|b| b.order + 1).max().unwrap_or(0),
     }
     bars.insert(id, bar);
     true
+}
+
+/// Boss bars in the order vanilla stacks them.
+pub fn boss_bars_ordered(bars: &FxHashMap<Uuid, BossBar>) -> Vec<(&Uuid, &BossBar)> {
+    let mut list: Vec<_> = bars.iter().collect();
+    list.sort_by_key(|(_, b)| b.order);
+    list
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -258,10 +439,83 @@ pub struct Scoreboard {
     pub scores: FxHashMap<(String, String), Score>,
     pub teams: FxHashMap<String, Team>,
     pub display_slots: FxHashMap<u8, String>,
+    member_team: FxHashMap<String, String>,
 }
+
+/// The style a score falls back to when neither the score nor its objective sets a number format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreStyle {
+    Sidebar,
+    PlayerList,
+    Plain,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SidebarRow {
+    pub name: Component,
+    pub score: Component,
+}
+
+pub const MAX_SIDEBAR_ROWS: usize = 15;
+const SIDEBAR_SLOT: u8 = 1;
+const FIRST_TEAM_SLOT: u8 = 3;
 
 fn bounded(name: &str) -> bool {
     name.len() <= MAX_NAME_LEN
+}
+
+fn caseless_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(b.chars().flat_map(char::to_lowercase))
+}
+
+pub fn team_named_color(color: TeamColor) -> NamedColor {
+    match color {
+        TeamColor::Black => NamedColor::Black,
+        TeamColor::DarkBlue => NamedColor::DarkBlue,
+        TeamColor::DarkGreen => NamedColor::DarkGreen,
+        TeamColor::DarkAqua => NamedColor::DarkAqua,
+        TeamColor::DarkRed => NamedColor::DarkRed,
+        TeamColor::DarkPurple => NamedColor::DarkPurple,
+        TeamColor::Gold => NamedColor::Gold,
+        TeamColor::Gray => NamedColor::Gray,
+        TeamColor::DarkGray => NamedColor::DarkGray,
+        TeamColor::Blue => NamedColor::Blue,
+        TeamColor::Green => NamedColor::Green,
+        TeamColor::Aqua => NamedColor::Aqua,
+        TeamColor::Red => NamedColor::Red,
+        TeamColor::LightPurple => NamedColor::LightPurple,
+        TeamColor::Yellow => NamedColor::Yellow,
+        TeamColor::White => NamedColor::White,
+    }
+}
+
+/// Applies a score's number format; `None` falls back to `style`.
+pub fn format_score(format: Option<&NumberFormat>, style: ScoreStyle, value: i32) -> Component {
+    let styled = |color: Option<NamedColor>| {
+        Component::text(value.to_string()).styled(Style {
+            color: color.map(Color::Named),
+            ..Style::default()
+        })
+    };
+    match format {
+        Some(NumberFormat::Blank) => Component::text(""),
+        Some(NumberFormat::Fixed(c)) => c.clone(),
+        Some(NumberFormat::Styled(nbt)) => match &nbt.0 {
+            Value::Compound(style) => {
+                let mut c = style.clone();
+                c.insert("text", value.to_string());
+                Component::from_nbt_lenient(&Value::Compound(c))
+            }
+            _ => styled(None),
+        },
+        None => styled(match style {
+            ScoreStyle::Sidebar => Some(NamedColor::Red),
+            ScoreStyle::PlayerList => Some(NamedColor::Yellow),
+            ScoreStyle::Plain => None,
+        }),
+    }
 }
 
 impl Scoreboard {
@@ -287,22 +541,108 @@ impl Scoreboard {
         }
     }
 
+    /// Vanilla ignores a change to an objective it never saw added.
+    pub fn change_objective(&mut self, name: &str, display: &ObjectiveDisplay) {
+        if let Some(o) = self.objectives.get_mut(name) {
+            *o = display.into();
+        }
+    }
+
     pub fn set_display(&mut self, slot: DisplaySlot, objective: &str) {
-        if objective.is_empty() {
-            self.display_slots.remove(&(slot as u8));
-        } else if bounded(objective) {
+        if self.objectives.contains_key(objective) {
             self.display_slots.insert(slot as u8, objective.to_owned());
+        } else {
+            self.display_slots.remove(&(slot as u8));
         }
     }
 
     pub fn set_score(&mut self, owner: &str, objective: &str, score: Score) {
+        if !self.objectives.contains_key(objective) {
+            return;
+        }
         let key = (owner.to_owned(), objective.to_owned());
-        if bounded(owner)
-            && bounded(objective)
-            && (self.scores.contains_key(&key) || self.scores.len() < MAX_SCORES)
-        {
+        if bounded(owner) && (self.scores.contains_key(&key) || self.scores.len() < MAX_SCORES) {
             self.scores.insert(key, score);
         }
+    }
+
+    /// The sidebar objective for `player`: their team colour's slot wins over the plain sidebar.
+    pub fn sidebar_objective(&self, player: &str) -> Option<&str> {
+        let team_slot = self
+            .team_of(player)
+            .and_then(|t| self.teams.get(t)?.parameters.color)
+            .and_then(|c| self.display_slots.get(&(FIRST_TEAM_SLOT + c as u8)));
+        team_slot
+            .or_else(|| self.display_slots.get(&SIDEBAR_SLOT))
+            .filter(|o| self.objectives.contains_key(*o))
+            .map(String::as_str)
+    }
+
+    /// Prefix, name and suffix under the team colour, like vanilla's `PlayerTeam.formatNameForTeam`.
+    pub fn format_member(&self, member: &str, name: Component) -> Component {
+        let Some(team) = self.team_of(member).and_then(|t| self.teams.get(t)) else {
+            return name;
+        };
+        let p = &team.parameters;
+        Component::text("")
+            .styled(Style {
+                color: p.color.map(|c| Color::Named(team_named_color(c))),
+                ..Style::default()
+            })
+            .with(p.player_prefix.clone())
+            .with(name)
+            .with(p.player_suffix.clone())
+    }
+
+    pub fn format_value(
+        &self,
+        owner: &str,
+        objective: &str,
+        style: ScoreStyle,
+    ) -> Option<Component> {
+        let o = self.objectives.get(objective)?;
+        let s = self.scores.get(&(owner.to_owned(), objective.to_owned()))?;
+        Some(format_score(
+            s.number_format.as_ref().or(o.number_format.as_ref()),
+            style,
+            s.value,
+        ))
+    }
+
+    /// The top sidebar rows: highest score first, then owner name ignoring case; `#` owners stay hidden.
+    pub fn sidebar_rows(&self, objective: &str) -> Vec<SidebarRow> {
+        let Some(o) = self.objectives.get(objective) else {
+            return Vec::new();
+        };
+        let mut rows: Vec<(&str, &Score)> = self
+            .scores
+            .iter()
+            .filter(|((owner, obj), _)| obj == objective && !owner.starts_with('#'))
+            .map(|((owner, _), s)| (owner.as_str(), s))
+            .collect();
+        let order = |a: &(&str, &Score), b: &(&str, &Score)| {
+            b.1.value
+                .cmp(&a.1.value)
+                .then_with(|| caseless_cmp(a.0, b.0))
+        };
+        if rows.len() > MAX_SIDEBAR_ROWS {
+            rows.select_nth_unstable_by(MAX_SIDEBAR_ROWS, order);
+            rows.truncate(MAX_SIDEBAR_ROWS);
+        }
+        rows.sort_by(order);
+        rows.into_iter()
+            .map(|(owner, s)| {
+                let shown = s.display.clone().unwrap_or_else(|| Component::text(owner));
+                SidebarRow {
+                    name: self.format_member(owner, shown),
+                    score: format_score(
+                        s.number_format.as_ref().or(o.number_format.as_ref()),
+                        ScoreStyle::Sidebar,
+                        s.value,
+                    ),
+                }
+            })
+            .collect()
     }
 
     pub fn reset_score(&mut self, owner: &str, objective: Option<&str>) {
@@ -326,47 +666,70 @@ impl Scoreboard {
                 if self.teams.len() >= MAX_TEAMS && !self.teams.contains_key(name) {
                     return;
                 }
-                let mut team = Team {
-                    parameters: parameters.clone(),
-                    players: FxHashSet::default(),
-                };
-                for p in players.iter().take(MAX_TEAM_MEMBERS) {
-                    team.players.insert(p.clone());
-                }
-                self.teams.insert(name.to_owned(), team);
+                self.remove_team(name);
+                self.teams.insert(
+                    name.to_owned(),
+                    Team {
+                        parameters: parameters.clone(),
+                        players: FxHashSet::default(),
+                    },
+                );
+                self.join(name, players);
             }
-            TeamAction::Remove => {
-                self.teams.remove(name);
-            }
+            TeamAction::Remove => self.remove_team(name),
             TeamAction::Change(parameters) => {
                 if let Some(t) = self.teams.get_mut(name) {
                     t.parameters = parameters.clone();
                 }
             }
             TeamAction::Join(players) => {
-                if let Some(t) = self.teams.get_mut(name) {
-                    for p in players {
-                        if t.players.len() < MAX_TEAM_MEMBERS {
-                            t.players.insert(p.clone());
-                        }
-                    }
+                if self.teams.contains_key(name) {
+                    self.join(name, players);
                 }
             }
             TeamAction::Leave(players) => {
-                if let Some(t) = self.teams.get_mut(name) {
-                    for p in players {
-                        t.players.remove(p);
+                for p in players {
+                    if self.member_team.get(p).is_some_and(|t| t == name) {
+                        self.member_team.remove(p);
+                        if let Some(t) = self.teams.get_mut(name) {
+                            t.players.remove(p);
+                        }
                     }
                 }
             }
         }
     }
 
+    /// A player belongs to one team at most; joining another moves them.
+    fn join(&mut self, team: &str, players: &[String]) {
+        for p in players {
+            if !bounded(p) {
+                continue;
+            }
+            let previous = self.member_team.get(p).cloned();
+            if previous.is_none() && self.member_team.len() >= MAX_TEAM_MEMBERS {
+                continue;
+            }
+            if let Some(old) = previous.and_then(|old| self.teams.get_mut(&old)) {
+                old.players.remove(p);
+            }
+            self.member_team.insert(p.clone(), team.to_owned());
+            if let Some(t) = self.teams.get_mut(team) {
+                t.players.insert(p.clone());
+            }
+        }
+    }
+
+    fn remove_team(&mut self, name: &str) {
+        if let Some(team) = self.teams.remove(name) {
+            for p in &team.players {
+                self.member_team.remove(p);
+            }
+        }
+    }
+
     pub fn team_of(&self, player: &str) -> Option<&str> {
-        self.teams
-            .iter()
-            .find(|(_, t)| t.players.contains(player))
-            .map(|(name, _)| name.as_str())
+        self.member_team.get(player).map(String::as_str)
     }
 }
 

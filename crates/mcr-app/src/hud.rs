@@ -1,6 +1,8 @@
-use mcr_client::{BossBar, ClientState};
+use std::time::Instant;
+
+use mcr_client::{ClientState, ScoreStyle, boss_bars_ordered, tab_name};
 use mcr_data::Version;
-use mcr_protocol::play::clientbound::ui::{BossBarColor, BossBarOverlay};
+use mcr_protocol::play::clientbound::ui::{BossBarColor, BossBarOverlay, ObjectiveRenderType};
 use mcr_protocol::types::entity_data::EntityDataValue;
 use mcr_protocol::types::game::GameType;
 use mcr_protocol::types::text::Component;
@@ -9,19 +11,18 @@ use mcr_ui::{
     ChatOptions, DebugOverlay, HeartKind, HudItems, HudSprites, HudState, ItemIcons, SharedChat,
     SpriteId, StackView, Ui, UiFrame,
 };
-use uuid::Uuid;
 
 const MAX_AIR: i32 = 300;
 const AIR_DATA_INDEX: u8 = 1;
 const ABSORPTION_DATA_INDEX: u8 = 17;
 const FROZEN_DATA_INDEX: u8 = 7;
 const FULLY_FROZEN_TICKS: i32 = 140;
-const SIDEBAR_SLOT: u8 = 1;
-const MAX_SIDEBAR_ROWS: usize = 15;
-const MAX_TAB_ENTRIES: usize = 80;
-const ACTIONBAR_TICKS: i32 = 60;
+const LIST_SLOT: u8 = 0;
 const OFFHAND_SLOT: usize = 45;
-const OBJECTIVE_VALUE: u32 = 0xFFFF_5555;
+const SPECTATOR_NAME: u32 = 0x90FF_FFFF;
+const TAB_BACKGROUND: u32 = 0x8000_0000;
+const TAB_SLOT: u32 = 0x20FF_FFFF;
+const TAB_COLUMN_GAP: i32 = 5;
 
 #[derive(Debug)]
 struct Sprites {
@@ -59,8 +60,6 @@ pub struct Hud {
     display_health: i32,
     last_health_millis: u64,
     health_blink_tick: i64,
-    title_ticks: i32,
-    actionbar_ticks: i32,
 }
 
 impl std::fmt::Debug for Hud {
@@ -69,29 +68,14 @@ impl std::fmt::Debug for Hud {
     }
 }
 
-const MAX_TITLE_PHASE: i32 = 72_000;
-
-fn phase(v: i32) -> i32 {
-    v.clamp(0, MAX_TITLE_PHASE)
-}
-
-fn title_total(state: &ClientState) -> i32 {
-    let t = &state.titles;
-    phase(t.fade_in) + phase(t.stay) + phase(t.fade_out)
-}
-
-/// Keeps the `limit` smallest entries under `cmp`, sorted.
-fn smallest<T>(
-    mut items: Vec<T>,
-    limit: usize,
-    cmp: impl Fn(&T, &T) -> std::cmp::Ordering,
-) -> Vec<T> {
-    if items.len() > limit {
-        items.select_nth_unstable_by(limit, &cmp);
-        items.truncate(limit);
-    }
-    items.sort_by(cmp);
-    items
+/// Splits `cells` into lines no wider than `width`, honouring newlines.
+fn wrapped(frame: &mut UiFrame<'_>, cells: &[mcr_ui::Cell], width: f32) -> Vec<Vec<mcr_ui::Cell>> {
+    frame
+        .ui()
+        .wrap(cells, width)
+        .into_iter()
+        .map(|r| cells[r].iter().filter(|c| c.ch != '\n').cloned().collect())
+        .collect()
 }
 
 pub fn chat_options(options: &Options, focused: bool) -> ChatOptions {
@@ -160,8 +144,6 @@ impl Hud {
             display_health: 0,
             last_health_millis: 0,
             health_blink_tick: 0,
-            title_ticks: 0,
-            actionbar_ticks: 0,
         }
     }
 
@@ -171,22 +153,8 @@ impl Hud {
             .add(ui, message, tick, &chat_options(options, false));
     }
 
-    pub fn show_title(&mut self, state: &ClientState) {
-        self.title_ticks = title_total(state);
-    }
-
-    pub fn clear_titles(&mut self) {
-        self.title_ticks = 0;
-        self.actionbar_ticks = 0;
-    }
-
-    pub fn show_actionbar(&mut self) {
-        self.actionbar_ticks = ACTIONBAR_TICKS;
-    }
-
-    pub fn tick(&mut self) {
-        self.title_ticks = (self.title_ticks - 1).max(0);
-        self.actionbar_ticks = (self.actionbar_ticks - 1).max(0);
+    pub fn clear_chat(&mut self) {
+        *self.chat.borrow_mut() = mcr_ui::ChatHud::default();
     }
 
     pub fn draw(&mut self, frame: &mut UiFrame<'_>, icons: &mut ItemIcons, input: &HudInput<'_>) {
@@ -230,18 +198,20 @@ impl Hud {
     fn draw_bars(&mut self, frame: &mut UiFrame<'_>, icons: &mut ItemIcons, input: &HudInput<'_>) {
         let state = input.state;
         let player = &state.player;
+        let cooldown = |stack: Option<&mcr_protocol::types::ItemStack>| {
+            stack.map_or(0.0, |s| state.cooldown_percent(s, input.partial))
+        };
         let stacks: Vec<Option<StackView<'_>>> = (0..9u8)
             .map(|slot| StackView::new(state.inventory.hotbar(slot)))
             .collect();
-        let offhand = state
-            .inventory
-            .player
-            .slots
-            .get(OFFHAND_SLOT)
-            .and_then(StackView::new);
+        let offhand_stack = state.inventory.player.slots.get(OFFHAND_SLOT);
+        let offhand = offhand_stack.and_then(StackView::new);
         let items = HudItems {
-            hotbar: std::array::from_fn(|i| stacks[i].as_ref().map(|s| s.view(0.0))),
-            offhand: offhand.as_ref().map(|s| s.view(0.0)),
+            hotbar: std::array::from_fn(|i| {
+                let c = cooldown(Some(state.inventory.hotbar(i as u8)));
+                stacks[i].as_ref().map(|s| s.view(c))
+            }),
+            offhand: offhand.as_ref().map(|s| s.view(cooldown(offhand_stack))),
         };
         let survival = matches!(player.game_mode, GameType::Survival | GameType::Adventure);
         if survival {
@@ -358,12 +328,11 @@ impl Hud {
     }
 
     fn draw_bosses(&self, frame: &mut UiFrame<'_>, state: &ClientState) {
-        let (gui_w, _) = frame.gui_size();
-        let mut bars: Vec<(&Uuid, &BossBar)> = state.boss_bars.iter().collect();
-        bars.sort_by_key(|(id, _)| **id);
+        let (gui_w, gui_h) = frame.gui_size();
+        let now = Instant::now();
         let x = gui_w / 2 - 91;
-        for (row, (_, bar)) in bars.into_iter().take(4).enumerate() {
-            let y = 12 + row as i32 * 19;
+        let mut y = 12;
+        for (_, bar) in boss_bars_ordered(&state.boss_bars) {
             let color = match bar.color {
                 BossBarColor::Pink => "pink",
                 BossBarColor::Blue => "blue",
@@ -380,7 +349,12 @@ impl Hud {
                 BossBarOverlay::Notched12 => Some(12),
                 BossBarOverlay::Notched20 => Some(20),
             };
-            let progress = (bar.progress.clamp(0.0, 1.0) * 183.0) as i32;
+            let shown = bar.displayed_progress(now);
+            let progress = if shown.is_finite() {
+                (shown.clamp(0.0, 1.0) * 183.0) as i32
+            } else {
+                0
+            };
             let mut ids = |kind: &str| {
                 (
                     frame.ui().sprite_id(&format!("boss_bar/{color}_{kind}")),
@@ -410,185 +384,231 @@ impl Hud {
                 0xFFFF_FFFF,
                 true,
             );
+            y += 19;
+            if y >= gui_h / 3 {
+                break;
+            }
         }
     }
 
     fn draw_sidebar(&self, frame: &mut UiFrame<'_>, state: &ClientState) {
         let board = &state.scoreboard;
-        let Some(name) = board.display_slots.get(&SIDEBAR_SLOT) else {
+        let Some(name) = board.sidebar_objective(&state.name) else {
             return;
         };
         let Some(objective) = board.objectives.get(name) else {
             return;
         };
-        let rows: Vec<(&str, i32, Option<&Component>)> = board
-            .scores
-            .iter()
-            .filter(|((owner, obj), _)| obj == name && !owner.starts_with('#'))
-            .map(|((owner, _), s)| (owner.as_str(), s.value, s.display.as_ref()))
-            .collect();
-        let rows = smallest(rows, MAX_SIDEBAR_ROWS, |a, b| {
-            b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0))
-        });
         let title = frame.ui().flatten(&objective.display_name);
         let title_w = frame.ui().width(&title);
-        let rendered: Vec<(Vec<mcr_ui::Cell>, f32, String, f32)> = rows
+        let spacer = frame.ui().text_width(": ");
+        let rows: Vec<(Vec<mcr_ui::Cell>, Vec<mcr_ui::Cell>, f32)> = board
+            .sidebar_rows(name)
             .iter()
-            .map(|(owner, value, display)| {
-                let cells = match display {
-                    Some(c) => frame.ui().flatten(c),
-                    None => mcr_ui::parse_legacy(owner),
-                };
-                let w = frame.ui().width(&cells);
-                let score = value.to_string();
-                let sw = frame.ui().text_width(&score);
-                (cells, w, score, sw)
+            .map(|row| {
+                let name = frame.ui().flatten(&row.name);
+                let score = frame.ui().flatten(&row.score);
+                let score_w = frame.ui().width(&score);
+                (name, score, score_w)
             })
             .collect();
-        let widest = rendered
+        let widest = rows
             .iter()
-            .map(|(_, w, _, sw)| w + 2.0 + sw)
-            .fold(title_w, f32::max);
+            .map(|(name, _, score_w)| {
+                frame.ui().width(name)
+                    + if *score_w > 0.0 {
+                        spacer + score_w
+                    } else {
+                        0.0
+                    }
+            })
+            .fold(title_w, f32::max)
+            .ceil() as i32;
         let (gui_w, gui_h) = frame.gui_size();
         let row_h = 9;
-        let total_h = rendered.len() as i32 * row_h;
-        let bottom = gui_h / 2 + total_h / 3;
-        let right = gui_w - 3;
-        let left = right - widest.ceil() as i32 - 2;
-        let top = bottom - total_h;
-        frame.fill_rect(left - 2, top - row_h - 1, right + 2, top - 1, 0x6600_0000);
-        frame.fill_rect(left - 2, top - 1, right + 2, bottom, 0x5000_0000);
+        let count = rows.len() as i32;
+        let bottom = gui_h / 2 + count * row_h / 3;
+        let left = gui_w - widest - 3;
+        let right = gui_w - 3 + 2;
+        let header_y = bottom - count * row_h;
+        frame.fill_rect(
+            left - 2,
+            header_y - row_h - 1,
+            right,
+            header_y - 1,
+            0x6600_0000,
+        );
+        frame.fill_rect(left - 2, header_y - 1, right, bottom, 0x5000_0000);
         frame.cells(
             &title,
-            left as f32 + (widest - title_w) / 2.0 + 1.0,
-            (top - row_h) as f32,
+            (left + widest / 2) as f32 - title_w / 2.0,
+            (header_y - row_h) as f32,
             0xFFFF_FFFF,
             false,
         );
-        for (i, (cells, _, score, sw)) in rendered.iter().enumerate() {
-            let y = (top + i as i32 * row_h) as f32;
-            frame.cells(cells, left as f32 + 1.0, y, 0xFFFF_FFFF, false);
-            frame.text(score, right as f32 - sw - 1.0, y, OBJECTIVE_VALUE, false);
+        for (i, (name, score, score_w)) in rows.iter().enumerate() {
+            let y = (bottom - (count - i as i32) * row_h) as f32;
+            frame.cells(name, left as f32, y, 0xFFFF_FFFF, false);
+            frame.cells(score, right as f32 - score_w, y, 0xFFFF_FFFF, false);
         }
     }
 
     fn draw_titles(&self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
         let t = &input.state.titles;
         let (gui_w, gui_h) = frame.gui_size();
-        if self.actionbar_ticks > 0
-            && let Some(bar) = &t.action_bar
+        if let (Some(alpha), Some(bar)) = (t.overlay_alpha(input.partial), &t.action_bar)
+            && alpha > 8
         {
-            let left = self.actionbar_ticks as f32 - input.partial;
-            let alpha = ((left * 255.0 / 20.0) as i32).clamp(0, 255) as u32;
-            if alpha > 8 {
-                let cells = frame.ui().flatten(bar);
-                let w = frame.ui().width(&cells);
-                frame.cells(
-                    &cells,
-                    (gui_w as f32 - w) / 2.0,
-                    (gui_h - 68) as f32,
-                    alpha << 24 | 0xFF_FFFF,
-                    true,
-                );
-            }
+            let cells = frame.ui().flatten(bar);
+            let w = frame.ui().width(&cells);
+            frame.cells(
+                &cells,
+                (gui_w as f32 - w) / 2.0,
+                (gui_h - 68 - 4) as f32,
+                u32::from(alpha) << 24 | 0xFF_FFFF,
+                true,
+            );
         }
-        if self.title_ticks > 0 {
-            let (fade_in, stay, fade_out) = (phase(t.fade_in), phase(t.stay), phase(t.fade_out));
-            let total = (fade_in + stay + fade_out).max(1);
-            let age = total as f32 - (self.title_ticks as f32 - input.partial);
-            let alpha = if age < fade_in as f32 {
-                age / fade_in.max(1) as f32
-            } else if age < (fade_in + stay) as f32 {
-                1.0
-            } else {
-                1.0 - (age - (fade_in + stay) as f32) / fade_out.max(1) as f32
-            };
-            let alpha = (alpha.clamp(0.0, 1.0) * 255.0) as u32;
-            if alpha > 8 {
-                let argb = alpha << 24 | 0xFF_FFFF;
-                let (cx, cy) = (gui_w as f32 / 2.0, gui_h as f32 / 2.0);
-                for (component, scale, dy) in [(&t.title, 4.0, -10.0), (&t.subtitle, 2.0, 5.0)] {
-                    if let Some(c) = component {
-                        let cells = frame.ui().flatten(c);
-                        let w = frame.ui().width(&cells);
-                        frame.cells_scaled(
-                            &cells,
-                            cx - w * scale / 2.0,
-                            cy + dy * scale,
-                            argb,
-                            true,
-                            scale,
-                        );
-                    }
+        if let (Some(alpha), Some(title)) = (t.title_alpha(input.partial), &t.title)
+            && alpha > 8
+        {
+            let argb = u32::from(alpha) << 24 | 0xFF_FFFF;
+            let (cx, cy) = (gui_w as f32 / 2.0, gui_h as f32 / 2.0);
+            for (component, scale, dy) in
+                [(Some(title), 4.0, -10.0), (t.subtitle.as_ref(), 2.0, 5.0)]
+            {
+                if let Some(c) = component {
+                    let cells = frame.ui().flatten(c);
+                    let w = frame.ui().width(&cells);
+                    frame.cells_scaled(
+                        &cells,
+                        cx - w * scale / 2.0,
+                        cy + dy * scale,
+                        argb,
+                        true,
+                        scale,
+                    );
                 }
             }
         }
     }
 
     fn draw_tab_list(&self, frame: &mut UiFrame<'_>, state: &ClientState) {
-        let players: Vec<_> = state.players.iter().filter(|p| p.listed).collect();
-        let players = smallest(players, MAX_TAB_ENTRIES, |a, b| {
-            let spectator = |p: &&mcr_client::PlayerInfo| p.game_mode == GameType::Spectator;
-            spectator(a)
-                .cmp(&spectator(b))
-                .then_with(|| b.list_order.cmp(&a.list_order))
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        let (gui_w, _) = frame.gui_size();
-        let count = players.len().max(1);
-        let mut columns = 1usize;
-        let mut rows = count;
-        while rows > 20 {
-            columns += 1;
-            rows = count.div_ceil(columns);
-        }
-        let cells: Vec<Vec<mcr_ui::Cell>> = players
+        let board = &state.scoreboard;
+        let players = state.players.tab_order(board);
+        let objective = board
+            .display_slots
+            .get(&LIST_SLOT)
+            .and_then(|name| Some((name.as_str(), board.objectives.get(name)?)));
+        let hearts = objective.is_some_and(|(_, o)| o.render_type == ObjectiveRenderType::Hearts);
+        let spacer = frame.ui().text_width(" ");
+        let entries: Vec<(Vec<mcr_ui::Cell>, Vec<mcr_ui::Cell>, f32)> = players
             .iter()
-            .map(|p| match &p.display_name {
-                Some(c) => frame.ui().flatten(c),
-                None => mcr_ui::parse_legacy(&p.name),
+            .map(|p| {
+                let name = frame.ui().flatten(&tab_name(p, board));
+                let score = objective
+                    .filter(|_| !hearts)
+                    .and_then(|(o, _)| board.format_value(&p.name, o, ScoreStyle::PlayerList))
+                    .map(|c| frame.ui().flatten(&c))
+                    .unwrap_or_default();
+                let score_w = frame.ui().width(&score);
+                (name, score, score_w)
             })
             .collect();
-        let name_w = cells
+        let max_name_w = entries
             .iter()
-            .map(|c| frame.ui().width(c))
+            .map(|(name, _, _)| frame.ui().width(name))
             .fold(0.0f32, f32::max)
             .ceil() as i32;
-        let column_w = (name_w + 13).min((gui_w - 50) / columns as i32).max(40);
-        let total_w = column_w * columns as i32 + (columns as i32 - 1);
-        let left = (gui_w - total_w) / 2;
-        let header = frame.ui().flatten(&state.tab_list.header);
-        let footer = frame.ui().flatten(&state.tab_list.footer);
+        let max_score_w = entries
+            .iter()
+            .map(|(_, _, w)| if *w > 0.0 { spacer + w } else { 0.0 })
+            .fold(0.0f32, f32::max)
+            .ceil() as i32;
+        let (gui_w, _) = frame.gui_size();
+        let slots = players.len();
+        let mut rows = slots;
+        let mut columns = 1usize;
+        while rows > 20 {
+            columns += 1;
+            rows = slots.div_ceil(columns);
+        }
+        let width_for_score = match objective {
+            Some(_) if hearts => 90,
+            Some(_) => max_score_w,
+            None => 0,
+        };
+        let cols = columns as i32;
+        let slot_w = ((max_name_w + width_for_score + 13) * cols).min(gui_w - 50) / cols;
+        let mut max_line_w = slot_w * cols + (cols - 1) * TAB_COLUMN_GAP;
+        let left = gui_w / 2 - max_line_w / 2;
+        let lines = |frame: &mut UiFrame<'_>, c: &Component| {
+            if c.to_plain_string().is_empty() {
+                return Vec::new();
+            }
+            let cells = frame.ui().flatten(c);
+            wrapped(frame, &cells, (gui_w - 50) as f32)
+        };
+        let header = lines(frame, &state.tab_list.header);
+        let footer = lines(frame, &state.tab_list.footer);
+        for line in header.iter().chain(&footer) {
+            max_line_w = max_line_w.max(frame.ui().width(line).ceil() as i32);
+        }
+        let (bg_left, bg_right) = (
+            gui_w / 2 - max_line_w / 2 - 1,
+            gui_w / 2 + max_line_w / 2 + 1,
+        );
         let mut y = 10;
         if !header.is_empty() {
-            let w = frame.ui().width(&header);
-            frame.fill_rect(left - 1, y - 1, left + total_w + 1, y + 9, 0x8000_0000);
-            frame.cells(
-                &header,
-                (gui_w as f32 - w) / 2.0,
-                y as f32,
-                0xFFFF_FFFF,
-                true,
+            frame.fill_rect(
+                bg_left,
+                y - 1,
+                bg_right,
+                y + header.len() as i32 * 9,
+                TAB_BACKGROUND,
             );
-            y += 10;
+            for line in &header {
+                let w = frame.ui().width(line);
+                frame.cells(line, (gui_w as f32 - w) / 2.0, y as f32, 0xFFFF_FFFF, true);
+                y += 9;
+            }
+            y += 1;
         }
         frame.fill_rect(
-            left - 1,
+            bg_left,
             y - 1,
-            left + total_w + 1,
-            y + rows as i32 * 9 + 1,
-            0x8000_0000,
+            bg_right,
+            y + rows as i32 * 9,
+            TAB_BACKGROUND,
         );
-        for (i, cell) in cells.iter().enumerate() {
-            let (col, row) = (i / rows, i % rows);
-            let x = left + col as i32 * (column_w + 1);
-            let ry = y + row as i32 * 9;
-            frame.fill_rect(x, ry, x + column_w, ry + 8, 0x20FF_FFFF);
-            frame.push_scissor(x, ry, x + column_w - 11, ry + 9);
-            frame.cells(cell, x as f32 + 1.0, ry as f32, 0xFFFF_FFFF, true);
+        for (i, (name, score, score_w)) in entries.iter().enumerate() {
+            let (col, row) = ((i / rows) as i32, (i % rows) as i32);
+            let x = left + col * slot_w + col * TAB_COLUMN_GAP;
+            let ry = y + row * 9;
+            frame.fill_rect(x, ry, x + slot_w, ry + 8, TAB_SLOT);
+            let spectator = players[i].game_mode == GameType::Spectator;
+            let color = if spectator {
+                SPECTATOR_NAME
+            } else {
+                0xFFFF_FFFF
+            };
+            frame.push_scissor(x, ry, x + slot_w - 11, ry + 9);
+            frame.cells(name, x as f32, ry as f32, color, true);
             frame.pop_scissor();
-            let latency = players[i].latency;
-            let icon = match latency {
+            if objective.is_some() && !spectator && !hearts {
+                let score_left = x + max_name_w + 1;
+                let score_right = score_left + width_for_score;
+                if score_right - score_left > 5 {
+                    frame.cells(
+                        score,
+                        score_right as f32 - score_w,
+                        ry as f32,
+                        0xFFFF_FFFF,
+                        true,
+                    );
+                }
+            }
+            let icon = match players[i].latency {
                 l if l < 0 => 0,
                 l if l < 150 => 5,
                 l if l < 300 => 4,
@@ -597,42 +617,23 @@ impl Hud {
                 _ => 1,
             };
             if let Some(s) = self.own.ping[icon] {
-                frame.sprite(s, x + column_w - 11, ry, 10, 8);
+                frame.sprite(s, x + slot_w - 11, ry, 10, 8);
             }
         }
-        y += rows as i32 * 9 + 2;
         if !footer.is_empty() {
-            let w = frame.ui().width(&footer);
-            frame.fill_rect(left - 1, y - 1, left + total_w + 1, y + 9, 0x8000_0000);
-            frame.cells(
-                &footer,
-                (gui_w as f32 - w) / 2.0,
-                y as f32,
-                0xFFFF_FFFF,
-                true,
+            y += rows as i32 * 9 + 1;
+            frame.fill_rect(
+                bg_left,
+                y - 1,
+                bg_right,
+                y + footer.len() as i32 * 9,
+                TAB_BACKGROUND,
             );
+            for line in &footer {
+                let w = frame.ui().width(line);
+                frame.cells(line, (gui_w as f32 - w) / 2.0, y as f32, 0xFFFF_FFFF, true);
+                y += 9;
+            }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn selection_keeps_the_best_entries_sorted() {
-        let items: Vec<i32> = (0..100_000).rev().collect();
-        let top = smallest(items, 15, |a, b| a.cmp(b));
-        assert_eq!(top, (0..15).collect::<Vec<_>>());
-        assert_eq!(smallest(vec![3, 1, 2], 80, |a, b| a.cmp(b)), [1, 2, 3]);
-    }
-
-    #[test]
-    fn hostile_title_times_do_not_overflow() {
-        let mut state = ClientState::new(&mcr_client::ClientConfig::default(), Uuid::nil());
-        state.titles.fade_in = i32::MAX;
-        state.titles.stay = i32::MAX;
-        state.titles.fade_out = i32::MIN;
-        assert_eq!(title_total(&state), 2 * MAX_TITLE_PHASE);
     }
 }

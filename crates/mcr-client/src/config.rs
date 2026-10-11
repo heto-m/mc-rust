@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use mcr_auth::Secret;
 use mcr_protocol::common::{ChatVisibility, MainHand, ParticleStatus};
+use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone)]
 pub struct OnlineAuth {
@@ -33,6 +34,8 @@ pub struct ClientConfig {
     pub online: Option<OnlineAuth>,
     /// Handshake with the transfer intent (set when following a transfer packet).
     pub transfer: bool,
+    /// Cookies carried over from the server that transferred us.
+    pub cookies: FxHashMap<String, Vec<u8>>,
     pub connect_timeout: Duration,
     pub join_timeout: Duration,
     pub chat_history: usize,
@@ -56,6 +59,7 @@ impl Default for ClientConfig {
             dialog_link: None,
             online: None,
             transfer: false,
+            cookies: FxHashMap::default(),
             connect_timeout: Duration::from_secs(10),
             join_timeout: Duration::from_secs(60),
             chat_history: 256,
@@ -66,7 +70,25 @@ impl Default for ClientConfig {
     }
 }
 
+/// Where a `transfer` packet sends the player, with the cookies vanilla keeps across the hop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferTarget {
+    pub host: String,
+    pub port: u16,
+    pub cookies: FxHashMap<String, Vec<u8>>,
+}
+
 impl ClientConfig {
+    /// This config pointed at the transfer target with the transfer intent.
+    pub fn for_transfer(&self, target: &TransferTarget) -> Self {
+        let mut cfg = self.clone();
+        cfg.host = target.host.clone();
+        cfg.port = target.port;
+        cfg.transfer = true;
+        cfg.cookies = target.cookies.clone();
+        cfg
+    }
+
     pub fn with_addr(mut self, addr: &str) -> Self {
         match addr.rsplit_once(':') {
             Some((host, port)) if port.parse::<u16>().is_ok() => {

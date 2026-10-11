@@ -67,12 +67,9 @@ fn main() -> Result<()> {
             }
         }
         if let Err(e) = result {
-            if let Some((host, port)) = client.take_transfer() {
-                let mut cfg = config(&args);
-                cfg.host = host;
-                cfg.port = port;
-                cfg.transfer = true;
-                client = Client::connect(cfg).context("following transfer")?;
+            if let ClientError::Transferred(target) = &e {
+                client = Client::connect(config(&args).for_transfer(target))
+                    .context("following transfer")?;
                 continue;
             }
             return match e {

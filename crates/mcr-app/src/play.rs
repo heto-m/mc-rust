@@ -49,6 +49,20 @@ use crate::target::{BlockHit, EntityPicker, Target, pick, raycast_block, reach};
 use crate::view::{StateView, SuggestEngine};
 
 pub const TICK_SECONDS: f32 = 0.05;
+const LOW_DISK_SPACE_TOAST: u32 = 0x4c44_5321;
+
+/// Uniform in [0, 1) for cosmetic jitter such as sound pitch.
+fn rand_unit() -> f32 {
+    thread_local!(static SEED: std::cell::Cell<u32> = const { std::cell::Cell::new(0x2545_f491) });
+    SEED.with(|s| {
+        let mut x = s.get();
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        s.set(x);
+        (x >> 8) as f32 / (1u32 << 24) as f32
+    })
+}
 const MAX_TICKS_PER_FRAME: u32 = 10;
 const THIRD_PERSON_DISTANCE: f64 = 4.0;
 const CLICK_DELAY: u32 = 5;
@@ -285,6 +299,9 @@ pub struct Play {
     death_message: Option<mcr_protocol::types::text::Component>,
     pub leave: bool,
     pub quit: bool,
+    /// Set when the server sent us elsewhere; the shell reconnects there.
+    pub transfer: Option<mcr_client::TransferTarget>,
+    sky_factor: f32,
     pack_answers: Vec<bool>,
     dialog_replies: Vec<mcr_client::DialogReply>,
     test_status: mcr_ui::SharedTestStatus,
@@ -442,6 +459,8 @@ impl Play {
             tab_held: false,
             ctrl_held: false,
             closed: None,
+            transfer: None,
+            sky_factor: 1.0,
             attack_click: false,
             use_click: false,
             attack_delay: 0,
@@ -505,6 +524,10 @@ impl Play {
     }
 
     fn fail(&mut self, e: &ClientError) {
+        if let ClientError::Transferred(target) = e {
+            self.transfer = Some((**target).clone());
+            return;
+        }
         if self.closed.is_none() {
             self.closed = Some(sanitize_for_log(&e.to_string()));
         }
@@ -520,11 +543,16 @@ impl Play {
         }
     }
 
+    fn tick_seconds(&self) -> f32 {
+        self.world.client.state.world.tick_seconds()
+    }
+
     pub fn due_ticks(&mut self, dt: f32) -> u32 {
+        let step = self.tick_seconds();
         self.accum += dt.clamp(0.0, 0.25);
         let mut n = 0;
-        while self.accum >= TICK_SECONDS && n < MAX_TICKS_PER_FRAME {
-            self.accum -= TICK_SECONDS;
+        while self.accum >= step && n < MAX_TICKS_PER_FRAME {
+            self.accum -= step;
             n += 1;
         }
         if n == MAX_TICKS_PER_FRAME {
@@ -534,7 +562,7 @@ impl Play {
     }
 
     pub fn partial(&self) -> f32 {
-        (self.accum / TICK_SECONDS).clamp(0.0, 1.0)
+        (self.accum / self.tick_seconds()).clamp(0.0, 1.0)
     }
 
     fn busy(&self) -> bool {
@@ -558,7 +586,7 @@ impl Play {
     }
 
     pub fn tick(&mut self) {
-        if self.closed.is_some() {
+        if self.closed.is_some() || self.transfer.is_some() {
             return;
         }
         self.ticks += 1;
@@ -580,7 +608,6 @@ impl Play {
             self.gameplay();
             self.sounds_tick();
         }
-        self.hud.tick();
         self.screens_tick();
         if let Some(audio) = &mut self.audio {
             audio.set_listener(self.cur_eye, self.yaw);
@@ -598,11 +625,23 @@ impl Play {
         if let Some(entities) = &mut self.entities {
             entities.tick(state, sample);
         }
-        if let Some(block_entities) = &mut self.block_entities {
+        let running = state.world.runs_normally;
+        if let Some(block_entities) = &mut self.block_entities
+            && running
+        {
             block_entities.tick(state, self.ticks);
         }
         let scoping = self.scoping();
         self.overlays.tick(scoping);
+        let [block, sky] = crate::entities::light_at(
+            &state.chunks,
+            state.player.pos(),
+            state.player.physics.eye_height(),
+        );
+        let darken = ((1.0 - self.sky_factor.clamp(0.0, 1.0)) * 15.0).round() as u8;
+        let raw = block.max(sky.saturating_sub(darken));
+        self.overlays
+            .tick_vignette(crate::overlays::level_brightness(raw));
         self.water_ticks = if self.world.client.state.player.physics.eye_in_water() {
             (self.water_ticks + 1).min(600)
         } else {
@@ -621,9 +660,12 @@ impl Play {
                 server_using,
             });
         }
-        let rain = self
-            .effects
-            .tick(state, DVec3::from(self.cur_eye), &self.options);
+        let rain = if running {
+            self.effects
+                .tick(state, DVec3::from(self.cur_eye), &self.options)
+        } else {
+            None
+        };
         if let (Some(rain), Some(audio)) = (rain, &mut self.audio) {
             let at = rain.pos.map(|v| f64::from(v) + 0.5);
             if rain.above {
@@ -722,10 +764,21 @@ impl Play {
                 entity_id,
                 event: 35,
             } => {
+                let state = &self.world.client.state;
                 if entity_id == local_id {
-                    self.overlays.start_totem();
+                    self.overlays
+                        .start_totem(crate::overlays::totem_stack(state));
                 }
                 self.effects.totem(entity_id);
+                let at = if entity_id == local_id {
+                    Some(state.player.pos())
+                } else {
+                    state.entities.get(entity_id).map(|e| e.pos)
+                };
+                let source = crate::overlays::entity_sound_source(state, entity_id);
+                if let (Some(at), Some(audio)) = (at, &mut self.audio) {
+                    audio.play("item.totem.use", Some(at), 1.0, 1.0, source);
+                }
             }
             ClientEvent::EntityDamaged {
                 entity_id, effects, ..
@@ -761,8 +814,27 @@ impl Play {
                 progress,
             } => self.effects.destruction(entity_id, pos, progress),
             ClientEvent::Explosion {
-                center, particle, ..
-            } => self.effects.explosion(center, &particle),
+                center,
+                radius,
+                particle,
+                sound,
+                block_count,
+                block_particles,
+            } => {
+                self.effects
+                    .explosion(center, radius, &particle, block_count, block_particles);
+                let name = sound.and_then(|s| self.sound_name(&s));
+                if let (Some(name), Some(audio)) = (name, &mut self.audio) {
+                    let pitch = (1.0 + (rand_unit() - rand_unit()) * 0.2) * 0.7;
+                    audio.play(
+                        &name,
+                        Some(center),
+                        4.0,
+                        pitch,
+                        mcr_audio::SoundSource::Blocks,
+                    );
+                }
+            }
             ClientEvent::MapUpdated(id) => self.sync_map(id),
             ClientEvent::Respawned => {
                 self.effects.clear();
@@ -773,15 +845,26 @@ impl Play {
             ClientEvent::Chat { kind, message, .. } => {
                 let text: String = self.gui.ui.flatten(&message).iter().map(|c| c.ch).collect();
                 println!("chat: {}", sanitize_for_log(&text));
-                if kind == ChatKind::ActionBar {
-                    self.hud.show_actionbar();
-                } else {
+                if kind != ChatKind::ActionBar {
                     self.hud
                         .add_chat(&mut self.gui.ui, &message, self.ticks as u32, &self.options);
                 }
             }
-            ClientEvent::Title { .. } => self.hud.show_title(&self.world.client.state),
-            ClientEvent::TitlesCleared => self.hud.clear_titles(),
+            ClientEvent::ChatCleared => self.hud.clear_chat(),
+            ClientEvent::LocalSound {
+                sound,
+                pos,
+                volume,
+                pitch,
+                source,
+            } => {
+                if let Some(audio) = &mut self.audio {
+                    audio.play(sound, Some(pos), volume, pitch, wire_category(source));
+                }
+            }
+            ClientEvent::EntityAnimation { entity_id, action } if action == 1 || action == 2 => {
+                self.effects.crit(entity_id, action == 2);
+            }
             ClientEvent::Toast(toast) => self.add_toast(toast),
             ClientEvent::Disconnected(reason) => {
                 if self.closed.is_none() {
@@ -857,14 +940,7 @@ impl Play {
                 volume,
                 pitch,
             } => {
-                let name = match &sound {
-                    mcr_buf::IdOr::Id(id) => self
-                        .data
-                        .registry("minecraft:sound_event")
-                        .and_then(|r| u32::try_from(*id).ok().and_then(|i| r.name_of(i)))
-                        .map(str::to_owned),
-                    mcr_buf::IdOr::Inline(ev) => Some(ev.location.as_str().to_owned()),
-                };
+                let name = self.sound_name(&sound);
                 let at = pos.or_else(|| {
                     let e = self.world.client.state.entities.get(entity_id?)?;
                     Some(e.pos)
@@ -914,6 +990,17 @@ impl Play {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn sound_name(&self, sound: &mcr_buf::IdOr<mcr_protocol::types::SoundEvent>) -> Option<String> {
+        match sound {
+            mcr_buf::IdOr::Id(id) => self
+                .data
+                .registry("minecraft:sound_event")
+                .and_then(|r| u32::try_from(*id).ok().and_then(|i| r.name_of(i)))
+                .map(str::to_owned),
+            mcr_buf::IdOr::Inline(ev) => Some(ev.location.as_str().to_owned()),
         }
     }
 
@@ -1539,6 +1626,20 @@ impl Play {
             ToastEvent::Recipe { station, result } => {
                 self.gui.toasts.add_recipe(station, result);
             }
+            ToastEvent::LowDiskSpace => {
+                let lang = self.gui.ui.lang();
+                let text = |key: &str| lang.get(key).unwrap_or(key).to_owned();
+                let (title, message) = (
+                    text("chunk.toast.lowDiskSpace"),
+                    text("chunk.toast.lowDiskSpace.description"),
+                );
+                self.gui.toasts.add_system(
+                    &mut self.gui.ui,
+                    mcr_ui::SystemToastId::new(LOW_DISK_SPACE_TOAST),
+                    &title,
+                    Some(&message),
+                );
+            }
         }
     }
 
@@ -1953,6 +2054,7 @@ impl Play {
             )[1];
             effects::apply_underwater(&mut env, self.water_ticks, f32::from(sky));
         }
+        self.sky_factor = env.sky_factor;
         self.prepare_visuals(&camera, partial, aspect, &env);
 
         self.update_gui_size();
@@ -2021,12 +2123,19 @@ impl Play {
             if !self.hud_hidden {
                 let scoping = self.perspective == Perspective::First
                     && self.hand.as_ref().is_some_and(HeldHand::scoping);
+                let state = &self.world.client.state;
+                let [x, _, z] = state.player.pos();
+                let warning = self
+                    .options
+                    .vignette
+                    .then(|| state.world.border.warning_strength(x, z));
                 self.overlays.draw(
                     &mut frame,
                     &mut self.gui.icons,
                     &self.assets,
                     scoping,
                     partial,
+                    warning,
                 );
             }
             if !self.stack.is_empty() {
@@ -2165,6 +2274,11 @@ impl Play {
             .map(|d| (d.pos, (d.progress * 10 / d.total.max(1)).min(9) as u8));
         let decals = self.effects.decals(state, own);
         self.render.renderer.set_destroy_decals(&decals);
+        let distance = f64::from(self.world.render_distance().max(2) * 16);
+        let millis = self.started.elapsed().as_millis();
+        let border =
+            effects::border_visual(state, camera.position.to_array(), distance, partial, millis);
+        self.render.renderer.set_world_border(border, distance);
         self.effects.particles.set_camera(camera.position);
     }
 

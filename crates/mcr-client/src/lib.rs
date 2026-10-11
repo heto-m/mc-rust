@@ -1,6 +1,8 @@
 //! Renderer-independent game client: connection driver, game state, 20 TPS tick and actions.
 
 mod actions;
+#[cfg(test)]
+mod audit_tests;
 mod batch;
 mod client;
 pub mod commands;
@@ -48,7 +50,7 @@ pub use actions::Digging;
 pub use batch::ChunkBatchSizeCalculator;
 pub use client::{Client, Phase};
 pub use commands::{CommandTree, Completion, SuggestSource};
-pub use config::{ClientConfig, OnlineAuth, ResourcePackPolicy};
+pub use config::{ClientConfig, OnlineAuth, ResourcePackPolicy, TransferTarget};
 pub use dialogs::{
     DIALOG_REGISTRY, DialogEnd, DialogLink, DialogReply, DialogRequest, dialog_channel,
     resolve_dialog,
@@ -73,11 +75,13 @@ pub use registry::{Dimension, Registries, Registry, RegistryItem};
 pub use riding::{Ride, Sim};
 pub use slot_display::{holder_items, resolve as resolve_slot_display};
 pub use social::{
-    BossBar, ChatMessage, ChatState, Objective, PlayerInfo, PlayerList, Score, Scoreboard, TabList,
-    Team, Titles,
+    BossBar, ChatMessage, ChatState, MAX_SIDEBAR_ROWS, MAX_TAB_ENTRIES, Objective, PlayerInfo,
+    PlayerList, Score, ScoreStyle, Scoreboard, SidebarRow, TabList, Team, Titles,
+    boss_bars_ordered, format_score, tab_name, team_named_color,
 };
 pub use state::{
     ClientState, CommandReply, Outbox, ServerInfo, SpawnPoint, WorldBorder, WorldInfo,
+    is_trusted_url,
 };
 pub use toast::{ToastEvent, first_stack};
 pub use use_item::{UseKind, UseResult, UseTarget, UsingItem};

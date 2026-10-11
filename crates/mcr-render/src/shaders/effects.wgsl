@@ -103,6 +103,15 @@ fn fs_weather(in: Out) -> @location(0) vec4<f32> {
 }
 
 @fragment
+fn fs_border(in: Out) -> @location(0) vec4<f32> {
+    let t = textureSample(tex, smp, in.uv, 0);
+    if t.a < 0.004 {
+        discard;
+    }
+    return t * in.color;
+}
+
+@fragment
 fn fs_destroy(in: Out) -> @location(0) vec4<f32> {
     let t = textureSample(tex, smp, in.uv, i32(in.color.a * 255.0 + 0.5));
     if t.a < 0.1 {

@@ -3,7 +3,7 @@ use mcr_render::glam::DVec3;
 use mcr_render::synthetic::{Terrain, generate_world};
 use mcr_render::{
     Camera, DestroyDecal, EffectAssets, Environment, FrameInputs, Precipitation, RenderError,
-    Renderer, RendererConfig, Target, WeatherSource,
+    Renderer, RendererConfig, Target, WeatherSource, WorldBorderVisual,
 };
 
 const W: u32 = 960;
@@ -270,4 +270,29 @@ fn hostile_environment_renders_without_panic() {
         sky_light: 1.0,
     })
     .expect("render");
+}
+
+#[test]
+fn world_border_wall_screenshot() {
+    let Some(mut r) = renderer() else { return };
+    let mut s = scene("world_border_off", Environment::overworld(6000, 0.0, 0.0));
+    s.pos = DVec3::new(0.5, 100.0, 0.5);
+    s.pitch = 0.2;
+    let without = shoot(&mut r, &s);
+    r.set_world_border(
+        Some(WorldBorderVisual {
+            min_x: -6.0,
+            max_x: 6.0,
+            min_z: -6.0,
+            max_z: 6.0,
+            color: [0.125, 0.627, 1.0],
+            alpha: 1.0,
+            scroll: 0.25,
+        }),
+        128.0,
+    );
+    s.name = "world_border_on";
+    let with = shoot(&mut r, &s);
+    let (a, b) = (mean(&without, 0..H), mean(&with, 0..H));
+    assert!(b[2] > a[2] + 1.0, "{a:?} -> {b:?}");
 }

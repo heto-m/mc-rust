@@ -1,6 +1,6 @@
 //! Name tags above players and named entities, drawn through the UI text renderer.
 
-use mcr_client::{ClientState, Entity};
+use mcr_client::{ClientState, Entity, ScoreStyle, format_score};
 use mcr_entity_model::mcr_protocol::play::clientbound::ui::{NameTagVisibility, TeamColor};
 use mcr_entity_model::mcr_protocol::types::Component;
 use mcr_entity_model::mcr_protocol::types::entity_data::EntityDataValue;
@@ -27,7 +27,7 @@ pub struct Tag {
     color: Option<u32>,
     prefix: Option<Component>,
     suffix: Option<Component>,
-    score: Option<(i32, Component)>,
+    score: Option<Component>,
 }
 
 fn team_color(color: TeamColor) -> u32 {
@@ -136,9 +136,18 @@ pub fn collect(
             .then(|| board.display_slots.get(&BELOW_NAME_SLOT))
             .flatten()
             .and_then(|objective| {
-                let s = board.scores.get(&(entry.clone(), objective.clone()))?;
                 let o = board.objectives.get(objective)?;
-                Some((s.value, o.display_name.clone()))
+                let value = board
+                    .format_value(&entry, objective, ScoreStyle::Plain)
+                    .unwrap_or_else(|| {
+                        format_score(o.number_format.as_ref(), ScoreStyle::Plain, 0)
+                    });
+                Some(
+                    Component::text("")
+                        .with(value)
+                        .with(Component::text(" "))
+                        .with(o.display_name.clone()),
+                )
             });
         tags.push(Tag {
             anchor,
@@ -233,9 +242,9 @@ pub fn draw(frame: &mut UiFrame<'_>, tags: &[Tag], p: &TagParams<'_>) {
             0xFFFF_FFFF
         };
         let mut y_lift = 0.0;
-        if let Some((value, objective)) = &tag.score {
-            let mut cells = frame.ui().flatten(&Component::text(format!("{value} ")));
-            cells.extend(frame.ui().flatten(objective).into_iter().take(MAX_CELLS));
+        if let Some(score) = &tag.score {
+            let mut cells = frame.ui().flatten(score);
+            cells.truncate(MAX_CELLS * 2);
             draw_line(frame, &cells, sx, sy, px_per_font, color, bg_alpha);
             y_lift = 9.0 * 1.15 * px_per_font;
         }

@@ -20,6 +20,8 @@ pub enum ToastEvent {
         station: ItemStack,
         result: ItemStack,
     },
+    /// The server ran low on disk space and may fail to save the world.
+    LowDiskSpace,
 }
 
 pub fn stack_of(template: &ItemStackTemplate) -> ItemStack {

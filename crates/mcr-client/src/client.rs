@@ -109,7 +109,8 @@ impl Client {
                 mcr_auth::offline::offline_uuid(&config.name)?,
             ),
         };
-        let state = ClientState::new(&config, uuid);
+        let mut state = ClientState::new(&config, uuid);
+        state.server.cookies = config.cookies.clone();
         let mut client = Self {
             conn,
             ids,
@@ -203,6 +204,17 @@ impl Client {
 
     pub fn take_transfer(&mut self) -> Option<(String, u16)> {
         self.transfer.take()
+    }
+
+    /// Vanilla drops the connection as soon as it is told to transfer.
+    fn transferred(&mut self, host: String, port: u16) -> ClientError {
+        self.transfer = Some((host.clone(), port));
+        self.set_phase(Phase::Closed);
+        ClientError::Transferred(Box::new(crate::config::TransferTarget {
+            host,
+            port,
+            cookies: self.state.server.cookies.clone(),
+        }))
     }
 
     pub fn disconnect(self) {
@@ -299,9 +311,10 @@ impl Client {
                 }))?;
             }
             LoginClientbound::CookieRequest(p) => {
+                let payload = self.state.server.cookies.get(p.key.as_str()).cloned();
                 self.send_login(&LoginServerbound::CookieResponse(c::CookieResponse {
                     key: p.key,
-                    payload: None,
+                    payload: payload.as_deref().map(ByteArray),
                 }))?;
             }
         }
@@ -424,18 +437,23 @@ impl Client {
                 }
             }
             ConfigClientbound::Transfer(p) => {
-                self.transfer = Some((p.host.clone(), u16::try_from(p.port).unwrap_or(25565)));
+                let port = u16::try_from(p.port).unwrap_or(25565);
                 self.events.push_back(ClientEvent::Transfer {
-                    host: p.host,
-                    port: u16::try_from(p.port).unwrap_or(25565),
+                    host: p.host.clone(),
+                    port,
                 });
+                return Err(self.transferred(p.host, port));
             }
             ConfigClientbound::ServerLinks(p) => {
-                self.state.server.links = p
-                    .links
-                    .into_iter()
-                    .take(crate::state::MAX_SERVER_LINKS)
-                    .collect();
+                self.state.server.links = crate::state::trusted_links(p.links);
+            }
+            ConfigClientbound::CustomReportDetails(p) => {
+                self.state.server.report_details =
+                    crate::state::bounded_report_details(p.details.0);
+            }
+            ConfigClientbound::ResetChat(_) => {
+                self.state.chat.history.clear();
+                self.events.push_back(ClientEvent::ChatCleared);
             }
             ConfigClientbound::ShowDialog(p) => {
                 if let (Some(link), Some(dialog)) = (
@@ -483,11 +501,12 @@ impl Client {
         self.state.handle_play(packet, &mut out, Instant::now())?;
         let mut reconfigure = false;
         let mut closed = None;
+        let mut transfer = None;
         for event in &out.events {
             match event {
                 ClientEvent::Joined { .. } => self.joined = true,
                 ClientEvent::Reconfiguring => reconfigure = true,
-                ClientEvent::Transfer { host, port } => self.transfer = Some((host.clone(), *port)),
+                ClientEvent::Transfer { host, port } => transfer = Some((host.clone(), *port)),
                 ClientEvent::Disconnected(DisconnectReason::Server(r)) => closed = Some(r.clone()),
                 _ => {}
             }
@@ -507,6 +526,9 @@ impl Client {
             }))?;
         }
         self.events.append(&mut out.events);
+        if let Some((host, port)) = transfer {
+            return Err(self.transferred(host, port));
+        }
         if let Some(reason) = closed {
             self.set_phase(Phase::Closed);
             return Err(ClientError::Disconnected(Box::new(reason)));

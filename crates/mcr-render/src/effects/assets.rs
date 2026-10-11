@@ -68,6 +68,7 @@ pub struct EffectAssets {
     pub rain: EffectImage,
     pub snow: EffectImage,
     pub destroy: [EffectImage; 10],
+    pub forcefield: EffectImage,
 }
 
 impl EffectAssets {
@@ -93,6 +94,7 @@ impl EffectAssets {
             rain: get("environment/rain", clear),
             snow: get("environment/snow", clear),
             destroy: std::array::from_fn(|i| get(&format!("block/destroy_stage_{i}"), clear)),
+            forcefield: get("misc/forcefield", clear),
         }
     }
 }

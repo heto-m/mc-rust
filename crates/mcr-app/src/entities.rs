@@ -303,10 +303,9 @@ impl EntityLayer {
 
     pub fn on_event(&mut self, event: &ClientEvent, local_id: i32) {
         let (id, f): (i32, Mutation) = match *event {
-            ClientEvent::EntityAnimation { entity_id, action } => match action {
-                0 | 3 => (entity_id, Box::new(move |t| t.start_swing(action == 3))),
-                _ => return,
-            },
+            ClientEvent::EntitySwing { entity_id, offhand } => {
+                (entity_id, Box::new(move |t| t.start_swing(offhand)))
+            }
             ClientEvent::EntityEvent { entity_id, event } => match event {
                 33 | 36 | 37 | 44 | 57 => (entity_id, Box::new(|t| t.hurt = HURT_TICKS)),
                 3 => (entity_id, Box::new(|t| t.death = t.death.max(1))),

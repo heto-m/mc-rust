@@ -1,9 +1,11 @@
 use mcr_buf::{BlockPos, Identifier};
-use mcr_protocol::play::clientbound::world::SoundSource;
+use mcr_protocol::play::clientbound::world::{ExplosionParticle, SoundSource};
 use mcr_protocol::types::Component;
 use mcr_protocol::types::{Particle, SoundEvent};
 use mcr_world::ChunkPos;
 use uuid::Uuid;
+
+pub const MAX_EXPLOSION_PARTICLE_KINDS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisconnectReason {
@@ -168,9 +170,14 @@ pub enum ClientEvent {
     },
     /// Game event 4: the End poem and credits.
     ShowCredits,
+    /// The `animate` packet: 0 wake up, 1 critical hit, 2 magic critical hit.
     EntityAnimation {
         entity_id: i32,
         action: u8,
+    },
+    EntitySwing {
+        entity_id: i32,
+        offhand: bool,
     },
     EntityDamaged {
         entity_id: i32,
@@ -224,7 +231,21 @@ pub enum ClientEvent {
         center: [f64; 3],
         radius: f32,
         particle: Particle,
+        /// `None` when the server asked for a silent explosion.
+        sound: Option<mcr_buf::IdOr<SoundEvent>>,
+        block_count: i32,
+        block_particles: Vec<ExplosionParticle>,
     },
+    /// A sound the client plays for itself, e.g. from a game event.
+    LocalSound {
+        sound: &'static str,
+        pos: [f64; 3],
+        volume: f32,
+        pitch: f32,
+        source: SoundSource,
+    },
+    /// Configuration's `reset_chat`: the chat starts empty after reconfiguring.
+    ChatCleared,
     Title {
         title: Option<Component>,
         subtitle: Option<Component>,

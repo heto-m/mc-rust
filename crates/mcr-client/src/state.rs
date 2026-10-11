@@ -4,7 +4,7 @@ use mcr_buf::{BlockPos, Identifier};
 use mcr_data::Version;
 use mcr_nbt::Compound;
 use mcr_physics::{Attributes, BodyScratch, Effects, PhysicsData};
-use mcr_protocol::common::{ResourcePackAction, ResourcePackResponse, ServerLink};
+use mcr_protocol::common::{ReportDetail, ResourcePackAction, ResourcePackResponse, ServerLink};
 use mcr_protocol::dispatch::PlayServerbound;
 use mcr_protocol::types::Component;
 use mcr_world::{BlockState, ChunkStore, LightTable, WorldConfig};
@@ -25,6 +25,7 @@ use crate::social::{BossBar, ChatState, PlayerList, Scoreboard, TabList, Titles}
 pub const MAX_COOKIES: usize = 64;
 pub const MAX_COOKIE_BYTES: usize = 5120;
 pub const MAX_SERVER_LINKS: usize = 64;
+pub const MAX_REPORT_DETAILS: usize = 32;
 pub const MAX_BLOCK_ENTITIES: usize = 1 << 18;
 
 /// What applying a packet produced: events for the UI and packets to send back.
@@ -54,26 +55,34 @@ pub struct ClockState {
     pub rate: f32,
 }
 
+/// Vanilla's client world border; a size change lerps linearly over a number of game ticks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorldBorder {
     pub center_x: f64,
     pub center_z: f64,
     pub size: f64,
+    pub previous_size: f64,
+    pub from_size: f64,
     pub target_size: f64,
     pub lerp_ticks_left: i64,
     pub lerp_total_ticks: i64,
     pub absolute_max_size: i32,
     pub warning_blocks: i32,
+    /// In ticks since 26.x.
     pub warning_time: i32,
 }
+
+pub const DEFAULT_BORDER_SIZE: f64 = 5.9999968e7;
 
 impl Default for WorldBorder {
     fn default() -> Self {
         Self {
             center_x: 0.0,
             center_z: 0.0,
-            size: 5.9999968e7,
-            target_size: 5.9999968e7,
+            size: DEFAULT_BORDER_SIZE,
+            previous_size: DEFAULT_BORDER_SIZE,
+            from_size: DEFAULT_BORDER_SIZE,
+            target_size: DEFAULT_BORDER_SIZE,
             lerp_ticks_left: 0,
             lerp_total_ticks: 0,
             absolute_max_size: 29_999_984,
@@ -83,27 +92,85 @@ impl Default for WorldBorder {
     }
 }
 
+fn border_size(v: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(0.0, DEFAULT_BORDER_SIZE)
+    } else {
+        DEFAULT_BORDER_SIZE
+    }
+}
+
 impl WorldBorder {
-    pub fn set_lerp(&mut self, from: f64, to: f64, millis: i64) {
-        self.size = from;
+    /// `ticks` of 0 or a no-op change snaps straight to `to`.
+    pub fn set_lerp(&mut self, from: f64, to: f64, ticks: i64) {
+        let (from, to) = (border_size(from), border_size(to));
+        self.from_size = from;
         self.target_size = to;
-        let ticks = (millis / 50).clamp(0, i64::from(i32::MAX));
+        if ticks <= 0 || from == to {
+            self.lerp_total_ticks = 0;
+            self.lerp_ticks_left = 0;
+            self.size = to;
+            self.previous_size = to;
+            return;
+        }
         self.lerp_total_ticks = ticks;
         self.lerp_ticks_left = ticks;
-        if ticks == 0 {
-            self.size = to;
-        }
+        self.size = from;
+        self.previous_size = from;
     }
 
     pub fn tick(&mut self) {
-        if self.lerp_ticks_left > 0 {
-            let step = (self.target_size - self.size) / self.lerp_ticks_left as f64;
-            self.size += step;
-            self.lerp_ticks_left -= 1;
-            if self.lerp_ticks_left == 0 {
-                self.size = self.target_size;
-            }
+        self.previous_size = self.size;
+        if self.lerp_ticks_left <= 0 {
+            return;
         }
+        self.lerp_ticks_left -= 1;
+        let total = self.lerp_total_ticks as f64;
+        let progress = (total - self.lerp_ticks_left as f64) / total;
+        self.size = if progress < 1.0 {
+            self.from_size + (self.target_size - self.from_size) * progress
+        } else {
+            self.target_size
+        };
+    }
+
+    pub fn set_center(&mut self, x: f64, z: f64) {
+        if x.is_finite() && z.is_finite() {
+            self.center_x = x.clamp(-DEFAULT_BORDER_SIZE, DEFAULT_BORDER_SIZE);
+            self.center_z = z.clamp(-DEFAULT_BORDER_SIZE, DEFAULT_BORDER_SIZE);
+        }
+    }
+
+    pub fn size_at(&self, partial: f32) -> f64 {
+        self.previous_size + (self.size - self.previous_size) * f64::from(partial)
+    }
+
+    /// Blocks per tick while moving.
+    pub fn lerp_speed(&self) -> f64 {
+        if self.lerp_ticks_left > 0 {
+            (self.from_size - self.target_size).abs() / self.lerp_total_ticks as f64
+        } else {
+            0.0
+        }
+    }
+
+    pub fn distance_to(&self, x: f64, z: f64) -> f64 {
+        let half = self.size / 2.0;
+        let dx = half - (x - self.center_x).abs();
+        let dz = half - (z - self.center_z).abs();
+        dx.min(dz)
+    }
+
+    /// Vanilla's red vignette strength near the border, 0 when far enough inside.
+    pub fn warning_strength(&self, x: f64, z: f64) -> f32 {
+        let moving = (self.lerp_speed() * f64::from(self.warning_time))
+            .min((self.target_size - self.size).abs());
+        let warning = f64::from(self.warning_blocks).max(moving);
+        let d = self.distance_to(x, z);
+        if warning <= 0.0 || !d.is_finite() || d >= warning {
+            return 0.0;
+        }
+        (1.0 - d / warning).clamp(0.0, 1.0) as f32
     }
 }
 
@@ -127,6 +194,8 @@ pub struct WorldInfo {
     pub tick_rate: f32,
     pub frozen: bool,
     pub frozen_ticks_to_run: i32,
+    /// Vanilla's `runGameElements`: false while `/tick freeze` holds the world still.
+    pub runs_normally: bool,
     pub difficulty: u8,
     pub difficulty_locked: bool,
     pub hardcore: bool,
@@ -148,6 +217,7 @@ impl Default for WorldInfo {
             tick_rate: 20.0,
             frozen: false,
             frozen_ticks_to_run: 0,
+            runs_normally: true,
             difficulty: 2,
             difficulty_locked: false,
             hardcore: false,
@@ -168,16 +238,26 @@ impl WorldInfo {
     }
 
     pub fn tick(&mut self) {
-        self.border.tick();
-        let running = !self.frozen || self.frozen_ticks_to_run > 0;
-        if self.frozen && self.frozen_ticks_to_run > 0 {
+        self.runs_normally = !self.frozen || self.frozen_ticks_to_run > 0;
+        if self.frozen_ticks_to_run > 0 {
             self.frozen_ticks_to_run -= 1;
         }
-        if running {
+        if self.runs_normally {
+            self.border.tick();
             self.game_time += 1;
             for clock in self.clocks.values_mut() {
                 clock.ticks += f64::from(clock.rate);
             }
+        }
+    }
+
+    /// Client tick length: vanilla slows down with a server running under 20 TPS but never speeds up.
+    pub fn tick_seconds(&self) -> f32 {
+        const DEFAULT: f32 = 0.05;
+        if self.runs_normally && self.tick_rate.is_finite() && self.tick_rate > 0.0 {
+            DEFAULT.max(1.0 / self.tick_rate)
+        } else {
+            DEFAULT
         }
     }
 }
@@ -194,6 +274,37 @@ pub struct ServerInfo {
     pub max_players: i32,
     pub reduced_debug_info: bool,
     pub do_limited_crafting: bool,
+    /// Extra crash-report lines the server asked for.
+    pub report_details: Vec<(String, String)>,
+}
+
+/// Keeps the links vanilla would trust: an `http` or `https` URI without spaces or control characters.
+pub fn trusted_links(links: Vec<ServerLink>) -> Vec<ServerLink> {
+    links
+        .into_iter()
+        .filter(|l| is_trusted_url(&l.url))
+        .take(MAX_SERVER_LINKS)
+        .collect()
+}
+
+pub fn is_trusted_url(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return false;
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    (scheme == "http" || scheme == "https")
+        && !rest.is_empty()
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+pub fn bounded_report_details(
+    details: impl IntoIterator<Item = ReportDetail>,
+) -> Vec<(String, String)> {
+    details
+        .into_iter()
+        .take(MAX_REPORT_DETAILS)
+        .map(|d| (d.key, d.value))
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -304,6 +415,18 @@ pub fn default_world_config(
 }
 
 impl ClientState {
+    /// Vanilla's `getCooldownPercent`: the overlay fraction drawn over the stack this frame.
+    pub fn cooldown_percent(&self, stack: &mcr_protocol::types::ItemStack, partial: f32) -> f32 {
+        let Some(c) = self
+            .cooldown_group(stack)
+            .and_then(|key| self.cooldowns.get(&key))
+        else {
+            return 0.0;
+        };
+        let left = c.ends_at as f64 - (self.game_ticks as f64 + f64::from(partial));
+        (left / f64::from(c.total.max(1))).clamp(0.0, 1.0) as f32
+    }
+
     /// Remaining fraction of the cooldown covering the stack, if any.
     pub fn cooldown_progress(&self, stack: &mcr_protocol::types::ItemStack) -> Option<f32> {
         let key = self.cooldown_group(stack)?;
@@ -424,16 +547,21 @@ impl ClientState {
         self.cooldowns.retain(|_, c| c.ends_at > now);
         let eye = f64::from(self.player.physics.eye_height());
         let pos = self.player.physics.pos;
+        self.world.tick();
+        self.titles.tick();
+        let frozen = !self.world.runs_normally;
         let mut cx = SimContext {
             world: &self.chunks,
             data: PhysicsData::v26_3(),
             scratch: &mut self.sim_scratch,
             follow: Some([pos[0], pos[1] + eye / 2.0, pos[2]]),
+            frozen_except: frozen.then_some(self.sim_kinds.player_type),
         };
         self.entities.tick(&mut cx);
-        self.tick_pickups();
+        if !frozen {
+            self.tick_pickups();
+        }
         self.player.tick_hurt();
-        self.world.tick();
     }
 
     /// Where a collector's pickup animation aims: halfway up its body.

@@ -32,6 +32,10 @@ impl GameView for StateView<'_> {
         self.container().slots.get(index)
     }
 
+    fn cooldown(&self, stack: &ItemStack) -> f32 {
+        self.state.cooldown_percent(stack, 0.0)
+    }
+
     fn carried(&self) -> Option<&ItemStack> {
         Some(&self.state.inventory.cursor)
     }

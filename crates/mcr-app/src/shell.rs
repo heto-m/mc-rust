@@ -9,7 +9,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use mcr_client::{
-    Client, ClientConfig, DialogEnd, DialogReply, DialogRequest, dialog_channel, sanitize_for_log,
+    Client, ClientConfig, ClientError, DialogEnd, DialogReply, DialogRequest, TransferTarget,
+    dialog_channel, sanitize_for_log,
 };
 use mcr_nbt::Value;
 use mcr_protocol::types::text::Component;
@@ -31,7 +32,13 @@ use crate::respacks::{PackAction, ResourceStack, ServerPacks, downloads_dir};
 use crate::servers::FileServers;
 use crate::settings::{OptionsScreen, Settings, SharedSettings};
 
-type Connect = Receiver<Result<Client, String>>;
+/// A join either lands, fails with a message, or is redirected by a `transfer` packet.
+enum ConnectFailure {
+    Message(String),
+    Transfer(TransferTarget),
+}
+
+type Connect = Receiver<Result<Client, ConnectFailure>>;
 
 const MAX_DIALOG_REQUESTS_PER_FRAME: usize = 16;
 
@@ -447,8 +454,15 @@ impl Shell {
     }
 
     fn connect(&mut self, address: &str, with_screen: bool) {
+        self.connect_with(address, with_screen, None);
+    }
+
+    fn connect_with(&mut self, address: &str, with_screen: bool, transfer: Option<TransferTarget>) {
         let options = self.settings.borrow().file.options.clone();
         let mut config = ClientConfig::default().with_addr(address);
+        if let Some(target) = &transfer {
+            config = config.for_transfer(target);
+        }
         config.name = self.cfg.name.clone();
         config.view_distance = self
             .cfg
@@ -465,7 +479,10 @@ impl Shell {
         self.current_address = address.to_owned();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let result = Client::connect(config).map_err(|e| sanitize_for_log(&e.to_string()));
+            let result = Client::connect(config).map_err(|e| match e {
+                ClientError::Transferred(target) => ConnectFailure::Transfer(*target),
+                other => ConnectFailure::Message(sanitize_for_log(&other.to_string())),
+            });
             let _ = tx.send(result);
         });
         self.connecting = Some(rx);
@@ -493,7 +510,12 @@ impl Shell {
                 self.close_dialog_screens();
                 self.stack.pop();
             }
-            Err(message) => {
+            Err(ConnectFailure::Transfer(target)) => {
+                self.end_pack_session();
+                self.close_connecting_screen();
+                self.follow_transfer(target);
+            }
+            Err(ConnectFailure::Message(message)) => {
                 self.end_pack_session();
                 self.failure = Some(message.clone());
                 self.close_connecting_screen();
@@ -584,10 +606,24 @@ impl Shell {
         self.menu_actions(actions);
     }
 
+    /// Vanilla reconnects to the new address straight away, carrying the cookies over.
+    fn follow_transfer(&mut self, target: TransferTarget) {
+        let address = format!("{}:{}", target.host, target.port);
+        println!("transfer to {}", sanitize_for_log(&address));
+        self.connect_with(&address, true, Some(target));
+    }
+
     fn check_session(&mut self) {
         let Some(play) = &mut self.play else { return };
         if play.quit {
             self.quit = true;
+        }
+        if let Some(target) = play.transfer.take() {
+            let Some(play) = self.play.take() else { return };
+            self.parts = Some(play.finish());
+            self.end_pack_session();
+            self.follow_transfer(target);
+            return;
         }
         if play.leave {
             self.end_session(None);

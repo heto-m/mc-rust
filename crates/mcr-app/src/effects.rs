@@ -9,12 +9,14 @@ use mcr_particles::{
     Fluid, ParticleAssets, ParticleAtlas, ParticleEngine, ParticleWorld,
     weather::{RainSound, RainTicker},
 };
-use mcr_protocol::play::clientbound::world::{LevelParticles, ParticleRandomization};
+use mcr_protocol::play::clientbound::world::{
+    ExplosionParticle, LevelParticles, ParticleRandomization,
+};
 use mcr_protocol::types::Particle;
 use mcr_render::glam::DVec3;
 use mcr_render::{
     CloudMode, CloudSettings, DestroyDecal, EffectAssets, EffectImage, Environment, Precipitation,
-    WeatherSource,
+    WeatherSource, WorldBorderVisual,
 };
 use mcr_settings::Options;
 use mcr_settings::value::{CloudStatus, ParticleStatus};
@@ -24,7 +26,27 @@ use rustc_hash::FxHashMap;
 use crate::assets::Assets;
 
 const MAX_TRACKERS: usize = 64;
-const TRACKER_TICKS: u8 = 30;
+const TOTEM_TICKS: u8 = 30;
+const CRIT_TICKS: u8 = 3;
+const MAX_EXPLOSION_PARTICLES: i64 = 512;
+const MAX_PENDING_EXPLOSIONS: usize = 64;
+
+/// Vanilla's `TrackingEmitter`: bursts of a particle around an entity for a few ticks.
+#[derive(Debug, Clone, Copy)]
+struct Tracker {
+    entity: i32,
+    particle: &'static str,
+    age: u8,
+    lifetime: u8,
+}
+
+#[derive(Debug, Clone)]
+struct PendingExplosion {
+    center: [f64; 3],
+    radius: f32,
+    block_count: i32,
+    particles: Vec<ExplosionParticle>,
+}
 const BIOME_REGISTRY: &str = "minecraft:worldgen/biome";
 const SNOW_TEMPERATURE: f32 = 0.15;
 const MAX_DECALS: usize = 128;
@@ -223,7 +245,8 @@ pub struct WorldEffects {
     lightning_type: i32,
     status: ParticleStatus,
     counter: u32,
-    trackers: Vec<(i32, u8)>,
+    trackers: Vec<Tracker>,
+    explosions: Vec<PendingExplosion>,
 }
 
 impl std::fmt::Debug for WorldEffects {
@@ -250,6 +273,7 @@ impl WorldEffects {
             status: ParticleStatus::All,
             counter: 0,
             trackers: Vec::new(),
+            explosions: Vec::new(),
         }
     }
 
@@ -403,46 +427,78 @@ impl WorldEffects {
     /// The vanilla seed emitter has no sprites, so its 8 ticks of `explosion` bursts are driven here.
     /// Emits the packet's own particle (an emitter for big blasts) the way vanilla's `addParticle` does.
     pub fn totem(&mut self, entity_id: i32) {
+        self.track(entity_id, "minecraft:totem_of_undying", TOTEM_TICKS);
+    }
+
+    /// Critical-hit sparks from the `animate` packet; `magic` for enchanted hits.
+    pub fn crit(&mut self, entity_id: i32, magic: bool) {
+        let particle = if magic {
+            "minecraft:enchanted_hit"
+        } else {
+            "minecraft:crit"
+        };
+        self.track(entity_id, particle, CRIT_TICKS);
+    }
+
+    fn track(&mut self, entity: i32, particle: &'static str, lifetime: u8) {
         if self.trackers.len() < MAX_TRACKERS {
-            self.trackers.push((entity_id, 0));
+            self.trackers.push(Tracker {
+                entity,
+                particle,
+                age: 0,
+                lifetime,
+            });
         }
     }
 
+    fn random_signed(&mut self) -> f64 {
+        self.counter = self
+            .counter
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        f64::from(self.counter >> 8) / f64::from(1u32 << 24) * 2.0 - 1.0
+    }
+
+    fn random_unit(&mut self) -> f64 {
+        (self.random_signed() + 1.0) / 2.0
+    }
+
     fn tick_trackers(&mut self, state: &ClientState) {
-        let Some(id) = mcr_data::v26_3()
-            .registry("minecraft:particle_type")
-            .and_then(|r| r.id_of("minecraft:totem_of_undying"))
-        else {
+        let data = mcr_data::v26_3();
+        let Some(registry) = data.registry("minecraft:particle_type") else {
             self.trackers.clear();
             return;
         };
-        let particle = Particle::Simple(id as i32);
         let mut trackers = std::mem::take(&mut self.trackers);
-        for (entity, age) in &mut trackers {
-            let (pos, height) = if *entity == state.player.entity_id {
-                (state.player.pos(), 1.8)
-            } else if let Some(e) = state.entities.get(*entity) {
-                (e.pos, 1.0)
+        for t in &mut trackers {
+            let body = if t.entity == state.player.entity_id {
+                Some((state.player.pos(), 0.6, 1.8))
             } else {
-                *age = TRACKER_TICKS;
+                state.entities.get(t.entity).map(|e| {
+                    let size = data
+                        .entity_type_info(e.kind as u32)
+                        .map_or((0.6, 1.0), |i| (f64::from(i.width), f64::from(i.height)));
+                    (e.pos, size.0, size.1)
+                })
+            };
+            let (Some((pos, width, height)), Some(id)) = (body, registry.id_of(t.particle)) else {
+                t.age = t.lifetime;
                 continue;
             };
+            let particle = Particle::Simple(id as i32);
             for _ in 0..16 {
-                let mut r = || {
-                    self.counter = self
-                        .counter
-                        .wrapping_mul(1_664_525)
-                        .wrapping_add(1_013_904_223);
-                    f64::from(self.counter >> 8) / f64::from(1u32 << 24) * 2.0 - 1.0
-                };
-                let (x, y, z) = (r(), r(), r());
+                let (x, y, z) = (
+                    self.random_signed(),
+                    self.random_signed(),
+                    self.random_signed(),
+                );
                 if x * x + y * y + z * z > 1.0 {
                     continue;
                 }
                 let at = [
-                    pos[0] + x / 4.0,
+                    pos[0] + width * x / 4.0,
                     pos[1] + height * (0.5 + y / 4.0),
-                    pos[2] + z / 4.0,
+                    pos[2] + width * z / 4.0,
                 ];
                 self.emit(
                     &particle,
@@ -453,15 +509,85 @@ impl WorldEffects {
                     true,
                 );
             }
-            *age += 1;
+            t.age += 1;
         }
-        trackers.retain(|(_, age)| *age < TRACKER_TICKS);
+        trackers.retain(|t| t.age < t.lifetime);
         self.trackers = trackers;
     }
 
-    pub fn explosion(&mut self, center: [f64; 3], particle: &Particle) {
-        if center.iter().all(|c| c.is_finite()) {
-            self.emit(particle, center, [1.0, 0.0, 0.0], [1.0; 3], 0, true);
+    /// The packet's own particle now; block-debris particles follow on the next tick.
+    pub fn explosion(
+        &mut self,
+        center: [f64; 3],
+        radius: f32,
+        particle: &Particle,
+        block_count: i32,
+        particles: Vec<ExplosionParticle>,
+    ) {
+        if !center.iter().all(|c| c.is_finite()) {
+            return;
+        }
+        self.emit(particle, center, [1.0, 0.0, 0.0], [1.0; 3], 0, true);
+        if particles.iter().any(|p| p.weight > 0)
+            && radius.is_finite()
+            && block_count > 0
+            && self.explosions.len() < MAX_PENDING_EXPLOSIONS
+        {
+            self.explosions.push(PendingExplosion {
+                center,
+                radius: radius.clamp(0.0, 256.0),
+                block_count,
+                particles,
+            });
+        }
+    }
+
+    /// Vanilla's `ClientExplosionTracker`: up to 512 debris particles a tick, shared by block count.
+    fn tick_explosions(&mut self, state: &ClientState) {
+        let explosions = std::mem::take(&mut self.explosions);
+        if self.status != ParticleStatus::All {
+            return;
+        }
+        let total: i64 = explosions.iter().map(|e| i64::from(e.block_count)).sum();
+        for _ in 0..total.min(MAX_EXPLOSION_PARTICLES) {
+            let mut pick = (self.random_unit() * total as f64) as i64;
+            let Some(e) = explosions.iter().find(|e| {
+                pick -= i64::from(e.block_count);
+                pick < 0
+            }) else {
+                continue;
+            };
+            let (x, y, z) = (
+                self.random_signed(),
+                self.random_signed(),
+                self.random_signed(),
+            );
+            let len = (x * x + y * y + z * z).sqrt();
+            if len < 1.0e-4 {
+                continue;
+            }
+            let dir = [x / len, y / len, z / len];
+            let r = self.random_unit().cbrt() * f64::from(e.radius);
+            let local = dir.map(|d| d * r);
+            let at = [0, 1, 2].map(|i| e.center[i] + local[i]);
+            if !is_air(state, at) {
+                continue;
+            }
+            let total_weight: i64 = e.particles.iter().map(|p| i64::from(p.weight.max(0))).sum();
+            let mut w = (self.random_unit() * total_weight as f64) as i64;
+            let Some(info) = e.particles.iter().find(|p| {
+                w -= i64::from(p.weight.max(0));
+                w < 0
+            }) else {
+                continue;
+            };
+            let (a, b) = (self.random_unit(), self.random_unit());
+            let base = 0.5 / (r / f64::from(e.radius.max(1.0e-3)) + 0.1) * a * b + 0.3;
+            let speed = base * f64::from(info.speed);
+            let pos = [0, 1, 2].map(|i| e.center[i] + local[i] * f64::from(info.scaling));
+            let vel = dir.map(|d| (d * speed) as f32);
+            let particle = info.particle.clone();
+            self.emit(&particle, pos, vel, [1.0; 3], 0, false);
         }
     }
 
@@ -477,6 +603,7 @@ impl WorldEffects {
         let world = ClientParticleWorld(state);
         self.particles.tick(&world);
         self.tick_trackers(state);
+        self.tick_explosions(state);
         let rain = state.world.rain_level;
         if rain > 0.0 && self.status != ParticleStatus::Minimal {
             self.refresh_biomes(state);
@@ -502,6 +629,40 @@ pub fn cloud_settings(options: &Options) -> CloudSettings {
         },
         range_chunks: options.cloud_range.clamp(2, 128) as u32,
     }
+}
+
+/// Vanilla's border wall look: status colour and `(1 - distance / render distance)^4` opacity.
+pub fn border_visual(
+    state: &ClientState,
+    camera: [f64; 3],
+    distance: f64,
+    partial: f32,
+    millis: u128,
+) -> Option<WorldBorderVisual> {
+    let b = &state.world.border;
+    let half = b.size_at(partial) / 2.0;
+    let to_border = b.distance_to(camera[0], camera[2]);
+    let alpha = (1.0 - to_border / distance).powi(4).clamp(0.0, 1.0) as f32;
+    if !half.is_finite() || !alpha.is_finite() || alpha <= 0.0 {
+        return None;
+    }
+    let rgb = if b.lerp_ticks_left <= 0 {
+        0x20A0FF
+    } else if b.target_size < b.from_size {
+        0xFF3030
+    } else {
+        0x40FF80
+    };
+    let channel = |shift: u32| ((rgb >> shift) & 0xFF) as f32 / 255.0;
+    Some(WorldBorderVisual {
+        min_x: b.center_x - half,
+        max_x: b.center_x + half,
+        min_z: b.center_z - half,
+        max_z: b.center_z + half,
+        color: [channel(16), channel(8), channel(0)],
+        alpha,
+        scroll: (millis % 3000) as f32 / 3000.0,
+    })
 }
 
 pub fn camera_in_water(chunks: &mcr_world::ChunkStore, pos: [f64; 3]) -> bool {
@@ -623,4 +784,13 @@ mod underwater_tests {
         assert!((env.fog_end - 96.0).abs() < 1e-3);
         assert!(env.fog_color[2] > env.fog_color[0]);
     }
+}
+
+fn is_air(state: &ClientState, at: [f64; 3]) -> bool {
+    let [x, y, z] = at.map(|v| v.floor() as i32);
+    state.chunks.block(x, y, z).is_none_or(|b| {
+        mcr_data::v26_3()
+            .block_state(u32::from(b.0))
+            .is_none_or(|s| s.is_air())
+    })
 }

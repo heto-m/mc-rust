@@ -25,6 +25,9 @@ pub enum ClientError {
     Invalid(String),
     #[error("server requires online mode; no account configured")]
     OnlineModeRequired,
+    /// The server handed the player to another server; follow with [`crate::ClientConfig::for_transfer`].
+    #[error("transferred to {}:{}", crate::events::sanitize_for_log(&.0.host), .0.port)]
+    Transferred(Box<crate::config::TransferTarget>),
 }
 
 pub type Result<T> = std::result::Result<T, ClientError>;

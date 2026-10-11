@@ -55,6 +55,11 @@ pub trait GameView {
         None
     }
 
+    /// Fraction of the item cooldown overlay drawn over `stack`.
+    fn cooldown(&self, _stack: &ItemStack) -> f32 {
+        0.0
+    }
+
     fn carried(&self) -> Option<&ItemStack> {
         None
     }
@@ -329,7 +334,7 @@ impl<'a, 'f> RenderCx<'a, 'f> {
             return;
         };
         let view = view.with_trim_materials(self.view.trim_materials());
-        let item = view.view(0.0);
+        let item = view.view(self.view.cooldown(stack));
         self.icons.draw_with_decorations(self.frame, &item, x, y);
     }
 

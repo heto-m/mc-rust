@@ -9,7 +9,9 @@ use wgpu::util::DeviceExt;
 use crate::animation::{ANIM_TABLE_LEN, AnimationTable, SpriteAnimation};
 use crate::arena::Arena;
 use crate::camera::Camera;
-use crate::effects::{CloudSettings, DestroyDecal, EffectAssets, Effects, WeatherSource};
+use crate::effects::{
+    CloudSettings, DestroyDecal, EffectAssets, Effects, WeatherSource, WorldBorderVisual,
+};
 use crate::environment::{Environment, Skybox};
 use crate::graph::VisibilityGraph;
 use crate::mesh::SectionMesh;
@@ -1169,6 +1171,11 @@ impl Renderer {
     /// Blocks currently being broken (own or other players'); replaces the previous list.
     pub fn set_destroy_decals(&mut self, decals: &[DestroyDecal]) {
         self.effects.set_decals(decals);
+    }
+
+    /// The world border walls, drawn when the camera is within `distance` blocks of one.
+    pub fn set_world_border(&mut self, border: Option<WorldBorderVisual>, distance: f64) {
+        self.effects.set_border(border, distance);
     }
 
     /// Animated sprites (packed layer plus frame list); the table is evaluated at the current tick.

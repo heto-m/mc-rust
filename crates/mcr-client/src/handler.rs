@@ -11,6 +11,7 @@ use mcr_protocol::play::clientbound::player::{
     BoundChatType, CommonPlayerSpawnInfo, EntityAnchor, PlayerLookAt,
 };
 use mcr_protocol::play::clientbound::ui::{BossEventOperation, ObjectiveAction};
+use mcr_protocol::play::clientbound::world::SoundSource;
 use mcr_protocol::play::serverbound as sb;
 use mcr_protocol::types::Component;
 use mcr_protocol::types::ItemStack;
@@ -28,9 +29,10 @@ use crate::inventory::Inventory;
 use crate::registry::{CHAT_TYPE, Dimension};
 use crate::social::{BossBar, ChatMessage, Score};
 use crate::state::{
-    ClientState, MAX_BLOCK_ENTITIES, MAX_COOKIE_BYTES, MAX_COOKIES, MAX_SERVER_LINKS, Outbox,
-    SpawnPoint, resource_pack_responses,
+    ClientState, MAX_BLOCK_ENTITIES, MAX_COOKIE_BYTES, MAX_COOKIES, Outbox, SpawnPoint,
+    resource_pack_responses,
 };
+use crate::toast::ToastEvent;
 
 pub const KNOWN_PACK_NAMESPACE: &str = "minecraft";
 pub const KNOWN_PACK_ID: &str = "core";
@@ -96,9 +98,11 @@ impl ClientState {
                     out.replies.push(S::ResourcePack(response));
                 }
             }
-            P::ServerLinks(p) => {
-                self.server.links = p.links.into_iter().take(MAX_SERVER_LINKS).collect();
+            P::ServerLinks(p) => self.server.links = crate::state::trusted_links(p.links),
+            P::CustomReportDetails(p) => {
+                self.server.report_details = crate::state::bounded_report_details(p.details.0)
             }
+            P::LowDiskSpaceWarning(_) => out.event(ClientEvent::Toast(ToastEvent::LowDiskSpace)),
             P::ServerData(p) => self.server.motd = Some(p.motd),
             P::GameRuleValues(p) => {
                 for (k, v) in p.values.0.into_iter().take(1024) {
@@ -252,7 +256,14 @@ impl ClientState {
                 out.event(ClientEvent::Explosion {
                     center: v3(&p.center),
                     radius: p.radius,
-                    particle: p.particle.clone(),
+                    particle: p.particle,
+                    sound: p.play_sound.then_some(p.sound),
+                    block_count: p.block_count.max(0),
+                    block_particles: p
+                        .block_particles
+                        .into_iter()
+                        .take(crate::events::MAX_EXPLOSION_PARTICLE_KINDS)
+                        .collect(),
                 });
             }
             P::SetTime(p) => {
@@ -284,17 +295,13 @@ impl ClientState {
             }
             P::InitializeBorder(p) => {
                 let b = &mut self.world.border;
-                b.center_x = p.new_center_x;
-                b.center_z = p.new_center_z;
+                b.set_center(p.new_center_x, p.new_center_z);
                 b.absolute_max_size = p.new_absolute_max_size;
                 b.warning_blocks = p.warning_blocks;
                 b.warning_time = p.warning_time;
                 b.set_lerp(p.old_size, p.new_size, p.lerp_time);
             }
-            P::SetBorderCenter(p) => {
-                self.world.border.center_x = p.new_center_x;
-                self.world.border.center_z = p.new_center_z;
-            }
+            P::SetBorderCenter(p) => self.world.border.set_center(p.new_center_x, p.new_center_z),
             P::SetBorderSize(p) => self.world.border.set_lerp(p.size, p.size, 0),
             P::SetBorderLerpSize(p) => {
                 self.world
@@ -424,17 +431,7 @@ impl ClientState {
                     out.event(ClientEvent::EntityEquipmentChanged(p.entity_id));
                 }
             }
-            P::SetPassengers(p) => {
-                self.entities.set_passengers(p.vehicle, &p.passengers);
-                if p.vehicle >= 0 {
-                    let rides = p.passengers.contains(&self.player.entity_id);
-                    if rides {
-                        self.player.vehicle = Some(p.vehicle);
-                    } else if self.player.vehicle == Some(p.vehicle) {
-                        self.player.vehicle = None;
-                    }
-                }
-            }
+            P::SetPassengers(p) => self.on_set_passengers(p.vehicle, &p.passengers, out),
             P::SetEntityLink(p) => {
                 if let Some(e) = self.entities.get_mut(p.source_id) {
                     e.leash_holder = (p.dest_id > 0).then_some(p.dest_id);
@@ -506,9 +503,9 @@ impl ClientState {
                 entity_id: p.entity_id,
                 action: p.action,
             }),
-            P::SwingAnimation(p) => out.event(ClientEvent::EntityAnimation {
+            P::SwingAnimation(p) => out.event(ClientEvent::EntitySwing {
                 entity_id: p.entity_id,
-                action: p.hand as u8,
+                offhand: p.hand == mcr_protocol::types::game::Hand::Off,
             }),
             P::HurtAnimation(p) => {
                 if p.entity_id == self.player.entity_id && p.yaw.is_finite() {
@@ -549,7 +546,13 @@ impl ClientState {
                 if yaw.is_finite() && pitch.is_finite() {
                     let (pos, vel) = (phys.pos, phys.vel);
                     phys.snap_to(pos, vel, yaw % 360.0, pitch.clamp(-90.0, 90.0));
+                    let (y_rot, x_rot) = (phys.yaw, phys.pitch);
                     self.player.view_snapped = true;
+                    out.replies.push(S::MovePlayerRot(sb::MovePlayerRot {
+                        y_rot,
+                        x_rot,
+                        flags: sb::MoveFlags::new(false, false),
+                    }));
                     out.event(ClientEvent::PlayerRotated);
                 }
             }
@@ -594,6 +597,11 @@ impl ClientState {
             P::PlayerCombatKill(p) => {
                 if p.player_id == self.player.entity_id {
                     self.player.dead = true;
+                    if !self.player.show_death_screen {
+                        out.replies.push(S::ClientCommand(sb::ClientCommand {
+                            action: sb::ClientCommandAction::PerformRespawn,
+                        }));
+                    }
                     out.event(ClientEvent::Died {
                         message: Some(p.message),
                     });
@@ -684,17 +692,8 @@ impl ClientState {
                 }
             }
 
-            P::SystemChat(p) => {
-                let kind = if p.overlay {
-                    ChatKind::ActionBar
-                } else {
-                    ChatKind::System
-                };
-                if p.overlay {
-                    self.titles.action_bar = Some(p.content.clone());
-                }
-                self.push_chat(kind, None, p.content, None, None, out);
-            }
+            P::SystemChat(p) if p.overlay => self.set_overlay(p.content, out),
+            P::SystemChat(p) => self.push_chat(ChatKind::System, None, p.content, None, None, out),
             P::PlayerChat(p) => {
                 let content = p
                     .unsigned_content
@@ -729,37 +728,33 @@ impl ClientState {
                 out.event(ClientEvent::TabListChanged);
             }
             P::SetTitleText(p) => {
-                self.titles.title = Some(p.text.clone());
+                self.titles.set_title(p.text.clone());
                 out.event(ClientEvent::Title {
                     title: Some(p.text),
                     subtitle: None,
                 });
             }
             P::SetSubtitleText(p) => {
-                self.titles.subtitle = Some(p.text.clone());
+                self.titles.set_subtitle(p.text.clone());
                 out.event(ClientEvent::Title {
                     title: None,
                     subtitle: Some(p.text),
                 });
             }
-            P::SetActionBarText(p) => {
-                self.titles.action_bar = Some(p.text.clone());
-                self.push_chat(ChatKind::ActionBar, None, p.text, None, None, out);
-            }
-            P::SetTitlesAnimation(p) => {
-                self.titles.fade_in = p.fade_in;
-                self.titles.stay = p.stay;
-                self.titles.fade_out = p.fade_out;
-            }
+            P::SetActionBarText(p) => self.set_overlay(p.text, out),
+            P::SetTitlesAnimation(p) => self.titles.set_times(p.fade_in, p.stay, p.fade_out),
             P::ClearTitles(p) => {
                 self.titles.clear(p.reset_times);
                 out.event(ClientEvent::TitlesCleared);
             }
-            P::BossEvent(p) => self.on_boss_event(p.id, p.operation, out),
+            P::BossEvent(p) => self.on_boss_event(p.id, p.operation, now, out),
             P::SetObjective(p) => {
                 match &p.action {
-                    ObjectiveAction::Add(d) | ObjectiveAction::Change(d) => {
+                    ObjectiveAction::Add(d) => {
                         self.scoreboard.set_objective(&p.objective_name, Some(d));
+                    }
+                    ObjectiveAction::Change(d) => {
+                        self.scoreboard.change_objective(&p.objective_name, d);
                     }
                     ObjectiveAction::Remove => {
                         self.scoreboard.set_objective(&p.objective_name, None)
@@ -1004,7 +999,41 @@ impl ClientState {
                 self.player.apply_game_mode(mode);
                 out.event(ClientEvent::GameModeChanged);
             }
+            0 => self.push_chat(
+                ChatKind::System,
+                None,
+                Component::translatable("block.minecraft.spawn.not_valid", Vec::new()),
+                None,
+                None,
+                out,
+            ),
             4 => out.event(ClientEvent::ShowCredits),
+            5 => self.on_demo_event(param, out),
+            6 => {
+                let [x, y, z] = self.player.physics.pos;
+                let eye = y + f64::from(self.player.physics.eye_height());
+                out.event(ClientEvent::LocalSound {
+                    sound: "entity.arrow.hit_player",
+                    pos: [x, eye, z],
+                    volume: 0.18,
+                    pitch: 0.45,
+                    source: SoundSource::Players,
+                });
+            }
+            9 => out.event(ClientEvent::LocalSound {
+                sound: "entity.puffer_fish.sting",
+                pos: self.player.physics.pos,
+                volume: 1.0,
+                pitch: 1.0,
+                source: SoundSource::Neutral,
+            }),
+            10 if int == 1 => out.event(ClientEvent::LocalSound {
+                sound: "entity.elder_guardian.curse",
+                pos: self.player.physics.pos,
+                volume: 1.0,
+                pitch: 1.0,
+                source: SoundSource::Hostile,
+            }),
             7 if param.is_finite() => {
                 self.world.rain_level = param.clamp(0.0, 1.0);
                 out.event(ClientEvent::WeatherChanged);
@@ -1017,6 +1046,108 @@ impl ClientState {
             12 => self.server.do_limited_crafting = param == 1.0,
             _ => {}
         }
+    }
+
+    fn on_demo_event(&mut self, param: f32, out: &mut Outbox) {
+        use mcr_protocol::types::text::Arg;
+        let key = |name: &str| {
+            Arg::Component(Component::translatable(
+                format!("key.keyboard.{name}"),
+                Vec::new(),
+            ))
+        };
+        let lines: Vec<(&str, Vec<Arg>)> = if param == 0.0 {
+            vec![
+                ("demo.help.title", Vec::new()),
+                ("demo.help.fullWrapped", Vec::new()),
+            ]
+        } else if param == 101.0 {
+            vec![(
+                "demo.help.movement",
+                vec![key("w"), key("a"), key("s"), key("d")],
+            )]
+        } else if param == 102.0 {
+            vec![("demo.help.jump", vec![key("space")])]
+        } else if param == 103.0 {
+            vec![("demo.help.inventory", vec![key("e")])]
+        } else if param == 104.0 {
+            vec![("demo.day.6", vec![key("f2")])]
+        } else {
+            Vec::new()
+        };
+        for (k, args) in lines {
+            self.push_chat(
+                ChatKind::System,
+                None,
+                Component::translatable(k, args),
+                None,
+                None,
+                out,
+            );
+        }
+    }
+
+    fn set_overlay(&mut self, text: Component, out: &mut Outbox) {
+        self.titles.set_overlay(text.clone());
+        out.event(ClientEvent::Chat {
+            kind: ChatKind::ActionBar,
+            sender: None,
+            message: text,
+        });
+    }
+
+    /// Whether `vehicle` already carries the player, directly or through a stack of mounts.
+    fn carries_player(&self, vehicle: i32) -> bool {
+        let mut at = self.player.vehicle;
+        for _ in 0..16 {
+            match at {
+                Some(v) if v == vehicle => return true,
+                Some(v) => at = self.entities.get(v).and_then(|e| e.vehicle),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    fn on_set_passengers(&mut self, vehicle: i32, passengers: &[i32], out: &mut Outbox) {
+        let was_mounted = self.carries_player(vehicle);
+        self.entities.set_passengers(vehicle, passengers);
+        if vehicle < 0 {
+            return;
+        }
+        let rides = passengers.contains(&self.player.entity_id);
+        if !rides {
+            if self.player.vehicle == Some(vehicle) {
+                self.player.vehicle = None;
+            }
+            return;
+        }
+        self.player.vehicle = Some(vehicle);
+        if was_mounted {
+            return;
+        }
+        let Some(e) = self.entities.get(vehicle) else {
+            return;
+        };
+        let name = self.data.entity_type_name(e.kind as u32).unwrap_or("");
+        if name.ends_with("_boat") || name.ends_with("_raft") {
+            let yaw = e.yaw;
+            let phys = &mut self.player.physics;
+            let (pos, vel, pitch) = (phys.pos, phys.vel, phys.pitch);
+            phys.snap_to(pos, vel, yaw, pitch);
+            self.player.view_snapped = true;
+            out.event(ClientEvent::PlayerRotated);
+        }
+        let key = if name == "minecraft:cushion" {
+            "mount.sit"
+        } else {
+            "mount.onboard"
+        };
+        let sneak = Component::translatable("key.keyboard.left.shift", Vec::new());
+        self.set_overlay(
+            Component::translatable(key, vec![mcr_protocol::types::text::Arg::Component(sneak)]),
+            out,
+        );
     }
 
     fn on_chunk(&mut self, x: i32, z: i32, payload: &[u8], out: &mut Outbox) {
@@ -1297,7 +1428,7 @@ impl ClientState {
         out.event(ClientEvent::PlayerRotated);
     }
 
-    fn on_boss_event(&mut self, id: Uuid, op: BossEventOperation, out: &mut Outbox) {
+    fn on_boss_event(&mut self, id: Uuid, op: BossEventOperation, now: Instant, out: &mut Outbox) {
         match op {
             BossEventOperation::Add {
                 name,
@@ -1309,13 +1440,7 @@ impl ClientState {
                 crate::social::boss_bars_insert(
                     &mut self.boss_bars,
                     id,
-                    BossBar {
-                        name,
-                        progress,
-                        color,
-                        overlay,
-                        flags,
-                    },
+                    BossBar::new(name, progress, color, overlay, flags),
                 );
             }
             BossEventOperation::Remove => {
@@ -1323,7 +1448,7 @@ impl ClientState {
             }
             BossEventOperation::UpdateProgress(v) => {
                 if let Some(b) = self.boss_bars.get_mut(&id) {
-                    b.progress = v;
+                    b.set_progress(v, now);
                 }
             }
             BossEventOperation::UpdateName(name) => {
