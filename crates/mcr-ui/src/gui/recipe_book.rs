@@ -25,6 +25,7 @@ const MAX_ALTERNATIVES: usize = 256;
 const MAX_RESULTS: usize = 16;
 const MAX_OVERLAY: usize = 64;
 const MAX_NEED_ITEMS: usize = 1 << 20;
+const MAX_CRAFT_STEPS: usize = 1 << 22;
 const MAX_SEARCH: usize = 50;
 const SEARCH_ID: u32 = 1;
 const GHOST_BACK: u32 = 0x30FF_0000;
@@ -490,8 +491,9 @@ impl RecipeBook {
     fn recompute_craftable(&mut self, view: &dyn GameView, layout: &ContainerLayout) {
         let supply = self.supply(view, layout);
         self.craftable.clear();
+        let mut steps = MAX_CRAFT_STEPS;
         for entry in self.collections.iter().flat_map(|c| &c.entries) {
-            if entry.selectable && can_craft(&entry.needs, &supply) {
+            if entry.selectable && can_craft(&entry.needs, &supply, &mut steps) {
                 self.craftable.insert(entry.id);
             }
         }
@@ -531,12 +533,8 @@ impl RecipeBook {
                 .crafting_requirements
                 .as_ref()
                 .map(|sets| {
-                    let cost = sets.len().min(MAX_REQUIREMENTS) * MAX_ALTERNATIVES;
-                    if cost > budget {
-                        return vec![Vec::new()];
-                    }
-                    budget -= cost;
-                    sets.iter()
+                    let needs: Vec<Vec<i32>> = sets
+                        .iter()
                         .take(MAX_REQUIREMENTS)
                         .map(|set| {
                             let key = format!("{set:?}");
@@ -548,9 +546,15 @@ impl RecipeBook {
                                 })
                                 .clone()
                         })
-                        .collect()
+                        .collect();
+                    let cost: usize = needs.iter().map(Vec::len).sum::<usize>() + needs.len();
+                    if cost > budget {
+                        return Vec::new();
+                    }
+                    budget -= cost;
+                    needs
                 })
-                .unwrap_or_else(|| vec![Vec::new()]);
+                .unwrap_or_default();
             let entry = Entry {
                 id: c.id,
                 display: c.display.clone(),
@@ -559,11 +563,7 @@ impl RecipeBook {
                     r.truncate(MAX_RESULTS);
                     r
                 },
-                needs: if c.crafting_requirements.is_some() {
-                    needs
-                } else {
-                    vec![Vec::new()]
-                },
+                needs,
                 highlight: e.highlight(),
                 selectable: self.can_display(&c.display),
             };
@@ -1464,7 +1464,8 @@ pub fn place_grid(
 }
 
 /// Whether every requirement can take its own unit from the supply, by augmenting paths.
-pub fn can_craft(needs: &[Vec<i32>], supply: &FxHashMap<i32, i32>) -> bool {
+/// Bipartite match of requirements to supplied items; `steps` is a shared work budget that fails closed.
+pub fn can_craft(needs: &[Vec<i32>], supply: &FxHashMap<i32, i32>, steps: &mut usize) -> bool {
     if needs.is_empty() || needs.len() > MAX_REQUIREMENTS {
         return false;
     }
@@ -1487,7 +1488,7 @@ pub fn can_craft(needs: &[Vec<i32>], supply: &FxHashMap<i32, i32>) -> bool {
     let mut holders: FxHashMap<i32, Vec<usize>> = FxHashMap::default();
     for need in 0..options.len() {
         let mut visited = FxHashSet::default();
-        if !assign(need, &options, supply, &mut holders, &mut visited) {
+        if !assign(need, &options, supply, &mut holders, &mut visited, steps) {
             return false;
         }
     }
@@ -1500,8 +1501,13 @@ fn assign(
     supply: &FxHashMap<i32, i32>,
     holders: &mut FxHashMap<i32, Vec<usize>>,
     visited: &mut FxHashSet<i32>,
+    steps: &mut usize,
 ) -> bool {
     for &item in &options[need] {
+        if *steps == 0 {
+            return false;
+        }
+        *steps -= 1;
         if !visited.insert(item) {
             continue;
         }
@@ -1513,7 +1519,7 @@ fn assign(
         }
         let occupants = current.clone();
         for other in occupants {
-            if assign(other, options, supply, holders, visited) {
+            if assign(other, options, supply, holders, visited, steps) {
                 let list = holders.entry(item).or_default();
                 if let Some(pos) = list.iter().position(|&n| n == other) {
                     list[pos] = need;
@@ -1684,20 +1690,35 @@ mod tests {
         assert_eq!(corner, vec![0, 1, 3, 4]);
     }
 
+    fn can(needs: &[Vec<i32>], supply: &FxHashMap<i32, i32>) -> bool {
+        can_craft(needs, supply, &mut usize::MAX.clone())
+    }
+
+    #[test]
+    fn craft_checks_share_a_bounded_budget() {
+        let needs = vec![vec![1, 2, 3]; 3];
+        let supply = supply(&[(1, 1), (2, 1), (3, 1)]);
+        let mut steps = 1000;
+        assert!(can_craft(&needs, &supply, &mut steps));
+        let mut steps = 2;
+        assert!(!can_craft(&needs, &supply, &mut steps));
+        assert_eq!(steps, 0);
+    }
+
     #[test]
     fn matching_shares_one_item_between_alternatives() {
         let needs = vec![vec![1, 2], vec![1]];
-        assert!(can_craft(&needs, &supply(&[(1, 1), (2, 1)])));
-        assert!(!can_craft(&needs, &supply(&[(1, 1)])));
-        assert!(can_craft(&needs, &supply(&[(1, 2)])));
+        assert!(can(&needs, &supply(&[(1, 1), (2, 1)])));
+        assert!(!can(&needs, &supply(&[(1, 1)])));
+        assert!(can(&needs, &supply(&[(1, 2)])));
     }
 
     #[test]
     fn requirements_need_distinct_units() {
         let needs = vec![vec![5]; 4];
-        assert!(can_craft(&needs, &supply(&[(5, 4)])));
-        assert!(!can_craft(&needs, &supply(&[(5, 3)])));
-        assert!(!can_craft(&[], &supply(&[(5, 3)])));
-        assert!(!can_craft(&vec![vec![5]; 65], &supply(&[(5, 100)])));
+        assert!(can(&needs, &supply(&[(5, 4)])));
+        assert!(!can(&needs, &supply(&[(5, 3)])));
+        assert!(!can(&[], &supply(&[(5, 3)])));
+        assert!(!can(&vec![vec![5]; 65], &supply(&[(5, 100)])));
     }
 }

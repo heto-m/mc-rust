@@ -176,19 +176,21 @@ struct Tab {
 
 impl Tab {
     fn can_scroll_x(&self) -> bool {
-        self.max.0 - self.min.0 > INSIDE_W
+        i64::from(self.max.0) - i64::from(self.min.0) > i64::from(INSIDE_W)
     }
 
     fn can_scroll_y(&self) -> bool {
-        self.max.1 - self.min.1 > INSIDE_H
+        i64::from(self.max.1) - i64::from(self.min.1) > i64::from(INSIDE_H)
     }
 
     fn scroll_by(&mut self, dx: f32, dy: f32) {
         if self.can_scroll_x() {
-            self.scroll.0 = (self.scroll.0 + dx).clamp(-((self.max.0 - INSIDE_W) as f32), 0.0);
+            let low = -(self.max.0.saturating_sub(INSIDE_W) as f32);
+            self.scroll.0 = mth_clamp(self.scroll.0 + dx, low, 0.0);
         }
         if self.can_scroll_y() {
-            self.scroll.1 = (self.scroll.1 + dy).clamp(-((self.max.1 - INSIDE_H) as f32), 0.0);
+            let low = -(self.max.1.saturating_sub(INSIDE_H) as f32);
+            self.scroll.1 = mth_clamp(self.scroll.1 + dy, low, 0.0);
         }
     }
 
@@ -199,8 +201,8 @@ impl Tab {
     fn center(&mut self) {
         if !self.centered {
             self.scroll = (
-                (117 - (self.max.0 + self.min.0) / 2) as f32,
-                (56 - (self.max.1 + self.min.1) / 2) as f32,
+                (117 - (i64::from(self.max.0) + i64::from(self.min.0)) / 2) as f32,
+                (56 - (i64::from(self.max.1) + i64::from(self.min.1)) / 2) as f32,
             );
             self.centered = true;
         }
@@ -617,6 +619,11 @@ fn build_tabs(view: &dyn GameView) -> Vec<Tab> {
     }
     tabs.retain(|t| !t.nodes.is_empty());
     tabs
+}
+
+/// Vanilla's `Mth.clamp`: the lower bound wins when the bounds cross, where `f32::clamp` would panic.
+fn mth_clamp(v: f32, low: f32, high: f32) -> f32 {
+    if v < low { low } else { v.min(high) }
 }
 
 fn sane(v: f32) -> f32 {
@@ -1190,6 +1197,26 @@ mod tests {
         let tab = &build_tabs(&view)[0];
         assert!(tab.max.0 <= 4096 * 28 + 28 && tab.min.0 >= -4096 * 28);
         assert_eq!(tab.nodes[0].x, 0);
+    }
+
+    #[test]
+    fn crossed_or_empty_bounds_do_not_panic() {
+        let mut defs = vec![def("a:root", None, -4000.0, 0.0, true, 1)];
+        defs.push(def("a:near", Some("a:root"), 1.0, 0.0, false, 1));
+        let view = Mock {
+            defs,
+            progress: FxHashMap::default(),
+        };
+        let mut tab = build_tabs(&view).remove(0);
+        tab.scroll_by(-50.0, 0.0);
+        tab.scroll_by(1.0e9, 0.0);
+        assert!(tab.scroll.0.is_finite());
+        tab.nodes.clear();
+        tab.min = (i32::MAX, i32::MAX);
+        tab.max = (i32::MIN, i32::MIN);
+        tab.centered = false;
+        tab.center();
+        tab.scroll_by(10.0, 10.0);
     }
 
     #[test]
