@@ -163,3 +163,17 @@ fn partly_taken_stack_stays_with_the_rest() {
     assert_eq!(left, 3);
     assert_eq!(s.pickups.len(), 1);
 }
+
+#[test]
+fn win_game_event_shows_the_credits() {
+    use mcr_protocol::play::clientbound::world::GameEvent;
+    let mut s = state();
+    let events = handle(
+        &mut s,
+        P::GameEvent(GameEvent {
+            event: GameEvent::WIN_GAME,
+            param: 1.0,
+        }),
+    );
+    assert!(matches!(events.as_slice(), [ClientEvent::ShowCredits]));
+}

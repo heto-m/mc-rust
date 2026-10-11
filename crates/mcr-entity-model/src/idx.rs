@@ -1,6 +1,7 @@
 //! Synched entity data indices of 26.3: each class continues after its superclass' last index.
 
 pub const FLAGS: u8 = 0;
+pub const SILENT: u8 = 4;
 pub const POSE: u8 = 6;
 
 pub const LIVING_FLAGS: u8 = 8;
@@ -64,6 +65,7 @@ pub const BLAZE_FLAGS: u8 = 16;
 pub const VEX_FLAGS: u8 = 16;
 pub const BAT_FLAGS: u8 = 16;
 pub const BEE_FLAGS: u8 = 18;
+pub const BEE_ANGER_END: u8 = 19;
 pub const ARMADILLO_STATE: u8 = 18;
 pub const SNIFFER_STATE: u8 = 18;
 pub const CAMEL_DASH: u8 = 19;
@@ -73,6 +75,7 @@ pub const STRIDER_SUFFOCATING: u8 = 19;
 pub const TURTLE_EGG: u8 = 18;
 pub const GHAST_CHARGING: u8 = 16;
 pub const GUARDIAN_MOVING: u8 = 16;
+pub const GUARDIAN_ATTACK_TARGET: u8 = 17;
 pub const PHANTOM_SIZE: u8 = 16;
 pub const WITCH_USING_ITEM: u8 = 17;
 pub const PILLAGER_CHARGING: u8 = 17;

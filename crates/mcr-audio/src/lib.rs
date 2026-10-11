@@ -7,6 +7,7 @@ mod decode;
 mod engine;
 mod error;
 mod events;
+mod loops;
 mod manager;
 mod mixer;
 mod movement;
@@ -28,6 +29,7 @@ pub use decode::{Pcm, StreamSource, decode_ogg, open_stream};
 pub use engine::AudioEngine;
 pub use error::AudioError;
 pub use events::{JavaRandom, ResolvedSound, SoundEvents};
+pub use loops::{ElytraLoop, GuardianBeam, LoopLevel, bee_level, is_angry, nearest, reconcile};
 pub use manager::SoundManager;
 pub use mixer::{
     AudioHandle, CHUNK_FRAMES, Command, Listener, MAX_VOICES, Mixer, PlayRequest, Source, Spatial,

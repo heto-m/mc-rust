@@ -19,6 +19,7 @@ pub enum AmbientBlock {
     PotentSulfur,
     HangingMoss,
     Candle { count: u8 },
+    CreakingHeart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +37,8 @@ pub trait AmbientProbe {
     fn firefly_sounds_here(&self, pos: [i32; 3]) -> bool;
     fn air_above(&self, pos: [i32; 3]) -> bool;
     fn water_source_above(&self, pos: [i32; 3]) -> bool;
+    fn creaking_active(&self, pos: [i32; 3]) -> bool;
+    fn surrounded_by_pale_logs(&self, pos: [i32; 3]) -> bool;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -201,6 +204,15 @@ pub fn block_cue(
                 Ambient,
             )
         }
+        AmbientBlock::CreakingHeart => {
+            if !probe.creaking_active(pos)
+                || rng.below(16) != 0
+                || !probe.surrounded_by_pale_logs(pos)
+            {
+                return None;
+            }
+            cue("block.creaking_heart.idle", corner(pos), 1.0, 1.0, Blocks)
+        }
         AmbientBlock::Candle { count } => {
             for _ in 0..count.clamp(1, 4) {
                 if rng.f32() < 0.17 {
@@ -314,6 +326,12 @@ mod tests {
         fn water_source_above(&self, _: [i32; 3]) -> bool {
             self.0
         }
+        fn creaking_active(&self, _: [i32; 3]) -> bool {
+            self.0
+        }
+        fn surrounded_by_pale_logs(&self, _: [i32; 3]) -> bool {
+            self.0
+        }
     }
 
     fn rate(kind: AmbientBlock, probe: bool) -> f64 {
@@ -344,6 +362,12 @@ mod tests {
             0.0
         );
         assert!(rate(AmbientBlock::DriedGhast { waterlogged: true }, false) > 0.0);
+    }
+
+    #[test]
+    fn creaking_heart_idles_one_in_sixteen_when_active_and_enclosed() {
+        assert_eq!(rate(AmbientBlock::CreakingHeart, false), 0.0);
+        assert!((rate(AmbientBlock::CreakingHeart, true) - 1.0 / 16.0).abs() < 0.004);
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub struct SoundManager {
     events: SoundEvents,
     handle: AudioHandle,
     cache: FxHashMap<String, Arc<Pcm>>,
+    last_sound: Option<String>,
 }
 
 impl SoundManager {
@@ -29,6 +30,7 @@ impl SoundManager {
             events,
             handle,
             cache: FxHashMap::default(),
+            last_sound: None,
         }
     }
 
@@ -52,6 +54,11 @@ impl SoundManager {
 
     pub fn events(&self) -> &SoundEvents {
         &self.events
+    }
+
+    /// The sound file picked by the last successful play, e.g. `music/game/clark`.
+    pub fn last_sound(&self) -> Option<&str> {
+        self.last_sound.as_deref()
     }
 
     pub fn handle(&mut self) -> &mut AudioHandle {
@@ -120,14 +127,16 @@ impl SoundManager {
         } else {
             Source::Static(self.cached(&sound.name).ok()?)
         };
-        self.handle.play(PlayRequest {
+        let id = self.handle.play(PlayRequest {
             source,
             volume,
             pitch,
             category,
             spatial,
             looping,
-        })
+        })?;
+        self.last_sound = Some(sound.name);
+        Some(id)
     }
 
     fn cached(&mut self, name: &str) -> Result<Arc<Pcm>, AudioError> {

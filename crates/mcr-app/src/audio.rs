@@ -44,6 +44,23 @@ pub fn wire_category(source: WireSource) -> SoundSource {
     }
 }
 
+/// `Identifier#toShortLanguageKey` of a music file, `/` turned into `.`.
+pub fn music_lang_key(sound: &str) -> String {
+    let (namespace, path) = sound.split_once(':').unwrap_or(("minecraft", sound));
+    let key = if namespace == "minecraft" {
+        path.to_owned()
+    } else {
+        format!("{namespace}.{path}")
+    };
+    key.replace('/', ".")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MusicEvent {
+    Started(String),
+    Stopped,
+}
+
 const MAX_RECORDS: usize = 64;
 const RECORD_RANGE: f64 = 64.0;
 const SOUND_LOG_ENV: &str = "MCR_SOUND_LOG";
@@ -55,6 +72,7 @@ pub struct Audio {
     data: &'static Version,
     music: MusicManager,
     music_voice: Option<VoiceId>,
+    music_events: Vec<MusicEvent>,
     frequency: MusicFrequency,
     records: Vec<([i32; 3], VoiceId)>,
     ended: Vec<VoiceId>,
@@ -113,6 +131,7 @@ impl Audio {
             data,
             music: MusicManager::new(0x5EED, frequency),
             music_voice: None,
+            music_events: Vec::new(),
             frequency,
             records: Vec::new(),
             ended: Vec::new(),
@@ -273,6 +292,7 @@ impl Audio {
         self.records.retain(|(_, v)| !ended.contains(v));
         if self.music_voice.is_some_and(|v| ended.contains(&v)) {
             self.music_voice = None;
+            self.music_events.push(MusicEvent::Stopped);
         }
         self.ended = ended;
     }
@@ -341,6 +361,12 @@ impl Audio {
             self.stop_music_voice();
             let gain = actions.gain.unwrap_or(1.0);
             self.music_voice = self.play(&music.sound, None, gain, 1.0, SoundSource::Music);
+            if self.music_voice.is_some()
+                && let Some(file) = self.manager.last_sound()
+            {
+                let key = music_lang_key(file);
+                self.music_events.push(MusicEvent::Started(key));
+            }
         } else if let (Some(gain), Some(voice)) = (actions.gain, self.music_voice) {
             self.manager.set_voice_volume(voice, gain);
         }
@@ -356,7 +382,20 @@ impl Audio {
     fn stop_music_voice(&mut self) {
         if let Some(voice) = self.music_voice.take() {
             self.manager.stop(voice);
+            self.music_events.push(MusicEvent::Stopped);
         }
+    }
+
+    /// Drops the credits track when the credits screen closes.
+    pub fn stop_credits_music(&mut self) {
+        if self.music.is_playing(&Music::credits()) {
+            self.stop_music(None);
+        }
+    }
+
+    /// Track starts and stops since the last call, oldest first.
+    pub fn take_music_events(&mut self) -> Vec<MusicEvent> {
+        std::mem::take(&mut self.music_events)
     }
 
     /// Vanilla's pickup sounds: pitch is the difference of two uniform draws, scaled and offset.
@@ -419,6 +458,16 @@ pub fn sound_type(data: &'static Version, state: u32) -> Option<SoundType<'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn music_files_map_to_language_keys() {
+        assert_eq!(music_lang_key("music/game/clark"), "music.game.clark");
+        assert_eq!(
+            music_lang_key("minecraft:music/game/creative/aria_math"),
+            "music.game.creative.aria_math"
+        );
+        assert_eq!(music_lang_key("pack:music/x"), "pack.music.x");
+    }
 
     #[test]
     fn stone_uses_the_stone_events() {

@@ -1004,6 +1004,7 @@ impl ClientState {
                 self.player.apply_game_mode(mode);
                 out.event(ClientEvent::GameModeChanged);
             }
+            4 => out.event(ClientEvent::ShowCredits),
             7 if param.is_finite() => {
                 self.world.rain_level = param.clamp(0.0, 1.0);
                 out.event(ClientEvent::WeatherChanged);

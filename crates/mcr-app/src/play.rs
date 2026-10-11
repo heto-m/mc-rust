@@ -14,22 +14,24 @@ use mcr_protocol::types::ItemStack;
 use mcr_render::glam::{DVec3, Mat4};
 use mcr_render::{Camera, Environment, FrameStats, Overlay, OverlayCtx, Renderer, wgpu};
 use mcr_settings::bindings::mapping_index;
-use mcr_settings::{HeldState, InputKey, KeyBindings, MAPPINGS, Options};
+use mcr_settings::value::MusicToastState;
+use mcr_settings::{HeldState, InputKey, KeyBindings, MAPPINGS, Options, SOUND_CATEGORIES};
 use mcr_ui::{
-    ChatScreen, ContainerScreen, CreativeScreen, DeathScreen, Env, HotbarStore, MenuKind,
-    Modifiers, MouseButton, PauseScreen, RenderCx, Screen, ScreenAction, ScreenStack, Ui, UiInput,
-    UiRenderer,
+    CREDITS_PATH, ChatScreen, ContainerScreen, CreativeScreen, CreditsScreen, CreditsSource,
+    DeathScreen, Env, HotbarStore, MenuKind, Modifiers, MouseButton, POEM_PATH, POSTCREDITS_PATH,
+    PauseScreen, RenderCx, Screen, ScreenAction, ScreenStack, Ui, UiInput, UiRenderer,
 };
 
 use crate::assets::Assets;
 use mcr_audio::SoundSource;
 
 use crate::ambience::Ambience;
-use crate::audio::{Audio, BlockSound, wire_category};
+use crate::audio::{Audio, BlockSound, MusicEvent, wire_category};
 use crate::block_entities::BlockEntities;
 use crate::debug::{self, DebugInput};
 use crate::effects::{self, WorldEffects};
 use crate::entities::{Cull, EntityLayer, FrameCtx, LocalSample};
+use crate::entity_loops::EntityLoops;
 use crate::gui::{self, Gui};
 use crate::hand::{Hand as HeldHand, HandFrame, HandTick};
 use crate::hud::{Hud, HudInput};
@@ -52,6 +54,16 @@ const THIRD_PERSON_DISTANCE: f64 = 4.0;
 const CLICK_DELAY: u32 = 5;
 const USE_DELAY: u32 = 4;
 const HIT_SOUND_INTERVAL: u32 = 4;
+
+fn music_volume(options: &Options) -> f32 {
+    let volume = |name: &str| {
+        SOUND_CATEGORIES
+            .iter()
+            .position(|c| *c == name)
+            .map_or(1.0, |i| options.sound_volumes[i] as f32)
+    };
+    volume("master") * volume("music")
+}
 
 #[derive(Debug, Clone)]
 pub struct PlayConfig {
@@ -307,6 +319,7 @@ pub struct Play {
     using_item: bool,
     target: Option<Target>,
     ambience: Ambience,
+    loops: EntityLoops,
     movement: MovementSounds,
     placed_seen: bool,
     started: Instant,
@@ -437,6 +450,7 @@ impl Play {
             using_item: false,
             target: None,
             ambience: Ambience::new(data, Box::new(move |path| data_assets.read(path))),
+            loops: EntityLoops::new(data),
             movement: MovementSounds::new(data),
             placed_seen: false,
             started: now,
@@ -452,6 +466,7 @@ impl Play {
     pub fn finish(mut self) -> Parts {
         if let Some(audio) = &mut self.audio {
             self.ambience.reset(audio);
+            self.loops.reset(audio);
             audio.stop_world_sounds();
         }
         let (renderer, assets) = self.render.into_parts(&self.world);
@@ -699,6 +714,9 @@ impl Play {
         if let Some(block_entities) = &mut self.block_entities {
             block_entities.on_event(&event, &self.world.client.state);
         }
+        if let ClientEvent::EntityEvent { entity_id, event } = &event {
+            self.loops.on_entity_event(*entity_id, *event);
+        }
         match event {
             ClientEvent::EntityEvent {
                 entity_id,
@@ -801,6 +819,7 @@ impl Play {
                     self.push_screen(screen);
                 }
             }
+            ClientEvent::ShowCredits => self.show_credits(),
             ClientEvent::MinecartEditorOpened { entity_id } => {
                 if let Some(screen) =
                     crate::editors::minecart_screen(&self.world.client.state, entity_id)
@@ -1105,7 +1124,33 @@ impl Play {
         audio.poll(self.ticks);
         let state = &self.world.client.state;
         self.movement.tick(state, self.ticks, audio);
+        self.ambience.set_credits(self.stack.credits_music(), audio);
         self.ambience.tick(state, self.cur_eye, audio);
+        self.loops.tick(state, audio);
+        let events = audio.take_music_events();
+        self.apply_music_events(events);
+    }
+
+    fn apply_music_events(&mut self, events: Vec<MusicEvent>) {
+        for event in events {
+            match event {
+                MusicEvent::Started(key) => {
+                    let title = self
+                        .gui
+                        .ui
+                        .lang()
+                        .get(&key)
+                        .map_or_else(|| key.clone(), str::to_owned);
+                    self.gui.toasts.set_song(&mut self.gui.ui, Some(&title));
+                    if self.options.music_toast == MusicToastState::PauseAndToast
+                        && music_volume(&self.options) > 0.0
+                    {
+                        self.gui.toasts.show_now_playing();
+                    }
+                }
+                MusicEvent::Stopped => self.gui.toasts.set_song(&mut self.gui.ui, None),
+            }
+        }
     }
 
     fn pick_from(&self, eye: [f64; 3]) -> Option<Target> {
@@ -1343,6 +1388,21 @@ impl Play {
         Ok(())
     }
 
+    fn show_credits(&mut self) {
+        let text = |path: &str| {
+            self.assets
+                .read(path)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+        };
+        let source = CreditsSource {
+            poem: text(POEM_PATH),
+            credits: text(CREDITS_PATH),
+            postcredits: text(POSTCREDITS_PATH),
+        };
+        let player = self.world.client.config.name.clone();
+        self.push_screen(Box::new(CreditsScreen::new(&source, true, &player)));
+    }
+
     fn push_screen(&mut self, screen: Box<dyn Screen>) {
         self.release_all();
         self.update_gui_size();
@@ -1444,6 +1504,12 @@ impl Play {
         }
         if let Some(audio) = &mut self.audio {
             audio.apply_volumes(&self.options);
+        }
+        if self.options.music_toast != old.music_toast
+            && self.options.music_toast == MusicToastState::PauseAndToast
+            && music_volume(&self.options) > 0.0
+        {
+            self.gui.toasts.show_now_playing();
         }
         self.gui.sync_language(&self.options.language);
     }
@@ -1972,6 +2038,20 @@ impl Play {
                     RenderCx::new(&mut frame, &mut self.gui.icons, &self.gui.assets, &view);
                 cx.now_ms = input.millis;
                 self.gui.toasts.draw(&mut cx);
+            }
+            if !self.hud_hidden {
+                let toast = self.options.music_toast;
+                let audible = music_volume(&self.options) > 0.0;
+                let mut cx =
+                    RenderCx::new(&mut frame, &mut self.gui.icons, &self.gui.assets, &view);
+                cx.now_ms = input.millis;
+                if self.stack.top_shows_music_toast() {
+                    if toast != MusicToastState::Never && audible {
+                        self.gui.toasts.draw_now_playing_static(&mut cx);
+                    }
+                } else if toast == MusicToastState::PauseAndToast {
+                    self.gui.toasts.draw_now_playing(&mut cx);
+                }
             }
         }
 

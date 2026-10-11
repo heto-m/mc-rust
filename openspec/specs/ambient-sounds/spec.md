@@ -66,3 +66,14 @@ Level events 1010 and 1011 SHALL start and stop the record sound of the synced j
 #### Scenario: Disc inserted
 - **WHEN** level event 1010 arrives with a song id
 - **THEN** the song's sound event plays at the block in the records category
+
+### Requirement: Creaking heart idle
+Among the sampled blocks, a creaking heart that is not uprooted, in an overworld dimension type between day ticks 12600 and 23400, with pale oak logs on all six sides, SHALL play `block.creaking_heart.idle` with probability 1/16.
+
+#### Scenario: Night, enclosed
+- **WHEN** such a heart is sampled
+- **THEN** the idle sound plays in the blocks category
+
+#### Scenario: Daytime or uprooted
+- **WHEN** it is day or the heart is uprooted
+- **THEN** nothing plays

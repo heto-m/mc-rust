@@ -349,6 +349,10 @@ impl PauseScreen {
 }
 
 impl Screen for PauseScreen {
+    fn shows_music_toast(&self) -> bool {
+        true
+    }
+
     fn init(&mut self, width: i32, height: i32) {
         self.gui = (width, height);
         self.widgets.clear();

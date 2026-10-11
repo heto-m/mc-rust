@@ -166,6 +166,8 @@ pub enum ClientEvent {
         entity_id: i32,
         event: i8,
     },
+    /// Game event 4: the End poem and credits.
+    ShowCredits,
     EntityAnimation {
         entity_id: i32,
         action: u8,

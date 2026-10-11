@@ -3,8 +3,8 @@
 
 use mcr_audio::{
     AmbientBlock, AmbientFluid, AmbientProbe, AudioAttributes, FastRandom, JavaRandom, LoopFade,
-    MoodState, Situation, SoundSource, UnderwaterAmbient, UnderwaterLoop, VoiceId, block_cue,
-    fluid_cue, mood_sound_position, roll_additions, select_music,
+    MoodState, Music, Situation, SoundSource, UnderwaterAmbient, UnderwaterLoop, VoiceId,
+    block_cue, fluid_cue, mood_sound_position, roll_additions, select_music,
 };
 use mcr_client::ClientState;
 use mcr_client::RegistryItem;
@@ -29,6 +29,23 @@ const NEAR_RADIUS: i32 = 16;
 const FAR_RADIUS: i32 = 32;
 const SAMPLES_PER_RADIUS: u32 = 667;
 const MAX_MINECARTS: usize = 64;
+const DAY_PERIOD: i64 = 24_000;
+const CREAKING_ACTIVE_FROM: i64 = 12_600;
+const CREAKING_ACTIVE_UNTIL: i64 = 23_401;
+const CREAKING_DIMENSIONS: [&str; 2] = ["minecraft:overworld", "minecraft:overworld_caves"];
+const NEIGHBOURS: [[i32; 3]; 6] = [
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 1, 0],
+    [0, -1, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+];
+
+/// The `gameplay/creaking_active` keyframes of the overworld day timeline.
+fn creaking_active_at(day_time: i64) -> bool {
+    (CREAKING_ACTIVE_FROM..CREAKING_ACTIVE_UNTIL).contains(&day_time.rem_euclid(DAY_PERIOD))
+}
 const MINECART_PITCH_STEP: f32 = 0.0025;
 
 #[derive(Debug)]
@@ -80,6 +97,7 @@ pub struct Ambience {
     riding: Option<RidingVoice>,
     additions: Vec<usize>,
     last_biome: Option<usize>,
+    credits_open: bool,
 }
 
 impl std::fmt::Debug for Ambience {
@@ -119,9 +137,18 @@ impl Ambience {
             riding: None,
             additions: Vec::new(),
             last_biome: None,
+            credits_open: false,
         };
         a.classify_states();
         a
+    }
+
+    /// Credits screen open: `music.credits` is wanted, and it ends with the screen.
+    pub fn set_credits(&mut self, open: bool, audio: &mut Audio) {
+        if self.credits_open && !open {
+            audio.stop_credits_music();
+        }
+        self.credits_open = open;
     }
 
     fn classify_states(&mut self) {
@@ -178,6 +205,9 @@ impl Ambience {
                     AmbientBlock::PotentSulfur
                 }
                 "pale_hanging_moss" => AmbientBlock::HangingMoss,
+                "creaking_heart" if prop("creaking_heart_state") != Some("uprooted") => {
+                    AmbientBlock::CreakingHeart
+                }
                 n if n.ends_with("candle") && lit => AmbientBlock::Candle {
                     count: prop("candles").and_then(|c| c.parse().ok()).unwrap_or(1),
                 },
@@ -356,8 +386,9 @@ impl Ambience {
         let end_boss_music = state.boss_bars.values().any(|b| b.flags.play_music);
         let creative =
             state.player.game_mode == GameType::Creative && state.player.physics.abilities.may_fly;
+        let credits = Music::credits();
         let situation = select_music(&Situation {
-            screen_music: None,
+            screen_music: self.credits_open.then_some(&credits),
             in_world: true,
             in_end,
             end_boss_music,
@@ -651,6 +682,7 @@ fn is_ambient_block(name: &str) -> bool {
             | "firefly_bush"
             | "potent_sulfur"
             | "pale_hanging_moss"
+            | "creaking_heart"
     ) || name.ends_with("candle")
 }
 
@@ -740,6 +772,29 @@ impl AmbientProbe for StateProbe<'_> {
             .is_some_and(|s| s.is_air())
     }
 
+    fn creaking_active(&self, _: [i32; 3]) -> bool {
+        let state = self.state;
+        let overworld = state
+            .registries
+            .get(DIMENSION_TYPE)
+            .and_then(|r| r.get(state.dimension.type_id))
+            .is_some_and(|e| CREAKING_DIMENSIONS.contains(&e.id.as_str()));
+        overworld && state.world.day_time().is_some_and(creaking_active_at)
+    }
+
+    fn surrounded_by_pale_logs(&self, pos: [i32; 3]) -> bool {
+        NEIGHBOURS.iter().all(|d| {
+            self.block_id([pos[0] + d[0], pos[1] + d[1], pos[2] + d[2]])
+                .is_some_and(|b| {
+                    self.state.registries.is_in_tag(
+                        "minecraft:block",
+                        "minecraft:pale_oak_logs",
+                        b as i32,
+                    )
+                })
+        })
+    }
+
     fn water_source_above(&self, pos: [i32; 3]) -> bool {
         let above = up(pos);
         self.state
@@ -824,6 +879,31 @@ mod tests {
                 0 => None,
                 k => Some(a.block_kinds[usize::from(k) - 1]),
             })
+    }
+
+    #[test]
+    fn creaking_is_active_from_dusk_until_just_before_dawn() {
+        assert!(!creaking_active_at(12_599));
+        assert!(creaking_active_at(12_600));
+        assert!(creaking_active_at(23_400));
+        assert!(!creaking_active_at(23_401));
+        assert!(creaking_active_at(24_000 + 18_000));
+        assert!(!creaking_active_at(6_000));
+    }
+
+    #[test]
+    fn awake_and_dormant_hearts_are_ambient_but_uprooted_are_not() {
+        let a = Ambience::new(mcr_data::v26_3(), Box::new(|_| None));
+        let heart = |s| {
+            kind_of(
+                &a,
+                "minecraft:creaking_heart",
+                &[("creaking_heart_state", s)],
+            )
+        };
+        assert_eq!(heart("awake"), Some(AmbientBlock::CreakingHeart));
+        assert_eq!(heart("dormant"), Some(AmbientBlock::CreakingHeart));
+        assert_eq!(heart("uprooted"), None);
     }
 
     #[test]

@@ -19,6 +19,57 @@ const SYSTEM_WRAP_WIDTH: f32 = 200.0;
 const MAX_QUEUED: usize = 64;
 const MAX_RECIPE_ENTRIES: usize = 64;
 const MAX_LINES: usize = 8;
+const NOW_PLAYING_HEIGHT: i32 = 30;
+const MAX_SONG_CHARS: usize = 128;
+const NOW_PLAYING_PADDING: i32 = 7;
+const NOW_PLAYING_ICON_SPACE: i32 = 30;
+const NOW_PLAYING_TEXT: u32 = 0xFF9D_9D97;
+const NOTE_COLOR_MS: u64 = 25;
+const NOTE_COLOR_STEPS: u64 = 30;
+/// Dye colours at 1.25 brightness, the order of `ColorLerper.MUSIC_NOTE_COLORS`.
+const NOTE_COLORS: [[u8; 3]; 12] = [
+    [0xE6, 0xE6, 0xE6],
+    [0xC4, 0xC4, 0xBC],
+    [0x48, 0xE0, 0xFF],
+    [0x4B, 0x55, 0xD5],
+    [0x1C, 0xC3, 0xC3],
+    [0x76, 0x9B, 0x1B],
+    [0xA0, 0xF8, 0x26],
+    [0xFF, 0xFF, 0x4C],
+    [0xF9, 0xA0, 0x24],
+    [0xF3, 0xAF, 0xD3],
+    [0xDC, 0x39, 0x2F],
+    [0xF9, 0x61, 0xEC],
+];
+
+/// Colour of the music notes `now_ms` into the cycle, blending neighbouring colours in sRGB.
+pub fn note_color(now_ms: u64) -> u32 {
+    let step = now_ms / NOTE_COLOR_MS;
+    let index = (step / NOTE_COLOR_STEPS) as usize % NOTE_COLORS.len();
+    let next = (index + 1) % NOTE_COLORS.len();
+    let t = (step % NOTE_COLOR_STEPS) as f32 / NOTE_COLOR_STEPS as f32;
+    let channel = |c: usize| {
+        let (a, b) = (
+            f32::from(NOTE_COLORS[index][c]),
+            f32::from(NOTE_COLORS[next][c]),
+        );
+        (a + (b - a) * t).round() as u32
+    };
+    0xFF00_0000 | channel(0) << 16 | channel(1) << 8 | channel(2)
+}
+
+pub fn now_playing_width(text_width: f32) -> i32 {
+    NOW_PLAYING_ICON_SPACE + text_width.ceil() as i32 + NOW_PLAYING_PADDING
+}
+
+fn draw_now_playing(cx: &mut RenderCx<'_, '_>, (ox, oy): (i32, i32), title: &str, width: i32) {
+    cx.sprite("toast/now_playing", ox, oy, width, NOW_PLAYING_HEIGHT);
+    if let Some(id) = cx.sprite_id("icon/music_notes") {
+        let tint = note_color(cx.now_ms);
+        cx.frame.sprite_tinted(id, ox + 7, oy + 7, 16, 16, tint);
+    }
+    cx.text(title, ox + 30, oy + 11, NOW_PLAYING_TEXT, true);
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Visibility {
@@ -93,6 +144,10 @@ enum Kind {
         changed: bool,
         force_hide: bool,
     },
+    NowPlaying {
+        title: String,
+        hidden: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -144,6 +199,17 @@ impl Toast {
         }
     }
 
+    fn now_playing(title: String, width: i32) -> Self {
+        Self {
+            kind: Kind::NowPlaying {
+                title,
+                hidden: false,
+            },
+            width,
+            wanted: Visibility::Hide,
+        }
+    }
+
     pub fn width(&self) -> i32 {
         self.width
     }
@@ -153,6 +219,7 @@ impl Toast {
             Kind::System { title, message, .. } => {
                 20 + title.len().saturating_sub(1) as i32 * 12 + message.len().max(1) as i32 * 12
             }
+            Kind::NowPlaying { .. } => NOW_PLAYING_HEIGHT,
             _ => SLOT_HEIGHT,
         }
     }
@@ -209,6 +276,9 @@ impl Toast {
                 }
                 wanted(*force_hide || fully_visible_for - *last_changed >= scaled(id.display_ms))
             }
+            Kind::NowPlaying { hidden, .. } => {
+                wanted(*hidden || fully_visible_for >= scaled(DISPLAY_MS))
+            }
         };
     }
 
@@ -254,6 +324,9 @@ impl Toast {
                     }
                     cx.stack_opt(Some(result), ox + 8, oy + 8);
                 }
+            }
+            Kind::NowPlaying { title, .. } => {
+                draw_now_playing(cx, (ox, oy), title, self.width);
             }
             Kind::System { title, message, .. } => {
                 cx.sprite("toast/system", ox, oy, self.width, self.height());
@@ -335,6 +408,8 @@ pub struct ToastManager {
     visible: Vec<Instance>,
     occupied: [bool; SLOTS],
     queued: VecDeque<Toast>,
+    song: Option<(String, i32)>,
+    now_playing: Option<Instance>,
 }
 
 impl ToastManager {
@@ -356,7 +431,72 @@ impl ToastManager {
         }
     }
 
+    /// Sets the song named by the toast; `None` when music stopped, which also hides the toast.
+    pub fn set_song(&mut self, ui: &mut Ui, title: Option<&str>) {
+        self.song = title.map(|t| {
+            let title: String = t.chars().take(MAX_SONG_CHARS).collect();
+            let width = now_playing_width(ui.text_width(&title));
+            (title, width)
+        });
+        if self.song.is_none() {
+            self.hide_now_playing();
+        }
+    }
+
+    #[cfg(test)]
+    fn set_song_for_test(&mut self, title: Option<&str>) {
+        self.song = title.map(|t| (t.to_owned(), now_playing_width(10.0)));
+        if self.song.is_none() {
+            self.hide_now_playing();
+        }
+    }
+
+    pub fn song(&self) -> Option<&str> {
+        self.song.as_ref().map(|s| s.0.as_str())
+    }
+
+    /// Slides the now-playing toast in again for the current song.
+    pub fn show_now_playing(&mut self) {
+        self.now_playing = self
+            .song
+            .as_ref()
+            .map(|(title, width)| Instance::new(Toast::now_playing(title.clone(), *width), 0));
+    }
+
+    pub fn hide_now_playing(&mut self) {
+        if let Some(Toast {
+            kind: Kind::NowPlaying { hidden, .. },
+            ..
+        }) = self.now_playing.as_mut().map(|i| &mut i.toast)
+        {
+            *hidden = true;
+        }
+    }
+
+    pub fn now_playing_visible(&self) -> bool {
+        self.now_playing.as_ref().is_some_and(|i| !i.finished)
+    }
+
+    pub fn draw_now_playing(&self, cx: &mut RenderCx<'_, '_>) {
+        let Some(instance) = self.now_playing.as_ref().filter(|i| !i.finished) else {
+            return;
+        };
+        let width = instance.toast.width();
+        let x = width as f32 * instance.portion - width as f32;
+        instance
+            .toast
+            .draw(cx, (x.floor() as i32, 0), instance.fully_visible_for);
+    }
+
+    /// The fixed form on the pause screen.
+    pub fn draw_now_playing_static(&self, cx: &mut RenderCx<'_, '_>) {
+        if let Some((title, width)) = &self.song {
+            draw_now_playing(cx, (0, 0), title, *width);
+        }
+    }
+
     pub fn clear(&mut self) {
+        self.now_playing = None;
         self.visible.clear();
         self.queued.clear();
         self.occupied = [false; SLOTS];
@@ -466,6 +606,9 @@ impl ToastManager {
     /// Advances every toast to `now_ms`; returns the sound events to play, in order.
     pub fn update(&mut self, now_ms: u64, multiplier: f64) -> Vec<&'static str> {
         let now = now_ms as i64;
+        if let Some(instance) = self.now_playing.as_mut().filter(|i| !i.finished) {
+            instance.update(now, multiplier);
+        }
         let mut sounds = Vec::new();
         let mut visibility_sound = false;
         let occupied = &mut self.occupied;
@@ -687,5 +830,70 @@ mod tests {
             m.add(task());
         }
         assert_eq!(m.queued_count(), MAX_QUEUED);
+    }
+
+    fn playing() -> ToastManager {
+        ToastManager {
+            song: Some(("C418 - Clark".into(), now_playing_width(60.0))),
+            ..ToastManager::default()
+        }
+    }
+
+    #[test]
+    fn now_playing_slides_in_from_the_left_holds_then_leaves() {
+        let mut m = playing();
+        assert!(!m.now_playing_visible());
+        m.show_now_playing();
+        assert!(m.now_playing_visible());
+        assert!(m.update(0, 1.0).is_empty());
+        m.update(0, 1.0);
+        assert_eq!(m.now_playing.as_ref().unwrap().portion, 0.0);
+        m.update(600, 1.0);
+        assert_eq!(m.now_playing.as_ref().unwrap().portion, 1.0);
+        assert!(m.update(4000, 1.0).is_empty());
+        m.update(5700, 1.0);
+        m.update(6400, 1.0);
+        assert!(!m.now_playing_visible());
+    }
+
+    #[test]
+    fn now_playing_hides_when_the_song_stops() {
+        let mut m = playing();
+        m.show_now_playing();
+        m.update(0, 1.0);
+        m.update(1000, 1.0);
+        m.set_song_for_test(None);
+        m.update(1100, 1.0);
+        m.update(1800, 1.0);
+        assert!(!m.now_playing_visible());
+    }
+
+    #[test]
+    fn showing_again_restarts_the_slide() {
+        let mut m = playing();
+        m.show_now_playing();
+        m.update(0, 1.0);
+        m.update(5700, 1.0);
+        m.show_now_playing();
+        m.update(5800, 1.0);
+        m.update(5800, 1.0);
+        assert_eq!(m.now_playing.as_ref().unwrap().visibility, Visibility::Show);
+        assert!(m.now_playing_visible());
+    }
+
+    #[test]
+    fn no_song_means_nothing_to_show() {
+        let mut m = ToastManager::default();
+        m.show_now_playing();
+        assert!(!m.now_playing_visible());
+    }
+
+    #[test]
+    fn note_colours_cycle_through_the_palette() {
+        assert_eq!(note_color(0), 0xFFE6_E6E6);
+        assert_eq!(note_color(30 * 25), 0xFFC4_C4BC);
+        let mid = note_color(15 * 25);
+        assert!(mid != note_color(0) && mid != note_color(30 * 25));
+        assert_eq!(note_color(12 * 30 * 25), note_color(0));
     }
 }

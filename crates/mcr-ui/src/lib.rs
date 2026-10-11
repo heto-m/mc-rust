@@ -29,7 +29,7 @@ pub use style::{Cell, Flags, FontId, Style};
 pub use text::{
     ClickSpan, Lang, click_at, flatten, flatten_events, parse_legacy, push_legacy, wrap,
 };
-pub use toast::{SystemToastId, Toast, ToastFrame, ToastManager};
+pub use toast::{SystemToastId, Toast, ToastFrame, ToastManager, note_color};
 pub use ui::{Batch, DrawCmd, LINE_HEIGHT, PageKind, PageRef, Ui, UiFrame, Vertex, gui_scale};
 
 pub use wgpu;

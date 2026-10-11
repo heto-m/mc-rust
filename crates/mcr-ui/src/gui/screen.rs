@@ -211,6 +211,16 @@ pub trait Screen {
         false
     }
 
+    /// The credits screen asks for `music.credits` while it is open.
+    fn credits_music(&self) -> bool {
+        false
+    }
+
+    /// Whether the now-playing music toast is drawn in its static form on this screen.
+    fn shows_music_toast(&self) -> bool {
+        false
+    }
+
     /// Server dialogs and the screen shown while waiting for the server to answer one.
     fn is_dialog(&self) -> bool {
         false
@@ -278,6 +288,14 @@ impl ScreenStack {
 
     pub fn pauses_game(&self) -> bool {
         self.top().is_some_and(Screen::pauses_game)
+    }
+
+    pub fn credits_music(&self) -> bool {
+        self.top().is_some_and(Screen::credits_music)
+    }
+
+    pub fn top_shows_music_toast(&self) -> bool {
+        self.top().is_some_and(Screen::shows_music_toast)
     }
 
     pub fn top_is_dialog(&self) -> bool {

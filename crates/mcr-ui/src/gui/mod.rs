@@ -6,6 +6,7 @@ mod chat_screen;
 mod clicks;
 mod container;
 mod creative;
+mod credits;
 mod dialog;
 mod dialog_screen;
 mod edit_box;
@@ -36,6 +37,10 @@ pub use chat_screen::{
 pub use clicks::click_event_actions;
 pub use container::*;
 pub use creative::{CreativeScreen, HotbarStore, TabKind, creative_tabs};
+pub use credits::{
+    CREDITS_PATH, CreditsLine, CreditsScreen, CreditsSource, POEM_PATH, POSTCREDITS_PATH, Scroll,
+    build_lines,
+};
 pub use dialog::Dialog;
 pub use dialog_screen::{DialogScreen, WaitingForResponseScreen};
 pub use edit_box::{EditBox, is_allowed_char};
