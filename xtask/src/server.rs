@@ -86,7 +86,7 @@ pub fn run(layout: &Layout, ver: &str, port: u16, nogui: bool) -> Result<()> {
     fs::write(&properties, render_properties(current.as_deref(), port))?;
 
     let java = resolve_java(layout)?;
-    let mut cmd = Command::new(java);
+    let mut cmd = memory_capped(&java);
     cmd.args(["-Xms256M", "-Xmx1536M", "-XX:+UseSerialGC"])
         .arg("-jar")
         .arg(&server_jar)
@@ -99,6 +99,30 @@ pub fn run(layout: &Layout, ver: &str, port: u16, nogui: bool) -> Result<()> {
         bail!("server exited with {status}");
     }
     Ok(())
+}
+
+/// A runaway JVM in its own capped scope dies alone instead of tripping systemd-oomd on the caller's.
+fn memory_capped(program: &std::path::Path) -> Command {
+    let capped = cfg!(target_os = "linux")
+        && Command::new("systemd-run")
+            .args(["--user", "--scope", "-q", "true"])
+            .status()
+            .is_ok_and(|s| s.success());
+    if !capped {
+        return Command::new(program);
+    }
+    let mut cmd = Command::new("systemd-run");
+    cmd.args([
+        "--user",
+        "--scope",
+        "-q",
+        "-p",
+        "MemoryMax=2560M",
+        "-p",
+        "MemorySwapMax=0",
+    ])
+    .arg(program);
+    cmd
 }
 
 #[cfg(test)]
