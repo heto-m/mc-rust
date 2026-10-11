@@ -1,6 +1,6 @@
 //! Water and lava surfaces, following vanilla's fluid renderer.
 
-use mcr_render::{Face, ModelQuadDesc, SectionMesh, model_ao, pack_light};
+use mcr_render::{Face, ModelQuadDesc, SectionMesh, TintTable, model_ao, pack_light};
 
 use crate::cache::{
     ATTR_HALF_TRANSPARENT, ATTR_SOLID, FluidKind, MASK_EMPTY, MASK_FULL, StateModel,
@@ -216,41 +216,28 @@ pub(crate) fn mesh_fluid(
     let light_down = max_light(ctx.light(down_cell), here);
     let cell_u8 = [cell[0] as u8, cell[1] as u8, cell[2] as u8];
     mesher.note_tint(cell);
+    let mut top = None;
     let mut emit = |corners: [[f32; 3]; 4],
                     uvs: [[f32; 2]; 4],
                     layer: u16,
                     light: u16,
                     shade: Face,
                     back: bool| {
-        // Vertex order is vanilla's cycle; slots put its v0-v2 diagonal on the shader's shared edge.
-        let slot_of = [1usize, 3, 2, 0];
-        let mut build = |order: [usize; 4]| {
-            let mut c = [[0.0; 3]; 4];
-            let mut t = [[0.0; 2]; 4];
-            for (i, &v) in order.iter().enumerate() {
-                c[slot_of[i]] = corners[v];
-                t[slot_of[i]] = uvs[v];
-            }
-            mesher.push_fluid_quad(
-                &ModelQuadDesc {
-                    corners: c,
-                    uvs: t,
-                    layer,
-                    light: [light; 4],
-                    shade_face: shade,
-                    flags: 0,
-                    ao: [model_ao(1.0); 4],
-                    tint,
-                    cell: cell_u8,
-                },
+        push_surface(
+            mesher,
+            out,
+            &Surface {
+                corners,
+                uvs,
+                layer,
+                light,
+                shade,
+                back,
                 translucent,
-                out,
-            );
-        };
-        build([0, 1, 2, 3]);
-        if back {
-            build([0, 3, 2, 1]);
-        }
+                tint,
+                cell: cell_u8,
+            },
+        );
     };
 
     if render_up {
@@ -276,19 +263,35 @@ pub(crate) fn mesh_fluid(
                     kind_at(ctx, p) != kind && ctx.attr(p) & crate::cache::ATTR_SOLID_RENDER == 0
                 })
             });
-            emit(
-                [
-                    [cx, cy + nw, cz],
-                    [cx, cy + sw, cz + 1.0],
-                    [cx + 1.0, cy + se, cz + 1.0],
-                    [cx + 1.0, cy + ne, cz],
-                ],
-                uvs,
-                layer,
-                light_here_up,
-                Face::PosY,
-                backward,
-            );
+            if !moving && nw == sw && sw == se && se == ne {
+                top = Some(FluidTop {
+                    key: TopKey {
+                        y: cell[1] as u8,
+                        height: nw.to_bits(),
+                        layer,
+                        light: light_here_up,
+                        back: backward,
+                        translucent,
+                        tint,
+                    },
+                    x: cell[0] as u8,
+                    z: cell[2] as u8,
+                });
+            } else {
+                emit(
+                    [
+                        [cx, cy + nw, cz],
+                        [cx, cy + sw, cz + 1.0],
+                        [cx + 1.0, cy + se, cz + 1.0],
+                        [cx + 1.0, cy + ne, cz],
+                    ],
+                    uvs,
+                    layer,
+                    light_here_up,
+                    Face::PosY,
+                    backward,
+                );
+            }
         }
     }
     let bottom = if render_down { INSET } else { 0.0 };
@@ -347,12 +350,183 @@ pub(crate) fn mesh_fluid(
             !overlay,
         );
     }
+    drop(emit);
+    mesher.fluid_tops.extend(top);
     translucent
+}
+
+/// Largest merged top surface edge: model quad corners reach `-1..3` blocks around the anchor cell.
+pub(crate) const MAX_MERGE: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TopKey {
+    y: u8,
+    height: u32,
+    layer: u16,
+    light: u16,
+    back: bool,
+    translucent: bool,
+    tint: u8,
+}
+
+/// A flat, still fluid top face waiting to be merged with identical neighbours.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FluidTop {
+    key: TopKey,
+    x: u8,
+    z: u8,
+}
+
+struct Surface {
+    corners: [[f32; 3]; 4],
+    uvs: [[f32; 2]; 4],
+    layer: u16,
+    light: u16,
+    shade: Face,
+    back: bool,
+    translucent: bool,
+    tint: u8,
+    cell: [u8; 3],
+}
+
+fn push_surface(mesher: &Mesher, out: &mut SectionMesh, s: &Surface) {
+    // Vertex order is vanilla's cycle; slots put its v0-v2 diagonal on the shader's shared edge.
+    let slot_of = [1usize, 3, 2, 0];
+    let mut build = |order: [usize; 4]| {
+        let mut c = [[0.0; 3]; 4];
+        let mut t = [[0.0; 2]; 4];
+        for (i, &v) in order.iter().enumerate() {
+            c[slot_of[i]] = s.corners[v];
+            t[slot_of[i]] = s.uvs[v];
+        }
+        mesher.push_fluid_quad(
+            &ModelQuadDesc {
+                corners: c,
+                uvs: t,
+                layer: s.layer,
+                light: [s.light; 4],
+                shade_face: s.shade,
+                flags: 0,
+                ao: [model_ao(1.0); 4],
+                tint: s.tint,
+                cell: s.cell,
+            },
+            s.translucent,
+            out,
+        );
+    };
+    build([0, 1, 2, 3]);
+    if s.back {
+        build([0, 3, 2, 1]);
+    }
+}
+
+/// One merged rectangle of top faces: `w` cells along x, `d` along z from `(x, z)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TopRect {
+    key: TopKey,
+    x: u8,
+    z: u8,
+    w: u8,
+    d: u8,
+}
+
+/// Greedily merges `tops` into rectangles of at most [`MAX_MERGE`] cells per edge. Cells merge only
+/// when their key and `tint_of` colour match; `tops` is reordered.
+pub(crate) fn merge_tops(
+    tops: &mut [FluidTop],
+    tint_of: impl Fn(&FluidTop) -> u32,
+    mut emit: impl FnMut(TopRect),
+) {
+    tops.sort_unstable_by_key(|t| (t.key, tint_of(t), t.z, t.x));
+    let mut start = 0;
+    while start < tops.len() {
+        let group = |t: &FluidTop| (t.key, tint_of(t));
+        let head = group(&tops[start]);
+        let len = tops[start..]
+            .iter()
+            .take_while(|t| group(t) == head)
+            .count();
+        let cells = &tops[start..start + len];
+        start += len;
+        let mut present = [0u16; 16];
+        for t in cells {
+            present[usize::from(t.z)] |= 1 << t.x;
+        }
+        let mut used = [0u16; 16];
+        let free = |used: &[u16; 16], z: usize, x: usize| (present[z] & !used[z]) >> x & 1 != 0;
+        for t in cells {
+            let (x, z) = (usize::from(t.x), usize::from(t.z));
+            if !free(&used, z, x) {
+                continue;
+            }
+            let mut w = 1;
+            while w < MAX_MERGE && x + w < 16 && free(&used, z, x + w) {
+                w += 1;
+            }
+            let mut d = 1;
+            while d < MAX_MERGE && z + d < 16 && (x..x + w).all(|cx| free(&used, z + d, cx)) {
+                d += 1;
+            }
+            for row in &mut used[z..z + d] {
+                *row |= (((1u32 << w) - 1) << x) as u16;
+            }
+            emit(TopRect {
+                key: t.key,
+                x: t.x,
+                z: t.z,
+                w: w as u8,
+                d: d as u8,
+            });
+        }
+    }
+}
+
+impl Mesher {
+    /// Emits the buffered fluid top faces merged; `tints` is the section's tint table.
+    pub(crate) fn flush_fluid_tops(&mut self, tints: Option<&TintTable>, out: &mut SectionMesh) {
+        let mut tops = std::mem::take(&mut self.fluid_tops);
+        let tint_of = |t: &FluidTop| match (t.key.tint, tints) {
+            (0, _) => 0,
+            (k @ 1..=TINT_WATER, Some(table)) => {
+                table[(usize::from(k) - 1) * 256 + usize::from(t.z) * 16 + usize::from(t.x)]
+            }
+            (k, _) => u32::from(k) << 24,
+        };
+        merge_tops(&mut tops, tint_of, |r| {
+            let k = r.key;
+            let (x0, z0) = (f32::from(r.x), f32::from(r.z));
+            let (x1, z1) = (x0 + f32::from(r.w), z0 + f32::from(r.d));
+            let y = f32::from(k.y) + f32::from_bits(k.height);
+            let (w, d) = (f32::from(r.w), f32::from(r.d));
+            push_surface(
+                self,
+                out,
+                &Surface {
+                    corners: [[x0, y, z0], [x0, y, z1], [x1, y, z1], [x1, y, z0]],
+                    uvs: [[0.0, 0.0], [0.0, d], [w, d], [w, 0.0]],
+                    layer: k.layer,
+                    light: k.light,
+                    shade: Face::PosY,
+                    back: k.back,
+                    translucent: k.translucent,
+                    tint: k.tint,
+                    cell: [r.x + u8::from(r.w > 1), k.y, r.z + u8::from(r.d > 1)],
+                },
+            );
+        });
+        tops.clear();
+        self.fluid_tops = tops;
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::input::MeshInput;
+    use crate::testing::*;
 
     const SOURCE: f32 = 8.0 / 9.0;
 
@@ -417,5 +591,159 @@ mod tests {
             .iter()
             .fold([0.0; 2], |a, p| [a[0] + p[0] / 4.0, a[1] + p[1] / 4.0]);
         assert!((centre[0] - 0.5).abs() < 1e-6 && (centre[1] - 0.5).abs() < 1e-6);
+    }
+
+    const STILL_LAYER: u16 = 20;
+    const FLOW_LAYER: u16 = 21;
+
+    fn mesh_with(f: impl Fn(i32, i32, i32) -> u16, tweak: impl Fn(&mut MeshInput)) -> SectionMesh {
+        let mut cache = test_cache();
+        cache.fluid_sprites.water_still = STILL_LAYER;
+        cache.fluid_sprites.water_flow = FLOW_LAYER;
+        let colors = crate::tint::BiomeColors::from_climates(
+            &[crate::tint::BiomeClimate::default()],
+            &crate::tint::ColorMaps::flat(0x112233, 0x445566, 0x778899),
+        );
+        let mut mesher = Mesher::new(Arc::new(cache), Arc::new(colors));
+        let mut input = input_from(f);
+        tweak(&mut input);
+        let mut out = SectionMesh::default();
+        mesher.mesh(&input, &mut out);
+        out
+    }
+
+    fn ocean(_x: i32, y: i32, _z: i32) -> u16 {
+        match y {
+            -1 => STONE,
+            0..=3 => WATER,
+            _ => AIR,
+        }
+    }
+
+    fn tops(mesh: &SectionMesh) -> Vec<mcr_render::ModelQuadDesc> {
+        mesh.translucent
+            .iter()
+            .map(|q| q.decode())
+            .filter(|q| q.shade_face == Face::PosY)
+            .collect()
+    }
+
+    fn footprint(q: &mcr_render::ModelQuadDesc) -> f32 {
+        let span = |a: usize| {
+            let v = q.corners.iter().map(|c| c[a]);
+            v.clone().fold(f32::MIN, f32::max) - v.fold(f32::MAX, f32::min)
+        };
+        span(0) * span(2)
+    }
+
+    #[test]
+    fn ocean_surface_collapses_to_few_quads_with_the_same_area() {
+        let mesh = mesh_with(ocean, |_| {});
+        let tops = tops(&mesh);
+        assert_eq!(tops.len(), 6 * 6 * 2, "3x3 tiles, front and back");
+        let area: f32 = tops.iter().map(footprint).sum();
+        assert_eq!(area, 2.0 * 256.0);
+        assert!(tops.iter().all(|q| q.layer == STILL_LAYER));
+        assert!(tops.iter().all(|q| footprint(q) <= 9.0));
+    }
+
+    #[test]
+    fn merged_quads_repeat_the_sprite_per_block() {
+        let mesh = mesh_with(ocean, |_| {});
+        let big = tops(&mesh)
+            .into_iter()
+            .find(|q| footprint(q) == 9.0)
+            .expect("a full 3x3 tile");
+        let max_u = big.uvs.iter().map(|t| t[0]).fold(0.0, f32::max);
+        let max_v = big.uvs.iter().map(|t| t[1]).fold(0.0, f32::max);
+        assert_eq!((max_u, max_v), (3.0, 3.0));
+    }
+
+    #[test]
+    fn varying_light_prevents_merging() {
+        let mesh = mesh_with(ocean, |input| {
+            for y in 3..=4 {
+                input.set_light(5, y, 5, 4, 0);
+            }
+        });
+        let tops = tops(&mesh);
+        let normal = tops.iter().find(|q| footprint(q) == 9.0).unwrap().light[0];
+        let odd: Vec<_> = tops.iter().filter(|q| q.light[0] != normal).collect();
+        assert!(!odd.is_empty());
+        assert!(odd.iter().all(|q| footprint(q) == 1.0));
+        let area: f32 = tops.iter().map(footprint).sum();
+        assert_eq!(area, 2.0 * 256.0);
+    }
+
+    #[test]
+    fn flowing_water_is_not_merged() {
+        let mesh = mesh_with(
+            |x, y, _| match y {
+                -1 => STONE,
+                2 => WATER,
+                3 if (0..8).contains(&x) => WATER,
+                _ => AIR,
+            },
+            |_| {},
+        );
+        let flowing: Vec<_> = tops(&mesh)
+            .into_iter()
+            .filter(|q| q.layer == FLOW_LAYER && q.corners[0][1] > 3.0)
+            .collect();
+        assert_eq!(flowing.len(), 2 * 16 * 2, "both edges of the plateau flow");
+        assert!(flowing.iter().all(|q| footprint(q) == 1.0));
+        let still_area: f32 = tops(&mesh)
+            .iter()
+            .filter(|q| q.layer == STILL_LAYER)
+            .map(footprint)
+            .sum();
+        assert_eq!(still_area, 2.0 * (7.0 * 16.0 + 7.0 * 16.0));
+    }
+
+    fn top(x: u8, z: u8) -> FluidTop {
+        FluidTop {
+            key: TopKey {
+                y: 3,
+                height: 0.8f32.to_bits(),
+                layer: STILL_LAYER,
+                light: 0xf000,
+                back: false,
+                translucent: true,
+                tint: 4,
+            },
+            x,
+            z,
+        }
+    }
+
+    #[test]
+    fn differing_tint_colour_splits_the_merge() {
+        let mut cells: Vec<_> = (0..16)
+            .flat_map(|z| (0..16).map(move |x| top(x, z)))
+            .collect();
+        let mut rects = Vec::new();
+        merge_tops(&mut cells, |t| u32::from(t.x >= 8), |r| rects.push(r));
+        let mut covered = [[0u8; 16]; 16];
+        for r in &rects {
+            let across = (r.x..r.x + r.w).any(|x| x < 8) && (r.x..r.x + r.w).any(|x| x >= 8);
+            assert!(!across, "{r:?} spans the tint boundary");
+            for z in r.z..r.z + r.d {
+                for x in r.x..r.x + r.w {
+                    covered[usize::from(z)][usize::from(x)] += 1;
+                }
+            }
+        }
+        assert!(covered.iter().flatten().all(|&n| n == 1), "exact cover");
+        assert!(rects.len() < 256 / 4);
+    }
+
+    #[test]
+    fn differing_height_or_layer_never_merge() {
+        let mut other = top(1, 0);
+        other.key.height = 0.7f32.to_bits();
+        let mut cells = vec![top(0, 0), other];
+        let mut rects = 0;
+        merge_tops(&mut cells, |_| 0, |_| rects += 1);
+        assert_eq!(rects, 2);
     }
 }

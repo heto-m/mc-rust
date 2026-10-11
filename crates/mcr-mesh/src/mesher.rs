@@ -215,6 +215,7 @@ pub struct Mesher {
     meta: Vec<u32>,
     tint_y: [u8; 256],
     flood: Vec<u16>,
+    pub(crate) fluid_tops: Vec<fluid::FluidTop>,
 }
 
 impl std::fmt::Debug for Mesher {
@@ -313,6 +314,7 @@ impl Mesher {
             meta: vec![0; PADDED],
             tint_y: [NO_Y; 256],
             flood: Vec::new(),
+            fluid_tops: Vec::new(),
         }
     }
 
@@ -342,6 +344,7 @@ impl Mesher {
         };
         self.occupied.iter_mut().for_each(|o| *o = [0; 4]);
         self.tint_y = [NO_Y; 256];
+        self.fluid_tops.clear();
         let mut needs_tint = false;
         const STEP: [usize; 6] = [1, 1, 18 * 18, 18 * 18, 18, 18];
 
@@ -392,6 +395,9 @@ impl Mesher {
                 .fill_table_zoomed(input, &self.tint_y, &mut table);
             out.tints = Some(table);
         }
+        let tints = out.tints.take();
+        self.flush_fluid_tops(tints.as_deref(), out);
+        out.tints = tints;
     }
 
     pub(crate) fn note_tint(&mut self, cell: [i32; 3]) {
