@@ -1,3 +1,4 @@
+mod ambience;
 mod assets;
 mod audio;
 mod autopilot;
@@ -17,6 +18,7 @@ mod input;
 mod language;
 mod map;
 mod mesh_world;
+mod movement_sounds;
 mod nametags;
 mod net_world;
 mod outline;

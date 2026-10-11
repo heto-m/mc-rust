@@ -6,7 +6,7 @@ use crate::category::SoundSource;
 use crate::decode::{Pcm, decode_ogg, open_stream};
 use crate::error::AudioError;
 use crate::events::{JavaRandom, SoundEvents};
-use crate::mixer::{AudioHandle, Listener, PlayRequest, Source, Spatial, VoiceId};
+use crate::mixer::{AudioHandle, Command, Listener, PlayRequest, Source, Spatial, VoiceId};
 use crate::store::{AssetStore, SoundOverlay};
 
 #[derive(Debug)]
@@ -62,6 +62,14 @@ impl SoundManager {
         self.handle.set_listener(listener);
     }
 
+    pub fn stop(&mut self, id: VoiceId) {
+        self.handle.stop(id);
+    }
+
+    pub fn set_voice_volume(&mut self, id: VoiceId, volume: f32) {
+        self.handle.send(Command::SetVoiceVolume(id, volume));
+    }
+
     pub fn set_category_volume(&mut self, category: SoundSource, volume: f32) {
         self.handle.set_category_volume(category, volume);
     }
@@ -81,6 +89,20 @@ impl SoundManager {
         pitch: f32,
         category: SoundSource,
         seed: i64,
+    ) -> Option<VoiceId> {
+        self.play_looping(event, position, volume, pitch, category, seed, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn play_looping(
+        &mut self,
+        event: &str,
+        position: Option<[f32; 3]>,
+        volume: f32,
+        pitch: f32,
+        category: SoundSource,
+        seed: i64,
+        looping: bool,
     ) -> Option<VoiceId> {
         let sound = self.events.pick(event, &mut JavaRandom::new(seed))?;
         let volume = volume * sound.volume;
@@ -104,7 +126,7 @@ impl SoundManager {
             pitch,
             category,
             spatial,
-            looping: false,
+            looping,
         })
     }
 

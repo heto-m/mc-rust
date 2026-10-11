@@ -1,0 +1,820 @@
+//! World-driven ambient audio: situational music, biome loops/mood/additions, underwater sounds,
+//! block `animateTick` sounds and minecart rolling.
+
+use mcr_audio::{
+    AmbientBlock, AmbientFluid, AmbientProbe, AudioAttributes, FastRandom, JavaRandom, LoopFade,
+    MoodState, Situation, SoundSource, UnderwaterAmbient, UnderwaterLoop, VoiceId, block_cue,
+    fluid_cue, mood_sound_position, roll_additions, select_music,
+};
+use mcr_client::ClientState;
+use mcr_client::RegistryItem;
+use mcr_data::Version;
+use mcr_protocol::types::game::GameType;
+use rustc_hash::FxHashMap;
+
+use crate::audio::Audio;
+use crate::effects::{eye_in_water, light_at};
+
+const BIOME: &str = "minecraft:worldgen/biome";
+const DIMENSION_TYPE: &str = "minecraft:dimension_type";
+const NEAR_RADIUS: i32 = 16;
+const FAR_RADIUS: i32 = 32;
+const SAMPLES_PER_RADIUS: u32 = 667;
+const MAX_MINECARTS: usize = 64;
+const MINECART_PITCH_STEP: f32 = 0.0025;
+
+#[derive(Debug)]
+struct LoopVoice {
+    sound: String,
+    voice: VoiceId,
+    fade: LoopFade,
+}
+
+#[derive(Debug)]
+struct MinecartVoice {
+    voice: VoiceId,
+    last: [f64; 3],
+    pitch: f32,
+    speed: f32,
+    seen: bool,
+}
+
+#[derive(Debug)]
+struct RidingVoice {
+    vehicle: i32,
+    underwater_variant: bool,
+    voice: VoiceId,
+}
+
+pub type DataReader = Box<dyn Fn(&str) -> Option<Vec<u8>>>;
+
+pub struct Ambience {
+    data: &'static Version,
+    read: DataReader,
+    dimension_type: Option<i32>,
+    dimension_name: String,
+    dimension_attrs: AudioAttributes,
+    biome_count: usize,
+    biome_attrs: Vec<AudioAttributes>,
+    mood: MoodState,
+    rng: JavaRandom,
+    fast: FastRandom,
+    previous_loop: Option<String>,
+    loops: Vec<LoopVoice>,
+    underwater: UnderwaterAmbient,
+    underwater_loop: Option<(VoiceId, UnderwaterLoop)>,
+    was_underwater: bool,
+    block_states: Vec<u8>,
+    block_kinds: Vec<AmbientBlock>,
+    fluid_states: Vec<u8>,
+    minecart_types: Vec<i32>,
+    minecarts: FxHashMap<i32, MinecartVoice>,
+    riding: Option<RidingVoice>,
+    additions: Vec<usize>,
+    last_biome: Option<usize>,
+}
+
+impl std::fmt::Debug for Ambience {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ambience").finish_non_exhaustive()
+    }
+}
+
+impl Ambience {
+    pub fn new(data: &'static Version, read: DataReader) -> Self {
+        let mut a = Self {
+            data,
+            read,
+            dimension_type: None,
+            dimension_name: String::new(),
+            dimension_attrs: AudioAttributes::default(),
+            biome_count: usize::MAX,
+            biome_attrs: Vec::new(),
+            mood: MoodState::default(),
+            rng: JavaRandom::new(0x0A1B_1E27),
+            fast: FastRandom::new(0xA5_5EED),
+            previous_loop: None,
+            loops: Vec::new(),
+            underwater: UnderwaterAmbient::default(),
+            underwater_loop: None,
+            was_underwater: false,
+            block_states: Vec::new(),
+            block_kinds: Vec::new(),
+            fluid_states: Vec::new(),
+            minecart_types: data
+                .entity_types()
+                .iter()
+                .filter(|(_, n)| n.ends_with("minecart"))
+                .map(|(id, _)| id as i32)
+                .collect(),
+            minecarts: FxHashMap::default(),
+            riding: None,
+            additions: Vec::new(),
+            last_biome: None,
+        };
+        a.classify_states();
+        a
+    }
+
+    fn classify_states(&mut self) {
+        let data = self.data;
+        let count = data.state_count();
+        self.block_states = vec![0; count];
+        self.fluid_states = vec![0; count];
+        for state in 0..count as u32 {
+            let Some(info) = data.block_state(state) else {
+                continue;
+            };
+            if let Some(fluid) = info.fluid
+                && let Some(name) = data.fluid_name(fluid.fluid)
+            {
+                if name.ends_with("lava") {
+                    self.fluid_states[state as usize] = 2;
+                } else if name.ends_with("water") && !fluid.source && !fluid.falling {
+                    self.fluid_states[state as usize] = 1;
+                }
+            }
+            let Some(name) = data.state_block_name(state) else {
+                continue;
+            };
+            let Some(name) = name.strip_prefix("minecraft:") else {
+                continue;
+            };
+            if !is_ambient_block(name) {
+                continue;
+            }
+            let prop = |key: &str| {
+                data.state_properties(state)
+                    .find_map(|(k, v)| (k == key).then_some(v))
+            };
+            let lit = prop("lit") == Some("true");
+            let kind = match name {
+                "campfire" | "soul_campfire" if lit => AmbientBlock::Campfire,
+                "fire" | "soul_fire" => AmbientBlock::Fire,
+                "furnace" if lit => AmbientBlock::Furnace,
+                "blast_furnace" if lit => AmbientBlock::BlastFurnace,
+                "smoker" if lit => AmbientBlock::Smoker,
+                "nether_portal" => AmbientBlock::NetherPortal,
+                "respawn_anchor" if prop("charges").is_some_and(|c| c != "0") => {
+                    AmbientBlock::RespawnAnchor
+                }
+                "bubble_column" => AmbientBlock::BubbleColumn {
+                    drag_down: prop("drag") == Some("true"),
+                },
+                "open_eyeblossom" => AmbientBlock::Eyeblossom,
+                "dried_ghast" => AmbientBlock::DriedGhast {
+                    waterlogged: prop("waterlogged") == Some("true"),
+                },
+                "firefly_bush" => AmbientBlock::FireflyBush,
+                "potent_sulfur" if prop("state").is_some_and(|s| s != "dry") => {
+                    AmbientBlock::PotentSulfur
+                }
+                "pale_hanging_moss" => AmbientBlock::HangingMoss,
+                n if n.ends_with("candle") && lit => AmbientBlock::Candle {
+                    count: prop("candles").and_then(|c| c.parse().ok()).unwrap_or(1),
+                },
+                _ => continue,
+            };
+            let index = self
+                .block_kinds
+                .iter()
+                .position(|k| *k == kind)
+                .unwrap_or_else(|| {
+                    self.block_kinds.push(kind);
+                    self.block_kinds.len() - 1
+                });
+            self.block_states[state as usize] = index as u8 + 1;
+        }
+    }
+
+    fn refresh_registries(&mut self, state: &ClientState) {
+        let type_id = state.dimension.type_id;
+        let name = state.dimension.name.as_str();
+        let biomes = state.registries.get(BIOME).map_or(0, |r| r.len());
+        let dimension_changed = self.dimension_type != Some(type_id) || self.dimension_name != name;
+        if !dimension_changed && biomes == self.biome_count {
+            return;
+        }
+        self.dimension_attrs = state
+            .registries
+            .get(DIMENSION_TYPE)
+            .and_then(|r| r.get(type_id))
+            .map(|e| self.entry_attributes("dimension_type", e))
+            .unwrap_or_default();
+        self.biome_attrs = state
+            .registries
+            .get(BIOME)
+            .map(|r| {
+                r.entries
+                    .iter()
+                    .map(|e| {
+                        self.entry_attributes("worldgen/biome", e)
+                            .over(&self.dimension_attrs)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.biome_count = biomes;
+        self.dimension_type = Some(type_id);
+        self.dimension_name = name.to_owned();
+    }
+
+    /// Servers omit entries the client knows from its own data pack, so those come from the jar.
+    fn entry_attributes(&self, directory: &str, entry: &RegistryItem) -> AudioAttributes {
+        match &entry.data {
+            Some(data) => AudioAttributes::from_registry_entry(data),
+            None => self
+                .data_json(directory, entry.id.as_str())
+                .and_then(|bytes| AudioAttributes::from_json(&bytes))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn data_json(&self, directory: &str, id: &str) -> Option<Vec<u8>> {
+        let (namespace, name) = id.split_once(':').unwrap_or(("minecraft", id));
+        (self.read)(&format!("data/{namespace}/{directory}/{name}.json"))
+    }
+
+    /// The sound event of a jukebox song registry entry.
+    pub fn jukebox_sound(&self, state: &ClientState, song: i32) -> Option<String> {
+        let entry = state.registries.get("minecraft:jukebox_song")?.get(song)?;
+        match &entry.data {
+            Some(data) => match data.get("sound_event")? {
+                mcr_nbt::Value::String(name) => Some(name.clone()),
+                mcr_nbt::Value::Compound(c) => c.get_str("sound_id").map(str::to_owned),
+                _ => None,
+            },
+            None => {
+                let bytes = self.data_json("jukebox_song", entry.id.as_str())?;
+                let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+                json.get("sound_event")?.as_str().map(str::to_owned)
+            }
+        }
+    }
+
+    fn attrs_at(&self, state: &ClientState, pos: [i32; 3]) -> &AudioAttributes {
+        biome_at(state, pos)
+            .and_then(|id| self.biome_attrs.get(id))
+            .unwrap_or(&self.dimension_attrs)
+    }
+
+    /// Switching dimension: drop biome sounds, mood and music of the old one.
+    pub fn reset(&mut self, audio: &mut Audio) {
+        for l in self.loops.drain(..) {
+            audio.stop_voice(l.voice);
+        }
+        if let Some((voice, _)) = self.underwater_loop.take() {
+            audio.stop_voice(voice);
+        }
+        for (_, m) in self.minecarts.drain() {
+            audio.stop_voice(m.voice);
+        }
+        if let Some(r) = self.riding.take() {
+            audio.stop_voice(r.voice);
+        }
+        self.previous_loop = None;
+        self.mood = MoodState::default();
+        self.was_underwater = false;
+        self.dimension_type = None;
+    }
+
+    pub fn tick(&mut self, state: &ClientState, eye: [f64; 3], audio: &mut Audio) {
+        if !state.player.loaded {
+            audio.tick_music(None, 1.0, true);
+            return;
+        }
+        let was_other_dimension = self
+            .dimension_type
+            .is_some_and(|t| t != state.dimension.type_id)
+            || (!self.dimension_name.is_empty()
+                && self.dimension_name != state.dimension.name.as_str());
+        if was_other_dimension {
+            self.reset(audio);
+            audio.stop_music(None);
+        }
+        self.refresh_registries(state);
+        let feet = state.player.pos();
+        let feet_block = feet.map(|v| v.floor() as i32);
+        let attrs = self.attrs_at(state, feet_block).clone();
+        let biome = biome_at(state, feet_block);
+        if biome != self.last_biome {
+            self.last_biome = biome;
+            let name = biome
+                .and_then(|b| state.registries.get(BIOME)?.get(b as i32))
+                .map_or("?", |e| e.id.as_str());
+            audio.note(&format!(
+                "biome={name} music={:?} loop={:?} mood={} additions={}",
+                attrs
+                    .background_music
+                    .as_ref()
+                    .and_then(|m| m.default.as_ref())
+                    .map(|m| m.sound.as_str()),
+                attrs
+                    .ambient_sounds
+                    .as_ref()
+                    .and_then(|a| a.loop_sound.as_deref()),
+                attrs
+                    .ambient_sounds
+                    .as_ref()
+                    .is_some_and(|a| a.mood.is_some()),
+                attrs
+                    .ambient_sounds
+                    .as_ref()
+                    .map_or(0, |a| a.additions.len()),
+            ));
+        }
+        let spectator = state.player.game_mode == GameType::Spectator;
+        let underwater = eye_in_water(&state.chunks, eye);
+
+        self.tick_music(state, &attrs, underwater, audio);
+        self.tick_underwater(underwater, spectator, feet, audio);
+        if let Some(sounds) = &attrs.ambient_sounds {
+            self.tick_biome(state, sounds, feet, eye, audio);
+        } else {
+            self.tick_loops(None, audio);
+        }
+        self.animate_blocks(state, feet_block, audio);
+        self.tick_minecarts(state, underwater, audio);
+    }
+
+    fn tick_music(
+        &mut self,
+        state: &ClientState,
+        attrs: &AudioAttributes,
+        underwater: bool,
+        audio: &mut Audio,
+    ) {
+        let in_end = state.dimension.name.as_str() == "minecraft:the_end";
+        let end_boss_music = state.boss_bars.values().any(|b| b.flags.play_music);
+        let creative =
+            state.player.game_mode == GameType::Creative && state.player.physics.abilities.may_fly;
+        let situation = select_music(&Situation {
+            screen_music: None,
+            in_world: true,
+            in_end,
+            end_boss_music,
+            creative_flying: creative,
+            underwater,
+            background: attrs.background_music.as_ref(),
+        });
+        let volume = attrs.music_volume.unwrap_or(1.0);
+        audio.tick_music(situation.as_ref(), volume, false);
+    }
+
+    fn tick_underwater(
+        &mut self,
+        underwater: bool,
+        spectator: bool,
+        feet: [f64; 3],
+        audio: &mut Audio,
+    ) {
+        if !spectator && underwater != self.was_underwater {
+            self.was_underwater = underwater;
+            let event = if underwater {
+                "ambient.underwater.enter"
+            } else {
+                "ambient.underwater.exit"
+            };
+            audio.play(event, Some(feet), 1.0, 1.0, SoundSource::Ambient);
+            if underwater
+                && self.underwater_loop.is_none()
+                && let Some(voice) = audio.play_voice_looping(
+                    "ambient.underwater.loop",
+                    None,
+                    0.0,
+                    1.0,
+                    SoundSource::Ambient,
+                    true,
+                )
+            {
+                self.underwater_loop = Some((voice, UnderwaterLoop::default()));
+            }
+        }
+        if let Some((voice, fade)) = &mut self.underwater_loop {
+            match fade.tick(self.was_underwater) {
+                Some(volume) => audio.set_voice_volume(*voice, volume),
+                None => {
+                    audio.stop_voice(*voice);
+                    self.underwater_loop = None;
+                }
+            }
+        }
+        let roll = self.fast.f32();
+        if let Some(sound) = self.underwater.tick(self.was_underwater, roll) {
+            audio.play(sound.event(), None, 1.0, 1.0, SoundSource::Ambient);
+        }
+    }
+
+    fn tick_biome(
+        &mut self,
+        state: &ClientState,
+        sounds: &mcr_audio::AmbientSounds,
+        feet: [f64; 3],
+        eye: [f64; 3],
+        audio: &mut Audio,
+    ) {
+        self.tick_loops(sounds.loop_sound.as_deref(), audio);
+        roll_additions(&mut self.rng, &sounds.additions, &mut self.additions);
+        for &i in &self.additions {
+            audio.play(
+                &sounds.additions[i].sound,
+                None,
+                1.0,
+                1.0,
+                SoundSource::Ambient,
+            );
+        }
+        let Some(mood) = &sounds.mood else { return };
+        let extent = mood.block_search_extent;
+        let span = extent * 2 + 1;
+        let sample = [
+            (feet[0] + f64::from(self.rng.next_int(span) - extent)).floor() as i32,
+            (eye[1] + f64::from(self.rng.next_int(span) - extent)).floor() as i32,
+            (feet[2] + f64::from(self.rng.next_int(span) - extent)).floor() as i32,
+        ];
+        let (block, sky) =
+            light_at(&state.chunks, sample[0], sample[1], sample[2]).unwrap_or((0, 0));
+        if self.mood.step(mood, sky, block) {
+            let at = mood_sound_position(feet[0], eye[1], feet[2], sample, mood.offset);
+            audio.play(&mood.sound, Some(at), 1.0, 1.0, SoundSource::Ambient);
+        }
+    }
+
+    fn tick_loops(&mut self, current: Option<&str>, audio: &mut Audio) {
+        if current != self.previous_loop.as_deref() {
+            self.previous_loop = current.map(str::to_owned);
+            for l in &mut self.loops {
+                l.fade.fade_out();
+            }
+            if let Some(sound) = current {
+                if let Some(l) = self.loops.iter_mut().find(|l| l.sound == sound) {
+                    l.fade.fade_in();
+                } else if let Some(voice) =
+                    audio.play_voice_looping(sound, None, 0.0, 1.0, SoundSource::Ambient, true)
+                {
+                    let mut fade = LoopFade::default();
+                    fade.fade_in();
+                    self.loops.push(LoopVoice {
+                        sound: sound.to_owned(),
+                        voice,
+                        fade,
+                    });
+                }
+            }
+        }
+        self.loops.retain_mut(|l| match l.fade.tick() {
+            Some(volume) => {
+                audio.set_voice_volume(l.voice, volume);
+                true
+            }
+            None => {
+                audio.stop_voice(l.voice);
+                false
+            }
+        });
+    }
+
+    fn animate_blocks(&mut self, state: &ClientState, center: [i32; 3], audio: &mut Audio) {
+        if self.block_kinds.is_empty() {
+            return;
+        }
+        let probe = StateProbe {
+            state,
+            data: self.data,
+            attrs: self.biome_attrs.as_slice(),
+            fallback: &self.dimension_attrs,
+        };
+        for _ in 0..SAMPLES_PER_RADIUS {
+            for radius in [NEAR_RADIUS, FAR_RADIUS] {
+                let r = radius as u32;
+                let pos = [
+                    center[0] + self.fast.below(r) as i32 - self.fast.below(r) as i32,
+                    center[1] + self.fast.below(r) as i32 - self.fast.below(r) as i32,
+                    center[2] + self.fast.below(r) as i32 - self.fast.below(r) as i32,
+                ];
+                let Some(block) = state.chunks.block(pos[0], pos[1], pos[2]) else {
+                    continue;
+                };
+                let id = usize::from(block.0);
+                let kind = self.block_states.get(id).copied().unwrap_or(0);
+                let cue = if kind != 0 {
+                    block_cue(
+                        self.block_kinds[usize::from(kind) - 1],
+                        pos,
+                        &mut self.fast,
+                        &probe,
+                    )
+                } else {
+                    match self.fluid_states.get(id).copied().unwrap_or(0) {
+                        1 => fluid_cue(AmbientFluid::FlowingWater, pos, &mut self.fast, &probe),
+                        2 => fluid_cue(AmbientFluid::Lava, pos, &mut self.fast, &probe),
+                        _ => None,
+                    }
+                };
+                if let Some(cue) = cue {
+                    audio.play(
+                        cue.event,
+                        Some(cue.pos),
+                        cue.volume,
+                        cue.pitch,
+                        cue.category,
+                    );
+                }
+            }
+        }
+    }
+
+    fn tick_minecarts(&mut self, state: &ClientState, underwater: bool, audio: &mut Audio) {
+        for m in self.minecarts.values_mut() {
+            m.seen = false;
+        }
+        let mut seen = 0;
+        for e in state.entities.iter() {
+            if !self.minecart_types.contains(&e.kind) {
+                continue;
+            }
+            seen += 1;
+            if seen > MAX_MINECARTS {
+                break;
+            }
+            let cart = match self.minecarts.get_mut(&e.id) {
+                Some(c) => c,
+                None => {
+                    let Some(voice) = audio.play_voice_looping(
+                        "entity.minecart.riding",
+                        Some(e.pos),
+                        0.0,
+                        1.0,
+                        SoundSource::Neutral,
+                        true,
+                    ) else {
+                        continue;
+                    };
+                    self.minecarts.entry(e.id).or_insert(MinecartVoice {
+                        voice,
+                        last: e.pos,
+                        pitch: 0.0,
+                        speed: 0.0,
+                        seen: true,
+                    })
+                }
+            };
+            cart.seen = true;
+            let speed = ((e.pos[0] - cart.last[0]).powi(2) + (e.pos[2] - cart.last[2]).powi(2))
+                .sqrt() as f32;
+            cart.last = e.pos;
+            cart.speed = speed;
+            if speed >= 0.01 {
+                cart.pitch = (cart.pitch + MINECART_PITCH_STEP).clamp(0.0, 1.0);
+                let volume = speed.clamp(0.0, 0.5) / 0.5 * 0.7;
+                audio.set_voice_volume(cart.voice, volume);
+            } else {
+                cart.pitch = 0.0;
+                audio.set_voice_volume(cart.voice, 0.0);
+            }
+            audio.set_voice_pitch(cart.voice, cart.pitch);
+            audio.set_voice_position(cart.voice, e.pos);
+        }
+        self.minecarts.retain(|_, m| {
+            if !m.seen {
+                audio.stop_voice(m.voice);
+            }
+            m.seen
+        });
+        self.tick_riding(state, underwater, audio);
+    }
+
+    fn tick_riding(&mut self, state: &ClientState, underwater: bool, audio: &mut Audio) {
+        let vehicle = state
+            .player
+            .vehicle
+            .and_then(|id| state.entities.get(id))
+            .filter(|e| self.minecart_types.contains(&e.kind))
+            .map(|e| e.id);
+        if let Some(r) = &self.riding
+            && (vehicle != Some(r.vehicle) || r.underwater_variant != underwater)
+            && let Some(r) = self.riding.take()
+        {
+            audio.stop_voice(r.voice);
+        }
+        let Some(vehicle) = vehicle else { return };
+        if self.riding.is_none() {
+            let event = if underwater {
+                "entity.minecart.inside.underwater"
+            } else {
+                "entity.minecart.inside"
+            };
+            self.riding = audio
+                .play_voice_looping(event, None, 0.0, 1.0, SoundSource::Neutral, true)
+                .map(|voice| RidingVoice {
+                    vehicle,
+                    underwater_variant: underwater,
+                    voice,
+                });
+        }
+        if let Some(r) = &self.riding {
+            let speed = self.minecarts.get(&vehicle).map_or(0.0, |m| m.speed);
+            let volume = if speed >= 0.01 {
+                speed.clamp(0.0, 1.0) * 0.75
+            } else {
+                0.0
+            };
+            audio.set_voice_volume(r.voice, volume);
+        }
+    }
+}
+
+fn is_ambient_block(name: &str) -> bool {
+    matches!(
+        name,
+        "campfire"
+            | "soul_campfire"
+            | "fire"
+            | "soul_fire"
+            | "furnace"
+            | "blast_furnace"
+            | "smoker"
+            | "nether_portal"
+            | "respawn_anchor"
+            | "bubble_column"
+            | "open_eyeblossom"
+            | "dried_ghast"
+            | "firefly_bush"
+            | "potent_sulfur"
+            | "pale_hanging_moss"
+    ) || name.ends_with("candle")
+}
+
+pub fn biome_at(state: &ClientState, pos: [i32; 3]) -> Option<usize> {
+    let chunks = &state.chunks;
+    let column = chunks.column(mcr_world::ChunkPos::new(pos[0] >> 4, pos[2] >> 4))?;
+    let rel = pos[1] - chunks.config().min_y();
+    if rel < 0 {
+        return None;
+    }
+    let section = column.section((rel >> 4) as usize)?;
+    Some(
+        section
+            .biome(
+                ((pos[0] & 15) >> 2) as usize,
+                ((rel & 15) >> 2) as usize,
+                ((pos[2] & 15) >> 2) as usize,
+            )
+            .0 as usize,
+    )
+}
+
+struct StateProbe<'a> {
+    state: &'a ClientState,
+    data: &'static Version,
+    attrs: &'a [AudioAttributes],
+    fallback: &'a AudioAttributes,
+}
+
+impl StateProbe<'_> {
+    fn block_name(&self, pos: [i32; 3]) -> Option<&'static str> {
+        let s = self.state.chunks.block(pos[0], pos[1], pos[2])?;
+        self.data.state_block_name(u32::from(s.0))
+    }
+
+    fn block_id(&self, pos: [i32; 3]) -> Option<u32> {
+        let s = self.state.chunks.block(pos[0], pos[1], pos[2])?;
+        Some(self.data.block_state(u32::from(s.0))?.block)
+    }
+}
+
+fn up(pos: [i32; 3]) -> [i32; 3] {
+    [pos[0], pos[1] + 1, pos[2]]
+}
+
+impl AmbientProbe for StateProbe<'_> {
+    fn pale_moss_below(&self, pos: [i32; 3]) -> bool {
+        self.block_name([pos[0], pos[1] - 1, pos[2]]) == Some("minecraft:pale_moss_block")
+    }
+
+    fn pale_wood_above(&self, pos: [i32; 3]) -> bool {
+        self.block_name(up(pos)).is_some_and(|n| {
+            n == "minecraft:pale_oak_leaves"
+                || (n.contains("pale_oak") && (n.ends_with("_log") || n.ends_with("_wood")))
+        })
+    }
+
+    fn ghast_trigger_below(&self, pos: [i32; 3]) -> bool {
+        self.block_id([pos[0], pos[1] - 1, pos[2]])
+            .is_some_and(|b| {
+                self.state.registries.is_in_tag(
+                    "minecraft:block",
+                    "minecraft:triggers_ambient_dried_ghast_block_sounds",
+                    b as i32,
+                )
+            })
+    }
+
+    fn exposed_to_sky(&self, pos: [i32; 3]) -> bool {
+        light_at(&self.state.chunks, pos[0], pos[1], pos[2]).is_some_and(|(_, sky)| sky >= 13)
+    }
+
+    fn firefly_sounds_here(&self, pos: [i32; 3]) -> bool {
+        biome_at(self.state, pos)
+            .and_then(|b| self.attrs.get(b))
+            .unwrap_or(self.fallback)
+            .firefly_bush_sounds
+            .unwrap_or(false)
+    }
+
+    fn air_above(&self, pos: [i32; 3]) -> bool {
+        let above = up(pos);
+        self.state
+            .chunks
+            .block(above[0], above[1], above[2])
+            .and_then(|s| self.data.block_state(u32::from(s.0)))
+            .is_some_and(|s| s.is_air())
+    }
+
+    fn water_source_above(&self, pos: [i32; 3]) -> bool {
+        let above = up(pos);
+        self.state
+            .chunks
+            .block(above[0], above[1], above[2])
+            .and_then(|s| self.data.block_state(u32::from(s.0)))
+            .and_then(|s| s.fluid)
+            .is_some_and(|f| {
+                f.source
+                    && self
+                        .data
+                        .fluid_name(f.fluid)
+                        .is_some_and(|n| n.ends_with("water"))
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kind_of(a: &Ambience, block: &str, props: &[(&str, &str)]) -> Option<AmbientBlock> {
+        let data = a.data;
+        let id = data.block_by_name(block)?;
+        let (first, last) = data.block_info(id)?.states;
+        (first..last)
+            .find(|s| {
+                let have: Vec<_> = data.state_properties(*s).collect();
+                props.iter().all(|p| have.contains(p))
+            })
+            .and_then(|s| match a.block_states[s as usize] {
+                0 => None,
+                k => Some(a.block_kinds[usize::from(k) - 1]),
+            })
+    }
+
+    #[test]
+    fn lit_blocks_are_ambient_and_unlit_are_not() {
+        let a = Ambience::new(mcr_data::v26_3(), Box::new(|_| None));
+        assert_eq!(
+            kind_of(&a, "minecraft:furnace", &[("lit", "true")]),
+            Some(AmbientBlock::Furnace)
+        );
+        assert_eq!(kind_of(&a, "minecraft:furnace", &[("lit", "false")]), None);
+        assert_eq!(
+            kind_of(&a, "minecraft:campfire", &[("lit", "true")]),
+            Some(AmbientBlock::Campfire)
+        );
+        assert_eq!(
+            kind_of(&a, "minecraft:soul_fire", &[]),
+            Some(AmbientBlock::Fire)
+        );
+        assert_eq!(
+            kind_of(&a, "minecraft:nether_portal", &[]),
+            Some(AmbientBlock::NetherPortal)
+        );
+        assert_eq!(kind_of(&a, "minecraft:stone", &[]), None);
+        assert_eq!(
+            kind_of(&a, "minecraft:bubble_column", &[("drag", "true")]),
+            Some(AmbientBlock::BubbleColumn { drag_down: true })
+        );
+        assert_eq!(
+            kind_of(
+                &a,
+                "minecraft:white_candle",
+                &[("lit", "true"), ("candles", "3")]
+            ),
+            Some(AmbientBlock::Candle { count: 3 })
+        );
+    }
+
+    #[test]
+    fn lava_and_flowing_water_states_are_fluid_cues() {
+        let a = Ambience::new(mcr_data::v26_3(), Box::new(|_| None));
+        let data = a.data;
+        let class = |block: &str| {
+            let id = data.block_by_name(block).unwrap();
+            let (first, last) = data.block_info(id).unwrap().states;
+            (first..last)
+                .map(|s| a.fluid_states[s as usize])
+                .collect::<Vec<_>>()
+        };
+        assert!(class("minecraft:lava").iter().all(|c| *c == 2));
+        let water = class("minecraft:water");
+        assert!(water.contains(&1) && water.contains(&0));
+    }
+}

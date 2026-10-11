@@ -22,6 +22,9 @@ use mcr_ui::{
 };
 
 use crate::assets::Assets;
+use mcr_audio::SoundSource;
+
+use crate::ambience::Ambience;
 use crate::audio::{Audio, BlockSound, wire_category};
 use crate::block_entities::BlockEntities;
 use crate::debug::{self, DebugInput};
@@ -32,6 +35,7 @@ use crate::hand::{Hand as HeldHand, HandFrame, HandTick};
 use crate::hud::{Hud, HudInput};
 use crate::input::{KEY_ESCAPE, KEY_LEFT_CTRL, track_modifiers, ui_inputs};
 use crate::mesh_world::MeshWorld;
+use crate::movement_sounds::MovementSounds;
 use crate::nametags::{self, TagParams};
 use crate::net_world::NetworkWorld;
 use crate::outline::{OutlineRenderer, WorldBox};
@@ -48,7 +52,6 @@ const THIRD_PERSON_DISTANCE: f64 = 4.0;
 const CLICK_DELAY: u32 = 5;
 const USE_DELAY: u32 = 4;
 const HIT_SOUND_INTERVAL: u32 = 4;
-const STEP_STRIDE: f32 = 0.6;
 
 #[derive(Debug, Clone)]
 pub struct PlayConfig {
@@ -301,8 +304,8 @@ pub struct Play {
     dig: Option<Dig>,
     using_item: bool,
     target: Option<Target>,
-    step_dist: f32,
-    last_feet: [f64; 3],
+    ambience: Ambience,
+    movement: MovementSounds,
     placed_seen: bool,
     started: Instant,
     last_frame: Instant,
@@ -365,6 +368,7 @@ impl Play {
             None => (None, None, None, None),
         };
         let overlay_assets = assets.clone();
+        let data_assets = assets.clone();
         let render = RenderSystem::new(renderer, assets, &world);
         let now = Instant::now();
         Self {
@@ -430,8 +434,8 @@ impl Play {
             dig: None,
             using_item: false,
             target: None,
-            step_dist: 0.0,
-            last_feet: [0.0; 3],
+            ambience: Ambience::new(data, Box::new(move |path| data_assets.read(path))),
+            movement: MovementSounds::new(data),
             placed_seen: false,
             started: now,
             last_frame: now,
@@ -443,7 +447,11 @@ impl Play {
     }
 
     /// Ends the session and returns what the shell lent out.
-    pub fn finish(self) -> Parts {
+    pub fn finish(mut self) -> Parts {
+        if let Some(audio) = &mut self.audio {
+            self.ambience.reset(audio);
+            audio.stop_world_sounds();
+        }
         let (renderer, assets) = self.render.into_parts(&self.world);
         Parts {
             renderer,
@@ -553,7 +561,7 @@ impl Play {
         if self.world.client.state.player.loaded && self.closed.is_none() {
             self.target = self.pick_from(self.cur_eye);
             self.gameplay();
-            self.step_sounds();
+            self.sounds_tick();
         }
         self.hud.tick();
         self.screens_tick();
@@ -596,8 +604,23 @@ impl Play {
                 server_using,
             });
         }
-        self.effects
+        let rain = self
+            .effects
             .tick(state, DVec3::from(self.cur_eye), &self.options);
+        if let (Some(rain), Some(audio)) = (rain, &mut self.audio) {
+            let at = rain.pos.map(|v| f64::from(v) + 0.5);
+            if rain.above {
+                audio.play(
+                    "weather.rain.above",
+                    Some(at),
+                    0.1,
+                    0.5,
+                    SoundSource::Weather,
+                );
+            } else {
+                audio.play("weather.rain", Some(at), 0.2, 1.0, SoundSource::Weather);
+            }
+        }
         if let (Some(dig), Some(Target::Block(hit))) = (self.dig, self.target)
             && dig.pos == hit.pos
         {
@@ -855,6 +878,24 @@ impl Play {
                     audio.play_block(state, BlockSound::Break, center(pos));
                 }
             }
+            ClientEvent::LevelEvent {
+                event: 1010,
+                pos,
+                data,
+                ..
+            } => {
+                let sound = self.ambience.jukebox_sound(&self.world.client.state, data);
+                if let (Some(sound), Some(audio)) = (sound, &mut self.audio) {
+                    audio.play_record(&sound, [pos.x, pos.y, pos.z]);
+                }
+            }
+            ClientEvent::LevelEvent {
+                event: 1011, pos, ..
+            } => {
+                if let Some(audio) = &mut self.audio {
+                    audio.stop_record([pos.x, pos.y, pos.z]);
+                }
+            }
             _ => {}
         }
     }
@@ -1061,36 +1102,12 @@ impl Play {
         }
     }
 
-    fn step_sounds(&mut self) {
-        let player = &self.world.client.state.player;
-        let p = &player.physics;
-        let feet = p.pos;
-        let moved = ((feet[0] - self.last_feet[0]).powi(2) + (feet[2] - self.last_feet[2]).powi(2))
-            .sqrt() as f32;
-        self.last_feet = feet;
-        if !p.on_ground || p.crouching || p.abilities.flying || moved > 2.0 {
-            return;
-        }
-        self.step_dist += moved * STEP_STRIDE;
-        if self.step_dist < 1.0 {
-            return;
-        }
-        self.step_dist = 0.0;
-        let below = [
-            feet[0].floor() as i32,
-            (feet[1] - 0.2).floor() as i32,
-            feet[2].floor() as i32,
-        ];
-        let state = self
-            .world
-            .client
-            .state
-            .chunks
-            .block(below[0], below[1], below[2])
-            .map(|s| u32::from(s.0));
-        if let Some(state) = state {
-            self.play_block(state, BlockSound::Step, feet);
-        }
+    fn sounds_tick(&mut self) {
+        let Some(audio) = &mut self.audio else { return };
+        audio.poll(self.ticks);
+        let state = &self.world.client.state;
+        self.movement.tick(state, self.ticks, audio);
+        self.ambience.tick(state, self.cur_eye, audio);
     }
 
     fn pick_from(&self, eye: [f64; 3]) -> Option<Target> {

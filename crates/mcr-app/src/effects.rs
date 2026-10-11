@@ -6,7 +6,8 @@ use mcr_buf::BlockPos;
 use mcr_client::ClientState;
 use mcr_data::Version;
 use mcr_particles::{
-    Fluid, ParticleAssets, ParticleAtlas, ParticleEngine, ParticleWorld, weather::RainTicker,
+    Fluid, ParticleAssets, ParticleAtlas, ParticleEngine, ParticleWorld,
+    weather::{RainSound, RainTicker},
 };
 use mcr_protocol::play::clientbound::world::{LevelParticles, ParticleRandomization};
 use mcr_protocol::types::Particle;
@@ -101,7 +102,7 @@ impl ParticleAssets for AppParticleAssets {
 /// Collision, light and fluid queries on the client's chunks.
 pub struct ClientParticleWorld<'a>(pub &'a ClientState);
 
-fn light_at(chunks: &ChunkStore, x: i32, y: i32, z: i32) -> Option<(u8, u8)> {
+pub(crate) fn light_at(chunks: &ChunkStore, x: i32, y: i32, z: i32) -> Option<(u8, u8)> {
     let column = chunks.column(ChunkPos::new(x >> 4, z >> 4))?;
     let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
     Some((
@@ -465,7 +466,12 @@ impl WorldEffects {
     }
 
     /// One 20 Hz step: simulation, rain splashes and the lightning flash timer.
-    pub fn tick(&mut self, state: &ClientState, camera: DVec3, options: &Options) {
+    pub fn tick(
+        &mut self,
+        state: &ClientState,
+        camera: DVec3,
+        options: &Options,
+    ) -> Option<RainSound> {
         self.flash_ticks = self.flash_ticks.saturating_sub(1);
         self.particles.set_camera(camera);
         let world = ClientParticleWorld(state);
@@ -479,9 +485,11 @@ impl WorldEffects {
                 biomes: &self.biomes,
             };
             let radius = options.weather_radius.clamp(3, 10) as u32;
-            self.rain
+            return self
+                .rain
                 .tick(&mut self.particles, camera, rain, radius, &source, &world);
         }
+        None
     }
 }
 

@@ -7,6 +7,7 @@ use crate::decode::{Pcm, Pull, StreamSource};
 pub const MAX_VOICES: usize = 247;
 pub const CHUNK_FRAMES: usize = 256;
 const QUEUE_CAPACITY: usize = 1024;
+const ENDED_CAPACITY: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VoiceId(pub u32);
@@ -112,9 +113,17 @@ pub struct AudioHandle {
     tx: rtrb::Producer<Command>,
     next_id: u32,
     stats: Arc<Stats>,
+    ended: rtrb::Consumer<VoiceId>,
 }
 
 impl AudioHandle {
+    /// Drains voices that finished on their own since the last call.
+    pub fn take_ended(&mut self, out: &mut Vec<VoiceId>) {
+        while let Ok(id) = self.ended.pop() {
+            out.push(id);
+        }
+    }
+
     pub fn send(&mut self, command: Command) -> bool {
         self.tx.push(command).is_ok()
     }
@@ -302,6 +311,7 @@ pub struct Mixer {
     listener: Listener,
     volumes: [f32; SoundSource::COUNT],
     rx: Option<rtrb::Consumer<Command>>,
+    ended: Option<rtrb::Producer<VoiceId>>,
     stats: Arc<Stats>,
 }
 
@@ -313,6 +323,7 @@ impl Mixer {
             listener: Listener::default(),
             volumes: [1.0; SoundSource::COUNT],
             rx: None,
+            ended: None,
             stats: Arc::default(),
         }
     }
@@ -320,11 +331,14 @@ impl Mixer {
     pub fn with_queue(sample_rate: u32) -> (Self, AudioHandle) {
         let (tx, rx) = rtrb::RingBuffer::new(QUEUE_CAPACITY);
         let mut mixer = Self::new(sample_rate);
+        let (ended_tx, ended_rx) = rtrb::RingBuffer::new(ENDED_CAPACITY);
         mixer.rx = Some(rx);
+        mixer.ended = Some(ended_tx);
         let handle = AudioHandle {
             tx,
             next_id: 0,
             stats: mixer.stats.clone(),
+            ended: ended_rx,
         };
         (mixer, handle)
     }
@@ -427,7 +441,16 @@ impl Mixer {
             voice.mix(chunk, target);
             voice.loudness = target[0].max(target[1]);
         }
-        self.voices.retain(|v| !v.finished);
+        let ended = &mut self.ended;
+        self.voices.retain(|v| {
+            if v.finished {
+                if let Some(tx) = ended {
+                    let _ = tx.push(v.id);
+                }
+                return false;
+            }
+            true
+        });
     }
 }
 
@@ -657,5 +680,22 @@ mod tests {
         let per_second = start.elapsed().as_secs_f64() * 10.0;
         eprintln!("247 voices: {per_second:.3} s CPU per second of audio");
         assert!(per_second < 1.0);
+    }
+
+    #[test]
+    fn finished_voices_are_reported_but_stopped_ones_are_not() {
+        let (mut mixer, mut handle) = Mixer::with_queue(RATE);
+        let short = constant(300, 0.5);
+        let a = handle.play(request(&short, Spatial::Global)).unwrap();
+        let long = constant(RATE as usize, 0.5);
+        let b = handle.play(request(&long, Spatial::Global)).unwrap();
+        render(&mut mixer, 1024);
+        let mut ended = Vec::new();
+        handle.take_ended(&mut ended);
+        assert_eq!(ended, [a]);
+        handle.stop(b);
+        render(&mut mixer, 256);
+        handle.take_ended(&mut ended);
+        assert_eq!(ended, [a]);
     }
 }

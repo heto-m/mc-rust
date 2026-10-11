@@ -560,6 +560,11 @@ impl Shell {
     }
 
     fn tick_menu(&mut self) {
+        let ticks = self.started.elapsed().as_millis() as u64 / 50;
+        if let Some(audio) = self.parts.as_mut().and_then(|p| p.audio.as_mut()) {
+            audio.poll(ticks);
+            audio.tick_music(Some(&mcr_audio::Music::menu()), 1.0, false);
+        }
         if let Some(mut p) = self.autopilot.take() {
             p.step(self);
             self.autopilot = Some(p);
