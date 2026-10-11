@@ -1231,9 +1231,7 @@ impl ClientState {
             }
             None => {
                 if let Some((yaw, pitch)) = rot {
-                    e.target_yaw = yaw;
-                    e.target_pitch = pitch;
-                    e.move_or_interpolate_to(e.target_pos, Some((yaw, pitch)));
+                    e.rotate_or_interpolate_to(yaw, pitch);
                 }
             }
         }

@@ -213,6 +213,18 @@ impl Entity {
         }
     }
 
+    /// A rotation-only update never moves the entity, as vanilla's `moveOrInterpolateTo(yRot, xRot)`.
+    pub fn rotate_or_interpolate_to(&mut self, yaw: f32, pitch: f32) {
+        self.target_yaw = yaw;
+        self.target_pitch = pitch;
+        if self.sim.is_some() {
+            self.yaw = yaw;
+            self.pitch = pitch;
+        } else {
+            self.interpolation_left = INTERPOLATION_STEPS;
+        }
+    }
+
     pub fn snap_to(&mut self, pos: [f64; 3], yaw: f32, pitch: f32) {
         self.target_pos = pos;
         self.target_yaw = yaw;
@@ -446,6 +458,20 @@ mod tests {
     fn delta_snaps_unaligned_base_to_grid() {
         let moved = apply_delta([0.00001, 0.0, 0.0], 1, 0, 0);
         assert_eq!(moved[0], 1.0 / 4096.0);
+    }
+
+    #[test]
+    fn rotation_updates_keep_a_simulated_entity_in_place() {
+        let mut e = Entity::new(1, Uuid::nil(), 0, [0.0; 3]);
+        e.sim = Some(SimShape {
+            kind: BodyKind::Item,
+            width: 0.25,
+            height: 0.25,
+        });
+        e.pos = [2.0, 1.0, 0.0];
+        e.rotate_or_interpolate_to(90.0, 10.0);
+        assert_eq!(e.pos, [2.0, 1.0, 0.0]);
+        assert_eq!((e.yaw, e.pitch), (90.0, 10.0));
     }
 
     #[test]

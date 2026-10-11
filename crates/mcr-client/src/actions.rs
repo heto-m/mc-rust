@@ -328,12 +328,30 @@ impl Client {
         }))
     }
 
-    pub fn drop_item(&mut self, whole_stack: bool) -> Result<()> {
+    /// Vanilla `MultiPlayerGameMode.dropItem`: removes the predicted stack from the hand at once; true if anything left it.
+    pub fn drop_item(&mut self, whole_stack: bool) -> Result<bool> {
+        use mcr_protocol::types::game::GameType;
+        if self.state.player.game_mode == GameType::Spectator {
+            return Ok(false);
+        }
+        let held = crate::inventory::HOTBAR_START + usize::from(self.state.player.held_slot);
+        let dropped = match self.state.inventory.player.slots.get_mut(held) {
+            Some(stack) if !stack.is_empty() => {
+                if whole_stack || stack.count <= 1 {
+                    *stack = ItemStack::default();
+                } else {
+                    stack.count -= 1;
+                }
+                true
+            }
+            _ => false,
+        };
         self.simple_action(if whole_stack {
             sb::PlayerActionKind::DropAllItems
         } else {
             sb::PlayerActionKind::DropItem
-        })
+        })?;
+        Ok(dropped)
     }
 
     pub fn swap_offhand(&mut self) -> Result<()> {

@@ -1924,7 +1924,11 @@ impl Play {
             self.open_advancements();
         } else if i == k.drop {
             let whole = self.ctrl_held;
-            self.net(|c| c.drop_item(whole));
+            if self.net(|c| c.drop_item(whole)) == Some(true)
+                && let Some(hand) = &mut self.hand
+            {
+                hand.swing();
+            }
         } else if i == k.swap {
             self.net(Client::swap_offhand);
         } else if i == k.pick {
