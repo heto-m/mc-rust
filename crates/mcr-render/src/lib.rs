@@ -15,7 +15,7 @@ mod texture;
 
 pub use animation::{AnimationTable, SpriteAnimation, SpriteFrame};
 pub use arena::Arena;
-pub use camera::{Camera, Frustum};
+pub use camera::{Camera, Frustum, beyond_render_fog};
 pub use effects::{
     CloudMode, CloudSettings, DestroyDecal, EffectAssets, EffectImage, MAX_BOXES_PER_DECAL,
     MAX_DECALS, MAX_WEATHER_RADIUS, MIN_WEATHER_RADIUS, Precipitation, WeatherSource,

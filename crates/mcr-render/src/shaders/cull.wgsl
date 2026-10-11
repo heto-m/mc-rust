@@ -34,6 +34,16 @@ fn in_frustum(lo: vec3<f32>, hi: vec3<f32>) -> bool {
     return true;
 }
 
+// Terrain is fully fogged once max(horizontal distance, |dy|) reaches the render-distance fog end.
+fn beyond_fog(lo: vec3<f32>, hi: vec3<f32>) -> bool {
+    let end = g.fog.w;
+    if !(end > 0.0) {
+        return false;
+    }
+    let near = clamp(vec3<f32>(0.0), lo, hi);
+    return max(length(near.xz), abs(near.y)) >= end;
+}
+
 // Conservative: true unless every depth texel under the box's screen rectangle is nearer than the
 // box's nearest point. The pyramid holds the farthest (smallest reverse-Z) depth per texel.
 fn hiz_visible(lo: vec3<f32>, hi: vec3<f32>) -> bool {
@@ -137,7 +147,7 @@ fn cull_early(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let lo = vec3<f32>(s.origin.xyz - g.cam_int.xyz) - g.cam_frac.xyz;
-    if !in_frustum(lo - PAD_LO, lo + (16.0 + PAD_HI)) {
+    if !in_frustum(lo - PAD_LO, lo + (16.0 + PAD_HI)) || beyond_fog(lo - PAD_LO, lo + (16.0 + PAD_HI)) {
         return;
     }
     emit(s, lo, false);
@@ -159,7 +169,7 @@ fn cull_late(@builtin(global_invocation_id) gid: vec3<u32>) {
     let lo = vec3<f32>(s.origin.xyz - g.cam_int.xyz) - g.cam_frac.xyz;
     let box_lo = lo - PAD_LO;
     let box_hi = lo + (16.0 + PAD_HI);
-    var visible = graph_reachable(i) && in_frustum(box_lo, box_hi);
+    var visible = graph_reachable(i) && in_frustum(box_lo, box_hi) && !beyond_fog(box_lo, box_hi);
     if visible {
         visible = hiz_visible(box_lo, box_hi);
     }

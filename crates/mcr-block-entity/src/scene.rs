@@ -454,30 +454,13 @@ impl BlockEntityScene {
     }
 
     fn visible(&self, pos: &[i32; 3], kind: BlockEntityKind, ctx: &Ctx<'_>) -> bool {
-        let cam = ctx.frame.params.camera;
-        let rel = [
-            f64::from(pos[0]) + 0.5 - cam[0],
-            f64::from(pos[1]) + 0.5 - cam[1],
-            f64::from(pos[2]) + 0.5 - cam[2],
-        ];
-        let limit = kind.view_distance(ctx.frame.render_distance_blocks);
-        let horizontal = rel[0] * rel[0] + rel[2] * rel[2];
-        let dist2 = if kind == BlockEntityKind::Beacon {
-            horizontal
-        } else {
-            horizontal + rel[1] * rel[1]
-        };
-        if dist2 > limit * limit {
-            return false;
-        }
-        if kind == BlockEntityKind::Beacon {
-            return true;
-        }
-        let c = Vec3::new(rel[0] as f32, rel[1] as f32, rel[2] as f32);
-        let radius = 1.8;
-        ctx.planes
-            .iter()
-            .all(|p| p.truncate().dot(c) + p.w > -radius * p.truncate().length())
+        crate::cull::block_entity_visible(
+            kind,
+            *pos,
+            ctx.frame.params.camera,
+            ctx.frame.render_distance_blocks,
+            &ctx.planes,
+        )
     }
 
     fn emit(

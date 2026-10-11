@@ -91,9 +91,40 @@ impl Frustum {
     }
 }
 
+/// True when the whole camera-relative box lies in the fully fogged part of the render-distance fog,
+/// which the terrain shader measures as `max(horizontal length, |dy|)`. A non-positive `end` disables it.
+pub fn beyond_render_fog(min: Vec3, max: Vec3, end: f32) -> bool {
+    if end.is_nan() || end <= 0.0 {
+        return false;
+    }
+    let near = Vec3::ZERO.clamp(min, max);
+    near.x.hypot(near.z).max(near.y.abs()) >= end
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fog_range_culls_by_nearest_point_not_corner() {
+        let cube = |c: Vec3| beyond_render_fog(c, c + Vec3::splat(16.0), 100.0);
+        assert!(!cube(Vec3::new(90.0, 0.0, 0.0)));
+        assert!(cube(Vec3::new(100.0, 0.0, 0.0)));
+        assert!(!cube(Vec3::new(-110.0, 0.0, 0.0)));
+        assert!(cube(Vec3::new(-120.0, 0.0, 0.0)));
+        assert!(!cube(Vec3::new(70.0, 0.0, 70.0)));
+        assert!(cube(Vec3::new(72.0, 0.0, 72.0)));
+        assert!(cube(Vec3::new(0.0, 100.0, 0.0)));
+        assert!(!cube(Vec3::new(-8.0, -8.0, -8.0)));
+    }
+
+    #[test]
+    fn fog_range_disabled_for_bad_end() {
+        let (lo, hi) = (Vec3::splat(1.0e6), Vec3::splat(1.0e6 + 16.0));
+        assert!(!beyond_render_fog(lo, hi, 0.0));
+        assert!(!beyond_render_fog(lo, hi, f32::NAN));
+        assert!(beyond_render_fog(lo, hi, 100.0));
+    }
 
     #[test]
     fn forward_defaults_to_negative_z() {

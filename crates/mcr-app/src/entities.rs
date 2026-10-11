@@ -397,8 +397,8 @@ impl EntityLayer {
         drawn_list.clear();
         let registries = SyncedRegistries(&cx.state.registries);
         let data = mcr_data::v26_3();
-        let mut culled = 0usize;
-        let mut drawn = 0usize;
+        let culled = std::cell::Cell::new(0usize);
+        let drawn = std::cell::Cell::new(0usize);
         let local_id = cx.state.player.entity_id;
         let local_view = cx.show_local.then(|| {
             let mut v = make_view(
@@ -448,10 +448,10 @@ impl EntityLayer {
                     ];
                 }
                 if !visible(cx, state_chunks(cx.state), pos, w * scale, h * scale) {
-                    culled += 1;
+                    culled.set(culled.get() + 1);
                     return None;
                 }
-                drawn += 1;
+                drawn.set(drawn.get() + 1);
                 drawn_list.push((
                     e.id,
                     pos,
@@ -482,20 +482,26 @@ impl EntityLayer {
                 Some(view)
             })
             .chain(local_view)
-            .chain(cx.state.pickups.iter().map(|p| {
+            .chain(cx.state.pickups.iter().filter_map(|p| {
                 let e = &p.entity;
+                let (w, h) = type_size(data, e.kind);
+                if !in_view(cx.cull, p.position(cx.partial), w, h) {
+                    culled.set(culled.get() + 1);
+                    return None;
+                }
+                drawn.set(drawn.get() + 1);
                 let mut t = Track::new(e.pos, e.yaw, e.head_yaw, e.pitch, false);
                 t.age = e.age_ticks();
                 let mut view = make_view(e.id, e.uuid, e.kind, &t, 1.0, &e.data, 1.0);
                 view.pos = p.position(cx.partial);
                 view.object_data = e.object_data;
                 view.light = light_at(&cx.state.chunks, view.pos, 0.0);
-                view
+                Some(view)
             }));
         let chunks = &cx.state.chunks;
         scene.update_grounded(&registries, views, &|x, y, z| ground_top(chunks, x, y, z));
-        self.last_drawn = drawn;
-        self.last_culled = culled;
+        self.last_drawn = drawn.get();
+        self.last_culled = culled.get();
     }
 
     fn has_parts(&self) -> bool {
@@ -602,18 +608,23 @@ fn visible(cx: &FrameCtx<'_>, chunks: &ChunkStore, pos: [f64; 3], w: f32, h: f32
     if !pos.iter().all(|c| c.is_finite() && c.abs() < 3.0e7) {
         return false;
     }
-    let rel = [
-        pos[0] - cx.cull.camera_pos[0],
-        pos[1] - cx.cull.camera_pos[1],
-        pos[2] - cx.cull.camera_pos[2],
-    ];
-    let size = f64::from((w + h + w) / 3.0).max(0.25);
-    let limit = size * 64.0 * cx.cull.distance_scale;
-    if rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2] > limit * limit {
+    let chunk = ChunkPos::new((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+    chunks.column(chunk).is_some() && in_view(cx.cull, pos, w, h)
+}
+
+/// Vanilla `shouldRender` range (mean box edge x 64 x scale), then the box inflated by 0.5 against the frustum.
+pub fn in_view(cull: &Cull, pos: [f64; 3], w: f32, h: f32) -> bool {
+    if !pos.iter().all(|c| c.is_finite() && c.abs() < 3.0e7) {
         return false;
     }
-    let chunk = ChunkPos::new((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
-    if chunks.column(chunk).is_none() {
+    let rel = [
+        pos[0] - cull.camera_pos[0],
+        pos[1] - cull.camera_pos[1],
+        pos[2] - cull.camera_pos[2],
+    ];
+    let size = f64::from((w + h + w) / 3.0).max(0.25);
+    let limit = size * 64.0 * cull.distance_scale;
+    if rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2] > limit * limit {
         return false;
     }
     let half = w.max(0.1) / 2.0 + CULL_MARGIN;
@@ -627,7 +638,7 @@ fn visible(cx: &FrameCtx<'_>, chunks: &ChunkStore, pos: [f64; 3], w: f32, h: f32
         rel[1] as f32 + h + CULL_MARGIN,
         rel[2] as f32 + half,
     );
-    cx.cull.frustum.intersects_aabb(min, max)
+    cull.frustum.intersects_aabb(min, max)
 }
 
 /// `[block, sky]` at the entity's eye, which is where vanilla probes the light.
@@ -693,6 +704,43 @@ pub fn hand_view_proj(aspect: f32) -> Mat4 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cull_with(scale: f64) -> Cull {
+        Cull {
+            camera_pos: [0.0; 3],
+            frustum: Camera::default().frustum(16.0 / 9.0),
+            distance_scale: scale,
+        }
+    }
+
+    #[test]
+    fn entity_frustum_with_half_block_margin() {
+        let cull = cull_with(1.0);
+        assert!(in_view(&cull, [0.0, 0.0, -10.0], 0.6, 1.8));
+        assert!(!in_view(&cull, [0.0, 0.0, 10.0], 0.6, 1.8));
+        assert!(!in_view(&cull, [50.0, 0.0, -10.0], 0.6, 1.8));
+        assert!(!in_view(&cull, [0.0, 50.0, -10.0], 0.6, 1.8));
+        assert!(in_view(&cull, [0.0, -2.0, -10.0], 0.6, 5.0));
+    }
+
+    #[test]
+    fn entity_distance_follows_box_size_and_scaling() {
+        let near = cull_with(1.0);
+        assert!(in_view(&near, [0.0, 0.0, -60.0], 0.6, 1.8));
+        assert!(!in_view(&near, [0.0, 0.0, -70.0], 0.6, 1.8));
+        assert!(in_view(&near, [0.0, 0.0, -200.0], 4.0, 4.0));
+        assert!(!in_view(&near, [0.0, 0.0, -300.0], 4.0, 4.0));
+        assert!(in_view(&cull_with(5.0), [0.0, 0.0, -300.0], 0.6, 1.8));
+        assert!(!in_view(&cull_with(0.0), [0.0, 0.0, -5.0], 0.6, 1.8));
+    }
+
+    #[test]
+    fn hostile_positions_are_culled() {
+        let cull = cull_with(1.0);
+        assert!(!in_view(&cull, [f64::NAN, 0.0, -5.0], 0.6, 1.8));
+        assert!(!in_view(&cull, [0.0, f64::INFINITY, -5.0], 0.6, 1.8));
+        assert!(!in_view(&cull, [0.0, 0.0, -1.0e9], 0.6, 1.8));
+    }
 
     #[test]
     fn angles_wrap() {

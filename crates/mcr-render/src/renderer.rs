@@ -1474,6 +1474,7 @@ impl Renderer {
         cam_int: [i32; 3],
         cam_frac: glam::Vec3,
         graph: bool,
+        fog_end: f32,
     ) -> u32 {
         let mut visible: Vec<(f32, glam::Vec3, u32, u32, u32, u32)> = Vec::new();
         for (key, slot) in &self.sections {
@@ -1488,7 +1489,9 @@ impl Renderer {
                 (key[1] * 16 - cam_int[1]) as f32,
                 (key[2] * 16 - cam_int[2]) as f32,
             ) - cam_frac;
-            if !frustum.intersects_aabb(lo, lo + glam::Vec3::splat(16.0)) {
+            if !frustum.intersects_aabb(lo, lo + glam::Vec3::splat(16.0))
+                || crate::beyond_render_fog(lo, lo + glam::Vec3::splat(16.0), fog_end)
+            {
                 continue;
             }
             let tint_base = slot.tint.map_or(NO_TINT_TABLE, |t| {
@@ -1671,7 +1674,7 @@ impl Renderer {
                 graph_ms = started.elapsed().as_secs_f32() * 1000.0;
             }
         }
-        let trans_n = self.build_translucent(&frustum, [ci.x, ci.y, ci.z], cf, graph);
+        let trans_n = self.build_translucent(&frustum, [ci.x, ci.y, ci.z], cf, graph, rd_end);
         self.effects.prepare(&env, cam.position.to_array());
 
         let mut surface_tex = None;
