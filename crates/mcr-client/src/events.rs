@@ -72,6 +72,30 @@ impl DamageEffects {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockEditor {
+    CommandBlock,
+    StructureBlock,
+    Jigsaw,
+    TestBlock,
+    TestInstanceBlock,
+}
+
+impl BlockEditor {
+    pub fn from_block(name: &str) -> Option<Self> {
+        Some(match name.strip_prefix("minecraft:").unwrap_or(name) {
+            "command_block" | "chain_command_block" | "repeating_command_block" => {
+                Self::CommandBlock
+            }
+            "structure_block" => Self::StructureBlock,
+            "jigsaw" => Self::Jigsaw,
+            "test_block" => Self::TestBlock,
+            "test_instance_block" => Self::TestInstanceBlock,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientEvent {
     Joined {
@@ -97,6 +121,18 @@ pub enum ClientEvent {
     },
     BookOpened {
         hand: mcr_protocol::types::game::Hand,
+    },
+    /// Right-clicking an operator block as a creative operator opens its editor on the client.
+    BlockEditorOpened {
+        pos: BlockPos,
+        kind: BlockEditor,
+    },
+    MinecartEditorOpened {
+        entity_id: i32,
+    },
+    TestInstanceStatus {
+        status: Component,
+        size: Option<[i32; 3]>,
     },
 
     ChunkLoaded(ChunkPos),
@@ -260,5 +296,25 @@ mod tests {
         let s = sanitize_for_log("a\u{1b}[2J\u{1b}]0;pwned\u{7}\nb\u{9b}c\u{7f}");
         assert!(!s.chars().any(char::is_control));
         assert_eq!(s, "a\\u{1b}[2J\\u{1b}]0;pwned\\u{7}\\u{a}b\\u{9b}c\\u{7f}");
+    }
+
+    #[test]
+    fn operator_blocks_have_editors() {
+        for block in [
+            "minecraft:command_block",
+            "chain_command_block",
+            "repeating_command_block",
+        ] {
+            assert_eq!(
+                BlockEditor::from_block(block),
+                Some(BlockEditor::CommandBlock)
+            );
+        }
+        assert_eq!(BlockEditor::from_block("jigsaw"), Some(BlockEditor::Jigsaw));
+        assert_eq!(
+            BlockEditor::from_block("test_instance_block"),
+            Some(BlockEditor::TestInstanceBlock)
+        );
+        assert_eq!(BlockEditor::from_block("chest"), None);
     }
 }

@@ -7,7 +7,13 @@ use crate::ui::Ui;
 
 const GUI_ROOT: &str = "assets/minecraft/textures/gui/";
 const EFFECT_ROOT: &str = "assets/minecraft/textures/mob_effect/";
-const DIRS: [&str; 3] = ["container/", "container/creative_inventory/", "title/"];
+const DIRS: [&str; 5] = [
+    "container/",
+    "container/creative_inventory/",
+    "title/",
+    "signs/",
+    "hanging_signs/",
+];
 const FILES: [&str; 7] = [
     "menu_background",
     "menu_list_background",

@@ -48,3 +48,10 @@ The client SHALL keep chat history, player list, titles, boss bars and scoreboar
 #### Scenario: Chat
 - **WHEN** a system, player or disguised chat message arrives
 - **THEN** it is appended to bounded history and a chat event is queued
+
+### Requirement: Editor and dialog events
+The client SHALL queue events for opening block and minecart editors, and for the test instance status packet, and SHALL forward `show_dialog` and `clear_dialog` from both configuration and play to a dialog channel, resolving registry references to dialog compounds with at most 64 sub-dialogs, and send the answers it receives from that channel as `custom_click_action` or commands.
+
+#### Scenario: Registry reference
+- **WHEN** `show_dialog` names a registry id
+- **THEN** the channel receives the registry's dialog compound

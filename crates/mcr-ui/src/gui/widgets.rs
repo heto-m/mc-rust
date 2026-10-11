@@ -176,11 +176,15 @@ impl CycleButton {
         }
     }
 
-    fn label(&self) -> String {
+    fn label(&self, cx: &mut RenderCx<'_, '_>) -> String {
+        let resolve = |cx: &mut RenderCx<'_, '_>, s: &str| match s.strip_prefix("lang:") {
+            Some(key) => cx.lang(key),
+            None => s.to_owned(),
+        };
         match self.values.get(self.index) {
-            Some(v) if self.name.is_empty() => v.clone(),
-            Some(v) => format!("{}: {v}", self.name),
-            None => self.name.clone(),
+            Some(v) if self.name.is_empty() => resolve(cx, v),
+            Some(v) => format!("{}: {}", resolve(cx, &self.name), resolve(cx, v)),
+            None => resolve(cx, &self.name),
         }
     }
 
@@ -192,7 +196,8 @@ impl CycleButton {
             (true, false) => "widget/button",
         };
         cx.sprite(sprite, x, y, w, h);
-        draw_label(cx, &self.label(), self.rect, self.active);
+        let label = self.label(cx);
+        draw_label(cx, &label, self.rect, self.active);
     }
 }
 
@@ -220,6 +225,15 @@ impl Widget {
             Self::Slider(w) => w.rect,
             Self::Cycle(w) => w.rect,
             Self::Edit(w) => w.rect,
+        }
+    }
+
+    pub fn set_rect(&mut self, rect: [i32; 4]) {
+        match self {
+            Self::Button(w) => w.rect = rect,
+            Self::Slider(w) => w.rect = rect,
+            Self::Cycle(w) => w.rect = rect,
+            Self::Edit(w) => w.rect = rect,
         }
     }
 

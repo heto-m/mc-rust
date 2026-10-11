@@ -166,6 +166,19 @@ impl SpriteInfo {
         let dst = [x as f32, y as f32, (x + w) as f32, (y + h) as f32];
         self.quad(atlas_size as f32, nominal, src, dst)
     }
+
+    /// Stretches the `sw`x`sh` window starting at pixel `(tx, ty)` over the destination rectangle.
+    pub fn region_scaled(
+        &self,
+        atlas_size: u32,
+        (tx, ty, sw, sh): (i32, i32, i32, i32),
+        (x, y, w, h): (i32, i32, i32, i32),
+    ) -> SpriteQuad {
+        let nominal = (self.width as f32, self.height as f32);
+        let src = [tx as f32, ty as f32, (tx + sw) as f32, (ty + sh) as f32];
+        let dst = [x as f32, y as f32, (x + w) as f32, (y + h) as f32];
+        self.quad(atlas_size as f32, nominal, src, dst)
+    }
 }
 
 #[derive(Debug)]

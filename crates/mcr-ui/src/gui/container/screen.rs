@@ -39,6 +39,7 @@ pub struct ContainerScreen {
     pub(super) crafter_override: [Option<bool>; 9],
     pub(super) anvil_item: Option<ItemStack>,
     pub(super) anvil_sent: String,
+    pub(super) book_layout: Option<crate::gui::book::PageLayout>,
 }
 
 impl ContainerScreen {
@@ -59,6 +60,7 @@ impl ContainerScreen {
             crafter_override: [None; 9],
             anvil_item: None,
             anvil_sent: String::new(),
+            book_layout: None,
         }
     }
 

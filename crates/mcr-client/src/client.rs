@@ -59,6 +59,8 @@ pub struct Client {
     pub(crate) ride: Option<crate::riding::Ride>,
 }
 
+const MAX_CUSTOM_ACTION_BYTES: usize = 65_600;
+
 fn plain_json_text(json: &str) -> Component {
     for key in ["\"text\":\"", "\"translate\":\""] {
         if let Some(i) = json.find(key) {
@@ -153,6 +155,7 @@ impl Client {
                 return Err(ClientError::Timeout("joining"));
             }
             self.flush_pack_replies()?;
+            self.flush_dialog_replies()?;
             match self.conn.recv_timeout(Duration::from_millis(50)) {
                 Some(Event::Frame(f)) => self.handle_frame(f)?,
                 Some(Event::Closed(reason)) => return Err(self.closed(reason.to_string())),
@@ -434,6 +437,19 @@ impl Client {
                     .take(crate::state::MAX_SERVER_LINKS)
                     .collect();
             }
+            ConfigClientbound::ShowDialog(p) => {
+                if let (Some(link), Some(dialog)) = (
+                    &self.config.dialog_link,
+                    crate::resolve_dialog(&self.state.registries, &p.dialog.0),
+                ) {
+                    let _ = link.requests.send(crate::DialogRequest::Show(dialog));
+                }
+            }
+            ConfigClientbound::ClearDialog(_) => {
+                if let Some(link) = &self.config.dialog_link {
+                    let _ = link.requests.send(crate::DialogRequest::Clear);
+                }
+            }
             ConfigClientbound::CodeOfConduct(_) => {
                 self.send_config(&ConfigServerbound::AcceptCodeOfConduct(
                     cfg::AcceptCodeOfConduct,
@@ -474,6 +490,11 @@ impl Client {
                 ClientEvent::Transfer { host, port } => self.transfer = Some((host.clone(), *port)),
                 ClientEvent::Disconnected(DisconnectReason::Server(r)) => closed = Some(r.clone()),
                 _ => {}
+            }
+        }
+        for request in std::mem::take(&mut out.dialogs) {
+            if let Some(link) = &self.config.dialog_link {
+                let _ = link.requests.send(request);
             }
         }
         for reply in std::mem::take(&mut out.replies) {
@@ -524,8 +545,59 @@ impl Client {
         }
     }
 
+    fn flush_dialog_replies(&mut self) -> Result<()> {
+        use crate::{DialogReply, DialogRequest};
+        loop {
+            let Some(reply) = self
+                .config
+                .dialog_link
+                .as_ref()
+                .and_then(|l| l.next_reply())
+            else {
+                return Ok(());
+            };
+            match reply {
+                DialogReply::Custom { id, payload } => {
+                    let packet = c::CustomClickAction { id, payload };
+                    if mcr_buf::to_bytes(&packet).len() > MAX_CUSTOM_ACTION_BYTES {
+                        continue;
+                    }
+                    match self.phase {
+                        Phase::Configuration => {
+                            self.send_config(&ConfigServerbound::CustomClickAction(packet))?
+                        }
+                        Phase::Play => {
+                            self.send_play(&PlayServerbound::CustomClickAction(packet))?
+                        }
+                        _ => {}
+                    }
+                }
+                DialogReply::Command(command) => {
+                    if self.phase == Phase::Play {
+                        self.send_command(&command)?;
+                    }
+                }
+                DialogReply::Open(reference) => {
+                    if let (Some(link), Some(dialog)) = (
+                        &self.config.dialog_link,
+                        crate::resolve_dialog(&self.state.registries, &reference),
+                    ) {
+                        let _ = link.requests.send(DialogRequest::Show(dialog));
+                    }
+                }
+                DialogReply::Disconnect(reason) => {
+                    self.set_phase(Phase::Closed);
+                    self.events
+                        .push_back(ClientEvent::Disconnected(DisconnectReason::Local));
+                    return Err(ClientError::Disconnected(Box::new(reason)));
+                }
+            }
+        }
+    }
+
     fn pump(&mut self) -> Result<()> {
         self.flush_pack_replies()?;
+        self.flush_dialog_replies()?;
         for _ in 0..MAX_FRAMES_PER_PUMP {
             match self.conn.try_recv() {
                 Some(Event::Frame(f)) => self.handle_frame(f)?,

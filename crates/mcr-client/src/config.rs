@@ -28,6 +28,8 @@ pub struct ClientConfig {
     pub resource_packs: ResourcePackPolicy,
     /// When set, pack pushes go to the app instead of being answered by `resource_packs`.
     pub pack_link: Option<crate::PackLink>,
+    /// When set, server dialogs go to the app, which answers through the same link.
+    pub dialog_link: Option<crate::DialogLink>,
     pub online: Option<OnlineAuth>,
     /// Handshake with the transfer intent (set when following a transfer packet).
     pub transfer: bool,
@@ -51,6 +53,7 @@ impl Default for ClientConfig {
             known_packs: true,
             resource_packs: ResourcePackPolicy::Decline,
             pack_link: None,
+            dialog_link: None,
             online: None,
             transfer: false,
             connect_timeout: Duration::from_secs(10),

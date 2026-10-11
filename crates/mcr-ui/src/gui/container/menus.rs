@@ -1,7 +1,10 @@
 use mcr_protocol::types::item::ItemStack;
+use mcr_protocol::types::text::ClickEvent;
 
 use super::kind::{FurnaceKind, MenuKind};
 use super::screen::{ContainerScreen, LABEL};
+use crate::gui::book::PageLayout;
+use crate::gui::clicks::click_event_actions;
 use crate::gui::edit_box::EditBox;
 use crate::gui::env::{Env, GameView, RenderCx, is_empty};
 use crate::gui::input::{Key, MouseButton, UiInput, contains};
@@ -1181,7 +1184,7 @@ impl ContainerScreen {
         let left = (self.gui.0 - 192) / 2;
         cx.texture("book", (0, 0), (left, 2, 192, 192));
         let view = cx.view;
-        let pages = view.book_pages();
+        let pages = &view.book_pages();
         let page = view.data(0).max(0) as usize;
         let total = pages.len().max(1);
         let indicator = cx.lang_fmt(
@@ -1191,23 +1194,18 @@ impl ContainerScreen {
         let w = cx.text_width(&indicator);
         cx.text(&indicator, left + 148 - w, 2 + 16, 0xFF00_0000, false);
         if let Some(component) = pages.get(page) {
-            let cells = cx.frame.ui().flatten(component);
-            for (i, range) in cx
-                .frame
-                .ui()
-                .wrap(&cells, 114.0)
-                .into_iter()
-                .take(14)
-                .enumerate()
+            if self
+                .book_layout
+                .as_ref()
+                .is_none_or(|l| !l.is_for(component, page))
             {
-                cx.frame.cells(
-                    &cells[range],
-                    (left + 36) as f32,
-                    (2 + 30 + i as i32 * 9) as f32,
-                    0xFF00_0000,
-                    false,
-                );
+                self.book_layout = Some(PageLayout::new(cx, component, page));
             }
+        } else {
+            self.book_layout = None;
+        }
+        if let Some(layout) = &self.book_layout {
+            layout.draw(cx, self.gui.0);
         }
         if let Some(b) = self.widgets.button_mut(BOOK_PREV) {
             b.visible = page > 0;
@@ -1254,6 +1252,21 @@ impl ContainerScreen {
                 }
                 _ => {}
             }
+        }
+        if let UiInput::MousePress { x, y, .. } = *input
+            && let Some(event) = self
+                .book_layout
+                .as_ref()
+                .and_then(|l| l.event_at(self.gui.0, x, y))
+        {
+            match event {
+                ClickEvent::ChangePage(n) => {
+                    let page = n.saturating_sub(1).max(0);
+                    out.push(ScreenAction::ContainerButton(100 + page));
+                }
+                other => click_event_actions(other, out),
+            }
+            return true;
         }
         let mut events = Vec::new();
         let used = self.widgets.input(env, input, &mut events);

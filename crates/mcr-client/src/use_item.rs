@@ -121,6 +121,8 @@ fn block_consumes_use(name: &str) -> bool {
             | "repeating_command_block"
             | "structure_block"
             | "jigsaw"
+            | "test_block"
+            | "test_instance_block"
             | "composter"
             | "cake"
             | "vault"
@@ -212,6 +214,14 @@ impl Client {
                         .get(id)
                         .and_then(|e| u32::try_from(e.kind).ok())
                         .and_then(|k| self.state.data.entity_type_name(k));
+                    if entity.is_some_and(|e| short(e) == "command_block_minecart")
+                        && self.state.player.can_use_game_master_blocks()
+                    {
+                        self.push_event(crate::events::ClientEvent::MinecartEditorOpened {
+                            entity_id: id,
+                        });
+                        return Ok(UseResult::Success);
+                    }
                     if entity.is_some_and(|e| entity_interact_swings(e, held_name)) {
                         return Ok(UseResult::Success);
                     }
@@ -229,6 +239,17 @@ impl Client {
                     let suppress = sneaking && hands_busy;
                     self.use_item_on(hand, pos, face, cursor, inside)?;
                     let block = self.block_name_at(pos);
+                    if !suppress
+                        && hand == Hand::Main
+                        && self.state.player.can_use_game_master_blocks()
+                        && let Some(kind) = block.and_then(crate::events::BlockEditor::from_block)
+                    {
+                        self.push_event(crate::events::ClientEvent::BlockEditorOpened {
+                            pos,
+                            kind,
+                        });
+                        return Ok(UseResult::Success);
+                    }
                     if !suppress && hand == Hand::Main && block.is_some_and(block_consumes_use) {
                         return Ok(UseResult::Success);
                     }

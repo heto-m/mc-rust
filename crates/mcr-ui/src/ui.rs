@@ -356,6 +356,29 @@ impl UiFrame<'_> {
         );
     }
 
+    pub fn sprite_region_scaled(
+        &mut self,
+        id: SpriteId,
+        src: (i32, i32, i32, i32),
+        dst: (i32, i32, i32, i32),
+    ) {
+        let info = *self.ui.sprites.info(id);
+        let size = self.ui.sprites.atlas().size();
+        let q = info.region_scaled(size, src, dst);
+        let page = PageRef {
+            kind: PageKind::Sprite,
+            index: info.page,
+        };
+        let scissor = self.scissor_px();
+        self.ui.batch.push(
+            page,
+            scissor,
+            rect_corners(q.dst),
+            uv_corners(q.uv),
+            [255; 4],
+        );
+    }
+
     /// Draws `§`-formatted text and returns its width.
     pub fn text(&mut self, text: &str, x: f32, y: f32, argb: u32, shadow: bool) -> f32 {
         let cells = parse_legacy(text);

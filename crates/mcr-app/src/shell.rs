@@ -8,14 +8,17 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use mcr_client::{Client, ClientConfig, sanitize_for_log};
+use mcr_client::{
+    Client, ClientConfig, DialogEnd, DialogReply, DialogRequest, dialog_channel, sanitize_for_log,
+};
+use mcr_nbt::Value;
 use mcr_protocol::types::text::Component;
 use mcr_render::{Camera, FrameInputs, FrameStats, Renderer};
 use mcr_settings::InputKey;
 use mcr_ui::{
-    Clipboard, ConfirmScreen, ConnectingScreen, DisconnectedScreen, Env, Modifiers, NoView,
-    RenderCx, Screen, ScreenAction, ScreenStack, SharedServers, TitleScreen, UiInput,
-    vanilla_resources,
+    Clipboard, ConfirmScreen, ConnectingScreen, Dialog, DialogScreen, DisconnectedScreen, Env,
+    Modifiers, NoView, RenderCx, Screen, ScreenAction, ScreenStack, SharedServers, TitleScreen,
+    UiInput, vanilla_resources,
 };
 
 use crate::assets::Assets;
@@ -29,6 +32,8 @@ use crate::servers::FileServers;
 use crate::settings::{OptionsScreen, Settings, SharedSettings};
 
 type Connect = Receiver<Result<Client, String>>;
+
+const MAX_DIALOG_REQUESTS_PER_FRAME: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct ShellConfig {
@@ -63,6 +68,7 @@ pub struct Shell {
     resource_stack: ResourceStack,
     prompt_open: bool,
     current_address: String,
+    dialogs: Option<DialogEnd>,
 }
 
 impl std::fmt::Debug for Shell {
@@ -142,6 +148,7 @@ impl Shell {
             resource_stack,
             prompt_open: false,
             current_address: String::new(),
+            dialogs: None,
             cfg,
         };
         shell.show_title();
@@ -151,7 +158,14 @@ impl Shell {
         Ok(shell)
     }
 
+    fn close_dialog_screens(&mut self) {
+        while self.stack.top_is_dialog() {
+            self.stack.pop();
+        }
+    }
+
     fn close_connecting_screen(&mut self) {
+        self.close_dialog_screens();
         while self.prompt_open {
             self.prompt_open = false;
             self.stack.pop();
@@ -171,6 +185,49 @@ impl Shell {
         }
         let actions = self.packs.end_session();
         self.pack_actions(actions);
+    }
+
+    fn poll_dialogs(&mut self) {
+        let Some(end) = &self.dialogs else { return };
+        let mut requests = Vec::new();
+        while let Ok(request) = end.requests.try_recv() {
+            requests.push(request);
+            if requests.len() >= MAX_DIALOG_REQUESTS_PER_FRAME {
+                break;
+            }
+        }
+        if let Some(play) = &mut self.play {
+            for reply in play.take_dialog_replies() {
+                end.reply(reply);
+            }
+        }
+        for request in requests {
+            match request {
+                DialogRequest::Show(compound) => {
+                    let Some(dialog) = Dialog::from_nbt(&Value::Compound(compound)) else {
+                        eprintln!("ignoring a malformed server dialog");
+                        continue;
+                    };
+                    match &mut self.play {
+                        Some(play) => play.show_dialog(dialog),
+                        None => {
+                            if self.stack.top_is_dialog() {
+                                self.stack.pop();
+                            }
+                            self.push(Box::new(DialogScreen::new(dialog, Vec::new())));
+                        }
+                    }
+                }
+                DialogRequest::Clear => match &mut self.play {
+                    Some(play) => play.clear_dialog(),
+                    None => {
+                        if self.stack.top_is_dialog() {
+                            self.stack.pop();
+                        }
+                    }
+                },
+            }
+        }
     }
 
     fn poll_packs(&mut self) {
@@ -402,6 +459,9 @@ impl Shell {
             self.packs
                 .begin(self.servers.borrow().pack_setting_for(address)),
         );
+        let (dialog_link, dialog_end) = dialog_channel();
+        config.dialog_link = Some(dialog_link);
+        self.dialogs = Some(dialog_end);
         self.current_address = address.to_owned();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -430,6 +490,7 @@ impl Shell {
                     game_dir: self.cfg.game_dir.clone(),
                 };
                 self.play = Some(Play::new(parts, &cfg, client));
+                self.close_dialog_screens();
                 self.stack.pop();
             }
             Err(message) => {
@@ -466,6 +527,7 @@ impl Shell {
         self.last_frame = now;
         self.poll_connect();
         self.poll_packs();
+        self.poll_dialogs();
         if let Some(play) = &mut self.play {
             self.accum = 0.0;
             let ticks = play.due_ticks(dt);
@@ -540,6 +602,29 @@ impl Shell {
                     self.end_pack_session();
                 }
                 ScreenAction::ResourcePackAnswer(accepted) => self.pack_answer(accepted),
+                ScreenAction::ShowDialog(reference) => {
+                    if let Some(end) = &self.dialogs {
+                        end.reply(DialogReply::Open(reference));
+                    }
+                }
+                ScreenAction::CustomClick { id, payload } => {
+                    if let Some(end) = &self.dialogs {
+                        end.reply(DialogReply::Custom { id, payload });
+                    }
+                }
+                ScreenAction::DialogDisconnect => {
+                    if let Some(end) = &self.dialogs {
+                        end.reply(DialogReply::Disconnect(Component::translatable(
+                            "menu.custom_screen_info.disconnect",
+                            Vec::new(),
+                        )));
+                    }
+                }
+                ScreenAction::PlaySound(name) => {
+                    if let Some(a) = self.parts.as_mut().and_then(|p| p.audio.as_mut()) {
+                        a.play(name, None, 1.0, 1.0, mcr_audio::SoundSource::Ui);
+                    }
+                }
                 ScreenAction::OpenOptions => {
                     let screen = OptionsScreen::new(self.settings.clone(), self.languages());
                     self.push(Box::new(screen));

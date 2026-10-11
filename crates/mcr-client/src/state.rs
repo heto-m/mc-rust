@@ -33,6 +33,7 @@ pub struct Outbox {
     pub events: VecDeque<ClientEvent>,
     pub replies: Vec<PlayServerbound<'static>>,
     pub cookie_responses: Vec<(Identifier, Option<Vec<u8>>)>,
+    pub dialogs: Vec<crate::DialogRequest>,
 }
 
 impl Outbox {

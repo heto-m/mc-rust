@@ -780,6 +780,13 @@ fn parse_argb(v: &Value) -> Option<i32> {
     }
 }
 
+impl ClickEvent {
+    /// Reads a click event compound keyed by `action`; `None` when the action or its fields are unknown.
+    pub fn from_nbt(c: &Compound) -> Option<Self> {
+        parse_click(c)
+    }
+}
+
 fn parse_click(c: &Compound) -> Option<ClickEvent> {
     let string = |key: &str| c.get_str(key).map(str::to_owned);
     Some(match c.get_str("action")? {

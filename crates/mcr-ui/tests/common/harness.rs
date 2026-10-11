@@ -81,8 +81,8 @@ impl GameView for TestView {
         self.patterns
     }
 
-    fn book_pages(&self) -> &[mcr_protocol::types::text::Component] {
-        &self.pages
+    fn book_pages(&self) -> Vec<mcr_protocol::types::text::Component> {
+        self.pages.clone()
     }
 
     fn enchant_clue(&self, option: usize) -> Option<(String, i32)> {

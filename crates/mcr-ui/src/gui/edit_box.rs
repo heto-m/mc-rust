@@ -117,7 +117,7 @@ impl EditBox {
         self.value.chars().skip(a).take(b - a).collect()
     }
 
-    fn selection(&self) -> (usize, usize) {
+    pub fn selection(&self) -> (usize, usize) {
         (
             self.cursor.min(self.highlight),
             self.cursor.max(self.highlight),

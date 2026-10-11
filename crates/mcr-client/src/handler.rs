@@ -872,6 +872,22 @@ impl ClientState {
                     side: p.side,
                 });
             }
+            P::ShowDialog(p) => {
+                let dialog = match &p.dialog {
+                    mcr_buf::IdOr::Id(id) => {
+                        crate::dialogs::registry_dialog_by_index(&self.registries, *id)
+                    }
+                    mcr_buf::IdOr::Inline(nbt) => crate::resolve_dialog(&self.registries, &nbt.0),
+                };
+                if let Some(dialog) = dialog {
+                    out.dialogs.push(crate::DialogRequest::Show(dialog));
+                }
+            }
+            P::ClearDialog(_) => out.dialogs.push(crate::DialogRequest::Clear),
+            P::TestInstanceBlockStatus(p) => out.event(ClientEvent::TestInstanceStatus {
+                status: p.status,
+                size: p.size.map(|v| [v.x, v.y, v.z]),
+            }),
             P::OpenBook(p) => {
                 let stack = self.hand_stack(p.hand);
                 self.gameplay.book_editor = self.is_item(&stack, "writable_book").then_some(p.hand);

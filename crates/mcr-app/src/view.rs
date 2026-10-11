@@ -42,6 +42,21 @@ impl GameView for StateView<'_> {
         self.state.player.instabuild
     }
 
+    fn book_pages(&self) -> Vec<mcr_protocol::types::text::Component> {
+        self.container()
+            .slots
+            .first()
+            .and_then(crate::editors::pages_of_stack)
+            .map(|(_, pages)| pages)
+            .unwrap_or_default()
+    }
+
+    fn item_stack(&self, id: &str, count: i32) -> Option<ItemStack> {
+        let name = format!("minecraft:{}", id.strip_prefix("minecraft:").unwrap_or(id));
+        let item = mcr_data::v26_3().item_by_name(&name)?;
+        Some(ItemStack::new(i32::try_from(item).ok()?, count))
+    }
+
     fn xp_level(&self) -> i32 {
         self.state.player.xp_level
     }

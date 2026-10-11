@@ -28,6 +28,18 @@ impl ContainerClick {
     }
 }
 
+/// Serverbound edits made through block and minecart editor screens.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EditorPacket {
+    CommandBlock(mcr_protocol::play::serverbound::SetCommandBlock),
+    Minecart(mcr_protocol::play::serverbound::SetCommandMinecart),
+    Structure(Box<mcr_protocol::play::serverbound::SetStructureBlock>),
+    Jigsaw(mcr_protocol::play::serverbound::SetJigsawBlock),
+    JigsawGenerate(mcr_protocol::play::serverbound::JigsawGenerate),
+    TestBlock(mcr_protocol::play::serverbound::SetTestBlock),
+    TestInstance(Box<mcr_protocol::play::serverbound::TestInstanceBlockAction>),
+}
+
 /// What a screen asks the app to do; navigation variants are consumed by [`ScreenStack`].
 pub enum ScreenAction {
     Push(Box<dyn Screen>),
@@ -69,6 +81,21 @@ pub enum ScreenAction {
     },
     CreativeDrop(mcr_protocol::types::item::ItemStack),
     CreativeClearInventory,
+    SubmitSign([String; 4]),
+    SubmitBook {
+        pages: Vec<String>,
+        title: Option<String>,
+    },
+    Editor(EditorPacket),
+    /// A dialog compound or registry id from a `show_dialog` click event or a dialog button.
+    ShowDialog(mcr_nbt::Value),
+    CustomClick {
+        id: mcr_buf::Identifier,
+        payload: Option<mcr_nbt::Value>,
+    },
+    DialogCommand(String),
+    DialogDisconnect,
+    PlaySound(&'static str),
 }
 
 impl std::fmt::Debug for ScreenAction {
@@ -115,6 +142,18 @@ impl std::fmt::Debug for ScreenAction {
                 .finish(),
             Self::CreativeDrop(s) => f.debug_tuple("CreativeDrop").field(s).finish(),
             Self::CreativeClearInventory => f.write_str("CreativeClearInventory"),
+            Self::SubmitSign(lines) => f.debug_tuple("SubmitSign").field(lines).finish(),
+            Self::SubmitBook { pages, title } => f
+                .debug_struct("SubmitBook")
+                .field("pages", &pages.len())
+                .field("title", title)
+                .finish(),
+            Self::Editor(packet) => f.debug_tuple("Editor").field(packet).finish(),
+            Self::ShowDialog(_) => f.write_str("ShowDialog(..)"),
+            Self::CustomClick { id, .. } => f.debug_tuple("CustomClick").field(id).finish(),
+            Self::DialogCommand(c) => f.debug_tuple("DialogCommand").field(c).finish(),
+            Self::DialogDisconnect => f.write_str("DialogDisconnect"),
+            Self::PlaySound(s) => f.debug_tuple("PlaySound").field(s).finish(),
         }
     }
 }
@@ -138,6 +177,11 @@ pub trait Screen {
     fn tick(&mut self, _env: &mut Env<'_>, _out: &mut Vec<ScreenAction>) {}
 
     fn pauses_game(&self) -> bool {
+        false
+    }
+
+    /// Server dialogs and the screen shown while waiting for the server to answer one.
+    fn is_dialog(&self) -> bool {
         false
     }
 
@@ -203,6 +247,10 @@ impl ScreenStack {
 
     pub fn pauses_game(&self) -> bool {
         self.top().is_some_and(Screen::pauses_game)
+    }
+
+    pub fn top_is_dialog(&self) -> bool {
+        self.top().is_some_and(Screen::is_dialog)
     }
 
     pub fn resize(&mut self, width: i32, height: i32) {

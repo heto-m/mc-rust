@@ -83,8 +83,13 @@ pub trait GameView {
         0
     }
 
-    fn book_pages(&self) -> &[Component] {
-        &[]
+    fn book_pages(&self) -> Vec<Component> {
+        Vec::new()
+    }
+
+    /// A stack of the named item (`minecraft:` prefix optional) for server-provided displays.
+    fn item_stack(&self, _id: &str, _count: i32) -> Option<ItemStack> {
+        None
     }
 
     fn enchant_clue(&self, _option: usize) -> Option<(String, i32)> {
@@ -205,6 +210,18 @@ impl<'a, 'f> RenderCx<'a, 'f> {
     pub fn texture(&mut self, name: &str, (u, v): (i32, i32), rect: (i32, i32, i32, i32)) {
         if let Some(id) = self.assets.texture(name) {
             self.frame.sprite_region(id, (u, v), rect);
+        }
+    }
+
+    /// Draws the `sw`x`sh` window of a texture at `(u, v)` stretched over the destination rectangle.
+    pub fn texture_scaled(
+        &mut self,
+        name: &str,
+        src: (i32, i32, i32, i32),
+        dst: (i32, i32, i32, i32),
+    ) {
+        if let Some(id) = self.assets.texture(name) {
+            self.frame.sprite_region_scaled(id, src, dst);
         }
     }
 

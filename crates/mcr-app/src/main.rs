@@ -4,6 +4,7 @@ mod autopilot;
 mod block_entities;
 mod cli;
 mod debug;
+mod editors;
 mod effects;
 mod engine;
 mod entities;

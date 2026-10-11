@@ -269,6 +269,8 @@ pub struct Play {
     pub leave: bool,
     pub quit: bool,
     pack_answers: Vec<bool>,
+    dialog_replies: Vec<mcr_client::DialogReply>,
+    test_status: mcr_ui::SharedTestStatus,
     chat_depth: Option<usize>,
     pub options: Options,
     bindings: KeyBindings,
@@ -396,6 +398,8 @@ impl Play {
             leave: false,
             quit: false,
             pack_answers: Vec::new(),
+            dialog_replies: Vec::new(),
+            test_status: mcr_ui::SharedTestStatus::default(),
             chat_depth: None,
             options,
             bindings,
@@ -763,6 +767,29 @@ impl Play {
                     self.net(Client::close_container);
                 }
             },
+            ClientEvent::SignEditorOpened { pos, side } => {
+                let screen = crate::editors::sign_screen(&self.world.client.state, pos, side);
+                self.push_screen(Box::new(screen));
+            }
+            ClientEvent::BookOpened { hand } => self.open_book(hand),
+            ClientEvent::BlockEditorOpened { pos, kind } => {
+                let state = &self.world.client.state;
+                if let Some(screen) =
+                    crate::editors::block_editor_screen(state, pos, kind, &self.test_status)
+                {
+                    self.push_screen(screen);
+                }
+            }
+            ClientEvent::MinecartEditorOpened { entity_id } => {
+                if let Some(screen) =
+                    crate::editors::minecart_screen(&self.world.client.state, entity_id)
+                {
+                    self.push_screen(Box::new(screen));
+                }
+            }
+            ClientEvent::TestInstanceStatus { status, size } => {
+                *self.test_status.borrow_mut() = Some((status, size));
+            }
             ClientEvent::ContainerUpdated(_) => self.container_updates += 1,
             ClientEvent::ContainerClosed(_) => {
                 if self.container_open {
@@ -1220,6 +1247,39 @@ impl Play {
         std::mem::take(&mut self.pack_answers)
     }
 
+    pub fn take_dialog_replies(&mut self) -> Vec<mcr_client::DialogReply> {
+        std::mem::take(&mut self.dialog_replies)
+    }
+
+    /// Shows a server dialog, replacing the one on top so the previous screen stays underneath.
+    pub fn show_dialog(&mut self, dialog: mcr_ui::Dialog) {
+        let links = crate::editors::server_links(&self.world.client.state);
+        if self.stack.top_is_dialog() {
+            self.stack.pop();
+        }
+        self.push_screen(Box::new(mcr_ui::DialogScreen::new(dialog, links)));
+    }
+
+    pub fn clear_dialog(&mut self) {
+        if self.stack.top_is_dialog() {
+            self.stack.pop();
+        }
+    }
+
+    fn open_book(&mut self, hand: mcr_protocol::types::game::Hand) {
+        let state = &self.world.client.state;
+        let Some((writable, _)) = crate::editors::book_pages(state, hand) else {
+            return;
+        };
+        if writable {
+            let name = self.world.client.config.name.clone();
+            let screen = crate::editors::book_edit_screen(state, hand, &name);
+            self.push_screen(Box::new(screen));
+        } else if let Some(screen) = crate::editors::book_view_screen(state, hand) {
+            self.push_screen(Box::new(screen));
+        }
+    }
+
     pub fn force_close(&mut self, reason: String) {
         self.closed.get_or_insert(reason);
     }
@@ -1529,6 +1589,31 @@ impl Play {
                     self.update_gui_size();
                     self.stack.push(Box::new(screen));
                 }
+                ScreenAction::SubmitSign(lines) => {
+                    let [a, b, c, d] = &lines;
+                    self.net(|cl| cl.submit_sign([a, b, c, d]));
+                }
+                ScreenAction::SubmitBook { pages, title } => {
+                    self.net(|c| c.submit_book(&pages, title.as_deref()));
+                }
+                ScreenAction::Editor(packet) => self.send_editor(packet),
+                ScreenAction::ShowDialog(reference) => {
+                    self.dialog_replies
+                        .push(mcr_client::DialogReply::Open(reference));
+                }
+                ScreenAction::CustomClick { id, payload } => {
+                    self.dialog_replies
+                        .push(mcr_client::DialogReply::Custom { id, payload });
+                }
+                ScreenAction::DialogCommand(command) => {
+                    self.net(|c| c.send_command(&command));
+                }
+                ScreenAction::DialogDisconnect => self.leave = true,
+                ScreenAction::PlaySound(name) => {
+                    if let Some(audio) = &mut self.audio {
+                        audio.play(name, None, 1.0, 1.0, mcr_audio::SoundSource::Ui);
+                    }
+                }
                 ScreenAction::OpenUrl(url) => gui::open_url(&url),
                 ScreenAction::CopyToClipboard(text) => {
                     use mcr_ui::Clipboard;
@@ -1544,6 +1629,22 @@ impl Play {
                 _ => {}
             }
         }
+    }
+
+    fn send_editor(&mut self, packet: mcr_ui::EditorPacket) {
+        use mcr_client::Client;
+        use mcr_protocol::dispatch::PlayServerbound as S;
+        use mcr_ui::EditorPacket as E;
+        let send = |c: &mut Client, p: S<'_>| c.send_play(&p);
+        match packet {
+            E::CommandBlock(p) => self.net(|c| send(c, S::SetCommandBlock(p))),
+            E::Minecart(p) => self.net(|c| send(c, S::SetCommandMinecart(p))),
+            E::Structure(p) => self.net(|c| send(c, S::SetStructureBlock(*p))),
+            E::Jigsaw(p) => self.net(|c| send(c, S::SetJigsawBlock(p))),
+            E::JigsawGenerate(p) => self.net(|c| send(c, S::JigsawGenerate(p))),
+            E::TestBlock(p) => self.net(|c| send(c, S::SetTestBlock(p))),
+            E::TestInstance(p) => self.net(|c| send(c, S::TestInstanceBlockAction(*p))),
+        };
     }
 
     pub fn ui_click(&mut self, x: f32, y: f32, button: MouseButton) {

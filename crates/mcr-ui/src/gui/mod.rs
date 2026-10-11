@@ -1,23 +1,39 @@
 mod assets;
+mod blocks;
+mod book;
 mod chat_screen;
+mod clicks;
 mod container;
 mod creative;
+mod dialog;
+mod dialog_screen;
 mod edit_box;
 mod env;
 mod input;
 mod list;
 mod menus;
+mod multiline;
 mod screen;
 mod server_list;
+mod sign;
 mod tooltip;
 mod widgets;
 
 pub use assets::ScreenAssets;
+pub use blocks::{
+    CommandBlockInfo, CommandBlockScreen, JigsawBlockScreen, JigsawInfo, MinecartCommandInfo,
+    SharedTestStatus, StructureBlockScreen, StructureInfo, TestBlockScreen,
+    TestInstanceBlockScreen, TestInstanceInfo,
+};
+pub use book::{BookEditScreen, BookViewScreen};
 pub use chat_screen::{
     ChatScreen, CommandSuggester, NoSuggestions, SharedChat, Suggestion, SuggestionSet,
 };
+pub use clicks::click_event_actions;
 pub use container::*;
 pub use creative::{CreativeScreen, HotbarStore, TabKind, creative_tabs};
+pub use dialog::Dialog;
+pub use dialog_screen::{DialogScreen, WaitingForResponseScreen};
 pub use edit_box::{EditBox, is_allowed_char};
 pub use env::{
     Clipboard, Env, GameView, MemoryClipboard, MerchantInfo, NoView, RenderCx, TradeOffer,
@@ -28,10 +44,12 @@ pub use menus::{
     ConfirmScreen, ConnectingScreen, DeathScreen, DirectConnectScreen, DisconnectedScreen,
     PauseScreen, StatusHandle, TitleScreen, draw_dim_background, draw_menu_background,
 };
-pub use screen::{ClickType, ContainerClick, Screen, ScreenAction, ScreenStack};
+pub use multiline::MultiLineEdit;
+pub use screen::{ClickType, ContainerClick, EditorPacket, Screen, ScreenAction, ScreenStack};
 pub use server_list::{
     EditServerScreen, FAVICON_SIZE, Favicon, MemoryServerStore, OnlineStatus, PackSetting,
     ServerEntry, ServerListScreen, ServerStatus, ServerStore, SharedServers,
 };
+pub use sign::{SignEditScreen, SignInfo};
 pub use tooltip::{TooltipLine, TooltipLines, draw_tooltip, tooltip_position};
 pub use widgets::{Button, CycleButton, Slider, Widget, WidgetEvent, WidgetEventKind, WidgetSet};

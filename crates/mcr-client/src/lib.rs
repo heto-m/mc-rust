@@ -5,6 +5,7 @@ mod batch;
 mod client;
 pub mod commands;
 mod config;
+mod dialogs;
 mod digging;
 #[cfg(test)]
 mod digging_tests;
@@ -45,9 +46,15 @@ pub use batch::ChunkBatchSizeCalculator;
 pub use client::{Client, Phase};
 pub use commands::{CommandTree, Completion, SuggestSource};
 pub use config::{ClientConfig, OnlineAuth, ResourcePackPolicy};
+pub use dialogs::{
+    DIALOG_REGISTRY, DialogEnd, DialogLink, DialogReply, DialogRequest, dialog_channel,
+    resolve_dialog,
+};
 pub use entity::{AttributeState, Entities, Entity, MobEffect, SimShape};
 pub use error::{ClientError, Result};
-pub use events::{ChatKind, ClientEvent, DamageEffects, DisconnectReason, sanitize_for_log};
+pub use events::{
+    BlockEditor, ChatKind, ClientEvent, DamageEffects, DisconnectReason, sanitize_for_log,
+};
 pub use gamestate::{
     Advancements, GameplayState, MapData, Merchant, RecipeBook, SignEditor, Waypoints,
 };
