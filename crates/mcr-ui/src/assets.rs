@@ -7,8 +7,10 @@ use serde_json::Value;
 use crate::error::{Result, UiError};
 
 const FONT_PREFIX: &str = "minecraft/font/";
+const LANG_PREFIX: &str = "minecraft/lang/";
+const PACK_META: &str = "pack.mcmeta";
 
-/// Font files the client jar omits (`unifont.zip`) live in the launcher's asset index.
+/// Files the client jar omits (`unifont.zip`, other languages, the language list) live in the launcher asset index.
 #[derive(Debug)]
 pub struct AssetIndexSource {
     objects_dir: PathBuf,
@@ -28,7 +30,9 @@ impl AssetIndexSource {
             .and_then(Value::as_object)
             .into_iter()
             .flatten()
-            .filter(|(key, _)| key.starts_with(FONT_PREFIX))
+            .filter(|(key, _)| {
+                key.starts_with(FONT_PREFIX) || key.starts_with(LANG_PREFIX) || *key == PACK_META
+            })
             .filter_map(|(key, obj)| Some((key.clone(), obj.get("hash")?.as_str()?.to_owned())))
             .collect();
         Ok(Self {
@@ -40,10 +44,12 @@ impl AssetIndexSource {
 
 impl AssetSource for AssetIndexSource {
     fn read(&self, path: &str) -> mcr_assets::Result<Option<Vec<u8>>> {
-        let Some(hash) = path
-            .strip_prefix("assets/")
-            .and_then(|key| self.hashes.get(key))
-        else {
+        let key = if path == PACK_META {
+            Some(PACK_META)
+        } else {
+            path.strip_prefix("assets/")
+        };
+        let Some(hash) = key.and_then(|key| self.hashes.get(key)) else {
             return Ok(None);
         };
         match std::fs::read(self.objects_dir.join(&hash[..2]).join(hash)) {
@@ -54,7 +60,17 @@ impl AssetSource for AssetIndexSource {
     }
 
     fn list(&self) -> mcr_assets::Result<Vec<String>> {
-        Ok(self.hashes.keys().map(|k| format!("assets/{k}")).collect())
+        Ok(self
+            .hashes
+            .keys()
+            .map(|k| {
+                if k == PACK_META {
+                    k.clone()
+                } else {
+                    format!("assets/{k}")
+                }
+            })
+            .collect())
     }
 }
 

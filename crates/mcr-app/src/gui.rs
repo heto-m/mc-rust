@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use mcr_assets::ResourceManager;
 use mcr_render::{Overlay, OverlayCtx, wgpu};
-use mcr_ui::{ItemIcons, MemoryClipboard, ScreenAssets, Ui, UiRenderer};
+use mcr_ui::{ItemIcons, MemoryClipboard, ScreenAssets, ToastManager, Ui, UiRenderer};
 
 /// Everything that draws GUI: owned by the shell between sessions and lent to a session while it runs.
 pub struct Gui {
@@ -10,6 +12,9 @@ pub struct Gui {
     pub icons: ItemIcons,
     pub assets: ScreenAssets,
     pub clipboard: MemoryClipboard,
+    pub toasts: ToastManager,
+    resources: Arc<ResourceManager>,
+    language: String,
 }
 
 impl std::fmt::Debug for Gui {
@@ -20,26 +25,29 @@ impl std::fmt::Debug for Gui {
 
 impl Gui {
     pub fn load(
-        resources: &ResourceManager,
+        resources: Arc<ResourceManager>,
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
     ) -> Result<Self> {
-        let mut ui = Ui::load(resources).context("loading ui")?;
-        let icons = ItemIcons::load(resources).context("loading item icons")?;
-        let assets = ScreenAssets::load(&mut ui, resources).context("loading screen textures")?;
+        let mut ui = Ui::load(&resources).context("loading ui")?;
+        let icons = ItemIcons::load(&resources).context("loading item icons")?;
+        let assets = ScreenAssets::load(&mut ui, &resources).context("loading screen textures")?;
         Ok(Self {
             ui,
             ui_renderer: UiRenderer::new(device, format),
             icons,
             assets,
             clipboard: MemoryClipboard::default(),
+            toasts: ToastManager::default(),
+            resources,
+            language: mcr_ui::DEFAULT_LANGUAGE.to_owned(),
         })
     }
 }
 
 impl Gui {
     /// Rebuilds the fonts, language, sprites and item icons; on error nothing changes.
-    pub fn reload(&mut self, resources: &ResourceManager) -> Result<()> {
+    pub fn reload(&mut self, resources: &Arc<ResourceManager>) -> Result<()> {
         let mut ui = Ui::load(resources).context("loading ui")?;
         let icons = ItemIcons::load(resources).context("loading item icons")?;
         let assets = ScreenAssets::load(&mut ui, resources).context("loading screen textures")?;
@@ -47,7 +55,26 @@ impl Gui {
         self.icons = icons;
         self.assets = assets;
         self.ui_renderer.reset_pages();
+        self.resources = Arc::clone(resources);
+        if let Err(e) = self.ui.set_language(&self.resources, &self.language) {
+            tracing::warn!("language {} failed to reload: {e}", self.language);
+        }
         Ok(())
+    }
+
+    pub fn sync_language(&mut self, code: &str) {
+        if self.language == code {
+            return;
+        }
+        self.language = code.to_owned();
+        if let Err(e) = self.ui.set_language(&self.resources, code) {
+            tracing::warn!("language {code} failed to load: {e}");
+        }
+    }
+
+    /// Advances the toasts and returns the sound events they want played.
+    pub fn tick_toasts(&mut self, now_ms: u64, display_time: f64) -> Vec<&'static str> {
+        self.toasts.update(now_ms, display_time)
     }
 }
 

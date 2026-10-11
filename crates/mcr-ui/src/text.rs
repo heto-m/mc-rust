@@ -1,45 +1,10 @@
 use std::ops::Range;
 
-use mcr_assets::ResourceManager;
 use mcr_nbt::Value;
 use mcr_protocol::types::text::{Arg, ClickEvent, Component, Content};
-use rustc_hash::FxHashMap;
 
-use crate::error::Result;
+pub use crate::lang::Lang;
 use crate::style::{Cell, Flags, FontId, Style};
-
-#[derive(Debug, Default)]
-pub struct Lang(FxHashMap<String, String>);
-
-impl Lang {
-    pub fn load(resources: &ResourceManager) -> Result<Self> {
-        let path = "assets/minecraft/lang/en_us.json";
-        let mut map: FxHashMap<String, String> = FxHashMap::default();
-        for bytes in resources.read_all(path) {
-            match serde_json::from_slice::<FxHashMap<String, String>>(&bytes) {
-                Ok(layer) => map.extend(layer),
-                Err(e) => tracing::warn!("{path}: {e}"),
-            }
-        }
-        if map.is_empty() {
-            tracing::warn!("missing {path}; translations fall back to keys");
-        }
-        Ok(Self(map))
-    }
-
-    pub fn from_pairs<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
-        Self(
-            pairs
-                .into_iter()
-                .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                .collect(),
-        )
-    }
-
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key).map(String::as_str)
-    }
-}
 
 /// Decomposes `§` formatting codes; a reset restores `base`.
 pub fn push_legacy(out: &mut Vec<Cell>, text: &str, base: Style) {

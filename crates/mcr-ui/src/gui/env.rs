@@ -222,7 +222,7 @@ impl<'a, 'f> RenderCx<'a, 'f> {
             .text(text, (cx as f32 - w / 2.0).floor(), y as f32, argb, shadow);
     }
 
-    pub fn lang(&mut self, key: &str) -> String {
+    fn lang_raw(&mut self, key: &str) -> String {
         self.frame
             .ui()
             .lang()
@@ -230,8 +230,12 @@ impl<'a, 'f> RenderCx<'a, 'f> {
             .map_or_else(|| key.to_owned(), str::to_owned)
     }
 
+    pub fn lang(&mut self, key: &str) -> String {
+        self.lang_raw(key).replace("%%", "%")
+    }
+
     pub fn lang_fmt(&mut self, key: &str, args: &[&str]) -> String {
-        let mut out = self.lang(key);
+        let mut out = self.lang_raw(key);
         for (i, arg) in args.iter().enumerate() {
             out = out
                 .replace(&format!("%{}$s", i + 1), arg)
@@ -242,7 +246,7 @@ impl<'a, 'f> RenderCx<'a, 'f> {
                 out.replace_range(pos..pos + 2, arg);
             }
         }
-        out
+        out.replace("%%", "%")
     }
 
     pub fn stack(&mut self, stack: &ItemStack, x: i32, y: i32) {

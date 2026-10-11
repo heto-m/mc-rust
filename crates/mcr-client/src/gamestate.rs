@@ -11,6 +11,8 @@ use mcr_protocol::play::clientbound::ui::{
 use mcr_protocol::types::game::{Hand, SignSide};
 use rustc_hash::FxHashMap;
 
+use crate::toast::{MAX_TOASTS_PER_PACKET, ToastEvent, recipe_toast, stack_of};
+
 pub const MAX_RECIPES: usize = 1 << 13;
 pub const MAX_ADVANCEMENTS: usize = 4096;
 pub const MAX_CRITERIA: usize = 1 << 14;
@@ -45,13 +47,20 @@ pub struct RecipeBook {
 }
 
 impl RecipeBook {
-    pub fn add(&mut self, packet: RecipeBookAdd) {
+    pub fn add(&mut self, packet: RecipeBookAdd) -> Vec<ToastEvent> {
         if packet.replace {
             self.entries.clear();
         }
+        let mut toasts = Vec::new();
         for e in packet.entries {
+            if toasts.len() < MAX_TOASTS_PER_PACKET
+                && let Some(toast) = recipe_toast(&e)
+            {
+                toasts.push(toast);
+            }
             insert_bounded(&mut self.entries, MAX_RECIPES, e.contents.id, e);
         }
+        toasts
     }
 
     pub fn remove(&mut self, ids: impl IntoIterator<Item = i32>) {
@@ -70,7 +79,16 @@ pub struct Advancements {
 }
 
 impl Advancements {
-    pub fn apply(&mut self, p: UpdateAdvancements) {
+    /// Returns toasts for advancements this update completed, never on the initial sync.
+    pub fn apply(&mut self, p: UpdateAdvancements) -> Vec<ToastEvent> {
+        let mut toasts = Vec::new();
+        let reset = p.reset;
+        let touched: Vec<(String, bool)> = p
+            .progress
+            .0
+            .iter()
+            .map(|(id, _)| (id.as_str().to_owned(), self.is_done(id.as_str())))
+            .collect();
         if p.reset {
             self.defs.clear();
             self.progress.clear();
@@ -101,6 +119,24 @@ impl Advancements {
             }
         }
         self.show = p.show_advancements;
+        if !reset {
+            for (id, was_done) in touched {
+                if was_done || !self.is_done(&id) {
+                    continue;
+                }
+                let Some(display) = self.advancement(&id).and_then(|a| a.display.as_ref()) else {
+                    continue;
+                };
+                if display.show_toast && toasts.len() < MAX_TOASTS_PER_PACKET {
+                    toasts.push(ToastEvent::Advancement {
+                        title: display.title.clone(),
+                        frame: display.frame,
+                        icon: stack_of(&display.icon),
+                    });
+                }
+            }
+        }
+        toasts
     }
 
     pub fn advancement(&self, id: &str) -> Option<&Advancement> {

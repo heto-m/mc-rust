@@ -822,7 +822,9 @@ impl ClientState {
                 ));
             }
             P::RecipeBookAdd(p) => {
-                self.gameplay.recipe_book.add(p);
+                for toast in self.gameplay.recipe_book.add(p) {
+                    out.event(ClientEvent::Toast(toast));
+                }
                 out.event(ClientEvent::RecipeBookUpdated);
             }
             P::RecipeBookRemove(p) => {
@@ -836,7 +838,9 @@ impl ClientState {
                 out.event(ClientEvent::RecipeBookUpdated);
             }
             P::UpdateAdvancements(p) => {
-                self.gameplay.advancements.apply(p);
+                for toast in self.gameplay.advancements.apply(p) {
+                    out.event(ClientEvent::Toast(toast));
+                }
                 out.event(ClientEvent::AdvancementsUpdated);
             }
             P::SelectAdvancementsTab(p) => {
@@ -1382,24 +1386,12 @@ impl ClientState {
                 _ => None,
             })
             .collect();
-        let fallback = chat_fallback(&key, args.len());
+        let fallback = vec!["%s"; args.len()].join(" ");
         Component::from_content(mcr_protocol::types::text::Content::Translatable {
             key,
             fallback: Some(fallback),
             args,
         })
-    }
-}
-
-/// Readable English pattern for the vanilla chat types, since no language files are loaded here.
-fn chat_fallback(key: &str, arg_count: usize) -> String {
-    match key {
-        "chat.type.text" => "<%s> %s".into(),
-        "chat.type.emote" => "* %s %s".into(),
-        "chat.type.announcement" => "[%s] %s".into(),
-        "commands.message.display.incoming" => "%s whispers to you: %s".into(),
-        "commands.message.display.outgoing" => "You whisper to %s: %s".into(),
-        _ => vec!["%s"; arg_count].join(" "),
     }
 }
 

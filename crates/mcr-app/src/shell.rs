@@ -84,12 +84,15 @@ impl Shell {
         let options = settings.borrow().file.options.clone();
         let assets = Arc::new(Assets::load(&cfg.jar)?);
         let index = asset_index_id(&cfg.jar);
-        let resources = vanilla_resources(
-            &cfg.jar,
-            index.as_deref().map(|i| (cfg.assets_dir.as_path(), i)),
-        )
-        .context("opening resources")?;
-        let gui = Gui::load(&resources, renderer.device(), renderer.target_format())?;
+        let resources = Arc::new(
+            vanilla_resources(
+                &cfg.jar,
+                index.as_deref().map(|i| (cfg.assets_dir.as_path(), i)),
+            )
+            .context("opening resources")?,
+        );
+        let mut gui = Gui::load(resources, renderer.device(), renderer.target_format())?;
+        gui.sync_language(&options.language);
         let audio = Audio::start(
             &cfg.assets_dir,
             index.as_deref().unwrap_or("34"),
@@ -331,6 +334,13 @@ impl Shell {
         self.autopilot.as_ref().is_none_or(|a| a.finished)
     }
 
+    fn languages(&self) -> Vec<mcr_ui::LanguageInfo> {
+        self.parts
+            .as_ref()
+            .map(|p| p.gui.ui.lang().languages().to_vec())
+            .unwrap_or_default()
+    }
+
     fn show_title(&mut self) {
         self.stack.clear();
         let servers: SharedServers = self.servers.clone();
@@ -531,7 +541,7 @@ impl Shell {
                 }
                 ScreenAction::ResourcePackAnswer(accepted) => self.pack_answer(accepted),
                 ScreenAction::OpenOptions => {
-                    let screen = OptionsScreen::new(self.settings.clone());
+                    let screen = OptionsScreen::new(self.settings.clone(), self.languages());
                     self.push(Box::new(screen));
                 }
                 ScreenAction::OpenUrl(url) => gui::open_url(&url),
@@ -667,6 +677,9 @@ impl Shell {
         }
         self.update_menu_size();
         let parts = self.parts.as_mut()?;
+        parts
+            .gui
+            .sync_language(&self.settings.borrow().file.options.language);
         let size = parts.renderer.size();
         let max_scale = u32::try_from(self.settings.borrow().file.options.gui_scale).unwrap_or(0);
         {

@@ -728,7 +728,8 @@ impl Play {
                 }
             }
             ClientEvent::Chat { kind, message, .. } => {
-                println!("chat: {}", sanitize_for_log(&message.to_plain_string()));
+                let text: String = self.gui.ui.flatten(&message).iter().map(|c| c.ch).collect();
+                println!("chat: {}", sanitize_for_log(&text));
                 if kind == ChatKind::ActionBar {
                     self.hud.show_actionbar();
                 } else {
@@ -738,6 +739,7 @@ impl Play {
             }
             ClientEvent::Title { .. } => self.hud.show_title(&self.world.client.state),
             ClientEvent::TitlesCleared => self.hud.clear_titles(),
+            ClientEvent::Toast(toast) => self.add_toast(toast),
             ClientEvent::Disconnected(reason) => {
                 if self.closed.is_none() {
                     self.closed = Some(reason.to_log_string());
@@ -1362,6 +1364,44 @@ impl Play {
         if let Some(audio) = &mut self.audio {
             audio.apply_volumes(&self.options);
         }
+        self.gui.sync_language(&self.options.language);
+    }
+
+    fn languages(&self) -> Vec<mcr_ui::LanguageInfo> {
+        self.gui.ui.lang().languages().to_vec()
+    }
+
+    fn add_toast(&mut self, toast: mcr_client::ToastEvent) {
+        use mcr_client::ToastEvent;
+        use mcr_protocol::play::clientbound::ui::AdvancementFrame;
+        use mcr_ui::ToastFrame;
+        match toast {
+            ToastEvent::Advancement { title, frame, icon } => {
+                let frame = match frame {
+                    AdvancementFrame::Task => ToastFrame::Task,
+                    AdvancementFrame::Goal => ToastFrame::Goal,
+                    AdvancementFrame::Challenge => ToastFrame::Challenge,
+                };
+                self.gui
+                    .toasts
+                    .add_advancement(&mut self.gui.ui, frame, &title, icon);
+            }
+            ToastEvent::Recipe { station, result } => {
+                self.gui.toasts.add_recipe(station, result);
+            }
+        }
+    }
+
+    fn tick_toasts(&mut self) {
+        let now = self.started.elapsed().as_millis() as u64;
+        let sounds = self
+            .gui
+            .tick_toasts(now, self.options.notification_display_time);
+        if let Some(audio) = &mut self.audio {
+            for sound in sounds {
+                audio.play(sound, None, 1.0, 1.0, mcr_audio::SoundSource::Ui);
+            }
+        }
     }
 
     fn screens_tick(&mut self) {
@@ -1485,7 +1525,7 @@ impl Play {
                 }
                 ScreenAction::Disconnect => self.leave = true,
                 ScreenAction::OpenOptions => {
-                    let screen = OptionsScreen::new(self.settings.clone());
+                    let screen = OptionsScreen::new(self.settings.clone(), self.languages());
                     self.update_gui_size();
                     self.stack.push(Box::new(screen));
                 }
@@ -1698,6 +1738,7 @@ impl Play {
         self.prepare_visuals(&camera, partial, aspect, &env);
 
         self.update_gui_size();
+        self.tick_toasts();
         let chat_open = self.chat_open();
         let debug = self.debug_on.then(|| {
             debug::build(&DebugInput {
@@ -1776,6 +1817,12 @@ impl Play {
                 cx.mouse = self.mouse;
                 cx.now_ms = input.millis;
                 self.stack.render(&mut cx);
+            }
+            if !self.hud_hidden && !self.gui.toasts.is_empty() {
+                let mut cx =
+                    RenderCx::new(&mut frame, &mut self.gui.icons, &self.gui.assets, &view);
+                cx.now_ms = input.millis;
+                self.gui.toasts.draw(&mut cx);
             }
         }
 

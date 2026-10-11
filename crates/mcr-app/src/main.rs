@@ -13,6 +13,7 @@ mod gui;
 mod hand;
 mod hud;
 mod input;
+mod language;
 mod map;
 mod mesh_world;
 mod nametags;

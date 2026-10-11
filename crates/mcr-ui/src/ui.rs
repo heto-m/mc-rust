@@ -5,6 +5,7 @@ use mcr_protocol::types::text::Component;
 
 use crate::error::Result;
 use crate::font::{FontOptions, Fonts};
+use crate::lang::DEFAULT_LANGUAGE;
 use crate::sprites::{SpriteId, Sprites};
 use crate::style::{Cell, Style, scale_rgb};
 use crate::text::{Lang, flatten, parse_legacy, wrap};
@@ -120,7 +121,7 @@ impl Ui {
         Ok(Self {
             fonts: Fonts::load(resources, options)?,
             sprites: Sprites::load(resources)?,
-            lang: Lang::load(resources)?,
+            lang: Lang::load(resources, DEFAULT_LANGUAGE)?,
             batch: Batch::default(),
             placed_scratch: Vec::new(),
             rng: 0x2545_F491,
@@ -145,6 +146,11 @@ impl Ui {
 
     pub fn lang(&self) -> &Lang {
         &self.lang
+    }
+
+    pub fn set_language(&mut self, resources: &ResourceManager, code: &str) -> Result<()> {
+        self.lang = Lang::load(resources, code)?;
+        Ok(())
     }
 
     pub fn batch(&self) -> &Batch {

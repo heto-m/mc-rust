@@ -35,6 +35,7 @@ mod riding;
 pub mod script;
 mod social;
 mod state;
+mod toast;
 mod use_item;
 #[cfg(test)]
 mod use_item_tests;
@@ -67,4 +68,5 @@ pub use social::{
 pub use state::{
     ClientState, CommandReply, Outbox, ServerInfo, SpawnPoint, WorldBorder, WorldInfo,
 };
+pub use toast::{ToastEvent, first_stack};
 pub use use_item::{UseKind, UseResult, UseTarget, UsingItem};

@@ -195,6 +195,10 @@ impl ResourceManager {
         out
     }
 
+    pub fn read_stack(&self, path: &str) -> Result<Vec<Vec<u8>>> {
+        Ok(self.read_all(path))
+    }
+
     pub fn list_prefix<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = &'a str> {
         self.index
             .keys()
@@ -263,6 +267,21 @@ mod tests {
         }
         assert_eq!(rm.read_all("lang.json"), [b"1".to_vec(), b"2".to_vec()]);
         assert!(rm.read_all("none").is_empty());
+    }
+
+    #[test]
+    fn stack_returns_every_pack_in_order() {
+        let mut rm = ResourceManager::new();
+        for (name, body) in [("a", "1"), ("b", "2")] {
+            let zip = zip_bytes(&[("f.txt", body.as_bytes())]);
+            rm.push_pack(name, Box::new(ZipSource::from_bytes(zip).unwrap()))
+                .unwrap();
+        }
+        assert_eq!(
+            rm.read_stack("f.txt").unwrap(),
+            [b"1".to_vec(), b"2".to_vec()]
+        );
+        assert!(rm.read_stack("g.txt").unwrap().is_empty());
     }
 
     #[test]

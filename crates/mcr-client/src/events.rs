@@ -86,6 +86,7 @@ pub enum ClientEvent {
     Disconnected(DisconnectReason),
 
     RecipeBookUpdated,
+    Toast(crate::toast::ToastEvent),
     AdvancementsUpdated,
     MapUpdated(i32),
     MerchantOffersUpdated,

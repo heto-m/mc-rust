@@ -6,11 +6,12 @@ use std::rc::Rc;
 
 use mcr_settings::{InputKey, MAPPINGS, Options, OptionsFile, SOUND_CATEGORIES};
 use mcr_ui::{
-    Button, CycleButton, Env, Key, MouseButton, RenderCx, Screen, ScreenAction, ScrollList, Slider,
-    UiInput, WidgetEventKind, WidgetSet, draw_menu_background,
+    Button, CycleButton, Env, Key, LanguageInfo, MouseButton, RenderCx, Screen, ScreenAction,
+    ScrollList, Slider, UiInput, WidgetEventKind, WidgetSet, draw_menu_background,
 };
 
 use crate::input::input_key_from_ui;
+use crate::language::LanguageScreen;
 
 #[derive(Debug)]
 pub struct Settings {
@@ -53,8 +54,10 @@ const VIDEO: u32 = 1;
 const SOUND: u32 = 2;
 const CONTROLS: u32 = 3;
 const CHAT: u32 = 4;
+const LANGUAGE: u32 = 5;
 
 pub struct OptionsScreen {
+    languages: Vec<LanguageInfo>,
     settings: SharedSettings,
     widgets: WidgetSet,
     gui: (i32, i32),
@@ -67,8 +70,9 @@ impl std::fmt::Debug for OptionsScreen {
 }
 
 impl OptionsScreen {
-    pub fn new(settings: SharedSettings) -> Self {
+    pub fn new(settings: SharedSettings, languages: Vec<LanguageInfo>) -> Self {
         Self {
+            languages,
             settings,
             widgets: WidgetSet::default(),
             gui: (0, 0),
@@ -83,10 +87,11 @@ impl Screen for OptionsScreen {
         let x = width / 2 - 155;
         let y = height / 6 + 24;
         for (i, (id, label)) in [
-            (VIDEO, "Video Settings..."),
-            (SOUND, "Music & Sounds..."),
-            (CONTROLS, "Controls..."),
-            (CHAT, "Chat Settings..."),
+            (VIDEO, "lang:options.video"),
+            (SOUND, "lang:options.sounds"),
+            (CONTROLS, "lang:options.controls"),
+            (CHAT, "lang:options.chat"),
+            (LANGUAGE, "lang:options.language"),
         ]
         .into_iter()
         .enumerate()
@@ -101,13 +106,14 @@ impl Screen for OptionsScreen {
         self.widgets.add(Button::new(
             DONE,
             [width / 2 - 100, height / 6 + 168, 200, 20],
-            "Done",
+            "lang:gui.done",
         ));
     }
 
     fn render(&mut self, cx: &mut RenderCx<'_, '_>) {
         draw_menu_background(cx);
-        cx.centered_text("Options", self.gui.0 / 2, 15, 0xFFFF_FFFF, true);
+        let title = cx.lang("options.title");
+        cx.centered_text(&title, self.gui.0 / 2, 15, 0xFFFF_FFFF, true);
         self.widgets.render(cx);
     }
 
@@ -129,6 +135,10 @@ impl Screen for OptionsScreen {
                 SOUND => out.push(ScreenAction::Push(Box::new(FormScreen::sound(settings)))),
                 CONTROLS => out.push(ScreenAction::Push(Box::new(ControlsScreen::new(settings)))),
                 CHAT => out.push(ScreenAction::Push(Box::new(FormScreen::chat(settings)))),
+                LANGUAGE => out.push(ScreenAction::Push(Box::new(LanguageScreen::new(
+                    settings,
+                    self.languages.clone(),
+                )))),
                 DONE => out.push(ScreenAction::Pop),
                 _ => {}
             }
@@ -370,7 +380,7 @@ impl Screen for FormScreen {
         self.widgets.add(Button::new(
             DONE,
             [width / 2 - 100, height - 27, 200, 20],
-            "Done",
+            "lang:gui.done",
         ));
     }
 
@@ -472,7 +482,7 @@ impl Screen for ControlsScreen {
         self.widgets.add(Button::new(
             DONE,
             [width / 2 - 100, height - 27, 200, 20],
-            "Done",
+            "lang:gui.done",
         ));
     }
 

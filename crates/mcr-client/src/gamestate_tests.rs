@@ -146,3 +146,79 @@ fn maps_stats_and_waypoints_are_bounded() {
     assert!(g.stats.len() <= MAX_STATS);
     assert!(g.waypoints.tracked.len() <= MAX_WAYPOINTS);
 }
+
+fn toasting(id: &str, show_toast: bool) -> PositionedAdvancement {
+    use mcr_protocol::play::clientbound::ui::{AdvancementFrame, DisplayInfo};
+    use mcr_protocol::types::Component;
+    use mcr_protocol::types::item::ItemStackTemplate;
+    PositionedAdvancement {
+        id: Identifier::new("minecraft", id).unwrap(),
+        advancement: Advancement {
+            parent: None,
+            display: Some(DisplayInfo {
+                title: Component::text(id),
+                description: Component::text(""),
+                icon: ItemStackTemplate::default(),
+                frame: AdvancementFrame::Goal,
+                background: None,
+                show_toast,
+                hidden: false,
+            }),
+            requirements: vec![vec!["c".into()]],
+            sends_telemetry_event: false,
+        },
+        x: 0.0,
+        y: 0.0,
+    }
+}
+
+fn done(id: &str) -> Pairs<Identifier, Pairs<String, Option<i64>>> {
+    Pairs(vec![(
+        Identifier::new("minecraft", id).unwrap(),
+        Pairs(vec![("c".to_owned(), Some(1))]),
+    )])
+}
+
+fn update(
+    reset: bool,
+    added: Vec<PositionedAdvancement>,
+    progress: Pairs<Identifier, Pairs<String, Option<i64>>>,
+) -> UpdateAdvancements {
+    UpdateAdvancements {
+        reset,
+        added,
+        removed: vec![],
+        progress,
+        show_advancements: true,
+    }
+}
+
+#[test]
+fn newly_completed_advancements_toast_but_the_initial_sync_does_not() {
+    let mut g = GameplayState::default();
+    let sync = update(true, vec![toasting("a", true)], done("a"));
+    assert!(g.advancements.apply(sync).is_empty());
+    let silent = update(false, vec![toasting("b", false)], done("b"));
+    assert!(g.advancements.apply(silent).is_empty());
+    let fresh = update(false, vec![toasting("c", true)], done("c"));
+    assert_eq!(g.advancements.apply(fresh).len(), 1);
+    assert!(
+        g.advancements
+            .apply(update(false, vec![], done("c")))
+            .is_empty()
+    );
+}
+
+#[test]
+fn only_notifying_recipes_toast() {
+    let mut g = GameplayState::default();
+    let mut quiet = entry(1);
+    let mut loud = entry(2);
+    loud.flags = RecipeBookEntry::FLAG_NOTIFICATION;
+    quiet.flags = RecipeBookEntry::FLAG_HIGHLIGHT;
+    let toasts = g.recipe_book.add(RecipeBookAdd {
+        entries: vec![quiet, loud],
+        replace: false,
+    });
+    assert_eq!(toasts.len(), 1);
+}
