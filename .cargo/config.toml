@@ -2,4 +2,4 @@
 xtask = "run --package xtask --"
 
 [build]
-jobs = 6
+jobs = 4
