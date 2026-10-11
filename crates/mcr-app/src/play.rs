@@ -1389,6 +1389,9 @@ impl Play {
     }
 
     fn show_credits(&mut self) {
+        if self.stack.credits_music() {
+            return;
+        }
         let text = |path: &str| {
             self.assets
                 .read(path)

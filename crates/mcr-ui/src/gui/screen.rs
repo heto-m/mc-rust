@@ -1,6 +1,9 @@
 use super::env::{Env, RenderCx};
 use super::input::{DoubleClickTracker, UiInput};
 
+/// Server-opened screens nest at most a few deep; anything past this is spam.
+pub const MAX_SCREENS: usize = 16;
+
 /// Serverbound container click modes, numbered like the protocol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClickType {
@@ -270,6 +273,9 @@ impl ScreenStack {
     }
 
     pub fn push(&mut self, mut screen: Box<dyn Screen>) {
+        if self.screens.len() >= MAX_SCREENS {
+            self.screens.remove(0);
+        }
         screen.init(self.size.0, self.size.1);
         self.screens.push(screen);
     }
@@ -398,6 +404,15 @@ mod tests {
             inits: Vec::new(),
             pop_on_escape: pop,
         })
+    }
+
+    #[test]
+    fn stack_depth_is_capped() {
+        let mut stack = ScreenStack::new(320, 240);
+        for _ in 0..MAX_SCREENS * 4 {
+            stack.push(dummy(false));
+        }
+        assert_eq!(stack.len(), MAX_SCREENS);
     }
 
     #[test]
