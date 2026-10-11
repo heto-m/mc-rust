@@ -26,6 +26,7 @@ GPU-driven rendering on wgpu and a custom engine (no Bevy, no OpenGL).
 | `crates/mcr-buf` | `Encode`/`Decode<'a>` traits, VarInt, primitives (zero-copy decode) |
 | `crates/mcr-*` | One crate per subsystem (protocol, net, auth, nbt, world, assets, render, client) |
 | `crates/mcr-app` | The `mcr` binary |
+| `java/` | Our Java sources for the embedded JVM (no Mojang code), built by `cargo xtask java-build` into `.cache/java/` |
 | `xtask` | Dev tooling: `cargo xtask <cmd>` (download jars/JDK, data generator, codegen, decompile) |
 | `.cache/` | Gitignored downloads and generated reference data |
 | `openspec/` | Specs and change proposals |

@@ -1726,6 +1726,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcr-jvm"
+version = "0.1.0"
+dependencies = [
+ "criterion 0.5.1",
+ "jni-sys 0.4.1",
+ "libc",
+ "libloading",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "mcr-mesh"
 version = "0.1.0"
 dependencies = [

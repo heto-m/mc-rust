@@ -43,6 +43,9 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
   invoked on the Java thread inside a downcall. Every other Rust→Java flow is a message in an SPSC ring that
   Java drains, with a futex/condvar doorbell. Bulk data (packets, draw streams, PCM) lives in Rust-owned
   off-heap memory viewed from Java as `MemorySegment`s, so nothing is copied per call.
+- **Measured call costs** (`mod-jvm-host`, Ryzen 7 5800X): FFM downcall 3.2 ns critical and 3.9 ns normal,
+  upcall from Rust 20 ns, and a JNI static call from Rust 55 ns. The cross-thread doorbell handoff costs more
+  than any call, so rings and batching stay the shape.
 - **Threads.** The Java thread runs Minecraft's "Render thread" (`Main.main` → `Minecraft.run()`), paced by a
   blocking `awaitFrame` downcall. The mcr main thread never enters Java, so safepoints never stop it. A GC
   pause only delays the Java frame, and the render thread waits for that frame's slots (ZGC pauses are under 1 ms).

@@ -67,6 +67,14 @@ impl Layout {
         self.tools_dir().join("vineflower-1.12.0.jar")
     }
 
+    pub fn java_src_dir(&self) -> PathBuf {
+        self.root.join("java")
+    }
+
+    pub fn java_out_dir(&self) -> PathBuf {
+        self.cache_dir().join("java")
+    }
+
     pub fn server_run_dir(&self, ver: &str) -> PathBuf {
         self.root.join("run").join(format!("server-{ver}"))
     }
@@ -126,6 +134,12 @@ mod tests {
             l.vineflower_jar(),
             Path::new("/repo/.cache/tools/vineflower-1.12.0.jar")
         );
+    }
+
+    #[test]
+    fn java_dirs_match_layout() {
+        assert_eq!(layout().java_src_dir(), Path::new("/repo/java"));
+        assert_eq!(layout().java_out_dir(), Path::new("/repo/.cache/java"));
     }
 
     #[test]
