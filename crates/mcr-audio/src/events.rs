@@ -167,6 +167,36 @@ impl SoundEvents {
         Ok(events)
     }
 
+    /// Merges a resource pack's `sounds.json` for `namespace`, as vanilla layers pack sound definitions.
+    pub fn merge_namespaced(&mut self, namespace: &str, json: &str) -> Result<(), AudioError> {
+        let raw: FxHashMap<String, RawEvent> = serde_json::from_str(json)?;
+        if namespace == "minecraft" {
+            self.merge(raw);
+            return Ok(());
+        }
+        let qualify = |name: String| {
+            if name.contains(':') {
+                name
+            } else {
+                format!("{namespace}:{name}")
+            }
+        };
+        let raw = raw
+            .into_iter()
+            .map(|(id, mut event)| {
+                for entry in &mut event.sounds {
+                    match entry {
+                        RawEntry::Name(n) => *n = qualify(std::mem::take(n)),
+                        RawEntry::Full(s) => s.name = qualify(std::mem::take(&mut s.name)),
+                    }
+                }
+                (format!("{namespace}:{id}"), event)
+            })
+            .collect();
+        self.merge(raw);
+        Ok(())
+    }
+
     fn merge(&mut self, raw: FxHashMap<String, RawEvent>) {
         for (id, event) in raw {
             let slot = self.events.entry(id).or_default();
@@ -356,5 +386,17 @@ mod tests {
     #[test]
     fn preloads_lists_flagged_files() {
         assert_eq!(events().preloads().collect::<Vec<_>>(), ["x/two"]);
+    }
+
+    #[test]
+    fn pack_namespaces_qualify_events_and_files() {
+        let mut ev = SoundEvents::parse(JSON).unwrap();
+        ev.merge_namespaced("mypack", r#"{"boom":{"sounds":["fx/boom"]}}"#)
+            .unwrap();
+        ev.merge_namespaced("minecraft", r#"{"r":{"replace":true,"sounds":["mine"]}}"#)
+            .unwrap();
+        let boom = ev.pick("mypack:boom", &mut JavaRandom::new(1)).unwrap();
+        assert_eq!(boom.name, "mypack:fx/boom");
+        assert_eq!(ev.pick("r", &mut JavaRandom::new(1)).unwrap().name, "mine");
     }
 }

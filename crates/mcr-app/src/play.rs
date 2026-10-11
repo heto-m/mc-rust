@@ -268,6 +268,7 @@ pub struct Play {
     death_message: Option<mcr_protocol::types::text::Component>,
     pub leave: bool,
     pub quit: bool,
+    pack_answers: Vec<bool>,
     chat_depth: Option<usize>,
     pub options: Options,
     bindings: KeyBindings,
@@ -394,6 +395,7 @@ impl Play {
             death_message: None,
             leave: false,
             quit: false,
+            pack_answers: Vec::new(),
             chat_depth: None,
             options,
             bindings,
@@ -1203,6 +1205,67 @@ impl Play {
         }
     }
 
+    /// Opens a modal screen from outside the play loop (the server resource pack prompt).
+    pub fn show_screen(&mut self, screen: Box<dyn Screen>) {
+        self.push_screen(screen);
+    }
+
+    pub fn close_top_screen(&mut self) {
+        self.stack.pop();
+    }
+
+    pub fn take_pack_answers(&mut self) -> Vec<bool> {
+        std::mem::take(&mut self.pack_answers)
+    }
+
+    pub fn force_close(&mut self, reason: String) {
+        self.closed.get_or_insert(reason);
+    }
+
+    /// Swaps in assets rebuilt from a new resource stack without restarting the session.
+    pub fn reload_resources(&mut self, assets: Arc<Assets>) -> anyhow::Result<()> {
+        self.gui.reload(&assets.resources)?;
+        self.hud.rebind(&self.gui.ui, self.data);
+        self.overlays = Overlays::new();
+        if let Some(audio) = &mut self.audio {
+            audio.reload(&assets.resources);
+        }
+        self.effects = WorldEffects::new(assets.clone());
+        self.effects.set_options(&self.options);
+        let renderer = &mut self.render.renderer;
+        renderer.set_effect_assets(&effects::effect_assets(&assets));
+        let format = renderer.target_format();
+        (self.entities, self.block_entities, self.hand, self.preview) = match assets.scene.clone() {
+            Some(sa) => (
+                EntityLayer::new(renderer.device(), renderer.queue(), format, sa.clone()),
+                BlockEntities::new(renderer.device(), renderer.queue(), format, sa.clone()),
+                HeldHand::new(renderer.device(), renderer.queue(), format, sa.clone()),
+                Preview::new(renderer.device(), renderer.queue(), format, sa),
+            ),
+            None => (None, None, None, None),
+        };
+        if let Some(block_entities) = &mut self.block_entities {
+            for pos in self.world.loaded_columns() {
+                block_entities.load_chunk(&self.world.client.state, pos);
+            }
+        }
+        let maps: Vec<i32> = self
+            .world
+            .client
+            .state
+            .gameplay
+            .maps
+            .keys()
+            .copied()
+            .collect();
+        for id in maps {
+            self.sync_map(id);
+        }
+        self.render.reload_assets(assets.clone(), &self.world);
+        self.assets = assets;
+        Ok(())
+    }
+
     fn push_screen(&mut self, screen: Box<dyn Screen>) {
         self.release_all();
         self.update_gui_size();
@@ -1437,6 +1500,7 @@ impl Play {
                     }
                 }
                 ScreenAction::Quit => self.quit = true,
+                ScreenAction::ResourcePackAnswer(accepted) => self.pack_answers.push(accepted),
                 _ => {}
             }
         }

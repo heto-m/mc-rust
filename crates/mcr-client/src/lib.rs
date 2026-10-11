@@ -27,6 +27,7 @@ mod menu;
 mod menu_layout_tests;
 #[cfg(test)]
 mod menu_tests;
+mod packs;
 mod pickup;
 mod player;
 mod registry;
@@ -54,6 +55,7 @@ pub use inventory::{
 };
 pub use mcr_physics::PlayerInput;
 pub use menu::MountInfo;
+pub use packs::{PackEnd, PackLink, PackReply, PackRequest, pack_channel};
 pub use pickup::Pickup;
 pub use player::LocalPlayer;
 pub use registry::{Dimension, Registries, Registry, RegistryItem};

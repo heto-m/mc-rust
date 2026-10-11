@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::error::{AssetError, Result};
 use crate::pack::{PackFormat, PackMeta};
-use crate::source::{AssetSource, DirSource, ZipSource};
+use crate::source::{AssetSource, DirSource, ReadBudget, ZipLimits, ZipSource};
 
 #[derive(Debug)]
 struct Pack {
@@ -24,6 +24,7 @@ pub struct ResourceManager {
     packs: Vec<Pack>,
     paths: Vec<Box<str>>,
     index: HashMap<Box<str>, Entry>,
+    untrusted_budget: ReadBudget,
 }
 
 impl Default for ResourceManager {
@@ -43,6 +44,7 @@ impl ResourceManager {
             packs: Vec::new(),
             paths: Vec::new(),
             index: HashMap::new(),
+            untrusted_budget: ReadBudget::default(),
         }
     }
 
@@ -61,6 +63,28 @@ impl ResourceManager {
             Box::new(ZipSource::open(path)?)
         };
         self.push_pack(name, source)
+    }
+
+    /// Adds a zip the server chose: size-limited, safe entry names, and `pack.mcmeta` is mandatory.
+    pub fn push_untrusted_zip(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let name = path.display().to_string();
+        let source = ZipSource::open_limited_shared(
+            path,
+            ZipLimits::SERVER_PACK,
+            self.untrusted_budget.clone(),
+        )?;
+        let meta = source
+            .read("pack.mcmeta")?
+            .ok_or_else(|| AssetError::Missing(format!("{name}/pack.mcmeta")))?;
+        let meta = PackMeta::parse(&meta).map_err(|source| AssetError::Json {
+            path: format!("{name}/pack.mcmeta"),
+            source,
+        })?;
+        if meta.pack_format.is_none() && meta.supported.is_none() {
+            return Err(AssetError::invalid(name, "pack.mcmeta has no pack section"));
+        }
+        self.insert_pack(name, Box::new(source), meta)
     }
 
     pub fn push_pack(
@@ -144,6 +168,33 @@ impl ResourceManager {
         self.packs[entry.pack as usize].source.read(real)
     }
 
+    /// Every pack's copy of `path`, lowest priority first, for files that merge (language, sounds.json).
+    pub fn read_all(&self, path: &str) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        for pack in &self.packs {
+            let in_overlay = pack
+                .meta
+                .overlays
+                .iter()
+                .any(|o| path.starts_with(&format!("{}/", o.directory)));
+            let mut candidates = Vec::new();
+            if !in_overlay {
+                candidates.push(path.to_owned());
+            }
+            candidates.extend(
+                pack.meta
+                    .active_overlays(self.target_format)
+                    .map(|o| format!("{}/{path}", o.directory)),
+            );
+            for candidate in candidates {
+                if let Ok(Some(bytes)) = pack.source.read(&candidate) {
+                    out.push(bytes);
+                }
+            }
+        }
+        out
+    }
+
     pub fn list_prefix<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = &'a str> {
         self.index
             .keys()
@@ -174,6 +225,44 @@ mod tests {
         assert_eq!(rm.read("a.txt").unwrap().unwrap(), b"over");
         assert_eq!(rm.read("b.txt").unwrap().unwrap(), b"b");
         assert_eq!(rm.read("c.txt").unwrap(), None);
+    }
+
+    #[test]
+    fn untrusted_zip_needs_pack_meta() {
+        let dir = TempDir::new("untrusted");
+        dir.write("none.zip", &zip_bytes(&[("a.txt", b"1")]));
+        dir.write("bad.zip", &zip_bytes(&[("pack.mcmeta", b"{nope")]));
+        dir.write("empty.zip", &zip_bytes(&[("pack.mcmeta", b"{}")]));
+        dir.write(
+            "good.zip",
+            &zip_bytes(&[
+                ("pack.mcmeta", br#"{"pack":{"pack_format":9}}"#),
+                ("a.txt", b"1"),
+            ]),
+        );
+        let mut rm = ResourceManager::new();
+        for name in ["none", "bad", "empty"] {
+            assert!(
+                rm.push_untrusted_zip(dir.path().join(format!("{name}.zip")))
+                    .is_err()
+            );
+        }
+        rm.push_untrusted_zip(dir.path().join("good.zip")).unwrap();
+        assert_eq!(rm.read("a.txt").unwrap().unwrap(), b"1");
+    }
+
+    #[test]
+    fn read_all_returns_every_pack_in_order() {
+        let mut rm = ResourceManager::new();
+        for (name, body) in [("a", &b"1"[..]), ("b", &b"2"[..])] {
+            rm.push_pack(
+                name,
+                Box::new(ZipSource::from_bytes(zip_bytes(&[("lang.json", body)])).unwrap()),
+            )
+            .unwrap();
+        }
+        assert_eq!(rm.read_all("lang.json"), [b"1".to_vec(), b"2".to_vec()]);
+        assert!(rm.read_all("none").is_empty());
     }
 
     #[test]

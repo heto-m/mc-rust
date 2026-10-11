@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
@@ -16,11 +17,23 @@ struct IndexEntry {
     hash: String,
 }
 
+/// Looks up `minecraft/sounds/x.ogg`-style names in resource packs before the launcher store.
+pub type SoundOverlay = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
+
 /// Launcher-layout asset store: `<root>/indexes/<id>.json` and `<root>/objects/<hh>/<hash>`.
-#[derive(Debug)]
 pub struct AssetStore {
     root: PathBuf,
     hashes: FxHashMap<String, String>,
+    overlay: Option<SoundOverlay>,
+}
+
+impl std::fmt::Debug for AssetStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AssetStore")
+            .field("root", &self.root)
+            .field("overlay", &self.overlay.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl AssetStore {
@@ -64,14 +77,29 @@ impl AssetStore {
             .into_iter()
             .map(|(name, e)| (name, e.hash))
             .collect();
-        Ok(Self { root, hashes })
+        Ok(Self {
+            root,
+            hashes,
+            overlay: None,
+        })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    pub fn set_overlay(&mut self, overlay: Option<SoundOverlay>) {
+        self.overlay = overlay;
+    }
+
     pub fn read(&self, name: &str) -> Result<Vec<u8>, AudioError> {
+        if let Some(bytes) = self.overlay.as_ref().and_then(|o| o(name)) {
+            return Ok(bytes);
+        }
+        self.read_launcher(name)
+    }
+
+    fn read_launcher(&self, name: &str) -> Result<Vec<u8>, AudioError> {
         let hash = self
             .hashes
             .get(name)
@@ -82,7 +110,7 @@ impl AssetStore {
     }
 
     pub fn sounds_json(&self) -> Result<Vec<u8>, AudioError> {
-        self.read("minecraft/sounds.json")
+        self.read_launcher("minecraft/sounds.json")
     }
 
     pub fn sound_file(&self, sound_name: &str) -> Result<Vec<u8>, AudioError> {

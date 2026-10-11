@@ -26,6 +26,8 @@ pub struct ClientConfig {
     /// Reply `minecraft:core` to the known-packs request (the server then omits vanilla registry data).
     pub known_packs: bool,
     pub resource_packs: ResourcePackPolicy,
+    /// When set, pack pushes go to the app instead of being answered by `resource_packs`.
+    pub pack_link: Option<crate::PackLink>,
     pub online: Option<OnlineAuth>,
     /// Handshake with the transfer intent (set when following a transfer packet).
     pub transfer: bool,
@@ -48,6 +50,7 @@ impl Default for ClientConfig {
             brand: "mcr".into(),
             known_packs: true,
             resource_packs: ResourcePackPolicy::Decline,
+            pack_link: None,
             online: None,
             transfer: false,
             connect_timeout: Duration::from_secs(10),

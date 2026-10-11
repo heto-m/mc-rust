@@ -1,0 +1,17 @@
+[package]
+name = "mcr-respack"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcr-protocol = { path = "../mcr-protocol" }
+thiserror.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+sha1.workspace = true
+uuid = "1"
+
+[lints]
+workspace = true

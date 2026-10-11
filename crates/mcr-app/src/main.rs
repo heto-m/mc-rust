@@ -22,6 +22,7 @@ mod overlays;
 mod play;
 mod preview;
 mod render_system;
+mod respacks;
 mod screenshot;
 mod seats;
 mod servers;

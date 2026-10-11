@@ -7,7 +7,7 @@ use crate::decode::{Pcm, decode_ogg, open_stream};
 use crate::error::AudioError;
 use crate::events::{JavaRandom, SoundEvents};
 use crate::mixer::{AudioHandle, Listener, PlayRequest, Source, Spatial, VoiceId};
-use crate::store::AssetStore;
+use crate::store::{AssetStore, SoundOverlay};
 
 #[derive(Debug)]
 pub struct SoundManager {
@@ -30,6 +30,24 @@ impl SoundManager {
             handle,
             cache: FxHashMap::default(),
         }
+    }
+
+    /// Re-reads the sound definitions and files with `overlay` (resource packs) layered on top.
+    pub fn reload(&mut self, overlay: Option<SoundOverlay>, packs: &[(String, String)]) {
+        let mut events = self
+            .store
+            .sounds_json()
+            .ok()
+            .and_then(|b| SoundEvents::parse(&String::from_utf8_lossy(&b)).ok())
+            .unwrap_or_default();
+        for (namespace, json) in packs {
+            if let Err(e) = events.merge_namespaced(namespace, json) {
+                tracing::warn!("pack sounds.json for {namespace}: {e}");
+            }
+        }
+        self.store.set_overlay(overlay);
+        self.events = events;
+        self.cache.clear();
     }
 
     pub fn events(&self) -> &SoundEvents {

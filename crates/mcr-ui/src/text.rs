@@ -5,7 +5,7 @@ use mcr_nbt::Value;
 use mcr_protocol::types::text::{Arg, ClickEvent, Component, Content};
 use rustc_hash::FxHashMap;
 
-use crate::error::{Result, UiError};
+use crate::error::Result;
 use crate::style::{Cell, Flags, FontId, Style};
 
 #[derive(Debug, Default)]
@@ -14,14 +14,16 @@ pub struct Lang(FxHashMap<String, String>);
 impl Lang {
     pub fn load(resources: &ResourceManager) -> Result<Self> {
         let path = "assets/minecraft/lang/en_us.json";
-        let Some(bytes) = resources.read(path)? else {
+        let mut map: FxHashMap<String, String> = FxHashMap::default();
+        for bytes in resources.read_all(path) {
+            match serde_json::from_slice::<FxHashMap<String, String>>(&bytes) {
+                Ok(layer) => map.extend(layer),
+                Err(e) => tracing::warn!("{path}: {e}"),
+            }
+        }
+        if map.is_empty() {
             tracing::warn!("missing {path}; translations fall back to keys");
-            return Ok(Self::default());
-        };
-        let map = serde_json::from_slice(&bytes).map_err(|source| UiError::Json {
-            path: path.into(),
-            source,
-        })?;
+        }
         Ok(Self(map))
     }
 

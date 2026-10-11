@@ -26,6 +26,11 @@ impl Assets {
     pub fn load(jar: &Path) -> Result<Self> {
         let resources = ResourceManager::vanilla(jar)
             .with_context(|| format!("opening client jar {}", jar.display()))?;
+        Self::from_resources(jar, resources)
+    }
+
+    /// Bakes everything from `resources`: the vanilla jar plus whatever packs were stacked on it.
+    pub fn from_resources(jar: &Path, resources: ResourceManager) -> Result<Self> {
         let cache = ModelCache::build(&resources, mcr_data::v26_3()).context("baking models")?;
         if !cache.missing_sprites.is_empty() || cache.unbaked_states > 0 {
             eprintln!(

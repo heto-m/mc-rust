@@ -106,6 +106,31 @@ impl RenderSystem {
         }
     }
 
+    /// Swaps in freshly baked assets and remeshes every loaded section in place.
+    pub fn reload_assets(&mut self, assets: Arc<Assets>, world: &dyn MeshWorld) {
+        self.renderer
+            .set_texture_groups(&assets.cache.texture_groups());
+        self.renderer.set_tint_palette(&assets.cache.palette());
+        self.renderer.set_animations(assets.cache.animations());
+        let names = world.biome_names();
+        self.known_biomes = names.len();
+        self.pool = MeshPool::new(
+            assets.cache.clone(),
+            assets.biome_colors(&names),
+            self.mesh_threads,
+            mcr_mesh::DEFAULT_BLEND_RADIUS,
+        );
+        self.pool.set_biome_seed(world.biome_seed());
+        self.assets = assets;
+        self.ready.clear();
+        self.urgent.clear();
+        self.urgent_inflight.clear();
+        let all = all_sections((world.store().config().height() >> 4) as i32);
+        for pos in world.loaded_columns() {
+            self.waiting.insert(pos, all);
+        }
+    }
+
     pub fn settled(&self, world: &dyn MeshWorld) -> bool {
         world.streaming_idle()
             && world.store().dirty_count() == 0

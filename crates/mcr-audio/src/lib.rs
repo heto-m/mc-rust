@@ -17,4 +17,4 @@ pub use mixer::{
     AudioHandle, CHUNK_FRAMES, Command, Listener, MAX_VOICES, Mixer, PlayRequest, Source, Spatial,
     Stats, VoiceId, linear_attenuation, pan_gains,
 };
-pub use store::{AssetStore, sound_asset_name};
+pub use store::{AssetStore, SoundOverlay, sound_asset_name};

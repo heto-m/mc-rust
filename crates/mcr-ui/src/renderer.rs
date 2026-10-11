@@ -208,6 +208,12 @@ impl UiRenderer {
         self.stats
     }
 
+    /// Drops the GPU copies of the atlas pages; call after swapping in a freshly loaded `Ui`.
+    pub fn reset_pages(&mut self) {
+        self.sprite_pages.clear();
+        self.glyph_pages.clear();
+    }
+
     fn sync_pages(
         device: &wgpu::Device,
         queue: &wgpu::Queue,

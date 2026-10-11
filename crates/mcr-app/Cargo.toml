@@ -18,6 +18,8 @@ mcr-data = { path = "../mcr-data" }
 mcr-entity-model = { path = "../mcr-entity-model" }
 mcr-particles = { path = "../mcr-particles" }
 mcr-audio = { path = "../mcr-audio" }
+mcr-auth = { path = "../mcr-auth" }
+mcr-respack = { path = "../mcr-respack" }
 mcr-buf.workspace = true
 mcr-client = { path = "../mcr-client" }
 mcr-net = { path = "../mcr-net" }

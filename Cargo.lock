@@ -1536,6 +1536,7 @@ dependencies = [
  "mcr-anvil",
  "mcr-assets",
  "mcr-audio",
+ "mcr-auth",
  "mcr-block-entity",
  "mcr-buf",
  "mcr-client",
@@ -1548,6 +1549,7 @@ dependencies = [
  "mcr-physics",
  "mcr-protocol",
  "mcr-render",
+ "mcr-respack",
  "mcr-settings",
  "mcr-ui",
  "mcr-world",
@@ -1813,6 +1815,18 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "wgpu",
+]
+
+[[package]]
+name = "mcr-respack"
+version = "0.1.0"
+dependencies = [
+ "mcr-protocol",
+ "sha1 0.10.7",
+ "thiserror 2.0.21",
+ "tracing",
+ "ureq",
+ "uuid",
 ]
 
 [[package]]

@@ -182,6 +182,25 @@ pub fn decode_sprite(name: &str, png: &[u8], mcmeta: Option<&[u8]>) -> Result<Sp
     })
 }
 
+/// The decoded texture; `None` when absent or when a (possibly hostile) pack's file does not decode.
+pub(crate) fn load_sprite(resources: &ResourceManager, path: &str) -> Option<Sprite> {
+    let png = match resources.read(path) {
+        Ok(png) => png?,
+        Err(e) => {
+            tracing::warn!("{path}: {e}");
+            return None;
+        }
+    };
+    let meta = resources.read(&format!("{path}.mcmeta")).ok().flatten();
+    match decode_sprite(path, &png, meta.as_deref()) {
+        Ok(sprite) => Some(sprite),
+        Err(e) => {
+            tracing::warn!("{e}");
+            decode_sprite(path, &png, None).ok()
+        }
+    }
+}
+
 pub fn missing_sprite() -> Sprite {
     let data = (0..16 * 16)
         .flat_map(|i| {
@@ -378,11 +397,8 @@ impl TextureArrayBuilder {
                 continue;
             }
             let path = name.resource_path("textures", ".png");
-            let sprite = match resources.read(&path)? {
-                Some(png) => {
-                    let meta = resources.read(&format!("{path}.mcmeta"))?;
-                    decode_sprite(&path, &png, meta.as_deref())?
-                }
+            let sprite = match load_sprite(resources, &path) {
+                Some(sprite) => sprite,
                 None => {
                     missing.push(id);
                     missing_sprite()

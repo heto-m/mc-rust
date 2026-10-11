@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use mcr_audio::{AssetStore, AudioEngine, Listener, SoundManager, SoundSource};
+use std::sync::Arc;
+
+use mcr_assets::ResourceManager;
+use mcr_audio::{AssetStore, AudioEngine, Listener, SoundManager, SoundOverlay, SoundSource};
 use mcr_data::Version;
 use mcr_protocol::play::clientbound::world::SoundSource as WireSource;
 use mcr_settings::{Options, SOUND_CATEGORIES};
@@ -90,6 +93,28 @@ impl Audio {
             seed: 1,
             data,
         })
+    }
+
+    /// Layers the resource stack's sounds and `sounds.json` files over the launcher assets.
+    pub fn reload(&mut self, resources: &Arc<ResourceManager>) {
+        let files = resources.clone();
+        let overlay: SoundOverlay =
+            Arc::new(move |name| files.read(&format!("assets/{name}")).ok().flatten());
+        let mut packs = Vec::new();
+        for path in resources.list_prefix("assets/") {
+            let mut parts = path.split('/');
+            if let (Some("assets"), Some(namespace), Some("sounds.json"), None) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            {
+                for bytes in resources.read_all(path) {
+                    packs.push((
+                        namespace.to_owned(),
+                        String::from_utf8_lossy(&bytes).into_owned(),
+                    ));
+                }
+            }
+        }
+        self.manager.reload(Some(overlay), &packs);
     }
 
     pub fn apply_volumes(&mut self, options: &Options) {

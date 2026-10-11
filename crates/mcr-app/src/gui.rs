@@ -37,6 +37,20 @@ impl Gui {
     }
 }
 
+impl Gui {
+    /// Rebuilds the fonts, language, sprites and item icons; on error nothing changes.
+    pub fn reload(&mut self, resources: &ResourceManager) -> Result<()> {
+        let mut ui = Ui::load(resources).context("loading ui")?;
+        let icons = ItemIcons::load(resources).context("loading item icons")?;
+        let assets = ScreenAssets::load(&mut ui, resources).context("loading screen textures")?;
+        self.ui = ui;
+        self.icons = icons;
+        self.assets = assets;
+        self.ui_renderer.reset_pages();
+        Ok(())
+    }
+}
+
 pub fn gui_size(framebuffer: (u32, u32), max_scale: i32) -> ((i32, i32), u32) {
     let scale = mcr_ui::gui_scale(
         framebuffer.0,

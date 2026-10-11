@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use mcr_settings::ServerList;
-use mcr_ui::{Favicon, OnlineStatus, ServerEntry, ServerStatus, ServerStore};
+use mcr_settings::{ResourcePacks, ServerList};
+use mcr_ui::{Favicon, OnlineStatus, PackSetting, ServerEntry, ServerStatus, ServerStore};
 
 use crate::status::{self, PingResult};
 
@@ -58,6 +58,30 @@ impl FileServers {
         }
     }
 
+    fn write(&self) {
+        if let Ok(bytes) = self.list.to_bytes() {
+            if let Some(dir) = self.path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&self.path, bytes);
+        }
+    }
+
+    pub fn pack_setting_for(&self, address: &str) -> PackSetting {
+        self.list
+            .servers
+            .iter()
+            .find(|s| s.ip == address)
+            .map_or(PackSetting::Prompt, |s| to_ui(s.resource_packs))
+    }
+
+    pub fn set_pack_setting_for(&mut self, address: &str, setting: PackSetting) {
+        if let Some(s) = self.list.servers.iter_mut().find(|s| s.ip == address) {
+            s.resource_packs = from_ui(setting);
+            self.write();
+        }
+    }
+
     fn save(&mut self) {
         let old = std::mem::take(&mut self.list.servers);
         self.list.servers = self
@@ -74,12 +98,7 @@ impl FileServers {
                 s
             })
             .collect();
-        if let Ok(bytes) = self.list.to_bytes() {
-            if let Some(dir) = self.path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::write(&self.path, bytes);
-        }
+        self.write();
     }
 
     fn drain(&mut self) {
@@ -123,7 +142,37 @@ impl FileServers {
     }
 }
 
+fn to_ui(setting: ResourcePacks) -> PackSetting {
+    match setting {
+        ResourcePacks::Prompt => PackSetting::Prompt,
+        ResourcePacks::Enabled => PackSetting::Enabled,
+        ResourcePacks::Disabled => PackSetting::Disabled,
+    }
+}
+
+fn from_ui(setting: PackSetting) -> ResourcePacks {
+    match setting {
+        PackSetting::Prompt => ResourcePacks::Prompt,
+        PackSetting::Enabled => ResourcePacks::Enabled,
+        PackSetting::Disabled => ResourcePacks::Disabled,
+    }
+}
+
 impl ServerStore for FileServers {
+    fn pack_setting(&self, index: usize) -> PackSetting {
+        self.list
+            .servers
+            .get(index)
+            .map_or(PackSetting::Prompt, |s| to_ui(s.resource_packs))
+    }
+
+    fn set_pack_setting(&mut self, index: usize, setting: PackSetting) {
+        if let Some(s) = self.list.servers.get_mut(index) {
+            s.resource_packs = from_ui(setting);
+            self.write();
+        }
+    }
+
     fn servers(&self) -> &[ServerEntry] {
         &self.entries
     }

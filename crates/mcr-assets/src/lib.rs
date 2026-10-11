@@ -37,7 +37,7 @@ pub use model::{
 };
 pub use pack::{FormatRange, Overlay, PackFormat, PackMeta};
 pub use resources::ResourceManager;
-pub use source::{AssetSource, DirSource, ZipSource};
+pub use source::{AssetSource, DirSource, ZipLimits, ZipSource};
 pub use texture::{
     Animation, AnimationFrame, DEFAULT_MIP_LEVELS, Sprite, SpriteSlot, TextureArrayBuilder,
     TextureArrays, TextureGroup, Transparency, decode_sprite, missing_sprite,

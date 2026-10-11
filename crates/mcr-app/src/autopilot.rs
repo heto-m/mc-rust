@@ -10,17 +10,32 @@ use mcr_ui::{Key, MouseButton};
 pub enum Step {
     Wait(u32),
     WaitReady,
+    /// First step only: the script drives the menus itself instead of waiting for the join.
+    Early,
     Hold(Vec<InputKey>, u32),
     Tap(InputKey),
     Press(Vec<InputKey>),
     Release(Vec<InputKey>),
-    Look { yaw: f32, pitch: f32 },
-    Turn { yaw: f32, pitch: f32 },
+    Look {
+        yaw: f32,
+        pitch: f32,
+    },
+    Turn {
+        yaw: f32,
+        pitch: f32,
+    },
     Chat(String),
     Type(String),
     UiKey(Key),
-    Click { x: f32, y: f32, right: bool },
-    SlotClick { slot: usize, right: bool },
+    Click {
+        x: f32,
+        y: f32,
+        right: bool,
+    },
+    SlotClick {
+        slot: usize,
+        right: bool,
+    },
     Sleep(u32),
     Slot(u8),
     Shot(PathBuf),
@@ -58,6 +73,7 @@ pub fn parse(text: &str) -> Result<Vec<Step>, String> {
         steps.push(match cmd {
             "wait" => Step::Wait(rest.parse().map_err(|_| err("wait needs ticks"))?),
             "wait_ready" => Step::WaitReady,
+            "early" => Step::Early,
             "hold" => {
                 let (keys, ticks) = rest
                     .rsplit_once(' ')
@@ -178,6 +194,7 @@ impl Autopilot {
                         return;
                     }
                 }
+                Step::Early => {}
                 Step::Hold(keys, ticks) => {
                     for &key in &keys {
                         sh.key_event(key, true, None);

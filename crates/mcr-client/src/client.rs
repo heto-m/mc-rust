@@ -24,6 +24,7 @@ use crate::config::ClientConfig;
 use crate::error::{ClientError, Result};
 use crate::events::{ClientEvent, DisconnectReason};
 use crate::handler::core_pack;
+use crate::packs::{PackReply, PackRequest};
 use crate::state::{ClientState, Outbox, resource_pack_responses};
 
 const MAX_FRAMES_PER_PUMP: usize = 8192;
@@ -151,6 +152,7 @@ impl Client {
             if Instant::now() >= deadline {
                 return Err(ClientError::Timeout("joining"));
             }
+            self.flush_pack_replies()?;
             match self.conn.recv_timeout(Duration::from_millis(50)) {
                 Some(Event::Frame(f)) => self.handle_frame(f)?,
                 Some(Event::Closed(reason)) => return Err(self.closed(reason.to_string())),
@@ -396,8 +398,17 @@ impl Client {
                 ))?;
             }
             ConfigClientbound::ResourcePackPush(p) => {
-                for r in resource_pack_responses(self.config.resource_packs, p.id) {
-                    self.send_config(&ConfigServerbound::ResourcePack(r))?;
+                if let Some(link) = &self.config.pack_link {
+                    let _ = link.requests.send(PackRequest::Push(p));
+                } else {
+                    for r in resource_pack_responses(self.config.resource_packs, p.id) {
+                        self.send_config(&ConfigServerbound::ResourcePack(r))?;
+                    }
+                }
+            }
+            ConfigClientbound::ResourcePackPop(p) => {
+                if let Some(link) = &self.config.pack_link {
+                    let _ = link.requests.send(PackRequest::Pop(p.id));
                 }
             }
             ConfigClientbound::StoreCookie(p) => {
@@ -435,6 +446,23 @@ impl Client {
 
     fn handle_play(&mut self, frame: InboundFrame) -> Result<()> {
         let packet = PlayClientbound::decode(frame.id, &frame.payload, self.ids)?;
+        if let Some(link) = &self.config.pack_link {
+            match packet {
+                PlayClientbound::ResourcePackPush(p) => {
+                    let _ = link.requests.send(PackRequest::Push(p));
+                    return Ok(());
+                }
+                PlayClientbound::ResourcePackPop(p) => {
+                    let _ = link.requests.send(PackRequest::Pop(p.id));
+                    return Ok(());
+                }
+                other => return self.handle_play_packet(other),
+            }
+        }
+        self.handle_play_packet(packet)
+    }
+
+    fn handle_play_packet(&mut self, packet: PlayClientbound<'_>) -> Result<()> {
         let mut out = Outbox::default();
         self.state.handle_play(packet, &mut out, Instant::now())?;
         let mut reconfigure = false;
@@ -471,7 +499,33 @@ impl Client {
         Ok(())
     }
 
+    fn flush_pack_replies(&mut self) -> Result<()> {
+        loop {
+            let Some(reply) = self.config.pack_link.as_ref().and_then(|l| l.next_reply()) else {
+                return Ok(());
+            };
+            match reply {
+                PackReply::Status(status) => match self.phase {
+                    Phase::Configuration => {
+                        self.send_config(&ConfigServerbound::ResourcePack(status))?
+                    }
+                    Phase::Play => self.send_play(&PlayServerbound::ResourcePack(status))?,
+                    _ => {}
+                },
+                PackReply::Disconnect(reason) => {
+                    self.set_phase(Phase::Closed);
+                    self.events
+                        .push_back(ClientEvent::Disconnected(DisconnectReason::Server(
+                            reason.clone(),
+                        )));
+                    return Err(ClientError::Disconnected(Box::new(reason)));
+                }
+            }
+        }
+    }
+
     fn pump(&mut self) -> Result<()> {
+        self.flush_pack_replies()?;
         for _ in 0..MAX_FRAMES_PER_PUMP {
             match self.conn.try_recv() {
                 Some(Event::Frame(f)) => self.handle_frame(f)?,
@@ -500,6 +554,7 @@ impl Client {
 
     /// Waits up to `timeout` for the next packet so a caller can sleep on the network.
     pub fn wait_for_traffic(&mut self, timeout: Duration) -> Result<()> {
+        self.flush_pack_replies()?;
         match self.conn.recv_timeout(timeout) {
             Some(Event::Frame(f)) => self.handle_frame(f),
             Some(Event::Closed(reason)) => Err(self.closed(reason.to_string())),

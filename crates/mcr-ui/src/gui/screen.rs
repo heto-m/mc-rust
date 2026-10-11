@@ -59,6 +59,8 @@ pub enum ScreenAction {
     CopyToClipboard(String),
     ClickSound,
     Quit,
+    /// The answer to the server resource pack prompt.
+    ResourcePackAnswer(bool),
     CreativeSetCarried(mcr_protocol::types::item::ItemStack),
     CreativeClick(ContainerClick),
     CreativeSetSlot {
@@ -92,6 +94,7 @@ impl std::fmt::Debug for ScreenAction {
                 .field("primary", primary)
                 .field("secondary", secondary)
                 .finish(),
+            Self::ResourcePackAnswer(b) => f.debug_tuple("ResourcePackAnswer").field(b).finish(),
             Self::Respawn => f.write_str("Respawn"),
             Self::Disconnect => f.write_str("Disconnect"),
             Self::Connect(a) => f.debug_tuple("Connect").field(a).finish(),

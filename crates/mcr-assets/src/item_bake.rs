@@ -10,7 +10,7 @@ use crate::model::{
     ResolvedModel,
 };
 use crate::resources::ResourceManager;
-use crate::texture::{Sprite, decode_sprite, missing_sprite};
+use crate::texture::{Sprite, load_sprite, missing_sprite};
 
 const LAYERS: usize = 5;
 const MIN_Z: f32 = 7.5;
@@ -234,13 +234,7 @@ impl ItemBaker {
         }
         let name = self.sprites.get(id).clone();
         let path = name.resource_path("textures", ".png");
-        let sprite = match resources.read(&path)? {
-            Some(png) => {
-                let meta = resources.read(&format!("{path}.mcmeta"))?;
-                decode_sprite(&path, &png, meta.as_deref())?
-            }
-            None => missing_sprite(),
-        };
+        let sprite = load_sprite(resources, &path).unwrap_or_else(missing_sprite);
         let sprite = Arc::new(sprite);
         self.images.insert(id, sprite.clone());
         Ok(sprite)

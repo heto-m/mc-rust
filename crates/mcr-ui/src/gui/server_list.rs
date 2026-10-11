@@ -49,7 +49,40 @@ pub enum ServerStatus {
     Unreachable { message: String },
 }
 
+/// "Server Resource Packs" choice of a server entry.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PackSetting {
+    #[default]
+    Prompt,
+    Enabled,
+    Disabled,
+}
+
+impl PackSetting {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Prompt => Self::Enabled,
+            Self::Enabled => Self::Disabled,
+            Self::Disabled => Self::Prompt,
+        }
+    }
+
+    fn lang_key(self) -> &'static str {
+        match self {
+            Self::Prompt => "manageServer.resourcePack.prompt",
+            Self::Enabled => "manageServer.resourcePack.enabled",
+            Self::Disabled => "manageServer.resourcePack.disabled",
+        }
+    }
+}
+
 pub trait ServerStore {
+    fn pack_setting(&self, _index: usize) -> PackSetting {
+        PackSetting::Prompt
+    }
+
+    fn set_pack_setting(&mut self, _index: usize, _setting: PackSetting) {}
+
     fn servers(&self) -> &[ServerEntry];
     fn add(&mut self, entry: ServerEntry);
     fn update(&mut self, index: usize, entry: ServerEntry);
@@ -606,12 +639,14 @@ const NAME: u32 = 1;
 const ADDRESS: u32 = 2;
 const DONE: u32 = 3;
 const CANCEL: u32 = 4;
+const PACKS: u32 = 5;
 
 pub struct EditServerScreen {
     servers: SharedServers,
     index: Option<usize>,
     widgets: WidgetSet,
     gui: (i32, i32),
+    packs: PackSetting,
 }
 
 impl std::fmt::Debug for EditServerScreen {
@@ -624,11 +659,13 @@ impl std::fmt::Debug for EditServerScreen {
 
 impl EditServerScreen {
     pub fn new(servers: SharedServers, index: Option<usize>) -> Self {
+        let packs = index.map_or(PackSetting::Prompt, |i| servers.borrow().pack_setting(i));
         Self {
             servers,
             index,
             widgets: WidgetSet::default(),
             gui: (0, 0),
+            packs,
         }
     }
 
@@ -664,10 +701,18 @@ impl EditServerScreen {
             },
             address,
         };
-        match self.index {
-            Some(i) => self.servers.borrow_mut().update(i, entry),
-            None => self.servers.borrow_mut().add(entry),
-        }
+        let mut servers = self.servers.borrow_mut();
+        let index = match self.index {
+            Some(i) => {
+                servers.update(i, entry);
+                i
+            }
+            None => {
+                servers.add(entry);
+                servers.servers().len().saturating_sub(1)
+            }
+        };
+        servers.set_pack_setting(index, self.packs);
         out.push(ScreenAction::Pop);
     }
 }
@@ -695,6 +740,11 @@ impl Screen for EditServerScreen {
         self.widgets.add(name);
         self.widgets.add(address);
         self.widgets.add(Button::new(
+            PACKS,
+            [width / 2 - 100, height / 4 + 72 + 18, 200, 20],
+            "",
+        ));
+        self.widgets.add(Button::new(
             DONE,
             [width / 2 - 100, height / 4 + 96 + 18, 200, 20],
             "lang:gui.done",
@@ -721,6 +771,14 @@ impl Screen for EditServerScreen {
         cx.text(&name_label, self.gui.0 / 2 - 100, 53, 0xFFA0_A0A0, true);
         let ip_label = cx.lang("addServer.enterIp");
         cx.text(&ip_label, self.gui.0 / 2 - 100, 94, 0xFFA0_A0A0, true);
+        let packs_label = format!(
+            "{}: {}",
+            cx.lang("manageServer.resourcePack"),
+            cx.lang(self.packs.lang_key())
+        );
+        if let Some(b) = self.widgets.button_mut(PACKS) {
+            b.label = packs_label;
+        }
         let hint = cx.lang("selectServer.defaultName");
         if let Some(e) = self.widgets.edit_mut(NAME) {
             e.hint = Some(hint);
@@ -744,6 +802,7 @@ impl Screen for EditServerScreen {
                     self.done("Minecraft Server", out);
                 }
                 (CANCEL, WidgetEventKind::Pressed) => out.push(ScreenAction::Pop),
+                (PACKS, WidgetEventKind::Pressed) => self.packs = self.packs.next(),
                 _ => {}
             }
         }

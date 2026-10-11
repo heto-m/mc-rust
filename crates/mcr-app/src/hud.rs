@@ -111,6 +111,13 @@ pub fn chat_options(options: &Options, focused: bool) -> ChatOptions {
 }
 
 impl Hud {
+    /// Re-resolves sprite ids after the UI atlas was rebuilt, keeping chat and timers.
+    pub fn rebind(&mut self, ui: &Ui, data: &'static Version) {
+        let fresh = Self::new(ui, data);
+        self.sprites = fresh.sprites;
+        self.own = fresh.own;
+    }
+
     pub fn new(ui: &Ui, data: &'static Version) -> Self {
         let id = |name: &str| ui.sprite_id(name);
         let attributes = data.registry("minecraft:attribute");

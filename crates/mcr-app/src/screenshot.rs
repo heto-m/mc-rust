@@ -161,7 +161,7 @@ pub fn run_shell(opts: &crate::cli::Options, out: &Path) -> Result<()> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut steps = crate::autopilot::parse(&text).map_err(anyhow::Error::msg)?;
-        if connecting {
+        if connecting && steps.first() != Some(&crate::autopilot::Step::Early) {
             steps.insert(0, crate::autopilot::Step::WaitReady);
         }
         shell.set_autopilot(crate::autopilot::Autopilot::new(steps));

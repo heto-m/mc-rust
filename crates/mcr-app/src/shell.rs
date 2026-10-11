@@ -13,8 +13,9 @@ use mcr_protocol::types::text::Component;
 use mcr_render::{Camera, FrameInputs, FrameStats, Renderer};
 use mcr_settings::InputKey;
 use mcr_ui::{
-    Clipboard, ConnectingScreen, DisconnectedScreen, Env, Modifiers, NoView, RenderCx, Screen,
-    ScreenAction, ScreenStack, SharedServers, TitleScreen, UiInput, vanilla_resources,
+    Clipboard, ConfirmScreen, ConnectingScreen, DisconnectedScreen, Env, Modifiers, NoView,
+    RenderCx, Screen, ScreenAction, ScreenStack, SharedServers, TitleScreen, UiInput,
+    vanilla_resources,
 };
 
 use crate::assets::Assets;
@@ -23,6 +24,7 @@ use crate::autopilot::Autopilot;
 use crate::gui::{self, Gui, UiOverlay};
 use crate::input::{track_modifiers, ui_inputs};
 use crate::play::{Parts, Play, PlayConfig, TICK_SECONDS};
+use crate::respacks::{PackAction, ResourceStack, ServerPacks, downloads_dir};
 use crate::servers::FileServers;
 use crate::settings::{OptionsScreen, Settings, SharedSettings};
 
@@ -57,6 +59,10 @@ pub struct Shell {
     pub failure: Option<String>,
     autopilot: Option<Autopilot>,
     camera: Camera,
+    packs: ServerPacks,
+    resource_stack: ResourceStack,
+    prompt_open: bool,
+    current_address: String,
 }
 
 impl std::fmt::Debug for Shell {
@@ -94,6 +100,16 @@ impl Shell {
             println!("audio: disabled");
         }
         let servers = Rc::new(RefCell::new(FileServers::load(&cfg.game_dir)));
+        let packs = ServerPacks::new(
+            downloads_dir(&cfg.game_dir),
+            &cfg.name,
+            mcr_auth::offline::offline_uuid(&cfg.name).unwrap_or_default(),
+        );
+        let resource_stack = ResourceStack {
+            jar: cfg.jar.clone(),
+            assets_dir: cfg.assets_dir.clone(),
+            index: index.clone(),
+        };
         let now = Instant::now();
         let mut shell = Self {
             parts: Some(Parts {
@@ -119,6 +135,10 @@ impl Shell {
             failure: None,
             autopilot: None,
             camera: Camera::default(),
+            packs,
+            resource_stack,
+            prompt_open: false,
+            current_address: String::new(),
             cfg,
         };
         shell.show_title();
@@ -126,6 +146,181 @@ impl Shell {
             shell.connect(&addr, false);
         }
         Ok(shell)
+    }
+
+    fn close_connecting_screen(&mut self) {
+        while self.prompt_open {
+            self.prompt_open = false;
+            self.stack.pop();
+        }
+        self.stack.pop();
+    }
+
+    fn end_pack_session(&mut self) {
+        if self.prompt_open {
+            self.prompt_open = false;
+            match &mut self.play {
+                Some(play) => play.close_top_screen(),
+                None => {
+                    self.stack.pop();
+                }
+            }
+        }
+        let actions = self.packs.end_session();
+        self.pack_actions(actions);
+    }
+
+    fn poll_packs(&mut self) {
+        if !self.packs.is_active() {
+            return;
+        }
+        let answers = self.play.as_mut().map(Play::take_pack_answers);
+        for accepted in answers.into_iter().flatten() {
+            self.pack_answer(accepted);
+        }
+        let actions = self.packs.poll();
+        self.pack_actions(actions);
+    }
+
+    fn pack_answer(&mut self, accepted: bool) {
+        self.prompt_open = false;
+        let actions = self.packs.answer(accepted);
+        self.pack_actions(actions);
+    }
+
+    fn pack_actions(&mut self, mut actions: Vec<PackAction>) {
+        while !actions.is_empty() {
+            let mut next = Vec::new();
+            for action in actions {
+                match action {
+                    PackAction::Prompt { required, message } => {
+                        self.show_pack_prompt(required, message.as_ref());
+                    }
+                    PackAction::Reload(paths) => {
+                        let ok = self.reload_resources(&paths);
+                        next.extend(self.packs.reload_finished(ok));
+                    }
+                    PackAction::SaveSetting(setting) => {
+                        self.servers
+                            .borrow_mut()
+                            .set_pack_setting_for(&self.current_address, setting);
+                    }
+                    PackAction::Disconnect(reason) => self.pack_disconnect(&reason),
+                }
+            }
+            actions = next;
+        }
+    }
+
+    fn show_pack_prompt(&mut self, required: bool, message: Option<&Component>) {
+        let (title, line, yes, no) = if required {
+            (
+                "lang:multiplayer.requiredTexturePrompt.line1",
+                "lang:multiplayer.requiredTexturePrompt.line2",
+                "lang:gui.proceed",
+                "lang:menu.disconnect",
+            )
+        } else {
+            (
+                "lang:multiplayer.texturePrompt.line1",
+                "lang:multiplayer.texturePrompt.line2",
+                "lang:gui.yes",
+                "lang:gui.no",
+            )
+        };
+        let mut text = line.to_owned();
+        if let Some(prompt) = message {
+            let plain: String = prompt
+                .to_plain_string()
+                .chars()
+                .filter(|c| !c.is_control() || *c == '\n')
+                .take(512)
+                .collect();
+            text.push_str("\n\n");
+            text.push_str(&plain.replace('§', ""));
+        }
+        let screen = ConfirmScreen::new(
+            title,
+            &text,
+            vec![
+                (
+                    yes.into(),
+                    Box::new(|| vec![ScreenAction::ResourcePackAnswer(true), ScreenAction::Pop]),
+                ),
+                (
+                    no.into(),
+                    Box::new(|| vec![ScreenAction::ResourcePackAnswer(false), ScreenAction::Pop]),
+                ),
+            ],
+        );
+        if self.prompt_open {
+            match &mut self.play {
+                Some(play) => play.close_top_screen(),
+                None => {
+                    self.stack.pop();
+                }
+            }
+        }
+        self.prompt_open = true;
+        match &mut self.play {
+            Some(play) => play.show_screen(Box::new(screen)),
+            None => self.push(Box::new(screen)),
+        }
+    }
+
+    fn pack_disconnect(&mut self, reason: &Component) {
+        let text = sanitize_for_log(&reason.to_plain_string());
+        match &mut self.play {
+            Some(play) => play.force_close(text),
+            None => {
+                self.connecting = None;
+                self.failure = Some(text);
+                self.close_connecting_screen();
+                self.push(Box::new(
+                    DisconnectedScreen::new(reason.clone())
+                        .with_title(Component::translatable("connect.failed", Vec::new())),
+                ));
+            }
+        }
+    }
+
+    fn reload_resources(&mut self, paths: &[PathBuf]) -> bool {
+        let started = Instant::now();
+        let built = self
+            .resource_stack
+            .build(paths)
+            .and_then(|r| Assets::from_resources(&self.cfg.jar, r));
+        let assets = match built {
+            Ok(assets) => Arc::new(assets),
+            Err(e) => {
+                eprintln!("resource reload failed: {e:#}");
+                return false;
+            }
+        };
+        let applied = match (&mut self.play, &mut self.parts) {
+            (Some(play), _) => play.reload_resources(assets),
+            (None, Some(parts)) => parts.gui.reload(&assets.resources).map(|()| {
+                if let Some(audio) = &mut parts.audio {
+                    audio.reload(&assets.resources);
+                }
+                parts.assets = assets;
+            }),
+            (None, None) => return false,
+        };
+        match applied {
+            Ok(()) => {
+                println!(
+                    "resource packs: reloaded {} pack(s) in {:?}",
+                    paths.len(),
+                    started.elapsed()
+                );
+                true
+            }
+            Err(e) => {
+                eprintln!("resource reload failed: {e:#}");
+                false
+            }
+        }
     }
 
     pub fn set_autopilot(&mut self, autopilot: Autopilot) {
@@ -193,6 +388,11 @@ impl Shell {
             .render_distance
             .unwrap_or(options.render_distance)
             .clamp(2, 32) as i8;
+        config.pack_link = Some(
+            self.packs
+                .begin(self.servers.borrow().pack_setting_for(address)),
+        );
+        self.current_address = address.to_owned();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let result = Client::connect(config).map_err(|e| sanitize_for_log(&e.to_string()));
@@ -223,8 +423,9 @@ impl Shell {
                 self.stack.pop();
             }
             Err(message) => {
+                self.end_pack_session();
                 self.failure = Some(message.clone());
-                self.stack.pop();
+                self.close_connecting_screen();
                 self.push(Box::new(
                     DisconnectedScreen::new(Component::text(message))
                         .with_title(Component::translatable("connect.failed", Vec::new())),
@@ -236,6 +437,7 @@ impl Shell {
     fn end_session(&mut self, reason: Option<String>) {
         let Some(play) = self.play.take() else { return };
         self.parts = Some(play.finish());
+        self.end_pack_session();
         self.update_menu_size();
         match reason {
             Some(reason) => {
@@ -253,6 +455,7 @@ impl Shell {
         let now = Instant::now();
         self.last_frame = now;
         self.poll_connect();
+        self.poll_packs();
         if let Some(play) = &mut self.play {
             self.accum = 0.0;
             let ticks = play.due_ticks(dt);
@@ -322,7 +525,11 @@ impl Shell {
                 ScreenAction::Connect(address) => {
                     self.connect(&address, true);
                 }
-                ScreenAction::CancelConnect => self.connecting = None,
+                ScreenAction::CancelConnect => {
+                    self.connecting = None;
+                    self.end_pack_session();
+                }
+                ScreenAction::ResourcePackAnswer(accepted) => self.pack_answer(accepted),
                 ScreenAction::OpenOptions => {
                     let screen = OptionsScreen::new(self.settings.clone());
                     self.push(Box::new(screen));
