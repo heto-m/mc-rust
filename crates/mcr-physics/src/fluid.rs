@@ -1,4 +1,4 @@
-use crate::data::{FLUID_NONE, FLUID_WATER, StateInfo, flag};
+use crate::data::{FLUID_NONE, FLUID_WATER, PhysicsData, StateInfo, flag};
 use crate::player::{FluidState, PlayerPhysics};
 use crate::world::CollisionWorld;
 
@@ -20,6 +20,49 @@ fn normalize(v: [f64; 3]) -> [f64; 3] {
     }
 }
 
+fn fluid_height<W: CollisionWorld + ?Sized>(
+    w: &W,
+    data: &PhysicsData,
+    p: [i32; 3],
+    s: &StateInfo,
+) -> f32 {
+    if data.state(w.block_state(p[0], p[1] + 1, p[2])).fluid == s.fluid {
+        1.0
+    } else {
+        s.own_fluid_height()
+    }
+}
+
+/// Vanilla `getHeightForCamera`: a source capped by a sturdy downward face fills its block.
+fn camera_fluid_height<W: CollisionWorld + ?Sized>(
+    w: &W,
+    data: &PhysicsData,
+    p: [i32; 3],
+    s: &StateInfo,
+) -> f32 {
+    let above = data.state(w.block_state(p[0], p[1] + 1, p[2]));
+    if s.has(flag::FLUID_SOURCE) && above.sturdy & 1 != 0 {
+        1.0
+    } else {
+        fluid_height(w, data, p, s)
+    }
+}
+
+/// Whether a camera at `pos` is inside water (vanilla `Camera.getFluidInCamera`).
+pub fn camera_in_water<W: CollisionWorld + ?Sized>(
+    w: &W,
+    data: &PhysicsData,
+    pos: [f64; 3],
+) -> bool {
+    if !pos.iter().all(|v| v.is_finite()) {
+        return false;
+    }
+    let p = pos.map(|v| v.floor() as i32);
+    let s = data.state(w.block_state(p[0], p[1], p[2]));
+    s.fluid == FLUID_WATER
+        && pos[1] < f64::from(p[1]) + f64::from(camera_fluid_height(w, data, p, s))
+}
+
 fn blocks_fluid_flow(s: &StateInfo) -> bool {
     s.has_collision() || s.has(flag::SIGN)
 }
@@ -31,12 +74,7 @@ impl PlayerPhysics {
         p: [i32; 3],
         s: &StateInfo,
     ) -> f32 {
-        let above = self.state_at(w, [p[0], p[1] + 1, p[2]]);
-        if above.fluid == s.fluid {
-            1.0
-        } else {
-            s.own_fluid_height()
-        }
+        fluid_height(w, self.data, p, s)
     }
 
     fn solid_face<W: CollisionWorld + ?Sized>(
@@ -101,6 +139,12 @@ impl PlayerPhysics {
         normalize(flow)
     }
 
+    /// Passengers skip `tick`, but vanilla still refreshes their fluid contact every tick.
+    pub fn update_passenger_fluid<W: CollisionWorld + ?Sized>(&mut self, w: &W) {
+        self.was_eye_in_water = self.fluid.eye_in_water;
+        self.update_fluid_interaction(w);
+    }
+
     pub(crate) fn update_fluid_interaction<W: CollisionWorld + ?Sized>(&mut self, w: &W) {
         self.fluid = FluidState::default();
         let ignore_current = self.abilities.flying;
@@ -141,16 +185,13 @@ impl PlayerPhysics {
                         }
                         let source = st.has(flag::FLUID_SOURCE);
                         let slot = usize::from(st.fluid - 1) * 2 + usize::from(!source);
-                        if x == eye_x && z == eye_z && eye_y >= bottom && st.fluid == FLUID_WATER {
-                            let above = self.state_at(w, [x, y + 1, z]);
-                            let cam = if source && above.sturdy & 1 != 0 {
-                                1.0
-                            } else {
-                                self.fluid_height_at(w, p, st)
-                            };
-                            if eye_y <= bottom + f64::from(cam) {
-                                eyes_water = true;
-                            }
+                        if x == eye_x
+                            && z == eye_z
+                            && eye_y >= bottom
+                            && st.fluid == FLUID_WATER
+                            && eye_y <= bottom + f64::from(camera_fluid_height(w, self.data, p, st))
+                        {
+                            eyes_water = true;
                         }
                         heights[slot] = heights[slot].max(top - entity_y);
                         if !ignore_current {

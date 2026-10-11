@@ -458,3 +458,50 @@ fn idle_in_still_water_only_moves_vertically() {
     assert_eq!(p.vel[0], 0.0);
     assert_eq!(p.vel[2], 0.0);
 }
+
+#[test]
+fn eye_stays_in_water_while_sinking_to_the_pool_bottom() {
+    let mut w = TestWorld::flat("minecraft:stone", 56);
+    w.fill([-6, 56, -6], [6, 63, 6], default_state("minecraft:water"));
+    let mut p = PlayerPhysics::new([0.5, 61.33, 0.5]);
+    let mut top_ninth = 0;
+    for _ in 0..600 {
+        p.tick(&idle(), &w);
+        let eye = p.eye_y();
+        if eye.fract() > 8.0 / 9.0 {
+            top_ninth += 1;
+        }
+        assert!(p.eye_in_water(), "eye left water at {eye}");
+    }
+    assert!(
+        top_ninth > 0,
+        "never crossed the top ninth of a water block"
+    );
+    assert!(p.on_ground);
+}
+
+#[test]
+fn passengers_refresh_their_fluid_contact() {
+    let mut w = TestWorld::flat("minecraft:stone", 56);
+    w.fill([-6, 56, -6], [6, 63, 6], default_state("minecraft:water"));
+    let mut p = PlayerPhysics::new([0.5, 58.0, 0.5]);
+    assert!(!p.eye_in_water());
+    p.update_passenger_fluid(&w);
+    assert!(p.eye_in_water());
+    p.snap_to([0.5, 70.0, 0.5], [0.0; 3], 0.0, 0.0);
+    p.update_passenger_fluid(&w);
+    assert!(!p.eye_in_water());
+}
+
+#[test]
+fn camera_water_height_follows_vanilla() {
+    let data = crate::PhysicsData::v26_3();
+    let mut w = TestWorld::flat("minecraft:stone", 60);
+    w.fill([0, 60, 0], [0, 61, 0], default_state("minecraft:water"));
+    assert!(crate::camera_in_water(&w, data, [0.5, 60.95, 0.5]));
+    assert!(crate::camera_in_water(&w, data, [0.5, 61.85, 0.5]));
+    assert!(!crate::camera_in_water(&w, data, [0.5, 61.9, 0.5]));
+    w.set(0, 62, 0, default_state("minecraft:glass"));
+    assert!(crate::camera_in_water(&w, data, [0.5, 61.95, 0.5]));
+    assert!(!crate::camera_in_water(&w, data, [f64::NAN, 61.0, 0.5]));
+}

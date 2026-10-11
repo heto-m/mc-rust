@@ -588,7 +588,7 @@ impl Play {
         }
         let scoping = self.scoping();
         self.overlays.tick(scoping);
-        self.water_ticks = if self.eye_in_water(self.cur_eye) {
+        self.water_ticks = if self.world.client.state.player.physics.eye_in_water() {
             (self.water_ticks + 1).min(600)
         } else {
             0
@@ -652,10 +652,6 @@ impl Play {
         if snapped || !player.placed {
             self.prev_eye = self.cur_eye;
         }
-    }
-
-    fn eye_in_water(&self, eye: [f64; 3]) -> bool {
-        effects::eye_in_water(&self.world.client.state.chunks, eye)
     }
 
     fn scoping(&self) -> bool {
@@ -1880,7 +1876,7 @@ impl Play {
             self.effects.flash(),
             self.options.gamma as f32,
         );
-        if self.water_ticks > 0 || self.eye_in_water(camera.position.to_array()) {
+        if effects::camera_in_water(&self.world.client.state.chunks, camera.position.to_array()) {
             let sky = crate::entities::light_at(
                 &self.world.client.state.chunks,
                 camera.position.to_array(),

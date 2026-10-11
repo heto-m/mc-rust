@@ -387,6 +387,7 @@ impl Client {
             keys.yaw,
             keys.pitch,
         );
+        p.update_passenger_fluid(&self.state.chunks);
         let controlled_now = !matches!(ride.sim, Sim::Passive);
         let pose = controlled_now.then_some((vehicle_pose, on_ground));
         if let Some(amount) = jump_data {

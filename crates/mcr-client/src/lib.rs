@@ -18,6 +18,8 @@ mod gamestate;
 mod gamestate_tests;
 mod glide;
 mod handler;
+#[cfg(test)]
+mod handler_tests;
 pub mod hashing;
 #[cfg(test)]
 mod hashing_tests;

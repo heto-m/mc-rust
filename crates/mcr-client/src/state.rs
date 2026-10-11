@@ -390,6 +390,7 @@ impl ClientState {
         self.chunks = new_store(cfg);
         self.block_entities.clear();
         self.entities.clear();
+        self.pickups.clear();
         self.dimension = Dimension {
             min_y,
             height: height as i32,
@@ -546,6 +547,7 @@ impl ClientState {
         self.chunks = new_store(cfg);
         self.block_entities.clear();
         self.entities.clear();
+        self.pickups.clear();
         self.boss_bars.clear();
         self.inventory.open = None;
         self.player.loaded = false;

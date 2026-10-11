@@ -504,27 +504,8 @@ pub fn cloud_settings(options: &Options) -> CloudSettings {
     }
 }
 
-/// Whether `eye` is below the surface of a water block.
-pub fn eye_in_water(chunks: &mcr_world::ChunkStore, eye: [f64; 3]) -> bool {
-    let (x, y, z) = (
-        eye[0].floor() as i32,
-        eye[1].floor() as i32,
-        eye[2].floor() as i32,
-    );
-    let data = mcr_data::v26_3();
-    let Some(info) = chunks
-        .block(x, y, z)
-        .and_then(|s| data.block_state(u32::from(s.0)))
-    else {
-        return false;
-    };
-    let Some(fluid) = info.fluid else {
-        return false;
-    };
-    let height = f64::from(fluid.amount.min(8)) / 9.0;
-    data.fluid_name(fluid.fluid)
-        .is_some_and(|n| n.contains("water"))
-        && eye[1] - f64::from(y) < height.max(if fluid.falling { 1.0 } else { 0.0 })
+pub fn camera_in_water(chunks: &mcr_world::ChunkStore, pos: [f64; 3]) -> bool {
+    mcr_physics::camera_in_water(chunks, mcr_physics::PhysicsData::v26_3(), pos)
 }
 
 /// Vanilla's underwater fog: dark blue, starting behind the camera, opening up over 30 seconds.

@@ -13,9 +13,17 @@ use mcr_protocol::types::game::GameType;
 use rustc_hash::FxHashMap;
 
 use crate::audio::Audio;
-use crate::effects::{eye_in_water, light_at};
+use crate::effects::light_at;
 
 const BIOME: &str = "minecraft:worldgen/biome";
+
+/// The new state when the eye crosses the water surface; spectators keep the old one.
+fn underwater_transition(was: &mut bool, underwater: bool, spectator: bool) -> Option<bool> {
+    (!spectator && underwater != *was).then(|| {
+        *was = underwater;
+        underwater
+    })
+}
 const DIMENSION_TYPE: &str = "minecraft:dimension_type";
 const NEAR_RADIUS: i32 = 16;
 const FAR_RADIUS: i32 = 32;
@@ -324,7 +332,7 @@ impl Ambience {
             ));
         }
         let spectator = state.player.game_mode == GameType::Spectator;
-        let underwater = eye_in_water(&state.chunks, eye);
+        let underwater = state.player.physics.eye_in_water();
 
         self.tick_music(state, &attrs, underwater, audio);
         self.tick_underwater(underwater, spectator, feet, audio);
@@ -368,8 +376,9 @@ impl Ambience {
         feet: [f64; 3],
         audio: &mut Audio,
     ) {
-        if !spectator && underwater != self.was_underwater {
-            self.was_underwater = underwater;
+        if let Some(underwater) =
+            underwater_transition(&mut self.was_underwater, underwater, spectator)
+        {
             let event = if underwater {
                 "ambient.underwater.enter"
             } else {
@@ -751,6 +760,56 @@ impl AmbientProbe for StateProbe<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mcr_physics::{PlayerInput, PlayerPhysics};
+    use mcr_world::{BlockState, ChunkColumn, ChunkPos, ChunkStore, WorldConfig};
+
+    fn pool() -> ChunkStore {
+        let data = mcr_data::v26_3();
+        let cfg = WorldConfig::new(data.state_count() as u32, 80, -64, 384).unwrap();
+        let mut store = ChunkStore::new(cfg);
+        store.insert(ChunkPos::new(0, 0), ChunkColumn::empty(&cfg));
+        let state = |name| {
+            let id = data.block_by_name(name).unwrap();
+            BlockState(data.block_info(id).unwrap().default_state as u16)
+        };
+        for x in 0..16 {
+            for z in 0..16 {
+                store.set_block(x, 55, z, state("minecraft:stone"));
+                for y in 56..64 {
+                    store.set_block(x, y, z, state("minecraft:water"));
+                }
+            }
+        }
+        store
+    }
+
+    #[test]
+    fn sinking_to_a_pool_bottom_enters_water_once() {
+        let world = pool();
+        let mut p = PlayerPhysics::new([8.5, 61.33, 8.5]);
+        let mut was = false;
+        let mut transitions = Vec::new();
+        let mut top_ninth_ticks = 0;
+        for _ in 0..800 {
+            p.tick(&PlayerInput::default(), &world);
+            let eye = p.pos[1] + f64::from(p.eye_height());
+            if eye.fract() > 8.0 / 9.0 {
+                top_ninth_ticks += 1;
+            }
+            transitions.extend(underwater_transition(&mut was, p.eye_in_water(), false));
+        }
+        assert!(p.on_ground, "never reached the bottom");
+        assert!(top_ninth_ticks > 0);
+        assert_eq!(transitions, [true]);
+    }
+
+    #[test]
+    fn spectators_never_toggle_underwater() {
+        let mut was = false;
+        assert_eq!(underwater_transition(&mut was, true, true), None);
+        assert_eq!(underwater_transition(&mut was, true, false), Some(true));
+        assert_eq!(underwater_transition(&mut was, false, false), Some(false));
+    }
 
     fn kind_of(a: &Ambience, block: &str, props: &[(&str, &str)]) -> Option<AmbientBlock> {
         let data = a.data;
