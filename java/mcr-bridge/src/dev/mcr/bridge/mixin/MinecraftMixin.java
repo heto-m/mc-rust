@@ -2,6 +2,7 @@ package dev.mcr.bridge.mixin;
 
 import dev.mcr.bridge.McrCrash;
 import dev.mcr.bridge.McrFrame;
+import dev.mcr.bridge.gpu.GpuSelfTest;
 import dev.mcr.bridge.net.GameplayKeys;
 import dev.mcr.bridge.net.McrNet;
 import java.io.File;
@@ -23,6 +24,7 @@ abstract class MinecraftMixin {
     @Inject(method = "runTick", at = @At("TAIL"))
     private void mcr$flushNet(boolean advanceGameTime, CallbackInfo ci) {
         McrNet.endOfTick();
+        GpuSelfTest.onFrame((Minecraft) (Object) this);
     }
 
     @Inject(method = "handleKeybinds", at = @At("HEAD"))

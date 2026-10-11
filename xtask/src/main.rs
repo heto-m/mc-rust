@@ -4,6 +4,7 @@ mod datagen;
 mod decompile;
 mod fabric;
 mod fetch;
+mod golden;
 mod java;
 mod jdk;
 mod manifest;
@@ -79,6 +80,8 @@ enum Command {
     },
     /// Compile the Java modules under java/ into .cache/java/<module>.jar
     JavaBuild,
+    /// Render the test mod's GPU parity screen with vanilla OpenGL into .cache/golden/<ver>/gui.png
+    GoldenGui,
     /// Run fetch, jdk, datagen and decompile in order
     Setup {
         #[arg(long)]
@@ -124,6 +127,9 @@ fn main() -> Result<()> {
         }
         Command::JavaBuild => {
             java::run(&layout)?;
+        }
+        Command::GoldenGui => {
+            golden::run(&layout)?;
         }
         Command::Setup { version, force } => {
             let ver = fetch::resolve_version(version.as_deref())?;

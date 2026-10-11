@@ -111,6 +111,9 @@ public final class NullDeviceBackend implements GpuDeviceBackend {
 
     @Override
     public BackendRenderPipeline.Pending compilePipeline(BackendRenderPipeline.CreateInfo info) {
+        if (System.getProperty(PipelineInfo.DUMP_PROPERTY) != null) {
+            PipelineInfo.dump(info, PipelineInfo.encode(info));
+        }
         return NullPipeline::new;
     }
 

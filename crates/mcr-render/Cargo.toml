@@ -6,10 +6,10 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-wgpu = "30"
+wgpu.workspace = true
 glam = { version = "0.34", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }
-pollster = "0.4"
+pollster.workspace = true
 png.workspace = true
 thiserror.workspace = true
 rustc-hash.workspace = true

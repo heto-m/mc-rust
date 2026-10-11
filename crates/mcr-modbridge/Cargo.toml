@@ -11,11 +11,16 @@ mcr-client = { path = "../mcr-client" }
 mcr-jvm = { path = "../mcr-jvm" }
 mcr-physics = { path = "../mcr-physics" }
 mcr-protocol = { path = "../mcr-protocol" }
+naga = { version = "30", features = ["spv-in"] }
+pollster.workspace = true
+rustc-hash.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+wgpu = { workspace = true, features = ["naga-ir"] }
 
 [dev-dependencies]
+png.workspace = true
 criterion.workspace = true
 mcr-auth = { path = "../mcr-auth" }
 mcr-net = { path = "../mcr-net" }

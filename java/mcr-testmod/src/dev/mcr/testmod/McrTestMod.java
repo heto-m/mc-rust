@@ -9,8 +9,11 @@ import net.minecraft.network.codec.ByteBufCodecs;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.Identifier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public final class McrTestMod implements ClientModInitializer {
+    static final Logger LOGGER = LoggerFactory.getLogger("mcr_testmod");
     public static final String MESSAGE = "hello from mcr_testmod";
     public static final String COMMAND = "time query day";
     /** Fabric's client command dispatcher only exists once the server's command tree arrived. */
@@ -37,6 +40,7 @@ public final class McrTestMod implements ClientModInitializer {
             commandIn = COMMAND_DELAY_TICKS;
         });
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            GuiCapture.tick(client);
             if (commandIn > 0 && --commandIn == 0 && client.getConnection() != null) {
                 client.getConnection().sendCommand(COMMAND);
             }

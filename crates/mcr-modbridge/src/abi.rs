@@ -10,7 +10,7 @@ use crate::events::BridgeEvent;
 use crate::net::{NetShared, SPILL_LIMIT};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 2;
+pub const BRIDGE_VERSION: u32 = 3;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 
 pub const SHARED_CONTROL_RING: i32 = 0;
@@ -126,6 +126,26 @@ pub const ENTRIES: &[EntryDesc] = &[
         descriptor: "(IJI)V",
         flavour: Flavour::Normal,
     },
+    EntryDesc {
+        name: "gpu_device",
+        descriptor: "(IJI)J",
+        flavour: Flavour::Normal,
+    },
+    EntryDesc {
+        name: "gpu_encode",
+        descriptor: "(JIJI)J",
+        flavour: Flavour::Normal,
+    },
+    EntryDesc {
+        name: "gpu_pass",
+        descriptor: "(JJIJI)J",
+        flavour: Flavour::Normal,
+    },
+    EntryDesc {
+        name: "gpu_error",
+        descriptor: "(JI)I",
+        flavour: Flavour::Normal,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -184,7 +204,15 @@ pub(crate) fn shared() -> Result<&'static Shared, RingError> {
 
 pub(crate) fn table() -> &'static ExtensionTable {
     TABLE.get_or_init(|| {
-        let fns: [*const c_void; 2] = [shared_address as *const c_void, report as *const c_void];
+        use crate::gpu::ffi;
+        let fns: [*const c_void; 6] = [
+            shared_address as *const c_void,
+            report as *const c_void,
+            ffi::gpu_device as *const c_void,
+            ffi::gpu_encode as *const c_void,
+            ffi::gpu_pass as *const c_void,
+            ffi::gpu_error as *const c_void,
+        ];
         let entries: Vec<_> = ENTRIES.iter().copied().zip(fns).collect();
         ExtensionTable::leak(BRIDGE_VERSION, &entries)
     })
@@ -248,7 +276,31 @@ extern "C" fn report(kind: i32, ptr: i64, len: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu::{self, ffi};
     use std::path::Path;
+
+    #[test]
+    fn java_gpu_name_tables_match_rust() {
+        let src = bridge_abi_java();
+        let tables: &[(&str, &[&str])] = &[
+            ("GPU_FORMATS", gpu::enums::GPU_FORMATS),
+            ("BLEND_FACTORS", gpu::enums::BLEND_FACTORS),
+            ("BLEND_OPS", gpu::enums::BLEND_OPS),
+            ("COMPARE_OPS", gpu::enums::COMPARE_OPS),
+            ("POLYGON_MODES", gpu::enums::POLYGON_MODES),
+            ("TOPOLOGIES", gpu::enums::TOPOLOGIES),
+            ("UNIFORM_TYPES", gpu::enums::UNIFORM_TYPES),
+            ("ADDRESS_MODES", gpu::enums::ADDRESS_MODES),
+            ("FILTER_MODES", gpu::enums::FILTER_MODES),
+        ];
+        for (name, rust) in tables {
+            let decl = format!("String[] {name} = {{");
+            let start = src.find(&decl).unwrap_or_else(|| panic!("{name} missing")) + decl.len();
+            let body = &src[start..start + src[start..].find('}').unwrap()];
+            let java: Vec<&str> = body.split('"').skip(1).step_by(2).collect();
+            assert_eq!(&java, rust, "{name}");
+        }
+    }
 
     fn bridge_abi_java() -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -378,6 +430,67 @@ mod tests {
             ("ANSWER_DATA", ANSWER_DATA as i64),
             ("ANSWER_LEVEL", ANSWER_LEVEL.into()),
             ("ANSWER_PLAYER", ANSWER_PLAYER.into()),
+            ("PIPELINE_MAGIC", gpu::info::MAGIC.into()),
+            ("PIPELINE_FORMAT", gpu::info::FORMAT.into()),
+            ("GPU_MAX_ARGS", ffi::MAX_ARGS as i64),
+            ("GPU_INFO_SLOTS", ffi::INFO_SLOTS as i64),
+            ("GPU_FEATURE_POLYGON_LINE", ffi::FEATURE_POLYGON_LINE as i64),
+            (
+                "GPU_FEATURE_FIRST_INSTANCE",
+                ffi::FEATURE_FIRST_INSTANCE as i64,
+            ),
+            ("GPU_MAX_UNIFORMS", gpu::pass::MAX_UNIFORMS as i64),
+            ("D_INFO", ffi::D_INFO.into()),
+            ("D_BUFFER", ffi::D_BUFFER.into()),
+            ("D_TRANSIENT", ffi::D_TRANSIENT.into()),
+            ("D_HOST", ffi::D_HOST.into()),
+            ("D_TEXTURE", ffi::D_TEXTURE.into()),
+            ("D_VIEW", ffi::D_VIEW.into()),
+            ("D_SAMPLER", ffi::D_SAMPLER.into()),
+            ("D_PIPELINE", ffi::D_PIPELINE.into()),
+            ("D_DESTROY", ffi::D_DESTROY.into()),
+            ("D_ENCODER", ffi::D_ENCODER.into()),
+            ("D_SURFACE", ffi::D_SURFACE.into()),
+            ("D_SURFACE_CONFIGURE", ffi::D_SURFACE_CONFIGURE.into()),
+            ("D_SURFACE_PRESENT", ffi::D_SURFACE_PRESENT.into()),
+            ("D_STATS", ffi::D_STATS.into()),
+            ("E_CLEAR", ffi::E_CLEAR.into()),
+            ("E_CLEAR_REGION", ffi::E_CLEAR_REGION.into()),
+            ("E_WRITE_BUFFER", ffi::E_WRITE_BUFFER.into()),
+            ("E_COPY_BUFFER", ffi::E_COPY_BUFFER.into()),
+            ("E_WRITE_TEXTURE", ffi::E_WRITE_TEXTURE.into()),
+            ("E_BUFFER_TO_TEXTURE", ffi::E_BUFFER_TO_TEXTURE.into()),
+            ("E_TEXTURE_TO_BUFFER", ffi::E_TEXTURE_TO_BUFFER.into()),
+            ("E_TEXTURE_TO_TEXTURE", ffi::E_TEXTURE_TO_TEXTURE.into()),
+            ("E_FLUSH_MAPPED", ffi::E_FLUSH_MAPPED.into()),
+            ("E_BLIT", ffi::E_BLIT.into()),
+            ("E_DIRTY", ffi::E_DIRTY.into()),
+            ("E_SUBMIT", ffi::E_SUBMIT.into()),
+            ("E_POLL", ffi::E_POLL.into()),
+            ("E_WAIT", ffi::E_WAIT.into()),
+            ("P_PIPELINE", gpu::pass::P_PIPELINE.into()),
+            ("P_UNIFORM_BUFFER", gpu::pass::P_UNIFORM_BUFFER.into()),
+            ("P_UNIFORM_TEXTURE", gpu::pass::P_UNIFORM_TEXTURE.into()),
+            ("P_UNIFORM_NONE", gpu::pass::P_UNIFORM_NONE.into()),
+            ("P_PUSH", gpu::pass::P_PUSH.into()),
+            ("P_SCISSOR", gpu::pass::P_SCISSOR.into()),
+            ("P_NO_SCISSOR", gpu::pass::P_NO_SCISSOR.into()),
+            ("P_VERTEX", gpu::pass::P_VERTEX.into()),
+            ("P_INDEX", gpu::pass::P_INDEX.into()),
+            ("P_DRAW", gpu::pass::P_DRAW.into()),
+            ("P_DRAW_INDEXED", gpu::pass::P_DRAW_INDEXED.into()),
+            ("P_MULTI_DRAW", gpu::pass::P_MULTI_DRAW.into()),
+            (
+                "P_MULTI_DRAW_INDEXED",
+                gpu::pass::P_MULTI_DRAW_INDEXED.into(),
+            ),
+            ("P_DRAW_INDIRECT", gpu::pass::P_DRAW_INDIRECT.into()),
+            (
+                "P_DRAW_INDEXED_INDIRECT",
+                gpu::pass::P_DRAW_INDEXED_INDIRECT.into(),
+            ),
+            ("P_DEBUG_PUSH", gpu::pass::P_DEBUG_PUSH.into()),
+            ("P_DEBUG_POP", gpu::pass::P_DEBUG_POP.into()),
         ];
         for (name, value) in ints {
             assert_eq!(int_const(&src, name), *value, "{name}");

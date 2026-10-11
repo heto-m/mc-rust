@@ -29,6 +29,8 @@ base64 = "0.22"
 time = { version = "0.3", features = ["parsing"] }
 png = "0.18"
 zip = { version = "9", default-features = false, features = ["deflate"] }
+wgpu = "30"
+pollster = "0.4"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

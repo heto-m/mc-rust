@@ -146,6 +146,43 @@ that Rust owns and reclaims after the submit that used them completes.
 
 The expected GUI frame is a few hundred ops and under 1 MiB of uploads. Task 4.2 measures it.
 
+## Measured
+
+- **Spike 0.1 (shaders).** Instead of a separate shaderc tool, the bridge dumps every `CreateInfo` the real frontend
+  produces (`-Dmcr.gpu.dump`, `-Dmcr.gpu.device=null`) into `.cache/spv/26.3`. Of 216 pipelines, 208 pass
+  `spv_fixup` + naga validation and 8 use texel buffers (all clouds); 0 fail. Besides the planned rewrite, two
+  more fixups were needed: output arrays (OIT's `out vec4 coeff[N]`) become N consecutive outputs, and debug
+  instructions are dropped (naga rejects `OpLine` between types).
+- **Live compile (`gpu_compile::vanilla_pipelines_compile_on_wgpu`).** Through the backend on wgpu: core 184/184,
+  post 24/24, texel 8 (fail cleanly), 0 failures. This needed `FLOAT32_BLENDABLE` (OIT depth-bounds pipelines blend
+  into `RGBA32_FLOAT`) and binding uniform blocks at their std140 size: vanilla sizes buffers without tail padding
+  (140 vs 144), so uniform-capable buffers are padded to 16 bytes and bindings round up to the block size.
+- **Coordinates.** naga's `adjust_coordinate_space` flips clip-space Y, which reproduces vanilla's Vulkan memory
+  layout (row 0 = bottom, as in GL). Front faces are therefore CW in wgpu terms, scissor rectangles pass through
+  unchanged, and the offscreen surface flips rows on readback (vanilla's Vulkan blit flips likewise).
+- **Handles** carry their kind (`generation << 32 | kind << 28 | index`), so a handle of the wrong type is as
+  invalid as a stale one. Java defers destroys to the next submit, matching Vulkan's destroy queue.
+- **Transient memory** uses vanilla's `TransientBlockAllocator` over Rust blocks with a host copy. Allocations mark
+  their range dirty; Rust uploads dirty ranges with `queue.write_buffer` at submit, which wgpu orders after earlier
+  submits, so blocks recycle immediately. Persistent-buffer writes and texture writes go through an upload ring
+  and `copy_*` commands at their place in the stream.
+- **Golden (`cargo xtask golden-gui`).** The stock Fabric client renders the test mod's parity screen (gradient, bars
+  behind the menu blur, buttons, shadowed text, item icons with counts, a scissored list) with vanilla's OpenGL
+  backend under Xvfb (Mesa 26.2 llvmpipe) into `.cache/golden/26.3/gui.png`. Through the bridge on wgpu
+  (`gpu_golden::gui_matches_the_opengl_golden`): SSIM 0.9996 against the golden; the Java screenshot (a readback
+  through `copyTextureToBuffer`) matches the presented frame at SSIM 1.0000; 0 validation errors.
+- **Bench (`gpu_bench::bench_gui_frames`, 1280×720, 120 frames after a 30-frame warm-up, per frame).** `record` is
+  wall time from pass creation to its end on the render thread (vanilla's own GUI work included), `native` the FFM
+  call, `encode` Rust's share of it.
+
+  | Screen | passes | ops | draws | record | native | encode | bind hits | upload |
+  |---|---|---|---|---|---|---|---|---|
+  | Title (panorama) | 4.2 | 558 | 78 | 55 µs | 60 µs | 56 µs | 99.8% | 26 KiB |
+  | Test screen (blur) | 10.2 | 598 | 85 | 81 µs | 78 µs | 70 µs | 100.0% | 30 KiB |
+
+  Both screens are capped at 60 fps by vanilla's menu limit; recording plus encoding stays well under 0.2 ms of the
+  16.7 ms frame, so bind group churn is not a concern for GUI frames.
+
 ## Risks / spikes
 
 - **Combined samplers through naga** (spike 0.1): if the rewrite cannot make all vanilla shaders validate, the
@@ -154,4 +191,4 @@ The expected GUI frame is a few hundred ops and under 1 MiB of uploads. Task 4.2
   catches mismatches, and fixes stay in one place (the naga option or a viewport flip).
 - Pipeline color formats: Java declares `RGBA8_UNORM` targets. If they later alias Rust targets of other formats,
   `mod-frame-compose` compiles per-format variants lazily.
-- Bind group churn in GUI-heavy frames: mitigated by the cache. Measured in task 4.2.
+- Bind group churn in GUI-heavy frames: mitigated by the cache (99.8–100% hits in task 4.2).

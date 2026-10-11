@@ -7,8 +7,11 @@ import com.mojang.renderpearl.frontend.FrontendGpuDevice;
 import org.jspecify.annotations.Nullable;
 import org.lwjgl.sdl.SDLVideo;
 
-/** The only backend vanilla may pick: a fake SDL window plus a device that mcr records later. */
+/** The only backend vanilla may pick: a fake SDL window plus a device recording on mcr's wgpu device. */
 public final class McrGpuBackend implements GpuBackend {
+    /** `-Dmcr.gpu.device=null` keeps the draw-nothing device (headless tests). */
+    public static final String DEVICE_PROPERTY = "mcr.gpu.device";
+
     private static final long SDL_WINDOW_OPENGL = 0x2L;
     private static final long SDL_WINDOW_VULKAN = 0x10000000L;
 
@@ -30,6 +33,7 @@ public final class McrGpuBackend implements GpuBackend {
 
     @Override
     public GpuDevice createDevice(GpuDebugOptions debugOptions) {
-        return new FrontendGpuDevice(new NullDeviceBackend());
+        boolean nullDevice = "null".equals(System.getProperty(DEVICE_PROPERTY));
+        return new FrontendGpuDevice(nullDevice ? new NullDeviceBackend() : new McrDeviceBackend());
     }
 }

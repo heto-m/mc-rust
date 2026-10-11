@@ -17,6 +17,10 @@ public final class Bridge {
 
     private final MethodHandle sharedAddress;
     private final MethodHandle report;
+    public final MethodHandle gpuDevice;
+    public final MethodHandle gpuEncode;
+    public final MethodHandle gpuPass;
+    public final MethodHandle gpuError;
     final Ring control;
     final Doorbell controlBell;
     public final Ring netIn;
@@ -25,6 +29,10 @@ public final class Bridge {
     private Bridge(NativeTable table) {
         this.sharedAddress = downcall(table, BridgeAbi.Entry.SHARED_ADDRESS);
         this.report = downcall(table, BridgeAbi.Entry.REPORT);
+        this.gpuDevice = downcall(table, BridgeAbi.Entry.GPU_DEVICE);
+        this.gpuEncode = downcall(table, BridgeAbi.Entry.GPU_ENCODE);
+        this.gpuPass = downcall(table, BridgeAbi.Entry.GPU_PASS);
+        this.gpuError = downcall(table, BridgeAbi.Entry.GPU_ERROR);
         this.control = Ring.at(shared(BridgeAbi.SHARED_CONTROL_RING));
         this.controlBell = new Doorbell(shared(BridgeAbi.SHARED_CONTROL_BELL));
         this.netIn = Ring.at(shared(BridgeAbi.SHARED_NET_IN_RING));
