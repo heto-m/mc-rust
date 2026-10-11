@@ -25,20 +25,24 @@ pub fn chunk_of(camera: &Camera) -> ChunkPos {
     )
 }
 
-fn dist_sq(a: ChunkPos, b: ChunkPos) -> i32 {
-    let (dx, dz) = (a.x - b.x, a.z - b.z);
+fn dist_sq(a: ChunkPos, b: ChunkPos) -> i64 {
+    let dx = i64::from(a.x) - i64::from(b.x);
+    let dz = i64::from(a.z) - i64::from(b.z);
     dx * dx + dz * dz
 }
 
 pub fn in_distance(a: ChunkPos, b: ChunkPos, distance: i32) -> bool {
-    dist_sq(a, b) <= distance * distance + distance
+    let d = i64::from(distance);
+    dist_sq(a, b) <= d * d + d
 }
 
 /// Within `distance` or bordering it: like vanilla's server, one extra ring so edge columns can mesh.
 fn near_distance(a: ChunkPos, b: ChunkPos, distance: i32) -> bool {
-    let toward = |v: i32| v - v.signum();
-    let inner = ChunkPos::new(b.x + toward(a.x - b.x), b.z + toward(a.z - b.z));
-    in_distance(inner, b, distance)
+    let toward = |v: i64| v - v.signum();
+    let dx = toward(i64::from(a.x) - i64::from(b.x));
+    let dz = toward(i64::from(a.z) - i64::from(b.z));
+    let d = i64::from(distance);
+    dx * dx + dz * dz <= d * d + d
 }
 
 /// World state independent of rendering: loaded columns, the viewpoint and the source feeding them.
@@ -159,7 +163,8 @@ impl Game {
                 let pos = ChunkPos::new(here.x + dx, here.z + dz);
                 if near_distance(pos, here, r) && !self.chunks.contains_key(&pos) {
                     self.chunks.insert(pos, ChunkState::Requested);
-                    self.source.request(pos, dist_sq(pos, here) as u32);
+                    self.source
+                        .request(pos, u32::try_from(dist_sq(pos, here)).unwrap_or(u32::MAX));
                 }
             }
         }
@@ -192,6 +197,16 @@ mod tests {
     use mcr_world::{ChunkColumn, WorldConfig};
 
     use super::*;
+
+    #[test]
+    fn distances_between_extreme_chunks_do_not_overflow() {
+        let far = ChunkPos::new(i32::MAX, i32::MIN);
+        let near = ChunkPos::new(0, 0);
+        assert!(!in_distance(far, near, 32));
+        assert!(!near_distance(far, near, 32));
+        assert!(in_distance(far, far, 0));
+        assert!(near_distance(ChunkPos::new(33, 0), near, 32));
+    }
 
     #[derive(Default)]
     struct Fake {
