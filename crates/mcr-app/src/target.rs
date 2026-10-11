@@ -1,6 +1,6 @@
 use mcr_buf::BlockPos;
 use mcr_client::{Entities, Entity, PlayerList};
-use mcr_data::Version;
+use mcr_data::{Aabb, StateId, Version};
 use mcr_entity_model::idx::ARMOR_STAND_FLAGS;
 use mcr_protocol::play::serverbound::Facing;
 use mcr_protocol::types::entity_data::EntityDataValue;
@@ -85,6 +85,52 @@ pub fn raycast_block(
     dir: [f64; 3],
     max: f64,
 ) -> Option<BlockHit> {
+    raycast_shapes(store, data, origin, dir, max, Version::outline_shape)
+}
+
+/// Like [`raycast_block`] but against collision shapes, which is vanilla's `ClipContext.Block.VISUAL` for the camera.
+pub fn raycast_collision(
+    store: &ChunkStore,
+    data: &Version,
+    origin: [f64; 3],
+    dir: [f64; 3],
+    max: f64,
+) -> Option<BlockHit> {
+    raycast_shapes(store, data, origin, dir, max, Version::collision_shape)
+}
+
+/// Vanilla `Camera.getMaxZoom`: eight rays from the eye's ±0.1 corners against collision shapes.
+pub fn third_person_distance(
+    store: &ChunkStore,
+    data: &Version,
+    eye: [f64; 3],
+    dir: [f64; 3],
+    max: f64,
+) -> f64 {
+    let mut distance = max;
+    for i in 0..8 {
+        let offset = [i & 1, (i >> 1) & 1, (i >> 2) & 1].map(|b| if b == 1 { 0.1 } else { -0.1 });
+        let from = std::array::from_fn(|a| eye[a] + offset[a]);
+        if let Some(hit) = raycast_collision(store, data, from, dir, distance) {
+            let point: [f64; 3] = std::array::from_fn(|a| from[a] + dir[a] * hit.distance);
+            let d = (0..3)
+                .map(|a| (point[a] - eye[a]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            distance = distance.min(d);
+        }
+    }
+    distance
+}
+
+fn raycast_shapes(
+    store: &ChunkStore,
+    data: &Version,
+    origin: [f64; 3],
+    dir: [f64; 3],
+    max: f64,
+    shape: for<'d> fn(&'d Version, StateId) -> &'d [Aabb],
+) -> Option<BlockHit> {
     let mut cell = [
         origin[0].floor() as i32,
         origin[1].floor() as i32,
@@ -114,7 +160,7 @@ pub fn raycast_block(
                 origin[2] - f64::from(cell[2]),
             ];
             let mut best: Option<(f64, Facing, bool)> = None;
-            for b in data.outline_shape(state) {
+            for b in shape(data, state) {
                 let lo = b.min.map(f64::from);
                 let hi = b.max.map(f64::from);
                 if let Some(s) = slab(local, dir, lo, hi)
@@ -316,6 +362,25 @@ mod tests {
         let top = raycast_block(&store, data, [5.5, 66.0, 5.5], [0.0, -1.0, 0.0], 4.5).unwrap();
         assert_eq!(top.face, Facing::Up);
         assert!((top.cursor[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn third_person_camera_stops_at_walls_but_not_plants() {
+        let data = mcr_data::v26_3();
+        let back = [0.0, 0.0, -1.0];
+        let (wall, _) = world_with((5, 64, 3), "minecraft:stone");
+        let d = third_person_distance(&wall, data, [5.5, 64.5, 5.5], back, 4.0);
+        assert!((d - 1.5).abs() < 0.02, "{d}");
+        let (grass, _) = world_with((5, 64, 4), "minecraft:short_grass");
+        assert_eq!(
+            third_person_distance(&grass, data, [5.5, 64.5, 5.5], back, 4.0),
+            4.0
+        );
+        let (open, _) = world_with((5, 64, 4), "minecraft:air");
+        assert_eq!(
+            third_person_distance(&open, data, [5.5, 64.5, 5.5], back, 4.0),
+            4.0
+        );
     }
 
     #[test]

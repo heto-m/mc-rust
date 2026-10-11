@@ -45,7 +45,7 @@ use crate::overlays::Overlays;
 use crate::preview::Preview;
 use crate::render_system::{PipelineStats, RenderSystem};
 use crate::settings::{OptionsScreen, SharedSettings};
-use crate::target::{BlockHit, EntityPicker, Target, pick, raycast_block, reach};
+use crate::target::{BlockHit, EntityPicker, Target, pick, reach, third_person_distance};
 use crate::view::{StateView, SuggestEngine};
 
 pub const TICK_SECONDS: f32 = 0.05;
@@ -1999,14 +1999,13 @@ impl Play {
                 1.0
             };
             let dir = forward.map(|v| v * sign);
-            let distance = raycast_block(
+            let distance = third_person_distance(
                 &self.world.client.state.chunks,
                 self.data,
                 eye,
                 dir,
                 THIRD_PERSON_DISTANCE,
-            )
-            .map_or(THIRD_PERSON_DISTANCE, |h| (h.distance - 0.2).max(0.0));
+            );
             camera.position = DVec3::from(eye) + DVec3::from(dir) * distance;
             if self.perspective == Perspective::ThirdFront {
                 camera.yaw += std::f32::consts::PI;
