@@ -4,12 +4,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use serde_json::Value;
 use sha1::{Digest, Sha1};
 
 use crate::jdk::REQUIRED_MAJOR;
 use crate::paths::Layout;
 
-const HASH_FORMAT: &str = "java-build/1";
+const HASH_FORMAT: &str = "java-build/2";
+const DEPS_FILE: &str = "deps.txt";
+const MANIFEST_FILE: &str = "MANIFEST.MF";
+const RESOURCES_DIR: &str = "resources";
+const FABRIC_LAUNCH: &str = "fabric/launch.json";
 
 #[derive(Debug, Clone)]
 pub struct Tool {
@@ -31,10 +36,21 @@ pub struct Toolchain {
     pub jar: Tool,
 }
 
+/// One line of `java/<module>/deps.txt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Dep {
+    /// `module <name>`: another module's jar, built first.
+    Module(String),
+    /// `fabric-launch`: the class path and game jar from `.cache/fabric/launch.json`.
+    FabricLaunch,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
     pub name: String,
+    pub dir: PathBuf,
     pub src: PathBuf,
+    pub deps: Vec<Dep>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,10 +59,26 @@ pub enum Outcome {
     UpToDate,
 }
 
+#[derive(Debug, Clone)]
+pub struct Dirs<'a> {
+    pub java: &'a Path,
+    pub out: &'a Path,
+    pub cache: &'a Path,
+}
+
 pub fn run(layout: &Layout) -> Result<()> {
     let toolchain = resolve_toolchain(layout)?;
-    for (module, outcome) in build_all(&layout.java_src_dir(), &layout.java_out_dir(), &toolchain)?
-    {
+    let (java, out, cache) = (
+        layout.java_src_dir(),
+        layout.java_out_dir(),
+        layout.cache_dir(),
+    );
+    let dirs = Dirs {
+        java: &java,
+        out: &out,
+        cache: &cache,
+    };
+    for (module, outcome) in build_all(&dirs, &toolchain)? {
         let state = match outcome {
             Outcome::Built => "built",
             Outcome::UpToDate => "up to date",
@@ -89,6 +121,21 @@ fn path_javac_is_suitable() -> bool {
         .is_some_and(|major| major >= REQUIRED_MAJOR)
 }
 
+pub fn parse_deps(text: &str) -> Result<Vec<Dep>> {
+    let mut deps = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match line.split_whitespace().collect::<Vec<_>>()[..] {
+            ["module", name] => deps.push(Dep::Module(name.to_owned())),
+            ["fabric-launch"] => deps.push(Dep::FabricLaunch),
+            _ => bail!("bad {DEPS_FILE} line `{line}`"),
+        }
+    }
+    Ok(deps)
+}
+
 pub fn discover_modules(java_dir: &Path) -> Result<Vec<Module>> {
     let mut modules = Vec::new();
     if !java_dir.is_dir() {
@@ -105,21 +152,70 @@ pub fn discover_modules(java_dir: &Path) -> Result<Vec<Module>> {
             .and_then(|n| n.to_str())
             .with_context(|| format!("non UTF-8 module directory {}", path.display()))?
             .to_owned();
-        modules.push(Module { name, src });
+        let deps = match fs::read_to_string(path.join(DEPS_FILE)) {
+            Ok(text) => parse_deps(&text).with_context(|| format!("module {name}"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        modules.push(Module {
+            name,
+            dir: path,
+            src,
+            deps,
+        });
     }
     modules.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(modules)
 }
 
-pub fn java_sources(src: &Path) -> Result<Vec<PathBuf>> {
+/// Dependencies first; fails on unknown modules and cycles.
+pub fn build_order(modules: Vec<Module>) -> Result<Vec<Module>> {
+    let names: Vec<String> = modules.iter().map(|m| m.name.clone()).collect();
+    for m in &modules {
+        for d in &m.deps {
+            if let Dep::Module(dep) = d
+                && !names.contains(dep)
+            {
+                bail!("module {} depends on unknown module {dep}", m.name);
+            }
+        }
+    }
+    let mut pending = modules;
+    let mut ordered: Vec<Module> = Vec::with_capacity(pending.len());
+    while !pending.is_empty() {
+        let ready = pending.iter().position(|m| {
+            m.deps.iter().all(|d| match d {
+                Dep::Module(dep) => ordered.iter().any(|o| &o.name == dep),
+                Dep::FabricLaunch => true,
+            })
+        });
+        match ready {
+            Some(i) => ordered.push(pending.remove(i)),
+            None => bail!(
+                "module dependency cycle among {}",
+                pending
+                    .iter()
+                    .map(|m| m.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+    Ok(ordered)
+}
+
+pub fn files_with_ext(dir: &Path, ext: Option<&str>) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    let mut stack = vec![src.to_path_buf()];
+    if !dir.is_dir() {
+        return Ok(out);
+    }
+    let mut stack = vec![dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in fs::read_dir(&dir)? {
             let path = entry?.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "java") {
+            } else if ext.is_none_or(|ext| path.extension().is_some_and(|e| e == ext)) {
                 out.push(path);
             }
         }
@@ -128,18 +224,40 @@ pub fn java_sources(src: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-pub fn source_hash(src: &Path, sources: &[PathBuf]) -> Result<String> {
+pub fn java_sources(src: &Path) -> Result<Vec<PathBuf>> {
+    files_with_ext(src, Some("java"))
+}
+
+fn hash_file(hasher: &mut Sha1, base: &Path, path: &Path) -> Result<()> {
+    let rel = path.strip_prefix(base).unwrap_or(path);
+    let rel = rel.to_string_lossy();
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    hasher.update((rel.len() as u64).to_le_bytes());
+    hasher.update(rel.as_bytes());
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(&bytes);
+    Ok(())
+}
+
+/// Covers sources, resources, the manifest, `deps.txt` and every input the class path came from.
+pub fn module_hash(module: &Module, inputs: &[PathBuf]) -> Result<String> {
     let mut hasher = Sha1::new();
     hasher.update(HASH_FORMAT.as_bytes());
     hasher.update(REQUIRED_MAJOR.to_le_bytes());
-    for path in sources {
-        let rel = path.strip_prefix(src).unwrap_or(path);
-        let rel = rel.to_string_lossy();
-        let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        hasher.update((rel.len() as u64).to_le_bytes());
-        hasher.update(rel.as_bytes());
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update(&bytes);
+    for path in java_sources(&module.src)? {
+        hash_file(&mut hasher, &module.dir, &path)?;
+    }
+    for path in files_with_ext(&module.dir.join(RESOURCES_DIR), None)? {
+        hash_file(&mut hasher, &module.dir, &path)?;
+    }
+    for name in [DEPS_FILE, MANIFEST_FILE] {
+        let path = module.dir.join(name);
+        if path.is_file() {
+            hash_file(&mut hasher, &module.dir, &path)?;
+        }
+    }
+    for input in inputs {
+        hash_file(&mut hasher, Path::new(""), input)?;
     }
     Ok(hasher
         .finalize()
@@ -148,33 +266,81 @@ pub fn source_hash(src: &Path, sources: &[PathBuf]) -> Result<String> {
         .collect())
 }
 
-pub fn build_all(
-    java_dir: &Path,
-    out_dir: &Path,
-    tc: &Toolchain,
-) -> Result<Vec<(Module, Outcome)>> {
-    let modules = discover_modules(java_dir)?;
-    if modules.is_empty() {
-        bail!("no Java modules under {}", java_dir.display());
+/// The compile class path, plus the files whose contents pin it (dependency hashes, launch.json).
+fn class_path(module: &Module, dirs: &Dirs) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let mut cp = Vec::new();
+    let mut inputs = Vec::new();
+    for dep in &module.deps {
+        match dep {
+            Dep::Module(name) => {
+                cp.push(dirs.out.join(format!("{name}.jar")));
+                inputs.push(dirs.out.join(format!("{name}.hash")));
+            }
+            Dep::FabricLaunch => {
+                let launch = dirs.cache.join(FABRIC_LAUNCH);
+                let text = fs::read_to_string(&launch).with_context(|| {
+                    format!(
+                        "{} missing; run `cargo xtask fabric-fetch` first",
+                        launch.display()
+                    )
+                })?;
+                cp.extend(launch_class_path(&text, dirs.cache)?);
+                inputs.push(launch);
+            }
+        }
     }
-    fs::create_dir_all(out_dir)?;
+    Ok((cp, inputs))
+}
+
+pub fn launch_class_path(launch_json: &str, cache: &Path) -> Result<Vec<PathBuf>> {
+    let root: Value = serde_json::from_str(launch_json).context("launch.json is not JSON")?;
+    let mut out: Vec<PathBuf> = root["class_path"]
+        .as_array()
+        .context("launch.json has no class_path")?
+        .iter()
+        .map(|v| v.as_str().map(|s| cache.join(s)))
+        .collect::<Option<_>>()
+        .context("launch.json class_path holds a non-string")?;
+    out.push(
+        cache.join(
+            root["game_jar"]
+                .as_str()
+                .context("launch.json has no game_jar")?,
+        ),
+    );
+    Ok(out)
+}
+
+pub fn build_all(dirs: &Dirs, tc: &Toolchain) -> Result<Vec<(Module, Outcome)>> {
+    let modules = build_order(discover_modules(dirs.java)?)?;
+    if modules.is_empty() {
+        bail!("no Java modules under {}", dirs.java.display());
+    }
+    fs::create_dir_all(dirs.out)?;
     let mut results = Vec::with_capacity(modules.len());
     for module in modules {
-        let outcome = build_module(&module, out_dir, tc)?;
+        let outcome = build_module(&module, dirs, tc)?;
         results.push((module, outcome));
     }
     Ok(results)
 }
 
-fn build_module(module: &Module, out_dir: &Path, tc: &Toolchain) -> Result<Outcome> {
+fn build_module(module: &Module, dirs: &Dirs, tc: &Toolchain) -> Result<Outcome> {
+    let out_dir = dirs.out;
     let jar = out_dir.join(format!("{}.jar", module.name));
     let hash_file = out_dir.join(format!("{}.hash", module.name));
     let sources = java_sources(&module.src)?;
     if sources.is_empty() {
         bail!("module {} has no .java sources", module.name);
     }
-    let hash = source_hash(&module.src, &sources)?;
+    let (cp, inputs) = class_path(module, dirs)?;
+    let hash = module_hash(module, &inputs)?;
     if jar.is_file() && fs::read_to_string(&hash_file).is_ok_and(|h| h.trim() == hash) {
+        // Tests compare mtimes to spot stale jars; a touched-but-identical source must not trip them.
+        fs::File::options()
+            .write(true)
+            .open(&jar)?
+            .set_modified(std::time::SystemTime::now())?;
         return Ok(Outcome::UpToDate);
     }
 
@@ -192,22 +358,29 @@ fn build_module(module: &Module, out_dir: &Path, tc: &Toolchain) -> Result<Outco
         .arg(REQUIRED_MAJOR.to_string())
         .arg("-encoding")
         .arg("UTF-8")
-        .arg("-Xlint:all,-restricted")
+        .arg("-proc:none")
+        .arg("-Xlint:all,-restricted,-classfile")
         .arg("-Werror")
         .arg("-d")
-        .arg(&classes)
-        .arg(format!("@{}", argfile.display()));
+        .arg(&classes);
+    if !cp.is_empty() {
+        javac.arg("-cp").arg(std::env::join_paths(&cp)?);
+    }
+    javac.arg(format!("@{}", argfile.display()));
     run_tool(javac, "javac", &module.name)?;
 
     let _ = fs::remove_file(&hash_file);
     let mut jar_cmd = tc.jar.command();
-    jar_cmd
-        .arg("--create")
-        .arg("--file")
-        .arg(&jar)
-        .arg("-C")
-        .arg(&classes)
-        .arg(".");
+    jar_cmd.arg("--create").arg("--file").arg(&jar);
+    let manifest = module.dir.join(MANIFEST_FILE);
+    if manifest.is_file() {
+        jar_cmd.arg("--manifest").arg(&manifest);
+    }
+    jar_cmd.arg("-C").arg(&classes).arg(".");
+    let resources = module.dir.join(RESOURCES_DIR);
+    if resources.is_dir() {
+        jar_cmd.arg("-C").arg(&resources).arg(".");
+    }
     run_tool(jar_cmd, "jar", &module.name)?;
 
     fs::write(&hash_file, &hash)?;
@@ -249,6 +422,7 @@ mod tests {
 log="$1"; shift
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-d" ]; then out="$2"; fi
+  if [ "$1" = "-cp" ]; then echo "cp $2" >> "$log.cp"; fi
   shift
 done
 echo javac >> "$log"
@@ -292,6 +466,18 @@ echo jar > "$out"
         fs::write(pkg.join(file), body).unwrap();
     }
 
+    fn build(dir: &Path, tc: &Toolchain) -> Result<Vec<(Module, Outcome)>> {
+        let (java, out, cache) = (dir.join("java"), dir.join("out"), dir.join("cache"));
+        build_all(
+            &Dirs {
+                java: &java,
+                out: &out,
+                cache: &cache,
+            },
+            tc,
+        )
+    }
+
     #[test]
     fn discovers_only_directories_with_src() {
         let dir = tempfile_dir("java-discover");
@@ -317,18 +503,18 @@ echo jar > "$out"
         write_module(&java, "two", "Two.java", "class Two {}");
         let (tc, log) = fake_toolchain(&dir);
 
-        let first = build_all(&java, &out, &tc).unwrap();
+        let first = build(&dir, &tc).unwrap();
         assert!(first.iter().all(|(_, o)| *o == Outcome::Built));
         assert_eq!(javac_runs(&log), 2);
         assert!(out.join("one.jar").is_file());
         assert!(!out.join("one.classes").exists());
 
-        let second = build_all(&java, &out, &tc).unwrap();
+        let second = build(&dir, &tc).unwrap();
         assert!(second.iter().all(|(_, o)| *o == Outcome::UpToDate));
         assert_eq!(javac_runs(&log), 2);
 
         write_module(&java, "two", "Two.java", "class Two { int x; }");
-        let third = build_all(&java, &out, &tc).unwrap();
+        let third = build(&dir, &tc).unwrap();
         let outcomes: Vec<_> = third.iter().map(|(m, o)| (m.name.as_str(), *o)).collect();
         assert_eq!(
             outcomes,
@@ -341,14 +527,81 @@ echo jar > "$out"
     fn missing_jar_forces_rebuild() {
         let dir = tempfile_dir("java-missing-jar");
         let java = dir.join("java");
-        let out = dir.join("out");
         write_module(&java, "one", "One.java", "class One {}");
         let (tc, log) = fake_toolchain(&dir);
-        build_all(&java, &out, &tc).unwrap();
-        fs::remove_file(out.join("one.jar")).unwrap();
-        let again = build_all(&java, &out, &tc).unwrap();
+        build(&dir, &tc).unwrap();
+        fs::remove_file(dir.join("out/one.jar")).unwrap();
+        let again = build(&dir, &tc).unwrap();
         assert_eq!(again[0].1, Outcome::Built);
         assert_eq!(javac_runs(&log), 2);
+    }
+
+    #[test]
+    fn dependencies_build_first_and_propagate_rebuilds() {
+        let dir = tempfile_dir("java-deps");
+        let java = dir.join("java");
+        write_module(&java, "a-app", "App.java", "class App {}");
+        write_module(&java, "z-lib", "Lib.java", "class Lib {}");
+        fs::write(java.join("a-app/deps.txt"), "# lib\nmodule z-lib\n").unwrap();
+        let (tc, log) = fake_toolchain(&dir);
+
+        let first = build(&dir, &tc).unwrap();
+        let order: Vec<_> = first.iter().map(|(m, _)| m.name.as_str()).collect();
+        assert_eq!(order, ["z-lib", "a-app"]);
+        let cp = fs::read_to_string(dir.join("javac.log.cp")).unwrap();
+        assert!(cp.contains("z-lib.jar"), "{cp}");
+
+        write_module(&java, "z-lib", "Lib.java", "class Lib { int y; }");
+        let second = build(&dir, &tc).unwrap();
+        assert!(second.iter().all(|(_, o)| *o == Outcome::Built));
+        assert_eq!(javac_runs(&log), 4);
+    }
+
+    #[test]
+    fn resources_change_the_hash() {
+        let dir = tempfile_dir("java-resources");
+        let java = dir.join("java");
+        write_module(&java, "one", "One.java", "class One {}");
+        fs::create_dir_all(java.join("one/resources")).unwrap();
+        fs::write(java.join("one/resources/fabric.mod.json"), "{}").unwrap();
+        let (tc, log) = fake_toolchain(&dir);
+        build(&dir, &tc).unwrap();
+        fs::write(java.join("one/resources/fabric.mod.json"), "{ }").unwrap();
+        assert_eq!(build(&dir, &tc).unwrap()[0].1, Outcome::Built);
+        assert_eq!(javac_runs(&log), 2);
+    }
+
+    #[test]
+    fn deps_parse_and_order_errors() {
+        assert_eq!(
+            parse_deps("module a\n\n# c\nfabric-launch\n").unwrap(),
+            [Dep::Module("a".into()), Dep::FabricLaunch]
+        );
+        assert!(parse_deps("modules a").is_err());
+        let m = |name: &str, dep: &str| Module {
+            name: name.into(),
+            dir: PathBuf::new(),
+            src: PathBuf::new(),
+            deps: vec![Dep::Module(dep.into())],
+        };
+        assert!(build_order(vec![m("a", "b"), m("b", "a")]).is_err());
+        assert!(build_order(vec![m("a", "missing")]).is_err());
+    }
+
+    #[test]
+    fn launch_class_path_appends_the_game_jar() {
+        let cp = launch_class_path(
+            r#"{"class_path": ["fabric/libraries/x.jar"], "game_jar": "versions/26.3/client.jar"}"#,
+            Path::new("/c"),
+        )
+        .unwrap();
+        assert_eq!(
+            cp,
+            [
+                PathBuf::from("/c/fabric/libraries/x.jar"),
+                PathBuf::from("/c/versions/26.3/client.jar")
+            ]
+        );
     }
 
     #[test]

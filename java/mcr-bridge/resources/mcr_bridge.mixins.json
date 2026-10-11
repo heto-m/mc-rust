@@ -1,0 +1,24 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.mcr.bridge.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "client": [
+    "BootstrapMixin",
+    "ClientShutdownWatchdogMixin",
+    "ConnectScreenMixin",
+    "DeviceListMixin",
+    "FramerateLimiterMixin",
+    "GuiMixin",
+    "LibraryMixin",
+    "MessageBoxMixin",
+    "MinecraftMixin",
+    "PreferredGraphicsApiMixin",
+    "RenderSystemMixin",
+    "SoundEngineMixin",
+    "VulkanBackendMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

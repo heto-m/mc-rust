@@ -41,7 +41,10 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
 - **Java→Rust** calls are FFM downcalls to function pointers Rust passes in a versioned `#[repr(C)]` table
   (no symbol export needed on any OS). **Rust→Java** upcall stubs are registered by Java at boot but are only ever
   invoked on the Java thread inside a downcall. Every other Rust→Java flow is a message in an SPSC ring that
-  Java drains, with a futex/condvar doorbell. Bulk data (packets, draw streams, PCM) lives in Rust-owned
+  Java drains, with a futex/condvar doorbell. Bridge entries live in a second, `mcr-modbridge`-owned table
+  (`ExtensionTable`, magic `MCRX`, its own version) passed as `-Dmcr.bridge.table`. `mcr-boot.jar` is a
+  Fabric system library, so Knot shares the one `dev.mcr.boot` copy. Rust never looks up Minecraft or mod
+  classes by name; it reaches Knot-loaded code only through rings and Java-registered upcall stubs. Bulk data (packets, draw streams, PCM) lives in Rust-owned
   off-heap memory viewed from Java as `MemorySegment`s, so nothing is copied per call.
 - **Measured call costs** (`mod-jvm-host`, Ryzen 7 5800X): FFM downcall 3.2 ns critical and 3.9 ns normal,
   upcall from Rust 20 ns, and a JNI static call from Rust 55 ns. The cross-thread doorbell handoff costs more
@@ -86,6 +89,9 @@ off-heap section arrays (`BitStorage` is an interface), if measurements say it p
 ## Policies
 
 - Mod mode is opt-in (mods folder non-empty and enabled). Without mods, no JVM starts.
+- Java resolves no remote host names (`jdk.net.hosts.file` with only localhost). Rust owns DNS and sockets.
+  `System.exit` or a crash in Java freezes or parks the VM for good: the bridge detaches, and mcr exits the
+  process on shutdown instead of destroying the VM.
 - With mods, Java has GUI authority: screens, HUD and chat come from Java. Native screens remain for mcr-only UI
   (mod manager, debug, crash fallback). On a Java crash, mcr detaches the bridge and continues natively.
 - Rust answers every vanilla protocol acknowledgement. From Java it forwards only custom payloads, custom query

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "mcr_bridge",
+  "version": "0.1.0",
+  "name": "mcr bridge",
+  "description": "Runs the game headless inside mcr and connects it to the Rust client.",
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["dev.mcr.bridge.McrBridge"]
+  },
+  "mixins": ["mcr_bridge.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "26.3",
+    "java": ">=25"
+  }
+}

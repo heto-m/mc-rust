@@ -3,31 +3,63 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use sha1::{Digest, Sha1};
+use sha2::Sha512;
 
 pub fn sha1_hex(bytes: &[u8]) -> String {
-    Sha1::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex(&Sha1::digest(bytes))
+}
+
+pub fn sha512_hex(bytes: &[u8]) -> String {
+    hex(&Sha512::digest(bytes))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checksum {
+    Sha1(String),
+    Sha512(String),
+}
+
+impl Checksum {
+    pub fn matches(&self, bytes: &[u8]) -> bool {
+        match self {
+            Self::Sha1(h) => sha1_hex(bytes).eq_ignore_ascii_case(h),
+            Self::Sha512(h) => sha512_hex(bytes).eq_ignore_ascii_case(h),
+        }
+    }
+
+    pub fn file_matches(&self, path: &Path) -> Result<bool> {
+        if !path.is_file() {
+            return Ok(false);
+        }
+        Ok(self.matches(&fs::read(path)?))
+    }
+
+    pub fn verify_or_remove(&self, path: &Path) -> Result<()> {
+        if self.file_matches(path)? {
+            return Ok(());
+        }
+        let _ = fs::remove_file(path);
+        let (algo, h) = match self {
+            Self::Sha1(h) => ("sha1", h),
+            Self::Sha512(h) => ("sha512", h),
+        };
+        bail!(
+            "{algo} mismatch for {} (expected {h}); file removed",
+            path.display()
+        )
+    }
 }
 
 pub fn file_matches(path: &Path, expected: &str) -> Result<bool> {
-    if !path.is_file() {
-        return Ok(false);
-    }
-    let bytes = fs::read(path)?;
-    Ok(sha1_hex(&bytes).eq_ignore_ascii_case(expected))
+    Checksum::Sha1(expected.to_owned()).file_matches(path)
 }
 
 pub fn verify_or_remove(path: &Path, expected: &str) -> Result<()> {
-    if file_matches(path, expected)? {
-        return Ok(());
-    }
-    fs::remove_file(path)?;
-    bail!(
-        "sha1 mismatch for {} (expected {expected}); file removed",
-        path.display()
-    )
+    Checksum::Sha1(expected.to_owned()).verify_or_remove(path)
 }
 
 #[cfg(test)]
@@ -38,6 +70,15 @@ mod tests {
     #[test]
     fn sha1_of_abc_matches_known_vector() {
         assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+    }
+
+    #[test]
+    fn sha512_of_abc_matches_known_vector() {
+        assert_eq!(
+            sha512_hex(b"abc"),
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+             2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
     }
 
     #[test]
@@ -60,7 +101,10 @@ mod tests {
         let dir = tempfile_dir("checksum-remove");
         let path = dir.join("bad.bin");
         fs::write(&path, b"abc").unwrap();
-        assert!(verify_or_remove(&path, "00").is_err());
+        let err = Checksum::Sha512("00".into())
+            .verify_or_remove(&path)
+            .unwrap_err();
+        assert!(err.to_string().contains("sha512 mismatch"));
         assert!(!path.exists());
     }
 }

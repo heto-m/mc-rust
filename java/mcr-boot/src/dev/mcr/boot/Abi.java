@@ -5,6 +5,7 @@ public final class Abi {
     public static final int MAGIC = 0x4D435242;
     public static final int VERSION = 1;
     public static final int TABLE_HEADER_SIZE = 16;
+    public static final int EXTENSION_MAGIC = 0x4D435258;
 
     public static final int RING_MAGIC = 0x4D435252;
     public static final int RING_HEADER_SIZE = 192;

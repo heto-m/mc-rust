@@ -49,11 +49,14 @@ fn messages() -> Vec<(u16, Vec<u8>)> {
 fn config(args: &[&str]) -> JvmConfig {
     let cache = dev_cache_dir();
     let jar = cache.join("java/mcr-boot.jar");
-    assert!(
-        jar.is_file(),
-        "{} missing: run `cargo xtask java-build`",
-        jar.display()
-    );
+    let module = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../java/mcr-boot");
+    if let Some(newer) = mcr_jvm::stale_java_jar(&module, &jar) {
+        panic!(
+            "{} is missing or older than {}: run `cargo xtask java-build`",
+            jar.display(),
+            newer.display()
+        );
+    }
     let home = HomeSearch::from_env(Some(&cache)).locate().expect("JDK 25");
     let mut cfg = JvmConfig::new(
         home,

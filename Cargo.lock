@@ -1543,6 +1543,7 @@ dependencies = [
  "mcr-data",
  "mcr-entity-model",
  "mcr-mesh",
+ "mcr-modbridge",
  "mcr-nbt",
  "mcr-net",
  "mcr-particles",
@@ -1747,6 +1748,16 @@ dependencies = [
  "mcr-world",
  "png",
  "rustc-hash 2.1.3",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "mcr-modbridge"
+version = "0.1.0"
+dependencies = [
+ "mcr-jvm",
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
@@ -4334,6 +4345,7 @@ dependencies = [
  "flate2",
  "serde_json",
  "sha1 0.11.0",
+ "sha2",
  "tar",
  "ureq",
  "zip",

@@ -1,0 +1,2 @@
+module mcr-boot
+fabric-launch

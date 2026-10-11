@@ -1,54 +1,32 @@
 package dev.mcr.boot;
 
-import java.lang.foreign.FunctionDescriptor;
-import java.lang.foreign.Linker;
-import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 
 public final class Native {
-    private static volatile MemorySegment table;
+    private static volatile NativeTable table;
 
     static void init(long address) {
         if (table != null) {
             throw new IllegalStateException("native table already initialised");
         }
-        MemorySegment header = MemorySegment.ofAddress(address).reinterpret(Abi.TABLE_HEADER_SIZE);
-        int magic = header.get(ValueLayout.JAVA_INT, 0);
-        int version = header.get(ValueLayout.JAVA_INT, 4);
-        int size = header.get(ValueLayout.JAVA_INT, 8);
-        int count = header.get(ValueLayout.JAVA_INT, 12);
-        checkHeader(magic, version, size, count, Abi.VERSION);
-        table = MemorySegment.ofAddress(address).reinterpret(size);
+        table = NativeTable.map(address, Abi.MAGIC, Abi.VERSION, Abi.Entry.values().length);
         Upcalls.register();
     }
 
+    public static boolean initialised() {
+        return table != null;
+    }
+
     public static void checkHeader(int magic, int version, int size, int count, int expectedVersion) {
-        if (magic != Abi.MAGIC) {
-            throw new IllegalStateException(String.format("native table magic 0x%08x, expected 0x%08x", magic, Abi.MAGIC));
-        }
-        if (version != expectedVersion) {
-            throw new IllegalStateException(
-                    "native table version " + version + " does not match boot code version " + expectedVersion);
-        }
-        int entries = Abi.Entry.values().length;
-        if (count < entries || size < Abi.TABLE_HEADER_SIZE + 8L * count) {
-            throw new IllegalStateException(
-                    "native table has " + count + " entries in " + size + " bytes, boot code needs " + entries);
-        }
+        NativeTable.check(magic, version, size, count, Abi.MAGIC, expectedVersion, Abi.Entry.values().length);
     }
 
     private static MethodHandle downcall(Abi.Entry entry) {
-        MemorySegment t = table;
+        NativeTable t = table;
         if (t == null) {
             throw new IllegalStateException("native table not initialised");
         }
-        long fn = t.get(ValueLayout.JAVA_LONG, Abi.TABLE_HEADER_SIZE + 8L * entry.ordinal());
-        FunctionDescriptor fd = Descriptors.parse(entry.descriptor);
-        Linker.Option[] options = entry.flavour == Abi.Flavour.CRITICAL
-                ? new Linker.Option[] {Linker.Option.critical(false)}
-                : new Linker.Option[0];
-        return Linker.nativeLinker().downcallHandle(MemorySegment.ofAddress(fn), fd, options);
+        return t.downcall(entry.ordinal(), entry.descriptor, entry.flavour == Abi.Flavour.CRITICAL);
     }
 
     // Static finals let the JIT treat the handles as constants; the holder initialises after init().

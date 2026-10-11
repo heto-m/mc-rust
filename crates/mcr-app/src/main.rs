@@ -19,6 +19,7 @@ mod input;
 mod language;
 mod map;
 mod mesh_world;
+mod mods;
 mod movement_sounds;
 mod nametags;
 mod net_world;
@@ -449,8 +450,16 @@ fn main() -> Result<()> {
         }
         return screenshot::run(&opts, &out, launched);
     }
+    let mod_host = match &opts.mods {
+        Some(dir) => mods::ModHost::start(&opts, dir)?,
+        None => None,
+    };
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    event_loop.run_app(&mut App::new(opts, launched))?;
+    let result = event_loop.run_app(&mut App::new(opts, launched));
+    if let Some(host) = mod_host {
+        host.finish();
+    }
+    result?;
     Ok(())
 }

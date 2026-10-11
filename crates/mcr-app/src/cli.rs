@@ -30,6 +30,7 @@ pub struct Options {
     pub bench_modes: bool,
     pub occlusion: bool,
     pub visibility_graph: bool,
+    pub mods: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -57,6 +58,7 @@ impl Default for Options {
             bench_modes: false,
             occlusion: true,
             visibility_graph: true,
+            mods: None,
         }
     }
 }
@@ -66,6 +68,7 @@ pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect ho
            [--autofly blocks_per_s] [--bench frames [--bench-view x,y,z,yaw,pitch]... [--bench-modes]]
        connect mode: [--name <name>] [--game-dir dir] [--assets-dir dir] [--autopilot script]
            [--screenshot out.png [--after-ticks N]]
+       mods: [--mods <dir>] boots the jars in <dir> under Fabric, headless (needs `cargo xtask fabric-fetch`)
 camera angles are degrees; yaw 0 looks toward -Z, positive turns left";
 
 fn parse_camera(text: &str) -> Result<Camera, String> {
@@ -120,6 +123,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             "--name" => opts.name = value(&arg, &mut args)?,
             "--game-dir" => opts.game_dir = value(&arg, &mut args)?.into(),
             "--assets-dir" => opts.assets_dir = value(&arg, &mut args)?.into(),
+            "--mods" => opts.mods = Some(value(&arg, &mut args)?.into()),
             "--autopilot" => opts.autopilot = Some(value(&arg, &mut args)?.into()),
             "--after-ticks" => {
                 opts.after_ticks = Some(
@@ -187,6 +191,13 @@ mod tests {
         assert_eq!(o.game_dir, PathBuf::from("g"));
         assert_eq!(o.after_ticks, Some(40));
         assert!(o.autopilot.is_some());
+    }
+
+    #[test]
+    fn mods_folder() {
+        let o = parse_str("--mods run/mods").unwrap();
+        assert_eq!(o.mods, Some(PathBuf::from("run/mods")));
+        assert!(parse_str("--mods").is_err());
     }
 
     #[test]

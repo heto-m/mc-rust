@@ -2,6 +2,7 @@ mod assets;
 mod checksum;
 mod datagen;
 mod decompile;
+mod fabric;
 mod fetch;
 mod java;
 mod jdk;
@@ -69,6 +70,13 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Download Fabric Loader, its libraries, the vanilla libraries and natives, and the test mods
+    FabricFetch {
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
     /// Compile the Java modules under java/ into .cache/java/<module>.jar
     JavaBuild,
     /// Run fetch, jdk, datagen and decompile in order
@@ -109,6 +117,10 @@ fn main() -> Result<()> {
         Command::Assets { version, force } => {
             let ver = fetch::resolve_version(version.as_deref())?;
             assets::run(&layout, &ver, force)?;
+        }
+        Command::FabricFetch { version, force } => {
+            let ver = fetch::resolve_version(version.as_deref())?;
+            fabric::run(&layout, &ver, force)?;
         }
         Command::JavaBuild => {
             java::run(&layout)?;

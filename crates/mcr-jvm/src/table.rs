@@ -3,6 +3,8 @@ use std::ffi::c_void;
 use crate::{doorbell, host, upcall};
 
 pub const TABLE_MAGIC: u32 = u32::from_be_bytes(*b"MCRB");
+/// Magic of embedder tables built with [`ExtensionTable`]; their `version` is the embedder's own.
+pub const EXTENSION_MAGIC: u32 = u32::from_be_bytes(*b"MCRX");
 /// Bump on any change to [`ENTRIES`] or [`UPCALLS`]; Java refuses a mismatched table.
 pub const TABLE_VERSION: u32 = 1;
 pub const TABLE_HEADER_SIZE: usize = 16;
@@ -87,6 +89,45 @@ struct NativeTable {
 
 pub fn table_address() -> i64 {
     &raw const TABLE as i64
+}
+
+/// An embedder-owned second table with the host header layout; the host table stays host-only.
+#[derive(Debug)]
+pub struct ExtensionTable {
+    words: Box<[u64]>,
+    entries: Vec<EntryDesc>,
+}
+
+impl ExtensionTable {
+    /// Leaked: Java may hold the address until the process exits.
+    pub fn leak(version: u32, entries: &[(EntryDesc, *const c_void)]) -> &'static Self {
+        let header_words = TABLE_HEADER_SIZE / 8;
+        let size = TABLE_HEADER_SIZE + entries.len() * 8;
+        let pack = |lo: u32, hi: u32| {
+            let mut b = [0u8; 8];
+            b[..4].copy_from_slice(&lo.to_ne_bytes());
+            b[4..].copy_from_slice(&hi.to_ne_bytes());
+            u64::from_ne_bytes(b)
+        };
+        let mut words = vec![0u64; header_words + entries.len()];
+        words[0] = pack(EXTENSION_MAGIC, version);
+        words[1] = pack(size as u32, entries.len() as u32);
+        for (slot, (_, f)) in words[header_words..].iter_mut().zip(entries) {
+            *slot = *f as usize as u64;
+        }
+        Box::leak(Box::new(Self {
+            words: words.into_boxed_slice(),
+            entries: entries.iter().map(|(d, _)| *d).collect(),
+        }))
+    }
+
+    pub fn address(&self) -> i64 {
+        self.words.as_ptr() as i64
+    }
+
+    pub fn entries(&self) -> &[EntryDesc] {
+        &self.entries
+    }
 }
 
 extern "C" fn nop_critical(x: i64) -> i64 {
@@ -178,6 +219,10 @@ mod tests {
     fn java_header_constants_match_rust() {
         let src = abi_java();
         assert_eq!(int_const(&src, "MAGIC"), i64::from(TABLE_MAGIC));
+        assert_eq!(
+            int_const(&src, "EXTENSION_MAGIC"),
+            i64::from(EXTENSION_MAGIC)
+        );
         assert_eq!(int_const(&src, "VERSION"), i64::from(TABLE_VERSION));
         assert_eq!(
             int_const(&src, "TABLE_HEADER_SIZE"),
@@ -215,6 +260,32 @@ mod tests {
         assert_eq!(std::mem::offset_of!(NativeTable, fns), TABLE_HEADER_SIZE);
         assert!(t.fns.iter().all(|f| !f.0.is_null()));
         assert_eq!(table_address() % 8, 0);
+    }
+
+    extern "C" fn ext_double(x: i64) -> i64 {
+        x * 2
+    }
+
+    #[test]
+    fn extension_table_has_the_host_header_layout() {
+        let desc = EntryDesc {
+            name: "double",
+            descriptor: "(J)J",
+            flavour: Flavour::Critical,
+        };
+        let t = ExtensionTable::leak(7, &[(desc, ext_double as *const c_void)]);
+        assert_eq!(t.address() % 8, 0);
+        assert_eq!(t.entries(), [desc]);
+        // SAFETY: the leaked table holds a 16-byte header plus one pointer.
+        let (magic, version, size, count, f) = unsafe {
+            let p = t.address() as *const u32;
+            let f = *(t.address() as *const usize).add(2);
+            (*p, *p.add(1), *p.add(2), *p.add(3), f)
+        };
+        assert_eq!((magic, version, size, count), (EXTENSION_MAGIC, 7, 24, 1));
+        // SAFETY: the slot holds `ext_double`, whose signature matches.
+        let g: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(f) };
+        assert_eq!(g(21), 42);
     }
 
     #[test]

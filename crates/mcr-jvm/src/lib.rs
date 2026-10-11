@@ -1,5 +1,6 @@
 //! Embedded HotSpot JVM host. Keep it free of Minecraft knowledge.
 
+mod dev;
 mod doorbell;
 mod error;
 mod home;
@@ -11,6 +12,7 @@ mod table;
 pub mod upcall;
 mod vm;
 
+pub use dev::stale_java_jar;
 pub use doorbell::Doorbell;
 pub use error::JvmError;
 pub use home::{HomeSearch, JavaHome, REQUIRED_MAJOR, dev_cache_dir, parse_release_major};
@@ -22,7 +24,8 @@ pub use ring::{
     RingError, RingReader, RingWriter,
 };
 pub use table::{
-    ENTRIES, EntryDesc, Flavour, TABLE_HEADER_SIZE, TABLE_MAGIC, TABLE_VERSION, UPCALLS, UpcallDesc,
+    ENTRIES, EXTENSION_MAGIC, EntryDesc, ExtensionTable, Flavour, TABLE_HEADER_SIZE, TABLE_MAGIC,
+    TABLE_VERSION, UPCALLS, UpcallDesc,
 };
 pub use vm::{
     DEFAULT_BOOT_CLASS, DESTROY_TIMEOUT, DestroyOutcome, JAVA_THREAD_NAME, JAVA_THREAD_STACK,

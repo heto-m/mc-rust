@@ -75,6 +75,18 @@ impl Layout {
         self.cache_dir().join("java")
     }
 
+    pub fn fabric_dir(&self) -> PathBuf {
+        self.cache_dir().join("fabric")
+    }
+
+    pub fn fabric_launch_json(&self) -> PathBuf {
+        self.fabric_dir().join("launch.json")
+    }
+
+    pub fn test_mods_dir(&self) -> PathBuf {
+        self.cache_dir().join("mods-test")
+    }
+
     pub fn server_run_dir(&self, ver: &str) -> PathBuf {
         self.root.join("run").join(format!("server-{ver}"))
     }
