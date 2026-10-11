@@ -9,6 +9,7 @@ use mcr_world::{ChunkPos, ChunkStore, SectionPos};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::assets::Assets;
+use crate::game::{chunk_of, in_distance};
 use crate::mesh_world::MeshWorld;
 
 const SNAPSHOT_BUDGET: Duration = Duration::from_millis(2);
@@ -40,6 +41,7 @@ pub struct RenderSystem {
     meshed: u64,
     uploaded: u64,
     arena_full_reported: bool,
+    view: Option<(ChunkPos, i32)>,
 }
 
 impl std::fmt::Debug for RenderSystem {
@@ -77,6 +79,7 @@ fn queue_dirty(
     touched: &mut FxHashSet<ChunkPos>,
     store: &mut ChunkStore,
     skip: &FxHashSet<SectionPos>,
+    in_view: impl Fn(ChunkPos) -> bool,
     mut unrender: impl FnMut(ChunkPos, u128),
 ) {
     let base = store.config().min_y() >> 4;
@@ -84,7 +87,7 @@ fn queue_dirty(
     touched.clear();
     for pos in store.drain_dirty() {
         let index = pos.y - base;
-        if skip.contains(&pos) || !(0..count).contains(&index) {
+        if skip.contains(&pos) || !(0..count).contains(&index) || !in_view(pos.chunk()) {
             continue;
         }
         *waiting.entry(pos.chunk()).or_default() |= section_bit(index);
@@ -98,6 +101,10 @@ fn queue_dirty(
             unrender(*pos, mask);
         }
     }
+}
+
+fn view_of(world: &dyn MeshWorld) -> (ChunkPos, i32) {
+    (chunk_of(world.camera()), world.render_distance())
 }
 
 impl RenderSystem {
@@ -126,6 +133,7 @@ impl RenderSystem {
             last_biome_check: Instant::now(),
             waiting: FxHashMap::default(),
             touched: FxHashSet::default(),
+            view: None,
             urgent: FxHashSet::default(),
             urgent_inflight: FxHashSet::default(),
             results: Vec::new(),
@@ -160,8 +168,10 @@ impl RenderSystem {
 
     fn requeue_all(&mut self, world: &dyn MeshWorld) {
         let all = all_sections((world.store().config().height() >> 4) as i32);
+        let (here, distance) = view_of(world);
+        self.view = Some((here, distance));
         for pos in world.loaded_columns() {
-            if world.store().neighbourhood_loaded(pos) {
+            if in_distance(pos, here, distance) && world.store().neighbourhood_loaded(pos) {
                 self.waiting.insert(pos, all);
             }
         }
@@ -196,6 +206,7 @@ impl RenderSystem {
         self.refresh_biomes(world);
         self.pool.set_biome_seed(world.biome_seed());
         self.urgent.extend(world.take_urgent());
+        self.track_view(world);
         self.collect_dirty(world);
         self.submit_urgent(world);
         self.submit(world);
@@ -276,14 +287,42 @@ impl RenderSystem {
         self.requeue_all(world);
     }
 
+    /// Meshes only columns inside the client's render distance, however far the server streams.
+    fn track_view(&mut self, world: &dyn MeshWorld) {
+        let (here, distance) = view_of(world);
+        let Some((old, old_distance)) = self.view.replace((here, distance)) else {
+            return;
+        };
+        if (old, old_distance) == (here, distance) {
+            return;
+        }
+        let base = Self::min_section(world);
+        let count = (world.store().config().height() >> 4) as i32;
+        let all = all_sections(count);
+        for pos in world.loaded_columns() {
+            let was = in_distance(pos, old, old_distance);
+            let is = in_distance(pos, here, distance);
+            if is && !was && world.store().neighbourhood_loaded(pos) {
+                self.waiting.insert(pos, all);
+            } else if was && !is {
+                self.waiting.remove(&pos);
+                for y in base..base + count {
+                    self.renderer.remove_section([pos.x, y, pos.z]);
+                }
+            }
+        }
+    }
+
     fn collect_dirty(&mut self, world: &mut dyn MeshWorld) {
         let base = Self::min_section(world);
         let renderer = &mut self.renderer;
+        let (here, distance) = view_of(world);
         queue_dirty(
             &mut self.waiting,
             &mut self.touched,
             world.store_mut(),
             &self.urgent,
+            |pos| in_distance(pos, here, distance),
             |pos, mask| {
                 for index in 0..MAX_SECTIONS {
                     if mask & section_bit(index) != 0 {
@@ -312,7 +351,10 @@ impl RenderSystem {
             if let Some(mask) = self.waiting.get_mut(&pos.chunk()) {
                 *mask &= !section_bit(index);
             }
-            if !world.store().neighbourhood_loaded(pos.chunk()) {
+            let (here, distance) = view_of(world);
+            if !in_distance(pos.chunk(), here, distance)
+                || !world.store().neighbourhood_loaded(pos.chunk())
+            {
                 self.renderer.remove_section([pos.x, pos.y, pos.z]);
                 continue;
             }
@@ -438,16 +480,19 @@ mod tests {
         waiting: FxHashMap<ChunkPos, u128>,
         touched: FxHashSet<ChunkPos>,
         unrendered: Vec<ChunkPos>,
+        view: Option<i32>,
     }
 
     impl Queue {
         fn collect(&mut self, store: &mut ChunkStore) {
             let unrendered = &mut self.unrendered;
+            let view = self.view;
             queue_dirty(
                 &mut self.waiting,
                 &mut self.touched,
                 store,
                 &FxHashSet::default(),
+                |pos| view.is_none_or(|d| in_distance(pos, ChunkPos::new(0, 0), d)),
                 |pos, _| unrendered.push(pos),
             );
         }
@@ -455,6 +500,29 @@ mod tests {
         fn take(&mut self, pos: ChunkPos) -> Option<u128> {
             self.waiting.remove(&pos)
         }
+    }
+
+    #[test]
+    fn columns_beyond_the_render_distance_are_never_queued() {
+        let mut store = ChunkStore::new(cfg());
+        for x in -6..=6 {
+            for z in -6..=6 {
+                load(&mut store, x, z);
+            }
+        }
+        let mut q = Queue {
+            view: Some(2),
+            ..Queue::default()
+        };
+        q.collect(&mut store);
+        assert!(q.take(ChunkPos::new(0, 0)).is_some());
+        assert!(q.take(ChunkPos::new(2, 0)).is_some());
+        assert!(
+            q.waiting
+                .keys()
+                .all(|p| in_distance(*p, ChunkPos::new(0, 0), 2))
+        );
+        assert!(q.take(ChunkPos::new(4, 0)).is_none());
     }
 
     fn load(store: &mut ChunkStore, x: i32, z: i32) {
