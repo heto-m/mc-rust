@@ -41,6 +41,10 @@ GPU-driven rendering on wgpu and a custom engine (no Bevy, no OpenGL).
   needed.
 - Before pushing: `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings &&
   cargo test --workspace`.
+- Long-running processes (vanilla server, client runs) from agent shells: start them with the Bash tool's
+  `run_in_background`, or fully detached (`setsid nohup … > log 2>&1 &`), never inheriting the tool's
+  pipes — otherwise the tool call hangs until the process exits. Never write to a FIFO without a
+  reader; feed server consoles via a regular file + `tail -f`. Stop servers when done.
 - `Cargo.lock` conflicts on rebase: take `main`'s copy, then run `cargo check` to regenerate.
 - Add dependencies to the crate's own `Cargo.toml`; shared ones go in `[workspace.dependencies]`.
 
