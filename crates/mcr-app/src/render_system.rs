@@ -5,11 +5,10 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use mcr_mesh::{ATTR_SOLID_RENDER, MeshInput, MeshPool, MeshResult};
 use mcr_render::{Camera, FrameInputs, FrameStats, Overlay, Renderer};
-use mcr_world::{ChunkPos, SectionPos};
+use mcr_world::{ChunkPos, ChunkStore, SectionPos};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::assets::Assets;
-use crate::game::{chunk_of, in_distance};
 use crate::mesh_world::MeshWorld;
 
 const SNAPSHOT_BUDGET: Duration = Duration::from_millis(2);
@@ -33,6 +32,7 @@ pub struct RenderSystem {
     known_biomes: usize,
     last_biome_check: Instant,
     waiting: FxHashMap<ChunkPos, u128>,
+    touched: FxHashSet<ChunkPos>,
     urgent: FxHashSet<SectionPos>,
     urgent_inflight: FxHashSet<SectionPos>,
     results: Vec<MeshResult>,
@@ -71,6 +71,35 @@ fn all_sections(count: i32) -> u128 {
     }
 }
 
+/// Queues dirty sections, dropping columns whose eight neighbours are not all loaded.
+fn queue_dirty(
+    waiting: &mut FxHashMap<ChunkPos, u128>,
+    touched: &mut FxHashSet<ChunkPos>,
+    store: &mut ChunkStore,
+    skip: &FxHashSet<SectionPos>,
+    mut unrender: impl FnMut(ChunkPos, u128),
+) {
+    let base = store.config().min_y() >> 4;
+    let count = (store.config().height() >> 4) as i32;
+    touched.clear();
+    for pos in store.drain_dirty() {
+        let index = pos.y - base;
+        if skip.contains(&pos) || !(0..count).contains(&index) {
+            continue;
+        }
+        *waiting.entry(pos.chunk()).or_default() |= section_bit(index);
+        touched.insert(pos.chunk());
+    }
+    // Loads and unloads dirty the whole 3x3, so only touched columns change readiness.
+    for pos in touched.iter() {
+        if !store.neighbourhood_loaded(*pos)
+            && let Some(mask) = waiting.remove(pos)
+        {
+            unrender(*pos, mask);
+        }
+    }
+}
+
 impl RenderSystem {
     pub fn new(mut renderer: Renderer, assets: Arc<Assets>, world: &dyn MeshWorld) -> Self {
         renderer.set_texture_groups(&assets.cache.texture_groups());
@@ -96,6 +125,7 @@ impl RenderSystem {
             known_biomes: names.len(),
             last_biome_check: Instant::now(),
             waiting: FxHashMap::default(),
+            touched: FxHashSet::default(),
             urgent: FxHashSet::default(),
             urgent_inflight: FxHashSet::default(),
             results: Vec::new(),
@@ -125,9 +155,15 @@ impl RenderSystem {
         self.ready.clear();
         self.urgent.clear();
         self.urgent_inflight.clear();
+        self.requeue_all(world);
+    }
+
+    fn requeue_all(&mut self, world: &dyn MeshWorld) {
         let all = all_sections((world.store().config().height() >> 4) as i32);
         for pos in world.loaded_columns() {
-            self.waiting.insert(pos, all);
+            if world.store().neighbourhood_loaded(pos) {
+                self.waiting.insert(pos, all);
+            }
         }
     }
 
@@ -237,29 +273,25 @@ impl RenderSystem {
             mcr_mesh::DEFAULT_BLEND_RADIUS,
         );
         self.ready.clear();
-        let all = all_sections((world.store().config().height() >> 4) as i32);
-        for pos in world.loaded_columns() {
-            self.waiting.insert(pos, all);
-        }
+        self.requeue_all(world);
     }
 
     fn collect_dirty(&mut self, world: &mut dyn MeshWorld) {
         let base = Self::min_section(world);
-        let here = chunk_of(world.camera());
-        let distance = world.render_distance();
-        let count = (world.store().config().height() >> 4) as i32;
-        let dirty: Vec<SectionPos> = world.store_mut().drain_dirty().collect();
-        for pos in dirty {
-            if self.urgent.contains(&pos) {
-                continue;
-            }
-            if !(0..count).contains(&(pos.y - base)) {
-                continue;
-            }
-            if in_distance(pos.chunk(), here, distance) {
-                *self.waiting.entry(pos.chunk()).or_default() |= section_bit(pos.y - base);
-            }
-        }
+        let renderer = &mut self.renderer;
+        queue_dirty(
+            &mut self.waiting,
+            &mut self.touched,
+            world.store_mut(),
+            &self.urgent,
+            |pos, mask| {
+                for index in 0..MAX_SECTIONS {
+                    if mask & section_bit(index) != 0 {
+                        renderer.remove_section([pos.x, base + index, pos.z]);
+                    }
+                }
+            },
+        );
     }
 
     fn submit_urgent(&mut self, world: &dyn MeshWorld) {
@@ -279,6 +311,10 @@ impl RenderSystem {
             self.urgent.remove(&pos);
             if let Some(mask) = self.waiting.get_mut(&pos.chunk()) {
                 *mask &= !section_bit(index);
+            }
+            if !world.store().neighbourhood_loaded(pos.chunk()) {
+                self.renderer.remove_section([pos.x, pos.y, pos.z]);
+                continue;
             }
             let Some(column) = world.store().column(pos.chunk()) else {
                 continue;
@@ -314,7 +350,6 @@ impl RenderSystem {
         let mut order: Vec<(f32, ChunkPos)> = self
             .waiting
             .keys()
-            .filter(|p| self.neighbours_settled(world, **p))
             .map(|p| {
                 let dx = (f64::from(p.x) * 16.0 + 8.0 - cam.x) as f32;
                 let dz = (f64::from(p.z) * 16.0 + 8.0 - cam.z) as f32;
@@ -333,6 +368,9 @@ impl RenderSystem {
             let Some(mask) = self.waiting.remove(&pos) else {
                 continue;
             };
+            if !world.store().neighbourhood_loaded(pos) {
+                continue;
+            }
             let Some(column) = world.store().column(pos) else {
                 continue;
             };
@@ -354,11 +392,6 @@ impl RenderSystem {
         }
     }
 
-    fn neighbours_settled(&self, world: &dyn MeshWorld, pos: ChunkPos) -> bool {
-        (-1..=1)
-            .all(|dz| (-1..=1).all(|dx| !world.is_pending(ChunkPos::new(pos.x + dx, pos.z + dz))))
-    }
-
     fn upload(&mut self, world: &dyn MeshWorld) {
         self.results.clear();
         self.pool.poll(&mut self.results);
@@ -372,7 +405,7 @@ impl RenderSystem {
         }
         let start = Instant::now();
         while let Some(MeshResult { pos, mesh }) = self.ready.pop_front() {
-            if world.store().column(pos.chunk()).is_none() {
+            if !world.store().neighbourhood_loaded(pos.chunk()) {
                 continue;
             }
             match self.renderer.set_section([pos.x, pos.y, pos.z], &mesh) {
@@ -392,7 +425,108 @@ impl RenderSystem {
 
 #[cfg(test)]
 mod tests {
+    use mcr_world::{ChunkColumn, WorldConfig};
+
     use super::*;
+
+    fn cfg() -> WorldConfig {
+        WorldConfig::new(35723, 80, -64, 384).unwrap()
+    }
+
+    #[derive(Default)]
+    struct Queue {
+        waiting: FxHashMap<ChunkPos, u128>,
+        touched: FxHashSet<ChunkPos>,
+        unrendered: Vec<ChunkPos>,
+    }
+
+    impl Queue {
+        fn collect(&mut self, store: &mut ChunkStore) {
+            let unrendered = &mut self.unrendered;
+            queue_dirty(
+                &mut self.waiting,
+                &mut self.touched,
+                store,
+                &FxHashSet::default(),
+                |pos, _| unrendered.push(pos),
+            );
+        }
+
+        fn take(&mut self, pos: ChunkPos) -> Option<u128> {
+            self.waiting.remove(&pos)
+        }
+    }
+
+    fn load(store: &mut ChunkStore, x: i32, z: i32) {
+        store.insert(ChunkPos::new(x, z), ChunkColumn::empty(&cfg()));
+    }
+
+    fn ring(store: &mut ChunkStore, skip: (i32, i32)) {
+        for z in -1..=1 {
+            for x in -1..=1 {
+                if (x, z) != skip {
+                    load(store, x, z);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn column_without_all_neighbours_is_not_queued() {
+        let mut store = ChunkStore::new(cfg());
+        let mut q = Queue::default();
+        ring(&mut store, (1, 1));
+        q.collect(&mut store);
+        assert!(q.waiting.is_empty());
+        assert!(q.unrendered.contains(&ChunkPos::new(0, 0)));
+    }
+
+    #[test]
+    fn last_diagonal_neighbour_queues_the_whole_column() {
+        let mut store = ChunkStore::new(cfg());
+        let mut q = Queue::default();
+        ring(&mut store, (1, 1));
+        q.collect(&mut store);
+        load(&mut store, 1, 1);
+        q.collect(&mut store);
+        assert_eq!(q.take(ChunkPos::new(0, 0)), Some(all_sections(24)));
+        assert!(q.waiting.is_empty(), "edge columns stay unmeshed");
+    }
+
+    #[test]
+    fn unloading_a_neighbour_unrenders_the_column() {
+        let mut store = ChunkStore::new(cfg());
+        let mut q = Queue::default();
+        ring(&mut store, (9, 9));
+        q.collect(&mut store);
+        assert!(q.take(ChunkPos::new(0, 0)).is_some());
+        q.unrendered.clear();
+        store.remove(ChunkPos::new(-1, -1));
+        q.collect(&mut store);
+        assert!(q.waiting.is_empty());
+        assert!(q.unrendered.contains(&ChunkPos::new(0, 0)));
+    }
+
+    #[test]
+    fn border_column_meshes_once_its_outer_ring_arrives() {
+        let mut store = ChunkStore::new(cfg());
+        let mut q = Queue::default();
+        ring(&mut store, (9, 9));
+        q.collect(&mut store);
+        q.waiting.clear();
+        for z in -1..=1 {
+            load(&mut store, 2, z);
+        }
+        q.collect(&mut store);
+        assert!(q.waiting.contains_key(&ChunkPos::new(1, 0)));
+        assert!(!q.waiting.contains_key(&ChunkPos::new(1, 1)));
+        q.waiting.clear();
+        for x in 0..=2 {
+            load(&mut store, x, 2);
+        }
+        q.collect(&mut store);
+        assert!(q.waiting.contains_key(&ChunkPos::new(1, 1)));
+    }
 
     #[test]
     fn hostile_section_indices_are_ignored() {

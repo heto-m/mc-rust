@@ -7,8 +7,6 @@ pub trait MeshWorld {
     fn store_mut(&mut self) -> &mut ChunkStore;
     fn camera(&self) -> &Camera;
     fn render_distance(&self) -> i32;
-    /// Whether `pos` is expected to arrive, so meshing next to it should wait.
-    fn is_pending(&self, pos: ChunkPos) -> bool;
     fn loaded_columns(&self) -> Vec<ChunkPos>;
     /// Columns removed since the last call.
     fn take_unloaded(&mut self) -> Vec<ChunkPos>;

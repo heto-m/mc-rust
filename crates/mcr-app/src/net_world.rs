@@ -130,13 +130,6 @@ impl MeshWorld for NetworkWorld {
             .min(self.client.state.world.view_distance.max(2))
     }
 
-    fn is_pending(&self, pos: ChunkPos) -> bool {
-        let state = &self.client.state;
-        let (cx, cz) = state.world.chunk_center;
-        let r = state.world.view_distance.max(2);
-        (pos.x - cx).abs() <= r && (pos.z - cz).abs() <= r && !self.loaded.contains(&pos)
-    }
-
     fn loaded_columns(&self) -> Vec<ChunkPos> {
         self.loaded.iter().copied().collect()
     }

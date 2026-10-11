@@ -83,22 +83,31 @@ impl ChunkStore {
         self.columns.get_mut(&pos)
     }
 
-    /// Replaces any existing column; all its sections and the border sections of loaded
-    /// neighbours become dirty.
+    /// Replaces any existing column; its sections and those of the loaded 3x3 around it become dirty.
     pub fn insert(&mut self, pos: ChunkPos, column: ChunkColumn) {
         let sections = column.sections().len() as i32;
         let base = column.min_y() >> 4;
         self.columns.insert(pos, column);
-        self.mark_column(pos, base, sections);
+        self.mark_column(pos, base, sections, &RING);
     }
 
+    /// The loaded 3x3 around the removed column becomes dirty.
     pub fn remove(&mut self, pos: ChunkPos) -> Option<ChunkColumn> {
         let column = self.columns.remove(&pos)?;
         let base = column.min_y() >> 4;
         let sections = column.sections().len() as i32;
         self.dirty.retain(|s| s.chunk() != pos);
-        self.mark_neighbours(pos, base, sections);
+        self.mark_neighbours(pos, base, sections, &RING);
         Some(column)
+    }
+
+    /// Whether `pos` and its eight neighbours are loaded, as vanilla requires before meshing.
+    pub fn neighbourhood_loaded(&self, pos: ChunkPos) -> bool {
+        self.columns.contains_key(&pos)
+            && RING.iter().all(|(dx, dz)| {
+                self.columns
+                    .contains_key(&ChunkPos::new(pos.x + dx, pos.z + dz))
+            })
     }
 
     pub fn apply_light(&mut self, pos: ChunkPos, light: crate::LightData) -> bool {
@@ -108,7 +117,7 @@ impl ChunkStore {
         column.apply_light(light);
         let base = column.min_y() >> 4;
         let sections = column.sections().len() as i32;
-        self.mark_column(pos, base, sections);
+        self.mark_column(pos, base, sections, &NEIGHBOURS);
         true
     }
 
@@ -121,19 +130,19 @@ impl ChunkStore {
         column.replace_biomes(&mut input, &self.cfg)?;
         let base = column.min_y() >> 4;
         let sections = column.sections().len() as i32;
-        self.mark_column(pos, base, sections);
+        self.mark_column(pos, base, sections, &NEIGHBOURS);
         Ok(true)
     }
 
-    fn mark_column(&mut self, pos: ChunkPos, base: i32, sections: i32) {
+    fn mark_column(&mut self, pos: ChunkPos, base: i32, sections: i32, around: &[(i32, i32)]) {
         for y in base..base + sections {
             self.dirty.insert(SectionPos::new(pos.x, y, pos.z));
         }
-        self.mark_neighbours(pos, base, sections);
+        self.mark_neighbours(pos, base, sections, around);
     }
 
-    fn mark_neighbours(&mut self, pos: ChunkPos, base: i32, sections: i32) {
-        for (dx, dz) in NEIGHBOURS {
+    fn mark_neighbours(&mut self, pos: ChunkPos, base: i32, sections: i32, around: &[(i32, i32)]) {
+        for &(dx, dz) in around {
             let n = ChunkPos::new(pos.x + dx, pos.z + dz);
             if self.columns.contains_key(&n) {
                 for y in base..base + sections {
@@ -252,6 +261,16 @@ impl ChunkStore {
 }
 
 const NEIGHBOURS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+const RING: [(i32, i32); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
 
 #[cfg(test)]
 mod tests {
@@ -326,6 +345,36 @@ mod tests {
         s.drain_dirty().for_each(drop);
         s.remove(ChunkPos::new(1, 0));
         assert_eq!(s.dirty_count(), 24);
+    }
+
+    #[test]
+    fn diagonal_neighbours_are_dirtied_on_load_and_unload() {
+        let mut s = store_with(&[(0, 0), (5, 5)]);
+        s.insert(ChunkPos::new(1, 1), ChunkColumn::empty(&cfg()));
+        let chunks: FxHashSet<ChunkPos> = s.drain_dirty().map(|p| p.chunk()).collect();
+        assert_eq!(
+            chunks,
+            [ChunkPos::new(0, 0), ChunkPos::new(1, 1)]
+                .into_iter()
+                .collect()
+        );
+        s.remove(ChunkPos::new(1, 1));
+        let chunks: FxHashSet<ChunkPos> = s.drain_dirty().map(|p| p.chunk()).collect();
+        assert_eq!(chunks, [ChunkPos::new(0, 0)].into_iter().collect());
+    }
+
+    #[test]
+    fn neighbourhood_needs_all_eight_columns() {
+        let mut ring: Vec<(i32, i32)> = (-1..=1)
+            .flat_map(|z| (-1..=1).map(move |x| (x, z)))
+            .collect();
+        let s = store_with(&ring);
+        assert!(s.neighbourhood_loaded(ChunkPos::new(0, 0)));
+        assert!(!s.neighbourhood_loaded(ChunkPos::new(1, 0)));
+        ring.retain(|&p| p != (1, 1));
+        let s = store_with(&ring);
+        assert!(!s.neighbourhood_loaded(ChunkPos::new(0, 0)));
+        assert!(!store_with(&[]).neighbourhood_loaded(ChunkPos::new(0, 0)));
     }
 
     #[test]

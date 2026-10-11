@@ -34,6 +34,13 @@ pub fn in_distance(a: ChunkPos, b: ChunkPos, distance: i32) -> bool {
     dist_sq(a, b) <= distance * distance + distance
 }
 
+/// Within `distance` or bordering it: like vanilla's server, one extra ring so edge columns can mesh.
+fn near_distance(a: ChunkPos, b: ChunkPos, distance: i32) -> bool {
+    let toward = |v: i32| v - v.signum();
+    let inner = ChunkPos::new(b.x + toward(a.x - b.x), b.z + toward(a.z - b.z));
+    in_distance(inner, b, distance)
+}
+
 /// World state independent of rendering: loaded columns, the viewpoint and the source feeding them.
 pub struct Game {
     pub store: ChunkStore,
@@ -72,10 +79,6 @@ impl MeshWorld for Game {
 
     fn render_distance(&self) -> i32 {
         self.render_distance
-    }
-
-    fn is_pending(&self, pos: ChunkPos) -> bool {
-        self.chunks.get(&pos) == Some(&ChunkState::Requested)
     }
 
     fn loaded_columns(&self) -> Vec<ChunkPos> {
@@ -151,10 +154,10 @@ impl Game {
 
     fn request_near(&mut self, here: ChunkPos) {
         let r = self.render_distance;
-        for dz in -r..=r {
-            for dx in -r..=r {
+        for dz in -r - 1..=r + 1 {
+            for dx in -r - 1..=r + 1 {
                 let pos = ChunkPos::new(here.x + dx, here.z + dz);
-                if in_distance(pos, here, r) && !self.chunks.contains_key(&pos) {
+                if near_distance(pos, here, r) && !self.chunks.contains_key(&pos) {
                     self.chunks.insert(pos, ChunkState::Requested);
                     self.source.request(pos, dist_sq(pos, here) as u32);
                 }
@@ -241,8 +244,35 @@ mod tests {
         let requested = &fake.borrow().requested;
         assert!(requested.contains(&ChunkPos::new(0, 0)));
         assert!(requested.contains(&ChunkPos::new(4, 0)));
-        assert!(!requested.contains(&ChunkPos::new(4, 4)));
-        assert!(g.is_pending(ChunkPos::new(0, 0)));
+        assert!(!requested.contains(&ChunkPos::new(5, 5)));
+        assert!(!requested.contains(&ChunkPos::new(6, 0)));
+    }
+
+    #[test]
+    fn every_column_in_range_has_its_neighbours_requested() {
+        let (mut g, fake) = game(6);
+        g.update();
+        let requested: rustc_hash::FxHashSet<ChunkPos> =
+            fake.borrow().requested.iter().copied().collect();
+        for dz in -6..=6 {
+            for dx in -6..=6 {
+                let pos = ChunkPos::new(dx, dz);
+                if !in_distance(pos, ChunkPos::new(0, 0), 6) {
+                    continue;
+                }
+                for nz in -1..=1 {
+                    for nx in -1..=1 {
+                        assert!(requested.contains(&ChunkPos::new(dx + nx, dz + nz)));
+                    }
+                }
+            }
+        }
+        let origin = ChunkPos::new(0, 0);
+        assert!(
+            requested
+                .iter()
+                .all(|p| in_distance(*p, origin, 6 + UNLOAD_MARGIN))
+        );
     }
 
     #[test]
