@@ -13,6 +13,7 @@ mod mixer;
 mod movement;
 mod music;
 mod rng;
+mod state;
 mod store;
 
 pub use ambient::{
@@ -25,15 +26,15 @@ pub use attributes::{
 pub use block_ambience::{AmbientBlock, AmbientFluid, AmbientProbe, Cue, block_cue, fluid_cue};
 pub use block_sounds::SoundType;
 pub use category::SoundSource;
-pub use decode::{Pcm, StreamSource, decode_ogg, open_stream};
+pub use decode::{Pcm, PcmProducer, StreamSource, decode_ogg, open_stream, pushed_stream};
 pub use engine::AudioEngine;
 pub use error::AudioError;
 pub use events::{JavaRandom, ResolvedSound, SoundEvents};
 pub use loops::{ElytraLoop, GuardianBeam, LoopLevel, bee_level, is_angry, nearest, reconcile};
 pub use manager::SoundManager;
 pub use mixer::{
-    AudioHandle, CHUNK_FRAMES, Command, Listener, MAX_VOICES, Mixer, PlayRequest, Source, Spatial,
-    Stats, VoiceId, linear_attenuation, pan_gains,
+    AudioHandle, CHUNK_FRAMES, Command, CommandProducer, EXTERNAL_VOICE_BIT, Listener, MAX_VOICES,
+    Mixer, PlayRequest, Source, Spatial, Stats, VoiceId, linear_attenuation, pan_gains,
 };
 pub use movement::{
     AboveKind, FallTracker, SoundCue, StepMove, StepOutcome, StepTracker, fall_cues, fall_damage,
@@ -41,4 +42,8 @@ pub use movement::{
 };
 pub use music::{MusicActions, MusicFrequency, MusicInput, MusicManager, Situation, select_music};
 pub use rng::FastRandom;
+pub use state::{
+    GENERATION_MASK, StateLink, VOICE_INITIAL, VOICE_PAUSED, VOICE_PLAYING, VOICE_STOPPED,
+    VoiceStates, state_word,
+};
 pub use store::{AssetStore, SoundOverlay, sound_asset_name};

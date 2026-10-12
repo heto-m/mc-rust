@@ -294,6 +294,7 @@ impl Client {
             pos,
             data: i32::from(old.0),
             global: false,
+            predicted: true,
         });
     }
 

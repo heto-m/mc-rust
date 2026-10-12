@@ -15,6 +15,7 @@ public final class Bridge {
 
     private static Bridge instance;
 
+    private final NativeTable table;
     private final MethodHandle sharedAddress;
     private final MethodHandle report;
     public final MethodHandle gpuDevice;
@@ -27,6 +28,7 @@ public final class Bridge {
     public final Ring netOut;
 
     private Bridge(NativeTable table) {
+        this.table = table;
         this.sharedAddress = downcall(table, BridgeAbi.Entry.SHARED_ADDRESS);
         this.report = downcall(table, BridgeAbi.Entry.REPORT);
         this.gpuDevice = downcall(table, BridgeAbi.Entry.GPU_DEVICE);
@@ -56,7 +58,11 @@ public final class Bridge {
         return instance;
     }
 
-    private long shared(int id) {
+    public MethodHandle downcall(BridgeAbi.Entry entry) {
+        return downcall(table, entry);
+    }
+
+    public long shared(int id) {
         try {
             long address = (long) sharedAddress.invokeExact(id);
             if (address == 0) {

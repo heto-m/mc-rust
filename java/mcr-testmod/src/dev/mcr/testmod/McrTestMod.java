@@ -41,6 +41,9 @@ public final class McrTestMod implements ClientModInitializer {
         });
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             GuiCapture.tick(client);
+            if (SoundSelfTest.enabled()) {
+                SoundSelfTest.tick(client);
+            }
             if (commandIn > 0 && --commandIn == 0 && client.getConnection() != null) {
                 client.getConnection().sendCommand(COMMAND);
             }

@@ -6,6 +6,7 @@ pub mod gpu;
 mod launch;
 pub mod net;
 mod pacer;
+pub mod sound;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;

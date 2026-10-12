@@ -5,6 +5,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use mcr_modbridge::sound::SoundLink;
 use mcr_modbridge::{Bridge, BridgeConfig, BridgeEvent, NetLink, SHUTDOWN_TIMEOUT};
 
 use crate::cli::Options;
@@ -22,6 +23,8 @@ pub struct ModHost {
 #[derive(Debug, Clone)]
 pub struct ModNet {
     pub link: NetLink,
+    /// Java's sound output, played by the shell's mixer.
+    pub sound: Option<SoundLink>,
     connects: Arc<Mutex<Vec<String>>>,
 }
 
@@ -64,6 +67,7 @@ impl ModHost {
         let mut bridge = Bridge::start(config).context("starting the Fabric bridge")?;
         let net = ModNet {
             link: bridge.net(),
+            sound: SoundLink::get().ok(),
             connects: Arc::new(Mutex::new(Vec::new())),
         };
         let connects = net.connects.clone();

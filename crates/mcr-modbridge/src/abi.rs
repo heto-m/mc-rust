@@ -8,15 +8,19 @@ use mcr_jvm::{Doorbell, EntryDesc, ExtensionTable, Flavour, Ring, RingError};
 
 use crate::events::BridgeEvent;
 use crate::net::{NetShared, SPILL_LIMIT};
+use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 3;
+pub const BRIDGE_VERSION: u32 = 4;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 
 pub const SHARED_CONTROL_RING: i32 = 0;
 pub const SHARED_CONTROL_BELL: i32 = 1;
 pub const SHARED_NET_IN_RING: i32 = 2;
 pub const SHARED_NET_OUT_RING: i32 = 3;
+pub const SHARED_SOUND_RING: i32 = 4;
+pub const SHARED_SOUND_STATES: i32 = 5;
+pub const SHARED_SOUND_CONTROL: i32 = 6;
 
 pub const MSG_FRAME: u16 = 1;
 pub const MSG_SHUTDOWN: u16 = 2;
@@ -146,6 +150,26 @@ pub const ENTRIES: &[EntryDesc] = &[
         descriptor: "(JI)I",
         flavour: Flavour::Normal,
     },
+    EntryDesc {
+        name: "sound_upload",
+        descriptor: "(JIIII)I",
+        flavour: Flavour::Normal,
+    },
+    EntryDesc {
+        name: "sound_free",
+        descriptor: "(I)V",
+        flavour: Flavour::Normal,
+    },
+    EntryDesc {
+        name: "sound_stream_open",
+        descriptor: "(IIIII)I",
+        flavour: Flavour::Normal,
+    },
+    EntryDesc {
+        name: "sound_stream_push",
+        descriptor: "(IIJI)I",
+        flavour: Flavour::Normal,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -181,6 +205,7 @@ pub(crate) struct Shared {
     pub crashed: AtomicBool,
     pub dropped_events: AtomicU64,
     pub net: NetShared,
+    pub sound: Arc<SoundShared>,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -192,6 +217,7 @@ pub(crate) fn shared() -> Result<&'static Shared, RingError> {
     }
     let control = Ring::new(CONTROL_RING_CAPACITY)?;
     let net = NetShared::new(NET_IN_RING_CAPACITY, NET_OUT_RING_CAPACITY, SPILL_LIMIT)?;
+    let sound = Arc::new(SoundShared::new()?);
     Ok(SHARED.get_or_init(|| Shared {
         control,
         bell: Doorbell::new(),
@@ -199,19 +225,28 @@ pub(crate) fn shared() -> Result<&'static Shared, RingError> {
         crashed: AtomicBool::new(false),
         dropped_events: AtomicU64::new(0),
         net,
+        sound,
     }))
+}
+
+pub(crate) fn shared_now() -> Option<&'static Shared> {
+    SHARED.get()
 }
 
 pub(crate) fn table() -> &'static ExtensionTable {
     TABLE.get_or_init(|| {
         use crate::gpu::ffi;
-        let fns: [*const c_void; 6] = [
+        let fns: [*const c_void; 10] = [
             shared_address as *const c_void,
             report as *const c_void,
             ffi::gpu_device as *const c_void,
             ffi::gpu_encode as *const c_void,
             ffi::gpu_pass as *const c_void,
             ffi::gpu_error as *const c_void,
+            sound::sound_upload as *const c_void,
+            sound::sound_free as *const c_void,
+            sound::sound_stream_open as *const c_void,
+            sound::sound_stream_push as *const c_void,
         ];
         let entries: Vec<_> = ENTRIES.iter().copied().zip(fns).collect();
         ExtensionTable::leak(BRIDGE_VERSION, &entries)
@@ -246,6 +281,9 @@ extern "C" fn shared_address(id: i32) -> i64 {
         SHARED_CONTROL_BELL => shared.bell.addr(),
         SHARED_NET_IN_RING => shared.net.inbound_addr(),
         SHARED_NET_OUT_RING => shared.net.outbound_addr(),
+        SHARED_SOUND_RING => shared.sound.ring_addr(),
+        SHARED_SOUND_STATES => shared.sound.states_addr(),
+        SHARED_SOUND_CONTROL => shared.sound.control_addr(),
         _ => 0,
     }
 }
@@ -355,6 +393,9 @@ mod tests {
             ("SHARED_CONTROL_BELL", SHARED_CONTROL_BELL.into()),
             ("SHARED_NET_IN_RING", SHARED_NET_IN_RING.into()),
             ("SHARED_NET_OUT_RING", SHARED_NET_OUT_RING.into()),
+            ("SHARED_SOUND_RING", SHARED_SOUND_RING.into()),
+            ("SHARED_SOUND_STATES", SHARED_SOUND_STATES.into()),
+            ("SHARED_SOUND_CONTROL", SHARED_SOUND_CONTROL.into()),
             ("MSG_FRAME", MSG_FRAME.into()),
             ("MSG_SHUTDOWN", MSG_SHUTDOWN.into()),
             ("FRAME_INDEX", FRAME_INDEX as i64),
@@ -541,6 +582,9 @@ mod tests {
         assert_ne!(shared_address(SHARED_CONTROL_RING), 0);
         assert_ne!(shared_address(SHARED_NET_IN_RING), 0);
         assert_ne!(shared_address(SHARED_NET_OUT_RING), 0);
+        assert_ne!(shared_address(SHARED_SOUND_RING), 0);
+        assert_ne!(shared_address(SHARED_SOUND_STATES), 0);
+        assert_ne!(shared_address(SHARED_SOUND_CONTROL), 0);
         *shared().unwrap().events.lock().unwrap() = None;
     }
 }

@@ -26,7 +26,7 @@ use crate::assets::Assets;
 use mcr_audio::SoundSource;
 
 use crate::ambience::Ambience;
-use crate::audio::{Audio, BlockSound, MusicEvent, wire_category};
+use crate::audio::{Audio, BlockSound, MusicEvent, wire_category, world_audio};
 use crate::block_entities::BlockEntities;
 use crate::debug::{self, DebugInput};
 use crate::effects::{self, WorldEffects};
@@ -47,6 +47,7 @@ use crate::render_system::{PipelineStats, RenderSystem};
 use crate::settings::{OptionsScreen, SharedSettings};
 use crate::target::{BlockHit, EntityPicker, Target, pick, reach, third_person_distance};
 use crate::view::{StateView, SuggestEngine};
+use mcr_modbridge::sound::{SoundOwner, event_owner};
 
 pub const TICK_SECONDS: f32 = 0.05;
 const LOW_DISK_SPACE_TOAST: u32 = 0x4c44_5321;
@@ -669,7 +670,7 @@ impl Play {
             let mut cx = crate::entity_events::EventCx {
                 state,
                 effects: &mut self.effects,
-                audio: self.audio.as_mut(),
+                audio: world_audio(&mut self.audio),
             };
             self.entity_events.tick(&mut cx);
             self.effects
@@ -678,11 +679,11 @@ impl Play {
             None
         };
         for s in std::mem::take(&mut self.effects.sounds) {
-            if let Some(audio) = &mut self.audio {
+            if let Some(audio) = world_audio(&mut self.audio) {
                 audio.play(s.name, Some(s.pos), s.volume, s.pitch, SoundSource::Ambient);
             }
         }
-        if let (Some(rain), Some(audio)) = (rain, &mut self.audio) {
+        if let (Some(rain), Some(audio)) = (rain, world_audio(&mut self.audio)) {
             let at = rain.pos.map(|v| f64::from(v) + 0.5);
             if rain.above {
                 audio.play(
@@ -764,7 +765,18 @@ impl Play {
         }
     }
 
+    /// In mod mode Java plays the sounds of the events it owns, so audio is lent out of reach meanwhile.
     fn on_event(&mut self, event: ClientEvent) {
+        let java_owned = self.audio.as_ref().is_some_and(Audio::java_owned)
+            && event_owner(&event) == Some(SoundOwner::Java);
+        let parked = if java_owned { self.audio.take() } else { None };
+        self.handle_event(event);
+        if parked.is_some() {
+            self.audio = parked;
+        }
+    }
+
+    fn handle_event(&mut self, event: ClientEvent) {
         let local_id = self.world.client.state.player.entity_id;
         if let Some(entities) = &mut self.entities {
             entities.on_event(&event, local_id);
@@ -1234,6 +1246,9 @@ impl Play {
         audio.poll(self.ticks);
         let state = &self.world.client.state;
         self.movement.tick(state, self.ticks, audio);
+        if audio.java_owned() {
+            return;
+        }
         self.ambience.set_credits(self.stack.credits_music(), audio);
         self.ambience.tick(state, self.cur_eye, audio);
         self.loops.tick(state, audio);

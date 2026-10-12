@@ -16,5 +16,12 @@ cpal = "0.18"
 lewton = "0.10"
 rtrb = "0.4"
 
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "mixer"
+harness = false
+
 [lints]
 workspace = true

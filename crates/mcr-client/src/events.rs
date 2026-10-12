@@ -226,6 +226,8 @@ pub enum ClientEvent {
         pos: BlockPos,
         data: i32,
         global: bool,
+        /// Raised by the client for its own action rather than sent by the server.
+        predicted: bool,
     },
     Explosion {
         center: [f64; 3],

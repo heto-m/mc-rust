@@ -213,6 +213,7 @@ impl ClientState {
                 pos: p.pos,
                 data: p.data,
                 global: p.global,
+                predicted: false,
             }),
             P::LevelParticles(p) => out.event(ClientEvent::Particle {
                 particle: p.particle,

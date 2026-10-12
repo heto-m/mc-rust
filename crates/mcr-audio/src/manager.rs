@@ -128,12 +128,11 @@ impl SoundManager {
             Source::Static(self.cached(&sound.name).ok()?)
         };
         let id = self.handle.play(PlayRequest {
-            source,
             volume,
             pitch,
-            category,
             spatial,
             looping,
+            ..PlayRequest::new(source, category)
         })?;
         self.last_sound = Some(sound.name);
         Some(id)

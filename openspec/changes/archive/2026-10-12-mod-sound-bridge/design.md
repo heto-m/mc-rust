@@ -89,3 +89,10 @@ values to mcr-owned categories.
 - Stream underruns if the sound thread stalls (GC): the 1 s ring absorbs it.
 - Double sounds if a server sound is also triggered locally by mcr's prediction (for example block break). The
   ownership table is checked against a captured session in task 3.2.
+
+## Measurements
+
+`cargo bench -p mcr-audio --bench mixer` (Ryzen 7 5800X): rendering 1024 frames (21.3 ms at 48 kHz) with 64
+positioned mono voices at 22.05 kHz and varied pitch costs 158.6 µs with static buffers and 154.7 µs with pushed
+rings, about 0.7 % of one core either way. Pushed voices cost the same as static ones, because both pull one frame
+per resampling step. The ring pop replaces the buffer index.

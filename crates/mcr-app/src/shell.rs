@@ -108,7 +108,7 @@ impl Shell {
         );
         let mut gui = Gui::load(resources, renderer.device(), renderer.target_format())?;
         gui.sync_language(&options.language);
-        let audio = Audio::start(
+        let mut audio = Audio::start(
             &cfg.assets_dir,
             index.as_deref().unwrap_or("34"),
             &options,
@@ -116,6 +116,12 @@ impl Shell {
         );
         if audio.is_none() {
             println!("audio: disabled");
+        }
+        let java_sound = cfg.mod_net.as_ref().and_then(|n| n.sound.clone());
+        if let (Some(audio), Some(link)) = (&mut audio, java_sound)
+            && !audio.attach_java(link)
+        {
+            println!("audio: Java's sounds could not attach");
         }
         let servers = Rc::new(RefCell::new(FileServers::load(&cfg.game_dir)));
         let packs = ServerPacks::new(

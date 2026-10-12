@@ -4,13 +4,16 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 3;
+    public static final int VERSION = 4;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
 
     public static final int SHARED_CONTROL_RING = 0;
     public static final int SHARED_CONTROL_BELL = 1;
     public static final int SHARED_NET_IN_RING = 2;
     public static final int SHARED_NET_OUT_RING = 3;
+    public static final int SHARED_SOUND_RING = 4;
+    public static final int SHARED_SOUND_STATES = 5;
+    public static final int SHARED_SOUND_CONTROL = 6;
 
     public static final int MSG_FRAME = 1;
     public static final int MSG_SHUTDOWN = 2;
@@ -192,7 +195,11 @@ public final class BridgeAbi {
         GPU_DEVICE("gpu_device", "(IJI)J", Flavour.NORMAL),
         GPU_ENCODE("gpu_encode", "(JIJI)J", Flavour.NORMAL),
         GPU_PASS("gpu_pass", "(JJIJI)J", Flavour.NORMAL),
-        GPU_ERROR("gpu_error", "(JI)I", Flavour.NORMAL);
+        GPU_ERROR("gpu_error", "(JI)I", Flavour.NORMAL),
+        SOUND_UPLOAD("sound_upload", "(JIIII)I", Flavour.NORMAL),
+        SOUND_FREE("sound_free", "(I)V", Flavour.NORMAL),
+        SOUND_STREAM_OPEN("sound_stream_open", "(IIIII)I", Flavour.NORMAL),
+        SOUND_STREAM_PUSH("sound_stream_push", "(IIJI)I", Flavour.NORMAL);
 
         public final String symbol;
         public final String descriptor;

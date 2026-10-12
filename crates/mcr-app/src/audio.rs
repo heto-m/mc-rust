@@ -9,6 +9,7 @@ use mcr_audio::{
     SoundManager, SoundOverlay, SoundSource, SoundType, VoiceId,
 };
 use mcr_data::Version;
+use mcr_modbridge::sound::SoundLink;
 use mcr_protocol::play::clientbound::world::SoundSource as WireSource;
 use mcr_settings::{Options, SOUND_CATEGORIES};
 
@@ -79,6 +80,18 @@ pub struct Audio {
     listener: [f64; 3],
     log: Option<std::fs::File>,
     tick: u64,
+    java: Option<JavaSound>,
+}
+
+/// Mod mode: Java's sound engine plays through this mixer and its sliders set every volume.
+struct JavaSound {
+    link: SoundLink,
+    volume_seq: u32,
+}
+
+/// `audio` unless Java owns world sounds (mod mode): server sounds, music, ambience, entity sounds.
+pub fn world_audio(audio: &mut Option<Audio>) -> Option<&mut Audio> {
+    audio.as_mut().filter(|a| !a.java_owned())
 }
 
 pub fn music_frequency(value: mcr_settings::value::MusicFrequency) -> MusicFrequency {
@@ -138,7 +151,48 @@ impl Audio {
             listener: [0.0; 3],
             log,
             tick: 0,
+            java: None,
         })
+    }
+
+    /// Hands Java's channel commands to this mixer; from then on Java owns world sounds.
+    pub fn attach_java(&mut self, link: SoundLink) -> bool {
+        let Some(voices) = link.voices(self._engine.sample_rate()) else {
+            return false;
+        };
+        if !self
+            .manager
+            .handle()
+            .send(mcr_audio::Command::AttachProducer(Box::new(voices)))
+        {
+            return false;
+        }
+        self.music
+            .stop_playing(None, &mut mcr_audio::MusicActions::default());
+        self.stop_music_voice();
+        self.java = Some(JavaSound {
+            link,
+            volume_seq: 0,
+        });
+        true
+    }
+
+    pub fn java_owned(&self) -> bool {
+        self.java.is_some()
+    }
+
+    fn sync_java_volumes(&mut self) {
+        let Some(java) = &mut self.java else { return };
+        let Some((seq, volumes)) = java.link.java_volumes() else {
+            return;
+        };
+        if seq == java.volume_seq {
+            return;
+        }
+        java.volume_seq = seq;
+        for (category, volume) in SoundSource::ALL.into_iter().zip(volumes) {
+            self.manager.set_category_volume(category, volume);
+        }
     }
 
     /// Layers the resource stack's sounds and `sounds.json` files over the launcher assets.
@@ -168,6 +222,9 @@ impl Audio {
         if frequency != self.frequency {
             self.frequency = frequency;
             self.music.set_frequency(frequency, None);
+        }
+        if self.java_owned() {
+            return;
         }
         for (i, name) in SOUND_CATEGORIES.iter().enumerate() {
             if let Some(category) = SoundSource::from_name(name) {
@@ -283,6 +340,7 @@ impl Audio {
     /// Once per client tick: learns which tracked voices finished by themselves.
     pub fn poll(&mut self, tick: u64) {
         self.tick = tick;
+        self.sync_java_volumes();
         self.ended.clear();
         self.manager.handle().take_ended(&mut self.ended);
         if self.ended.is_empty() {
@@ -346,6 +404,9 @@ impl Audio {
     }
 
     pub fn tick_music(&mut self, situation: Option<&Music>, target_volume: f32, loading: bool) {
+        if self.java_owned() {
+            return;
+        }
         let input = MusicInput {
             situation,
             target_volume,

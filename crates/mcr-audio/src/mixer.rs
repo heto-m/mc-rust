@@ -3,11 +3,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::category::SoundSource;
 use crate::decode::{Pcm, Pull, StreamSource};
+use crate::state::{StateLink, VOICE_INITIAL, VOICE_PAUSED, VOICE_PLAYING};
 
 pub const MAX_VOICES: usize = 247;
 pub const CHUNK_FRAMES: usize = 256;
 const QUEUE_CAPACITY: usize = 1024;
 const ENDED_CAPACITY: usize = 512;
+/// Ids from [`AudioHandle`] never set this bit, so another producer can own that half of the id space.
+pub const EXTERNAL_VOICE_BIT: u32 = 1 << 31;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VoiceId(pub u32);
@@ -27,11 +30,17 @@ impl Default for Listener {
     }
 }
 
+/// `max_distance` of `f32::INFINITY` disables distance attenuation but keeps panning.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Spatial {
     Global,
     Positioned {
         position: [f32; 3],
+        max_distance: f32,
+    },
+    /// Offset in listener space: +X right, +Y up, -Z ahead.
+    Relative {
+        offset: [f32; 3],
         max_distance: f32,
     },
 }
@@ -50,6 +59,31 @@ pub struct PlayRequest {
     pub category: SoundSource,
     pub spatial: Spatial,
     pub looping: bool,
+    /// The volume already includes every category and master gain, so the mixer applies none.
+    pub premixed: bool,
+    /// An external slot that reads stopped once this voice ends, is stolen or never starts.
+    pub state: Option<StateLink>,
+}
+
+impl PlayRequest {
+    pub fn new(source: Source, category: SoundSource) -> Self {
+        Self {
+            source,
+            volume: 1.0,
+            pitch: 1.0,
+            category,
+            spatial: Spatial::Global,
+            looping: false,
+            premixed: false,
+            state: None,
+        }
+    }
+}
+
+/// Another queue of commands, polled on the audio thread before every mixed chunk.
+pub trait CommandProducer: Send + std::fmt::Debug {
+    /// Must not block; bound the work done per call.
+    fn poll(&mut self, apply: &mut dyn FnMut(Command));
 }
 
 #[derive(Debug)]
@@ -63,6 +97,12 @@ pub enum Command {
     SetVoicePosition(VoiceId, [f32; 3]),
     SetVoiceVolume(VoiceId, f32),
     SetVoicePitch(VoiceId, f32),
+    SetVoiceLooping(VoiceId, bool),
+    SetVoiceSpatial(VoiceId, Spatial),
+    Pause(VoiceId),
+    Resume(VoiceId),
+    AttachProducer(Box<dyn CommandProducer>),
+    DetachProducer,
 }
 
 /// OpenAL linear distance model with reference distance 0 and rolloff 1.
@@ -131,7 +171,7 @@ impl AudioHandle {
     pub fn play(&mut self, request: PlayRequest) -> Option<VoiceId> {
         let id = VoiceId(self.next_id);
         if self.send(Command::Play(id, request)) {
-            self.next_id = self.next_id.wrapping_add(1);
+            self.next_id = self.next_id.wrapping_add(1) & !EXTERNAL_VOICE_BIT;
             Some(id)
         } else {
             None
@@ -164,6 +204,9 @@ struct Voice {
     category: SoundSource,
     spatial: Spatial,
     looping: bool,
+    premixed: bool,
+    paused: bool,
+    state: Option<StateLink>,
     cursor: usize,
     prev: [f32; 2],
     next: [f32; 2],
@@ -189,6 +232,9 @@ impl Voice {
             category: req.category,
             spatial: req.spatial,
             looping: req.looping,
+            premixed: req.premixed,
+            paused: false,
+            state: req.state,
             cursor: 0,
             prev: [0.0; 2],
             next: [0.0; 2],
@@ -249,26 +295,38 @@ impl Voice {
     }
 
     fn target_gains(&self, listener: &Listener, volumes: &[f32; SoundSource::COUNT]) -> [f32; 2] {
-        let mut gain = self.volume * volumes[0];
-        if self.category != SoundSource::Master {
-            gain *= volumes[self.category.index()];
+        let mut gain = self.volume;
+        if !self.premixed {
+            gain *= volumes[0];
+            if self.category != SoundSource::Master {
+                gain *= volumes[self.category.index()];
+            }
         }
-        let stereo = self.is_stereo();
-        match self.spatial {
-            Spatial::Global => [gain, gain],
+        let (dist, pan, max_distance) = match self.spatial {
+            Spatial::Global => return [gain, gain],
             Spatial::Positioned {
                 position,
                 max_distance,
             } => {
                 let (dist, pan) = listener.distance_and_pan(position);
-                let gain = gain * linear_attenuation(dist, max_distance);
-                if stereo {
-                    [gain, gain]
-                } else {
-                    let p = pan_gains(pan);
-                    [gain * p[0], gain * p[1]]
-                }
+                (dist, pan, max_distance)
             }
+            Spatial::Relative {
+                offset,
+                max_distance,
+            } => {
+                let dist =
+                    (offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2]).sqrt();
+                let pan = if dist < 1e-4 { 0.0 } else { offset[0] / dist };
+                (dist, pan, max_distance)
+            }
+        };
+        let gain = gain * linear_attenuation(dist, max_distance);
+        if self.is_stereo() {
+            [gain, gain]
+        } else {
+            let p = pan_gains(pan);
+            [gain * p[0], gain * p[1]]
         }
     }
 
@@ -311,6 +369,7 @@ pub struct Mixer {
     listener: Listener,
     volumes: [f32; SoundSource::COUNT],
     rx: Option<rtrb::Consumer<Command>>,
+    producer: Option<Box<dyn CommandProducer>>,
     ended: Option<rtrb::Producer<VoiceId>>,
     stats: Arc<Stats>,
 }
@@ -323,6 +382,7 @@ impl Mixer {
             listener: Listener::default(),
             volumes: [1.0; SoundSource::COUNT],
             rx: None,
+            producer: None,
             ended: None,
             stats: Arc::default(),
         }
@@ -359,13 +419,11 @@ impl Mixer {
             Command::StopAll => self.voices.clear(),
             Command::SetListener(l) => self.listener = l,
             Command::SetCategoryVolume(c, v) => self.volumes[c.index()] = v.clamp(0.0, 1.0),
-            Command::SetVoicePosition(id, p) => {
-                if let Some(Spatial::Positioned { position, .. }) =
-                    self.voice_mut(id).map(|v| &mut v.spatial)
-                {
-                    *position = p;
-                }
-            }
+            Command::SetVoicePosition(id, p) => match self.voice_mut(id).map(|v| &mut v.spatial) {
+                Some(Spatial::Positioned { position, .. }) => *position = p,
+                Some(Spatial::Relative { offset, .. }) => *offset = p,
+                _ => {}
+            },
             Command::SetVoiceVolume(id, vol) => {
                 if let Some(v) = self.voice_mut(id) {
                     v.volume = vol.clamp(0.0, 1.0);
@@ -375,6 +433,39 @@ impl Mixer {
                 if let Some(v) = self.voice_mut(id) {
                     v.pitch = p.clamp(0.5, 2.0);
                 }
+            }
+            Command::SetVoiceLooping(id, looping) => {
+                if let Some(v) = self.voice_mut(id) {
+                    v.looping = looping;
+                }
+            }
+            Command::SetVoiceSpatial(id, spatial) => {
+                if let Some(v) = self.voice_mut(id) {
+                    v.spatial = spatial;
+                }
+            }
+            Command::Pause(id) => self.set_paused(id, true),
+            Command::Resume(id) => self.set_paused(id, false),
+            Command::AttachProducer(p) => self.producer = Some(p),
+            Command::DetachProducer => self.producer = None,
+        }
+    }
+
+    /// Same as sending [`Command::AttachProducer`], for a mixer without a queue.
+    pub fn attach_producer(&mut self, producer: Box<dyn CommandProducer>) {
+        self.producer = Some(producer);
+    }
+
+    fn set_paused(&mut self, id: VoiceId, paused: bool) {
+        if let Some(v) = self.voice_mut(id) {
+            v.paused = paused;
+            if let Some(link) = &v.state {
+                let (from, to) = if paused {
+                    (VOICE_PLAYING, VOICE_PAUSED)
+                } else {
+                    (VOICE_PAUSED, VOICE_PLAYING)
+                };
+                link.transition(from, to);
             }
         }
     }
@@ -388,10 +479,14 @@ impl Mixer {
         if voice.finished {
             return;
         }
+        if let Some(link) = &voice.state {
+            link.transition(VOICE_INITIAL, VOICE_PLAYING);
+        }
         if let Spatial::Positioned {
             position,
             max_distance,
         } = voice.spatial
+            && voice.state.is_none()
             && self.listener.distance_and_pan(position).0 >= max_distance
         {
             return;
@@ -419,6 +514,12 @@ impl Mixer {
         while let Some(command) = self.rx.as_mut().and_then(|rx| rx.pop().ok()) {
             self.apply(command);
         }
+        if let Some(mut producer) = self.producer.take() {
+            producer.poll(&mut |command| self.apply(command));
+            if self.producer.is_none() {
+                self.producer = Some(producer);
+            }
+        }
     }
 
     /// Fills `out` with interleaved stereo; commands are drained every `CHUNK_FRAMES`.
@@ -436,7 +537,7 @@ impl Mixer {
     fn mix_chunk(&mut self, chunk: &mut [f32]) {
         let listener = self.listener;
         let volumes = self.volumes;
-        for voice in &mut self.voices {
+        for voice in self.voices.iter_mut().filter(|v| !v.paused) {
             let target = voice.target_gains(&listener, &volumes);
             voice.mix(chunk, target);
             voice.loudness = target[0].max(target[1]);
@@ -466,12 +567,8 @@ mod tests {
 
     fn request(pcm: &Arc<Pcm>, spatial: Spatial) -> PlayRequest {
         PlayRequest {
-            source: Source::Static(pcm.clone()),
-            volume: 1.0,
-            pitch: 1.0,
-            category: SoundSource::Blocks,
             spatial,
-            looping: false,
+            ..PlayRequest::new(Source::Static(pcm.clone()), SoundSource::Blocks)
         }
     }
 
@@ -697,5 +794,203 @@ mod tests {
         render(&mut mixer, 256);
         handle.take_ended(&mut ended);
         assert_eq!(ended, [a]);
+    }
+
+    use crate::decode::pushed_stream;
+    use crate::state::{VOICE_STOPPED, VoiceStates};
+    use std::sync::atomic::AtomicU64;
+
+    fn ramp(frames: usize) -> Arc<Pcm> {
+        Arc::new(Pcm::mono(
+            RATE,
+            (0..frames).map(|i| i as f32 / frames as f32).collect(),
+        ))
+    }
+
+    #[test]
+    fn pushed_voice_plays_pushed_frames_and_survives_an_underrun() {
+        let underruns = Arc::new(AtomicU64::new(0));
+        let (mut tx, rx) = pushed_stream(RATE, 1, 4096, underruns.clone());
+        tx.push(1000, std::iter::repeat_n(0.5, 1000));
+        let mut m = Mixer::new(RATE);
+        m.apply(Command::Play(
+            VoiceId(0),
+            PlayRequest::new(Source::Stream(rx), SoundSource::Master),
+        ));
+        let buf = render(&mut m, 512);
+        assert!((buf[1000] - 0.5).abs() < 1e-3, "{}", buf[1000]);
+        assert_eq!(underruns.load(Ordering::Relaxed), 0);
+        let buf = render(&mut m, 1024);
+        assert_eq!(last_frame(&buf), (0.0, 0.0));
+        let starved = underruns.load(Ordering::Relaxed);
+        assert!(starved > 0);
+        assert_eq!(m.active_voices(), 1);
+        tx.push(4000, std::iter::repeat_n(0.25, 4000));
+        let buf = render(&mut m, 256);
+        assert!((last_frame(&buf).0 - 0.25).abs() < 1e-3);
+        assert_eq!(underruns.load(Ordering::Relaxed), starved);
+        tx.finish();
+        render(&mut m, 8192);
+        assert_eq!(m.active_voices(), 0);
+    }
+
+    #[test]
+    fn pushed_voice_resamples_to_the_output_rate() {
+        let (mut tx, rx) = pushed_stream(RATE / 2, 1, 4096, Arc::default());
+        tx.push(2000, (0..2000).map(|i| i as f32 / 2000.0));
+        let mut m = Mixer::new(RATE);
+        m.apply(Command::Play(
+            VoiceId(0),
+            PlayRequest::new(Source::Stream(rx), SoundSource::Master),
+        ));
+        let buf = render(&mut m, 200);
+        let slope = (buf[2 * 120] - buf[2 * 100]) / 20.0;
+        assert!((slope - 0.5 / 2000.0).abs() < 1e-6, "{slope}");
+    }
+
+    #[test]
+    fn pause_keeps_the_position() {
+        let mut m = Mixer::new(RATE);
+        m.apply(Command::Play(
+            VoiceId(0),
+            request(&ramp(RATE as usize), Spatial::Global),
+        ));
+        let before = last_frame(&render(&mut m, 4800)).0;
+        m.apply(Command::Pause(VoiceId(0)));
+        let paused = render(&mut m, RATE as usize);
+        assert!(paused.iter().all(|s| *s == 0.0));
+        assert_eq!(m.active_voices(), 1);
+        m.apply(Command::Resume(VoiceId(0)));
+        let after = render(&mut m, 1)[0];
+        assert!((after - before).abs() < 1e-3, "{before} -> {after}");
+    }
+
+    #[test]
+    fn premixed_voices_ignore_category_and_master_volumes() {
+        let mut m = Mixer::new(RATE);
+        m.apply(Command::SetCategoryVolume(SoundSource::Master, 0.25));
+        m.apply(Command::SetCategoryVolume(SoundSource::Blocks, 0.0));
+        let mut req = request(&constant(RATE as usize, 1.0), Spatial::Global);
+        req.premixed = true;
+        req.volume = 0.5;
+        m.apply(Command::Play(VoiceId(0), req));
+        assert!((last_frame(&render(&mut m, 512)).0 - 0.5).abs() < 1e-4);
+    }
+
+    #[derive(Debug)]
+    struct Burst(Vec<Command>);
+
+    impl CommandProducer for Burst {
+        fn poll(&mut self, apply: &mut dyn FnMut(Command)) {
+            for c in self.0.drain(..) {
+                apply(c);
+            }
+        }
+    }
+
+    #[test]
+    fn both_producers_start_voices_in_the_same_period() {
+        let (mut m, mut handle) = Mixer::with_queue(RATE);
+        let pcm = constant(RATE as usize, 0.25);
+        m.attach_producer(Box::new(Burst(Vec::new())));
+        render(&mut m, CHUNK_FRAMES);
+        handle.play(request(&pcm, Spatial::Global)).unwrap();
+        handle.send(Command::AttachProducer(Box::new(Burst(vec![
+            Command::Play(VoiceId(EXTERNAL_VOICE_BIT), request(&pcm, Spatial::Global)),
+        ]))));
+        let buf = render(&mut m, CHUNK_FRAMES);
+        assert_eq!(m.active_voices(), 2);
+        assert!((buf[0] - 0.5).abs() < 1e-4, "{}", buf[0]);
+    }
+
+    #[test]
+    fn linked_voices_publish_their_state() {
+        let table = VoiceStates::new(4);
+        let mut m = Mixer::new(RATE);
+        let mut req = request(&constant(600, 0.5), at(100.0, 0.0, 16.0));
+        table.store(2, 5, crate::VOICE_INITIAL);
+        req.state = table.link(2, 5);
+        m.apply(Command::Play(VoiceId(7), req));
+        assert_eq!(m.active_voices(), 1, "linked voices start out of range");
+        assert_eq!(table.load(2), Some((5, crate::VOICE_PLAYING)));
+        m.apply(Command::Pause(VoiceId(7)));
+        assert_eq!(table.load(2), Some((5, crate::VOICE_PAUSED)));
+        m.apply(Command::Resume(VoiceId(7)));
+        render(&mut m, 1024);
+        assert_eq!(table.load(2), Some((5, VOICE_STOPPED)));
+    }
+
+    #[test]
+    fn stolen_and_refused_linked_voices_read_stopped() {
+        let table = VoiceStates::new(MAX_VOICES + 2);
+        let mut m = Mixer::new(RATE);
+        let pcm = constant(RATE as usize, 0.1);
+        for i in 0..MAX_VOICES {
+            let mut req = request(&pcm, Spatial::Global);
+            req.volume = 0.5;
+            table.store(i, 1, crate::VOICE_INITIAL);
+            req.state = table.link(i, 1);
+            m.apply(Command::Play(VoiceId(i as u32), req));
+        }
+        let mut quiet = request(&pcm, Spatial::Global);
+        quiet.volume = 0.1;
+        table.store(MAX_VOICES, 1, crate::VOICE_INITIAL);
+        quiet.state = table.link(MAX_VOICES, 1);
+        m.apply(Command::Play(VoiceId(9000), quiet));
+        assert_eq!(table.load(MAX_VOICES), Some((1, VOICE_STOPPED)));
+        let mut loud = request(&pcm, Spatial::Global);
+        table.store(MAX_VOICES + 1, 1, crate::VOICE_INITIAL);
+        loud.state = table.link(MAX_VOICES + 1, 1);
+        m.apply(Command::Play(VoiceId(9001), loud));
+        assert_eq!(table.load(MAX_VOICES + 1), Some((1, crate::VOICE_PLAYING)));
+        let stopped = (0..MAX_VOICES)
+            .filter(|&i| table.load(i) == Some((1, VOICE_STOPPED)))
+            .count();
+        assert_eq!(stopped, 1);
+    }
+
+    #[test]
+    fn relative_voices_pan_in_listener_space_and_ignore_the_listener() {
+        let mut m = Mixer::new(RATE);
+        m.apply(Command::SetListener(Listener {
+            position: [100.0, 0.0, 100.0],
+            yaw_degrees: 90.0,
+        }));
+        let req = request(
+            &constant(RATE as usize, 1.0),
+            Spatial::Relative {
+                offset: [2.0, 0.0, 0.0],
+                max_distance: 4.0,
+            },
+        );
+        m.apply(Command::Play(VoiceId(0), req));
+        let (l, r) = last_frame(&render(&mut m, 1024));
+        assert!(l.abs() < 1e-3 && (r - 0.5).abs() < 1e-3, "{l} {r}");
+    }
+
+    #[test]
+    fn infinite_range_keeps_full_gain_far_away() {
+        let mut m = Mixer::new(RATE);
+        m.apply(Command::Play(
+            VoiceId(0),
+            request(&constant(RATE as usize, 1.0), at(0.0, 1e6, f32::INFINITY)),
+        ));
+        let (l, r) = last_frame(&render(&mut m, 1024));
+        assert!((l * l + r * r - 1.0).abs() < 1e-3, "{l} {r}");
+    }
+
+    #[test]
+    fn handle_ids_stay_below_the_external_bit() {
+        let (_m, mut handle) = Mixer::with_queue(RATE);
+        handle.next_id = EXTERNAL_VOICE_BIT - 1;
+        let pcm = constant(10, 0.0);
+        assert_eq!(
+            handle.play(request(&pcm, Spatial::Global)),
+            Some(VoiceId(EXTERNAL_VOICE_BIT - 1))
+        );
+        assert_eq!(
+            handle.play(request(&pcm, Spatial::Global)),
+            Some(VoiceId(0))
+        );
     }
 }
