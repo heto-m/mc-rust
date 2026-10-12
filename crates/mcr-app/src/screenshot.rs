@@ -162,14 +162,15 @@ const JAVA_FADE: Duration = Duration::from_secs(3);
 pub fn run_shell(opts: &crate::cli::Options, out: &Path) -> Result<()> {
     let (width, height) = opts.size;
     let mut config = world_setup::renderer_config(opts, RendererConfig::default());
-    if opts.mods.is_some() {
+    let started = crate::mods::startup(opts)?;
+    if started.boot.is_some() {
         config.scene_texture = true;
         config.optional_features = mcr_modbridge::gpu::context::OPTIONAL_FEATURES;
     }
     let mut renderer =
         Renderer::new(Target::Offscreen { width, height }, config).context("creating renderer")?;
-    let mod_host = match &opts.mods {
-        Some(dir) => crate::mods::ModHost::start(opts, dir, &mut renderer)?,
+    let mod_host = match started.boot {
+        Some(plan) => plan.start(opts, &mut renderer, &started.app)?,
         None => None,
     };
     let result = shell_frames(
@@ -177,6 +178,7 @@ pub fn run_shell(opts: &crate::cli::Options, out: &Path) -> Result<()> {
         out,
         renderer,
         mod_host.as_ref().map(crate::mods::ModHost::net),
+        started.app,
     );
     if let Some(host) = mod_host {
         host.finish();
@@ -189,6 +191,7 @@ fn shell_frames(
     out: &Path,
     renderer: Renderer,
     mod_net: Option<crate::mods::ModNet>,
+    mods: crate::mods_ui::ModsApp,
 ) -> Result<()> {
     use crate::shell::{Shell, ShellConfig};
     let (width, height) = opts.size;
@@ -200,6 +203,7 @@ fn shell_frames(
         render_distance: opts.render_distance_set.then_some(opts.render_distance),
         connect: opts.connect.clone(),
         mod_net,
+        mods,
     };
     let mut shell = Shell::new(renderer, config)?;
     let connecting = opts.connect.is_some();

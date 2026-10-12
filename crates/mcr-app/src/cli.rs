@@ -72,7 +72,7 @@ pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect ho
            [--autofly blocks_per_s] [--bench frames [--bench-view x,y,z,yaw,pitch]... [--bench-modes]]
        connect mode: [--name <name>] [--game-dir dir] [--assets-dir dir] [--autopilot script]
            [--screenshot out.png [--after-ticks N]]
-       mods: [--mods <dir>] boots the jars in <dir> under Fabric, headless (needs `cargo xtask fabric-fetch`)
+       mods: [--mods <dir>] uses <dir> instead of <game-dir>/mods; enabled mods boot under Fabric (needs `cargo xtask fabric-fetch`)
 camera angles are degrees; yaw 0 looks toward -Z, positive turns left";
 
 fn parse_camera(text: &str) -> Result<Camera, String> {

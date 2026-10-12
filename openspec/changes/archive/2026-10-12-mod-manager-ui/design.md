@@ -63,6 +63,8 @@ resolvable mod, and the `mods.disabled_all` fallback flag is not set.
 - On the next start, if the previous state is not clean, mcr shows a native prompt: "Start without mods", "Try
   again", "Open crash report". "Start without mods" sets `mods.disabled_all` until the user re-enables mods.
 
+- The prompt appears instead of booting Java (the JVM cannot start later in-process): "Start without mods" sets `mods.disabled_all`, "Try again" clears the record and quits so the next launch boots, "Continue" runs natively and asks again next start. `running` records (killed from outside) do not prompt.
+
 ## Risks
 
 - Policy drift as mods update: entries are by id, with an optional version range field for later.

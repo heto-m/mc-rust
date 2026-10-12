@@ -247,11 +247,12 @@ impl ConfirmScreen {
 
     fn layout(&mut self, message_lines: i32) {
         let n = self.choices.len() as i32;
-        let total = n * 150 + (n - 1).max(0) * 10;
+        let bw = ((self.gui.0 - 20 - (n - 1).max(0) * 10) / n.max(1)).clamp(40, 150);
+        let total = n * bw + (n - 1).max(0) * 10;
         let y = (self.gui.1 / 2 - 50 + 20 + message_lines * 9 + 20).max(self.gui.1 / 6 + 96);
         for i in 0..self.choices.len() {
             if let Some(b) = self.widgets.button_mut(i as u32) {
-                b.rect = [(self.gui.0 - total) / 2 + i as i32 * 160, y, 150, 20];
+                b.rect = [(self.gui.0 - total) / 2 + i as i32 * (bw + 10), y, bw, 20];
                 b.active = self.delay == 0;
             }
         }
@@ -711,6 +712,7 @@ const TITLE_SINGLE: u32 = 1;
 const TITLE_MULTI: u32 = 2;
 const TITLE_OPTIONS: u32 = 3;
 const TITLE_QUIT: u32 = 4;
+const TITLE_MODS: u32 = 5;
 
 pub struct TitleScreen {
     widgets: WidgetSet,
@@ -749,6 +751,8 @@ impl Screen for TitleScreen {
             [x, y + 24, 200, 20],
             "lang:menu.multiplayer",
         ));
+        self.widgets
+            .add(Button::new(TITLE_MODS, [x, y + 48, 200, 20], "Mods"));
         self.widgets.add(Button::new(
             TITLE_OPTIONS,
             [x, y + 84, 98, 20],
@@ -792,6 +796,7 @@ impl Screen for TitleScreen {
                 TITLE_MULTI => out.push(ScreenAction::Push(Box::new(ServerListScreen::new(
                     self.servers.clone(),
                 )))),
+                TITLE_MODS => out.push(ScreenAction::OpenMods),
                 TITLE_OPTIONS => out.push(ScreenAction::OpenOptions),
                 TITLE_QUIT => out.push(ScreenAction::Quit),
                 _ => {}

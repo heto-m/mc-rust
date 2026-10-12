@@ -14,6 +14,7 @@ mod env;
 mod input;
 mod list;
 mod menus;
+mod mods;
 mod multiline;
 mod recipe_book;
 mod screen;
@@ -52,6 +53,10 @@ pub use list::ScrollList;
 pub use menus::{
     ConfirmScreen, ConnectingScreen, DeathScreen, DirectConnectScreen, DisconnectedScreen,
     PauseScreen, StatusHandle, TitleScreen, draw_dim_background, draw_menu_background,
+};
+pub use mods::{
+    IconCache, ModIcon, ModRow, ModTone, ModsModel, ModsScreen, PromptAction, SharedMods,
+    crash_fallback_screen,
 };
 pub use multiline::MultiLineEdit;
 pub use screen::{ClickType, ContainerClick, EditorPacket, Screen, ScreenAction, ScreenStack};

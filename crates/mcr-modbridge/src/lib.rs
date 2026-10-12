@@ -6,6 +6,7 @@ mod events;
 pub mod frame;
 pub mod gpu;
 mod launch;
+pub mod manager;
 pub mod net;
 mod pacer;
 pub mod sound;

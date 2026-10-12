@@ -11,9 +11,11 @@ mcr-buf.workspace = true
 mcr-client = { path = "../mcr-client" }
 mcr-jvm = { path = "../mcr-jvm" }
 mcr-physics = { path = "../mcr-physics" }
+mcr-settings = { path = "../mcr-settings" }
 mcr-protocol = { path = "../mcr-protocol" }
 mcr-render = { path = "../mcr-render" }
 naga = { version = "30", features = ["spv-in"] }
+png.workspace = true
 pollster.workspace = true
 rustc-hash.workspace = true
 rtrb = "0.4"
@@ -21,9 +23,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 wgpu = { workspace = true, features = ["naga-ir"] }
+zip.workspace = true
 
 [dev-dependencies]
-png.workspace = true
 criterion.workspace = true
 mcr-auth = { path = "../mcr-auth" }
 mcr-net = { path = "../mcr-net" }

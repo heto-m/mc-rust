@@ -22,6 +22,7 @@ mod language;
 mod map;
 mod mesh_world;
 mod mods;
+mod mods_ui;
 mod movement_sounds;
 mod nametags;
 mod net_world;
@@ -103,10 +104,12 @@ struct App {
     ready_reported: bool,
     exit: bool,
     mod_host: Option<mods::ModHost>,
+    boot: Option<mods::BootPlan>,
+    mods_app: mods_ui::ModsApp,
 }
 
 impl App {
-    fn new(opts: Options, launched: Instant) -> Self {
+    fn new(opts: Options, launched: Instant, started: mods::Startup) -> Self {
         Self {
             opts,
             launched,
@@ -119,6 +122,8 @@ impl App {
             ready_reported: false,
             exit: false,
             mod_host: None,
+            boot: started.boot,
+            mods_app: started.app,
         }
     }
 
@@ -132,7 +137,7 @@ impl App {
         );
         let size = window.inner_size();
         let mut config = world_setup::renderer_config(&self.opts, RendererConfig::default());
-        if self.opts.mods.is_some() {
+        if self.boot.is_some() {
             config.scene_texture = true;
             config.optional_features = mcr_modbridge::gpu::context::OPTIONAL_FEATURES;
         }
@@ -152,13 +157,17 @@ impl App {
             renderer.uses_draw_count(),
             renderer.has_timestamps()
         );
-        if let Some(dir) = self.opts.mods.clone() {
-            self.mod_host = mods::ModHost::start(&self.opts, &dir, &mut renderer)?;
+        if let Some(plan) = self.boot.take() {
+            self.mod_host = plan.start(&self.opts, &mut renderer, &self.mods_app)?;
         }
         self.scene = Some(if self.opts.world.is_none() && !self.opts.synthetic {
             Scene::Shell(Box::new(Shell::new(
                 renderer,
-                shell_config(&self.opts, self.mod_host.as_ref().map(mods::ModHost::net)),
+                shell_config(
+                    &self.opts,
+                    self.mod_host.as_ref().map(mods::ModHost::net),
+                    self.mods_app.clone(),
+                ),
             )?))
         } else if self.opts.synthetic {
             self.synthetic_scene(renderer)?
@@ -431,7 +440,11 @@ impl ApplicationHandler for App {
     }
 }
 
-fn shell_config(opts: &Options, mod_net: Option<mods::ModNet>) -> ShellConfig {
+fn shell_config(
+    opts: &Options,
+    mod_net: Option<mods::ModNet>,
+    mods: mods_ui::ModsApp,
+) -> ShellConfig {
     ShellConfig {
         game_dir: opts.game_dir.clone(),
         jar: opts.jar.clone(),
@@ -440,6 +453,7 @@ fn shell_config(opts: &Options, mod_net: Option<mods::ModNet>) -> ShellConfig {
         render_distance: opts.render_distance_set.then_some(opts.render_distance),
         connect: opts.connect.clone(),
         mod_net,
+        mods,
     }
 }
 
@@ -465,9 +479,10 @@ fn main() -> Result<()> {
         }
         return screenshot::run(&opts, &out, launched);
     }
+    let started = mods::startup(&opts)?;
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new(opts, launched);
+    let mut app = App::new(opts, launched, started);
     let result = event_loop.run_app(&mut app);
     if let Some(host) = app.mod_host.take() {
         host.finish();

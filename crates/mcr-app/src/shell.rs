@@ -54,6 +54,7 @@ pub struct ShellConfig {
     pub connect: Option<String>,
     /// Set in mod mode: every connection is mirrored to Java.
     pub mod_net: Option<crate::mods::ModNet>,
+    pub mods: crate::mods_ui::ModsApp,
 }
 
 pub struct Shell {
@@ -169,6 +170,9 @@ impl Shell {
             cfg,
         };
         shell.show_title();
+        if let Some(prompt) = shell.cfg.mods.take_crash_prompt() {
+            shell.push(prompt);
+        }
         if shell.mod_frames().is_none()
             && let Some(addr) = shell.cfg.connect.take()
         {
@@ -421,6 +425,15 @@ impl Shell {
         self.stack.clear();
         let servers: SharedServers = self.servers.clone();
         self.push(Box::new(TitleScreen::new("26.3", servers)));
+    }
+
+    /// The native Mods screen, from the main menu and from Java's "mcr" button.
+    pub fn open_mods(&mut self) {
+        let screen = Box::new(self.cfg.mods.screen());
+        match &mut self.play {
+            Some(play) => play.show_screen(screen),
+            None => self.push(screen),
+        }
     }
 
     fn push(&mut self, screen: Box<dyn Screen>) {
@@ -764,6 +777,7 @@ impl Shell {
                     let screen = OptionsScreen::new(self.settings.clone(), self.languages());
                     self.push(Box::new(screen));
                 }
+                ScreenAction::OpenMods => self.open_mods(),
                 ScreenAction::OpenUrl(url) => gui::open_url(&url),
                 ScreenAction::CopyToClipboard(text) => {
                     if let Some(p) = &mut self.parts {

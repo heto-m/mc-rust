@@ -68,6 +68,7 @@ pub enum ScreenAction {
     Connect(String),
     CancelConnect,
     OpenOptions,
+    OpenMods,
     OpenAdvancements,
     OpenStats,
     RecipeBookSettings {
@@ -143,6 +144,7 @@ impl std::fmt::Debug for ScreenAction {
             Self::Connect(a) => f.debug_tuple("Connect").field(a).finish(),
             Self::CancelConnect => f.write_str("CancelConnect"),
             Self::OpenOptions => f.write_str("OpenOptions"),
+            Self::OpenMods => f.write_str("OpenMods"),
             Self::OpenAdvancements => f.write_str("OpenAdvancements"),
             Self::OpenStats => f.write_str("OpenStats"),
             Self::RecipeBookSettings {
