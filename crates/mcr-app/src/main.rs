@@ -317,6 +317,7 @@ impl App {
             }
             let want = shell.wants_grab();
             let cap = shell.max_fps();
+            let vsync = shell.sync_vsync(self.opts.vsync);
             let java = shell.java_window();
             if want != self.grabbed {
                 self.set_grab(want);
@@ -325,7 +326,7 @@ impl App {
                 }
             }
             self.apply_java_window(java);
-            if !self.opts.vsync && (10..260).contains(&cap) {
+            if !vsync && (10..260).contains(&cap) {
                 let budget = std::time::Duration::from_secs_f64(1.0 / f64::from(cap));
                 if let Some(rest) = budget.checked_sub(now.elapsed()) {
                     std::thread::sleep(rest);

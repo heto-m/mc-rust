@@ -64,6 +64,7 @@ pub struct ShellConfig {
 
 pub struct Shell {
     cfg: ShellConfig,
+    applied_vsync: Option<bool>,
     parts: Option<Parts>,
     pub play: Option<Play>,
     stack: ScreenStack,
@@ -147,6 +148,7 @@ impl Shell {
         };
         let now = Instant::now();
         let mut shell = Self {
+            applied_vsync: None,
             parts: Some(Parts {
                 renderer,
                 gui,
@@ -525,6 +527,18 @@ impl Shell {
 
     pub fn max_fps(&self) -> i32 {
         self.settings.borrow().file.options.max_fps
+    }
+
+    /// Applies the saved VSync option (off when `allowed` is false) to the live renderer.
+    pub fn sync_vsync(&mut self, allowed: bool) -> bool {
+        let want = allowed && self.settings.borrow().file.options.enable_vsync;
+        if self.applied_vsync != Some(want)
+            && let Some(renderer) = self.renderer_mut()
+        {
+            renderer.set_vsync(want);
+            self.applied_vsync = Some(want);
+        }
+        want
     }
 
     pub fn ready(&self) -> bool {
