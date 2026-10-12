@@ -7,3 +7,5 @@
 /.claude/settings.local.json
 /crates/*/logs
 /.claude/scheduled_tasks.lock
+/logs/
+/tools/extractor/logs/
