@@ -253,6 +253,7 @@ impl RenderSystem {
                 self.renderer.remove_section([pos.x, y, pos.z]);
             }
         }
+        self.renderer.set_post_effects(&[]);
         (self.renderer, self.assets)
     }
 

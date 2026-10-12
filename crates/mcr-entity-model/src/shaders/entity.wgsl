@@ -17,6 +17,8 @@ struct Instance {
     flags: u32,
     uv_offset: vec2<f32>,
     origin: vec3<f32>,
+    // Glow colour as RGBA8 with alpha 255, or 0 when the entity does not glow.
+    outline: u32,
 }
 
 // The overlay texture's white row at u = 1 has alpha 0.25: three quarters white.
@@ -66,6 +68,10 @@ fn to_linear(c: vec3<f32>) -> vec3<f32> {
 
 @vertex
 fn vs_main(v: VertexIn) -> VertexOut {
+    return transform(v);
+}
+
+fn transform(v: VertexIn) -> VertexOut {
     let inst = instances[v.instance];
     let at = (inst.bone_base + v.bone) * 3u;
     let r0 = bones[at];
@@ -92,6 +98,26 @@ fn vs_main(v: VertexIn) -> VertexOut {
     out.flash = f32((inst.flags >> 2u) & 1u);
     out.fog_dist = vec2<f32>(length(p + inst.origin), max(length((p + inst.origin).xz), abs(p.y + inst.origin.y)));
     return out;
+}
+
+@vertex
+fn vs_outline(v: VertexIn) -> VertexOut {
+    var out = transform(v);
+    let outline = instances[v.instance].outline;
+    out.tint = unpack_rgba(outline);
+    if outline == 0u {
+        out.clip = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+    }
+    return out;
+}
+
+@fragment
+fn fs_outline(in: VertexOut) -> @location(0) vec4<f32> {
+    let c = textureSample(entity_textures, entity_sampler, in.uv, in.layer);
+    if c.a == 0.0 {
+        discard;
+    }
+    return vec4<f32>(in.tint.rgb, 1.0);
 }
 
 fn fog_factor(d: f32, start: f32, end: f32) -> f32 {

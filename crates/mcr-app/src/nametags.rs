@@ -30,7 +30,7 @@ pub struct Tag {
     score: Option<Component>,
 }
 
-fn team_color(color: TeamColor) -> u32 {
+pub(crate) fn team_color(color: TeamColor) -> u32 {
     match color {
         TeamColor::Black => 0x000000,
         TeamColor::DarkBlue => 0x0000AA,

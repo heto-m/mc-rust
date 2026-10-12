@@ -293,6 +293,18 @@ fn items_frames_paintings_blocks() {
 }
 
 #[test]
+fn block_display_draws_its_block() {
+    let Some(mut h) = Harness::new() else { return };
+    let glowstone = mcr_data::v26_3()
+        .block_by_name("minecraft:glowstone")
+        .and_then(|b| mcr_data::v26_3().block_info(b))
+        .map_or(0, |i| i.default_state as i32);
+    let specs = [spec("minecraft:block_display").d(23, V::BlockState(glowstone))];
+    let shot = row(&mut h, &specs, "block_display", 1.5, 2.0);
+    assert!(shot.covered() > 1000, "covered {}", shot.covered());
+}
+
+#[test]
 fn more_mobs() {
     let Some(mut h) = Harness::new() else { return };
     let specs = [

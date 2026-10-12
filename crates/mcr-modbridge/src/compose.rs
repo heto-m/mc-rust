@@ -196,6 +196,8 @@ pub struct FrameLink {
     stats: ComposeStats,
     /// The posted frame whose world slots ran at `after_opaque` and whose GUI is composed next.
     composing: Option<u64>,
+    /// The frame whose world slots are drained and whose GUI lands at `before_ui`, after post effects.
+    gui_pending: Option<u64>,
     /// `after_opaque` already spent this frame's wait budget.
     opaque_waited: bool,
     detached_camera: bool,
@@ -215,6 +217,7 @@ impl FrameLink {
             size_mismatch_logged: false,
             stats: ComposeStats::default(),
             composing: None,
+            gui_pending: None,
             opaque_waited: false,
             detached_camera: false,
             input,
@@ -359,6 +362,7 @@ impl FrameLink {
             return;
         };
         self.composing = None;
+        self.gui_pending = None;
         self.opaque_waited = false;
         backend.slots.set_scene(ctx.scene, ctx.depth);
         if self.shared.frame.is_gone() {
@@ -434,7 +438,7 @@ impl FrameLink {
         };
         let gpu = backend.gpu;
         if let Some(index) = self.composing.take() {
-            self.compose(ctx, backend, index);
+            self.compose(backend, index);
             self.stats.composed += 1;
             return;
         }
@@ -466,7 +470,7 @@ impl FrameLink {
             self.lockstep.complete(java.done, Instant::now());
             push_sample(&mut self.stats.waits_us, waited);
             push_sample(&mut self.stats.java_us, Duration::from_nanos(java.nanos));
-            self.compose(ctx, backend, index);
+            self.compose(backend, index);
             self.stats.composed += 1;
         } else if self.shared.frame.is_gone() {
             self.detach_for_good("Java stopped");
@@ -497,8 +501,15 @@ impl FrameLink {
         self.flipper.get_or_insert_with(|| Flipper::new(device))
     }
 
-    fn compose(&mut self, ctx: &ExternalCtx<'_>, backend: &'static Backend, index: u64) {
+    fn compose(&mut self, backend: &'static Backend, index: u64) {
         backend.slots.drain_before_gui(backend.gpu);
+        self.gui_pending = Some(index);
+    }
+
+    fn before_ui(&mut self, ctx: &ExternalCtx<'_>) {
+        let (Some(index), Some(backend)) = (self.gui_pending.take(), Self::backend()) else {
+            return;
+        };
         let main = backend
             .slots
             .main_color()
@@ -550,6 +561,10 @@ impl ExternalSubmitter for ModFrames {
 
     fn after_world(&mut self, ctx: &ExternalCtx<'_>) {
         self.lock().after_world(ctx);
+    }
+
+    fn before_ui(&mut self, ctx: &ExternalCtx<'_>) {
+        self.lock().before_ui(ctx);
     }
 }
 

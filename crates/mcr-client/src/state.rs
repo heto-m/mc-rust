@@ -28,6 +28,8 @@ pub const MAX_COMPLETION_CHARS: usize = 256;
 /// `TransientBlock.DEFAULT_TIME_TO_LIVE`: one second.
 pub const TRANSIENT_BLOCK_TICKS: u8 = 20;
 pub const MAX_TRANSIENT_BLOCKS: usize = 256;
+/// Server post effect ids kept from `post_effects`; vanilla's `/posteffect` adds one per call.
+pub const MAX_POST_EFFECTS: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransientBlock {
@@ -409,6 +411,8 @@ pub struct ClientState {
     pub controlled_vehicle: Option<i32>,
     /// The entity the view follows after `set_camera`; `None` when the player's own eyes are used.
     pub camera_entity: Option<i32>,
+    /// The server's `post_effects` ids, in order; cleared with the player on login and respawn.
+    pub post_effects: Vec<String>,
     pub vehicle_corrections: u32,
     pub chunk_batches: ChunkBatchSizeCalculator,
     pub chunks_received: u64,
@@ -514,6 +518,7 @@ impl ClientState {
             game_ticks: 0,
             controlled_vehicle: None,
             camera_entity: None,
+            post_effects: Vec::new(),
             vehicle_corrections: 0,
             chunk_batches: ChunkBatchSizeCalculator::default(),
             chunks_received: 0,

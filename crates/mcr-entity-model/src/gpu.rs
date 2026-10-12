@@ -10,6 +10,9 @@ pub const CLASS_SIZES: [u32; 5] = [64, 128, 256, 512, 1024];
 const CLASS_INITIAL_LAYERS: [u32; 5] = [64, 16, 4, 2, 1];
 const TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const INITIAL_CAPACITY: usize = 1024;
+/// Glow silhouette target formats; they match `mcr_render::GlowOutline`.
+pub const OUTLINE_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+pub const OUTLINE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub const MAX_INSTANCES: usize = 1 << 16;
 pub const MAX_BONES: usize = 1 << 20;
 const MAX_CLASS_LAYERS: [u32; 5] = [1024, 256, 64, 32, 16];
@@ -80,6 +83,8 @@ pub struct PartInstance {
     pub sky_light: u8,
     pub uv_offset: [f32; 2],
     pub origin: [f64; 3],
+    /// Glow colour: the part is also drawn as a silhouette by [`EntityRenderer::draw_outlines`].
+    pub outline: Option<[u8; 3]>,
 }
 
 #[repr(C)]
@@ -107,7 +112,7 @@ struct GpuInstance {
     flags: u32,
     uv_offset: [f32; 2],
     origin: [f32; 3],
-    pad: f32,
+    outline: u32,
 }
 
 /// Per-frame lighting inputs.
@@ -181,6 +186,8 @@ pub struct EntityRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipelines: [wgpu::RenderPipeline; 4],
+    outline_pipeline: wgpu::RenderPipeline,
+    frame_outlines: usize,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     globals: wgpu::Buffer,
@@ -275,53 +282,82 @@ impl EntityRenderer {
         let attributes = wgpu::vertex_attr_array![
             0 => Float32x3, 1 => Uint32, 2 => Float32x3, 3 => Float32x2
         ];
-        let make =
-            |entry: &str, blend: Option<wgpu::BlendState>, depth_write: bool, equal: bool| {
-                let compare = match (formats.reverse_z, equal) {
-                    (true, false) => wgpu::CompareFunction::Greater,
-                    (true, true) => wgpu::CompareFunction::GreaterEqual,
-                    (false, false) => wgpu::CompareFunction::Less,
-                    (false, true) => wgpu::CompareFunction::LessEqual,
-                };
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some("vs_main"),
-                        compilation_options: Default::default(),
-                        buffers: &[Some(wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<Vertex>() as u64,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &attributes,
-                        })],
-                    },
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: formats.depth,
-                        depth_write_enabled: Some(depth_write),
-                        depth_compare: Some(compare),
-                        stencil: Default::default(),
-                        bias: Default::default(),
-                    }),
-                    multisample: wgpu::MultisampleState {
-                        count: formats.sample_count.max(1),
-                        ..Default::default()
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some(entry),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: formats.color,
-                            blend,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
+        let make_with = |vs: &str,
+                         entry: &str,
+                         color: wgpu::TextureFormat,
+                         depth: wgpu::TextureFormat,
+                         samples: u32,
+                         blend: Option<wgpu::BlendState>,
+                         depth_write: bool,
+                         equal: bool| {
+            let compare = match (formats.reverse_z, equal) {
+                (true, false) => wgpu::CompareFunction::Greater,
+                (true, true) => wgpu::CompareFunction::GreaterEqual,
+                (false, false) => wgpu::CompareFunction::Less,
+                (false, true) => wgpu::CompareFunction::LessEqual,
             };
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some(vs),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &attributes,
+                    })],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: depth,
+                    depth_write_enabled: Some(depth_write),
+                    depth_compare: Some(compare),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: samples,
+                    ..Default::default()
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: color,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let samples = formats.sample_count.max(1);
+        let make = |entry: &str, blend, depth_write, equal| {
+            make_with(
+                "vs_main",
+                entry,
+                formats.color,
+                formats.depth,
+                samples,
+                blend,
+                depth_write,
+                equal,
+            )
+        };
+        let outline_pipeline = make_with(
+            "vs_outline",
+            "fs_outline",
+            OUTLINE_COLOR_FORMAT,
+            OUTLINE_DEPTH_FORMAT,
+            1,
+            None,
+            true,
+            true,
+        );
         let additive = wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::SrcAlpha,
@@ -371,6 +407,8 @@ impl EntityRenderer {
             device: device.clone(),
             queue: queue.clone(),
             pipelines,
+            outline_pipeline,
+            frame_outlines: 0,
             layout,
             sampler,
             globals,
@@ -532,6 +570,7 @@ impl EntityRenderer {
     pub fn begin_frame(&mut self) {
         self.frame_bones.clear();
         self.frame_instances.clear();
+        self.frame_outlines = 0;
     }
 
     /// Reserves `count` world-space bone matrices and returns their base index plus the slice to fill.
@@ -552,6 +591,7 @@ impl EntityRenderer {
         {
             return;
         }
+        self.frame_outlines += usize::from(inst.outline.is_some());
         let flags = u32::from(inst.fullbright)
             | u32::from(inst.hurt) << 1
             | u32::from(inst.flash) << 2
@@ -567,7 +607,9 @@ impl EntityRenderer {
                 flags,
                 uv_offset: inst.uv_offset,
                 origin: [0.0; 3],
-                pad: 0.0,
+                outline: inst
+                    .outline
+                    .map_or(0, |[r, g, b]| pack_rgba([r, g, b, 255])),
             },
             inst.origin,
         ));
@@ -731,11 +773,39 @@ impl EntityRenderer {
         self.draw_filtered(pass, |p| p != Pipeline::Cutout);
     }
 
+    /// Whether any part pushed this frame glows.
+    pub fn has_outlines(&self) -> bool {
+        self.frame_outlines > 0
+    }
+
+    /// Glow silhouettes into a pass on an [`OUTLINE_COLOR_FORMAT`] target with its own depth.
+    pub fn draw_outlines(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.has_outlines() {
+            self.draw_runs(
+                pass,
+                |p| p != Pipeline::Additive,
+                Some(&self.outline_pipeline),
+            );
+        }
+    }
+
     fn draw_filtered(&self, pass: &mut wgpu::RenderPass<'_>, keep: impl Fn(Pipeline) -> bool) {
+        self.draw_runs(pass, keep, None);
+    }
+
+    fn draw_runs(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        keep: impl Fn(Pipeline) -> bool,
+        only: Option<&wgpu::RenderPipeline>,
+    ) {
+        if let Some(pipeline) = only {
+            pass.set_pipeline(pipeline);
+        }
         let mut current: Option<(Pipeline, u8)> = None;
         for run in self.runs.iter().filter(|r| keep(r.pipeline)) {
             if current != Some((run.pipeline, run.class)) {
-                if current.map(|c| c.0) != Some(run.pipeline) {
+                if only.is_none() && current.map(|c| c.0) != Some(run.pipeline) {
                     pass.set_pipeline(&self.pipelines[run.pipeline as usize]);
                 }
                 if let Some((_, group)) = &self.bind_groups[run.class as usize] {

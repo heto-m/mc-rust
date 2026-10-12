@@ -14,7 +14,7 @@ pub struct DebugOverlay {
 pub const CHART_SAMPLES: usize = 240;
 const CHART_HEIGHT: i32 = 60;
 
-/// A rolling bar chart along the bottom-left edge, one bar per sample, newest on the right.
+/// A rolling bar chart along the bottom edge, one bar per sample, newest on the right.
 #[derive(Clone, Debug, Default)]
 pub struct DebugChart {
     pub title: String,
@@ -55,13 +55,14 @@ impl DebugChart {
             .collect()
     }
 
-    fn draw(&self, frame: &mut UiFrame<'_>, left: i32, bottom: i32) {
+    fn draw(&self, frame: &mut UiFrame<'_>, left: i32, width: i32, bottom: i32) {
         let heights = self.bar_heights();
-        let width = CHART_SAMPLES as i32;
         let top = bottom - CHART_HEIGHT;
         frame.fill_rect(left, top, left + width, bottom, BACKGROUND);
-        let first = width - heights.len() as i32;
-        let newest = self.samples.iter().rev().take(CHART_SAMPLES).rev();
+        let shown = heights.len().min(width.max(0) as usize);
+        let first = width - shown as i32;
+        let newest = self.samples.iter().rev().take(shown).rev();
+        let heights = &heights[heights.len() - shown..];
         for (i, (h, v)) in heights.iter().zip(newest).enumerate() {
             let x = left + first + i as i32;
             frame.fill_rect(x, bottom - h, x + 1, bottom, self.color(*v));
@@ -85,11 +86,24 @@ impl DebugChart {
     }
 }
 
+/// Vanilla's places: the first chart bottom-left, the rest bottom-right, stacked upwards.
+fn chart_slot(index: usize, width: i32, gui_width: i32, gui_height: i32) -> (i32, i32) {
+    match index {
+        0 => (0, gui_height),
+        n => (
+            gui_width - width,
+            gui_height - (n as i32 - 1) * (CHART_HEIGHT + 2),
+        ),
+    }
+}
+
 impl DebugOverlay {
     pub fn draw(&self, frame: &mut UiFrame<'_>) {
         let (gui_width, gui_height) = frame.gui_size();
+        let width = (gui_width / 2).min(CHART_SAMPLES as i32);
         for (i, chart) in self.charts.iter().enumerate() {
-            chart.draw(frame, 0, gui_height - i as i32 * (CHART_HEIGHT + 2));
+            let (left, bottom) = chart_slot(i, width, gui_width, gui_height);
+            chart.draw(frame, left, width, bottom);
         }
         for (lines, align_left) in [(&self.left, true), (&self.right, false)] {
             let placed: Vec<_> = lines
@@ -121,6 +135,13 @@ impl DebugOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn charts_sit_bottom_left_then_bottom_right() {
+        assert_eq!(chart_slot(0, 240, 960, 540), (0, 540));
+        assert_eq!(chart_slot(1, 240, 960, 540), (720, 540));
+        assert_eq!(chart_slot(2, 240, 960, 540), (720, 540 - CHART_HEIGHT - 2));
+    }
 
     #[test]
     fn bars_scale_clamp_and_keep_only_the_newest_samples() {

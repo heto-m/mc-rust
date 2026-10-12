@@ -10,6 +10,15 @@ const MAX_TOKENS: usize = 256;
 const MAX_REDIRECTS: usize = 16;
 pub const MAX_LOCAL_SUGGESTIONS: usize = 1024;
 const ASK_SERVER: &str = "minecraft:ask_server";
+const POST_EFFECTS: &str = "minecraft:post_effects";
+/// The post chains a vanilla client ships, which `/posteffect` suggests.
+const VANILLA_POST_EFFECTS: [&str; 5] = [
+    "minecraft:blur",
+    "minecraft:creeper",
+    "minecraft:entity_outline",
+    "minecraft:invert",
+    "minecraft:spider",
+];
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CommandTree {
@@ -185,18 +194,21 @@ impl CommandTree {
                         suggestions,
                     } => {
                         out.usage.push(format!("<{name}>"));
-                        match suggestions.as_ref().map(|s| s.as_str()) {
-                            Some(ASK_SERVER) => out.ask_server = true,
-                            Some(_) => {}
-                            None => {
-                                for s in parser_values(parser, source) {
-                                    if s.to_lowercase().starts_with(&lower)
-                                        || s.strip_prefix("minecraft:")
-                                            .is_some_and(|r| r.to_lowercase().starts_with(&lower))
-                                    {
-                                        seen.insert(s);
-                                    }
-                                }
+                        let values = match suggestions.as_ref().map(|s| s.as_str()) {
+                            Some(ASK_SERVER) => {
+                                out.ask_server = true;
+                                Vec::new()
+                            }
+                            Some(POST_EFFECTS) => VANILLA_POST_EFFECTS.map(str::to_owned).to_vec(),
+                            Some(_) => Vec::new(),
+                            None => parser_values(parser, source),
+                        };
+                        for s in values {
+                            if s.to_lowercase().starts_with(&lower)
+                                || s.strip_prefix("minecraft:")
+                                    .is_some_and(|r| r.to_lowercase().starts_with(&lower))
+                            {
+                                seen.insert(s);
                             }
                         }
                     }
@@ -421,6 +433,19 @@ mod tests {
         let c = tree().complete("/give A", 7, &NoSource);
         assert!(c.ask_server);
         assert_eq!(c.start, 6);
+    }
+
+    #[test]
+    fn post_effect_arguments_suggest_vanilla_chains() {
+        let mut t = tree();
+        let NodeKind::Argument { suggestions, .. } = &mut t.nodes[5].kind else {
+            panic!("targets is an argument");
+        };
+        *suggestions = Some(Identifier::parse(POST_EFFECTS).unwrap());
+        let c = t.complete("/give A", 7, &NoSource);
+        assert!(!c.ask_server);
+        let c = t.complete("/give in", 8, &NoSource);
+        assert_eq!(c.local, ["minecraft:invert"]);
     }
 
     #[test]

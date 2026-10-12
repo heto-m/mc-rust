@@ -184,6 +184,8 @@ pub struct EntityView<'a> {
     pub invisible: bool,
     pub custom_name: Option<&'a str>,
     pub player: PlayerView<'a>,
+    /// Glow colour (`Entity.getTeamColor` of a glowing entity), drawn as an outline.
+    pub outline: Option<[u8; 3]>,
 }
 
 impl std::fmt::Debug for EntityView<'_> {
@@ -234,6 +236,7 @@ impl<'a> EntityView<'a> {
             light: [0, 15],
             passenger: false,
             invisible: false,
+            outline: None,
             custom_name: None,
             player: PlayerView::default(),
         }

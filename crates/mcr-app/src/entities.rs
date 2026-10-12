@@ -350,6 +350,27 @@ pub struct FrameCtx<'a> {
     pub local_using: bool,
     pub events: &'a crate::entity_events::EntityEvents,
     pub skins: &'a crate::skins::SkinStore,
+    /// A spectator holds `key.spectatorOutlines`: every player glows.
+    pub spectator_outlines: bool,
+}
+
+/// `Entity.getTeamColor` when vanilla's `shouldEntityAppearGlowing` holds; `entry` is the
+/// scoreboard name (player name or UUID).
+fn glow_color(
+    cx: &FrameCtx<'_>,
+    data: &FxHashMap<u8, EntityDataValue>,
+    is_player: bool,
+    entry: impl FnOnce() -> Option<String>,
+) -> Option<[u8; 3]> {
+    let flagged = matches!(data.get(&0), Some(EntityDataValue::Byte(f)) if (*f as u8) & 0x40 != 0);
+    if !flagged && !(is_player && cx.spectator_outlines) {
+        return None;
+    }
+    let board = &cx.state.scoreboard;
+    let rgb = entry()
+        .and_then(|name| board.teams.get(board.team_of(&name)?)?.parameters.color)
+        .map_or(0xFF_FFFF, crate::nametags::team_color);
+    Some([(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8])
 }
 
 impl EntityLayer {
@@ -456,7 +477,10 @@ impl EntityLayer {
         let p = &state.player;
         let physics = &p.physics;
         self.local_data.clone_from(&p.data);
-        let mut flags = 0i8;
+        let mut flags = match p.data.get(&0) {
+            Some(EntityDataValue::Byte(server)) => server & 0x61,
+            _ => 0i8,
+        };
         if physics.crouching {
             flags |= 0x02;
         }
@@ -541,6 +565,7 @@ impl EntityLayer {
             if v.shared_flag(0) {
                 v.light[0] = 15;
             }
+            v.outline = glow_color(cx, local_data, true, || Some(cx.state.name.clone()));
             v
         });
         let views = tracks
@@ -614,6 +639,14 @@ impl EntityLayer {
                 if view.shared_flag(0) {
                     view.light[0] = 15;
                 }
+                let is_player = e.kind == *player_type;
+                view.outline = glow_color(cx, &e.data, is_player, || {
+                    if is_player {
+                        cx.state.players.name_of(e.uuid).map(str::to_owned)
+                    } else {
+                        Some(e.uuid.to_string())
+                    }
+                });
                 Some(view)
             })
             .chain(local_view)
@@ -675,6 +708,14 @@ impl EntityLayer {
         if self.has_parts() {
             self.scene.draw_blended(pass);
         }
+    }
+
+    pub fn has_outlines(&self) -> bool {
+        self.has_parts() && self.scene.has_outlines()
+    }
+
+    pub fn draw_outlines(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.scene.draw_outlines(pass);
     }
 
     /// The local player as a standing view for the inventory preview.

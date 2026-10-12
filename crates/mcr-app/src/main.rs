@@ -30,6 +30,7 @@ mod net_world;
 mod outline;
 mod overlays;
 mod play;
+mod post_effects;
 mod preview;
 mod render_system;
 mod respacks;

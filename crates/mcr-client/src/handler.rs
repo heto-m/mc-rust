@@ -338,7 +338,15 @@ impl ClientState {
             P::TickingStep(p) => self.world.frozen_ticks_to_run = p.tick_steps.max(0),
 
             P::AddEntity(p) => {
-                let pos = [p.x, p.y, p.z];
+                let mut pos = [p.x, p.y, p.z];
+                if Some(p.entity_type) == self.sim_kinds.knot_type {
+                    // The packet carries the fence's block position; the knot sits on the post.
+                    pos = [
+                        pos[0].floor() + 0.5,
+                        pos[1].floor() + 0.375,
+                        pos[2].floor() + 0.5,
+                    ];
+                }
                 if sane3(pos) && self.entities.len() < MAX_ENTITIES {
                     let mut e = Entity::new(p.entity_id, p.uuid, p.entity_type, pos);
                     e.yaw = p.y_rot.degrees();
@@ -353,6 +361,14 @@ impl ClientState {
                         out.event(ClientEvent::EntityAdded(p.entity_id));
                     }
                 }
+            }
+            P::PostEffects(p) => {
+                self.post_effects = p
+                    .post_effects
+                    .iter()
+                    .take(crate::state::MAX_POST_EFFECTS)
+                    .map(|id| id.as_str().to_owned())
+                    .collect();
             }
             P::SetCamera(p) => {
                 self.camera_entity = (p.camera_id != self.player.entity_id
@@ -950,6 +966,7 @@ impl ClientState {
         out: &mut Outbox,
     ) -> Result<()> {
         self.player.entity_id = p.player_id;
+        self.post_effects.clear();
         self.apply_spawn_world(&p.spawn_info, true)?;
         self.world.hardcore = p.hardcore;
         self.world.view_distance = p.chunk_radius.clamp(0, 64);
@@ -1012,6 +1029,7 @@ impl ClientState {
     fn on_respawn(&mut self, info: &CommonPlayerSpawnInfo, out: &mut Outbox) -> Result<()> {
         let changed = info.dimension != self.dimension.name;
         self.camera_entity = None;
+        self.post_effects.clear();
         self.apply_spawn_world(info, changed)?;
         self.inventory.open = None;
         self.inventory.cursor = ItemStack::default();

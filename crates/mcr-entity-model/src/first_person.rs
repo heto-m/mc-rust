@@ -92,6 +92,7 @@ impl EntityScene {
                     sky_light: view.light[1],
                     uv_offset: [0.0; 2],
                     origin: [0.0; 3],
+                    outline: None,
                 });
                 self.stats.parts += 1;
             }
@@ -155,6 +156,7 @@ impl EntityScene {
             sky_light: light[1],
             uv_offset: [0.0; 2],
             origin,
+            outline: None,
         });
         self.stats.parts += 1;
     }

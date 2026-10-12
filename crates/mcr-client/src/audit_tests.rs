@@ -802,6 +802,38 @@ fn set_camera_follows_a_known_entity_until_it_goes_away() {
 }
 
 #[test]
+fn post_effects_replace_the_list_and_stay_bounded() {
+    use mcr_protocol::common::PostEffects;
+    let mut s = state();
+    let ids = |n: usize| {
+        (0..n)
+            .map(|i| Identifier::parse(&format!("minecraft:e{i}")).unwrap())
+            .collect()
+    };
+    run(
+        &mut s,
+        P::PostEffects(PostEffects {
+            post_effects: ids(2),
+        }),
+    );
+    assert_eq!(s.post_effects, ["minecraft:e0", "minecraft:e1"]);
+    run(
+        &mut s,
+        P::PostEffects(PostEffects {
+            post_effects: ids(1000),
+        }),
+    );
+    assert_eq!(s.post_effects.len(), crate::state::MAX_POST_EFFECTS);
+    run(
+        &mut s,
+        P::PostEffects(PostEffects {
+            post_effects: Vec::new(),
+        }),
+    );
+    assert!(s.post_effects.is_empty());
+}
+
+#[test]
 fn custom_chat_completions_add_remove_set_and_complete() {
     use mcr_protocol::play::clientbound::player::{CompletionAction, CustomChatCompletions};
     let mut s = state();
@@ -870,4 +902,30 @@ fn transient_blocks_live_for_a_second_and_replace_by_position() {
         add(&mut s, x, 1);
     }
     assert!(s.transient_blocks.len() <= crate::state::MAX_TRANSIENT_BLOCKS);
+}
+
+#[test]
+fn leash_knots_sit_on_the_fence_post() {
+    use mcr_protocol::play::clientbound::entity::{AddEntity, LpVec3};
+    let mut s = state();
+    let knot = mcr_data::v26_3()
+        .entity_type_by_name("minecraft:leash_knot")
+        .unwrap() as i32;
+    run(
+        &mut s,
+        P::AddEntity(AddEntity {
+            entity_id: 60,
+            uuid: Uuid::from_u128(60),
+            entity_type: knot,
+            x: 3.0,
+            y: -60.0,
+            z: -4.0,
+            velocity: LpVec3::default(),
+            x_rot: mcr_buf::Angle(0),
+            y_rot: mcr_buf::Angle(0),
+            y_head_rot: mcr_buf::Angle(0),
+            data: 0,
+        }),
+    );
+    assert_eq!(s.entities.get(60).unwrap().pos, [3.5, -59.625, -3.5]);
 }

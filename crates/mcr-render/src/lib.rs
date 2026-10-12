@@ -4,10 +4,12 @@ mod camera;
 mod effects;
 mod environment;
 mod external;
+mod glow;
 mod graph;
 mod mesh;
 mod occlusion;
 mod overlay;
+mod post;
 mod quad;
 mod renderer;
 mod staging;
@@ -26,10 +28,12 @@ pub use environment::{
     CARDINAL_DEFAULT, CARDINAL_NETHER, Environment, OverworldBase, Rgb, Skybox, hex, srgb_lerp,
 };
 pub use external::{ExternalCtx, ExternalSubmitter};
+pub use glow::GlowOutline;
 pub use graph::SectionVisibility;
 pub use mesh::SectionMesh;
 pub use mesh::{TINT_KINDS, TINT_TABLE_WORDS, TintTable};
 pub use overlay::{Overlay, OverlayCtx};
+pub use post::{MAX_POST_CHAINS, PostChain, PostStack};
 pub use quad::{
     CubeQuad, Face, LIGHT_FULL_SKY, ModelQuad, ModelQuadDesc, PackedQuad, QuadError,
     cube_ao_brightness, light_block, light_sky, model_ao, pack_light,

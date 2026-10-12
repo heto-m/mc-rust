@@ -119,6 +119,8 @@ struct Keys {
     perspective: usize,
     swap: usize,
     debug: usize,
+    spectator_effect: usize,
+    spectator_outlines: usize,
 }
 
 impl Keys {
@@ -147,6 +149,8 @@ impl Keys {
             perspective: i("key.togglePerspective"),
             swap: i("key.swapOffhand"),
             debug: i("key.debug.overlay"),
+            spectator_effect: i("key.toggleSpectatorShaderEffects"),
+            spectator_outlines: i("key.spectatorOutlines"),
         }
     }
 }
@@ -176,6 +180,7 @@ struct FrameOverlay<'a> {
     particles: &'a mut ParticleEngine,
     env: &'a Environment,
     partial: f32,
+    glow: &'a mut Option<(wgpu::TextureFormat, mcr_render::GlowOutline)>,
 }
 
 impl Overlay for FrameOverlay<'_> {
@@ -224,6 +229,20 @@ impl Overlay for FrameOverlay<'_> {
         self.particles.record(ctx, self.partial, self.env);
         if let Some(hand) = self.hand {
             hand.record(ctx);
+        }
+        if let Some(entities) = self.entities.filter(|e| e.has_outlines()) {
+            if self.glow.as_ref().is_none_or(|(f, _)| *f != ctx.format) {
+                *self.glow = Some((
+                    ctx.format,
+                    mcr_render::GlowOutline::new(ctx.device, ctx.format),
+                ));
+            }
+            let (_, glow) = self.glow.as_mut().expect("set above");
+            {
+                let mut pass = glow.begin(ctx.device, ctx.encoder, ctx.size);
+                entities.draw_outlines(&mut pass);
+            }
+            glow.finish(ctx.device, ctx.queue, ctx.encoder, ctx.color);
         }
     }
 
@@ -367,6 +386,10 @@ pub struct Play {
     skins: crate::skins::SkinStore,
     boss_darkening: (f32, f32),
     spectate_view: Option<(f32, f32)>,
+    seen_camera: Option<i32>,
+    glow: Option<(wgpu::TextureFormat, mcr_render::GlowOutline)>,
+    spectator_effect: crate::post_effects::SpectatorEffect,
+    post_chains: Vec<mcr_render::PostChain>,
     ghost_age: Option<u32>,
     frame_history: Vec<f32>,
     tick_history: Vec<f32>,
@@ -518,6 +541,10 @@ impl Play {
             entity_events: Default::default(),
             boss_darkening: (0.0, 0.0),
             spectate_view: None,
+            seen_camera: None,
+            glow: None,
+            spectator_effect: Default::default(),
+            post_chains: Vec::new(),
             ghost_age: None,
             frame_history: Vec::new(),
             tick_history: Vec::new(),
@@ -815,6 +842,13 @@ impl Play {
         }
     }
 
+    /// The type id of the entity the camera follows, `None` for the player's own eyes.
+    fn camera_type(&self) -> Option<&'static str> {
+        let state = &self.world.client.state;
+        let e = state.entities.get(state.camera_entity?)?;
+        self.data.entity_type_name(u32::try_from(e.kind).ok()?)
+    }
+
     fn update_eye(&mut self) {
         let state = &self.world.client.state;
         let player = &state.player;
@@ -827,6 +861,10 @@ impl Play {
             self.cur_eye = crate::entities::eye_position(self.data, e);
             let yaw = if e.sim.is_some() { e.yaw } else { e.head_yaw };
             self.spectate_view = Some((yaw, e.pitch));
+        }
+        if state.camera_entity != self.seen_camera {
+            self.seen_camera = state.camera_entity;
+            self.spectator_effect.check(self.camera_type());
         }
         let snapped = player.placed && !self.placed_seen;
         if snapped {
@@ -2140,11 +2178,18 @@ impl Play {
         } else if i == k.debug {
             self.debug_on = !self.debug_on;
         } else if i == k.perspective {
+            let was_first = self.perspective == Perspective::First;
             self.perspective = match self.perspective {
                 Perspective::First => Perspective::ThirdBack,
                 Perspective::ThirdBack => Perspective::ThirdFront,
                 Perspective::ThirdFront => Perspective::First,
             };
+            if was_first != (self.perspective == Perspective::First) {
+                let ty = self.camera_type().filter(|_| !was_first);
+                self.spectator_effect.check(ty);
+            }
+        } else if i == k.spectator_effect {
+            self.spectator_effect.toggle();
         } else if let Some(n) = name.strip_prefix("key.hotbar.")
             && let Ok(n) = n.parse::<u8>()
         {
@@ -2414,6 +2459,15 @@ impl Play {
 
         self.render.renderer.set_environment(&env);
         self.render.renderer.set_animation_tick(self.ticks);
+        crate::post_effects::requested(
+            &self.world.client.state.post_effects,
+            self.spectator_effect.chain(),
+            &mut self.post_chains,
+        );
+        self.render.renderer.set_post_effects(&self.post_chains);
+        self.render
+            .renderer
+            .set_menu_blur(self.options.menu_background_blurriness.max(0) as u32);
         let mut overlay = FrameOverlay {
             outline: &self.outline,
             ui_renderer: &mut self.gui.ui_renderer,
@@ -2425,6 +2479,7 @@ impl Play {
             particles: &mut self.effects.particles,
             env: &env,
             partial,
+            glow: &mut self.glow,
         };
         self.render.draw_with(&camera, 1.0, Some(&mut overlay))
     }
@@ -2451,8 +2506,13 @@ impl Play {
                 state,
                 partial,
                 cull: &cull,
-                show_local: self.perspective != Perspective::First || self.spectate_view.is_some(),
-                hide_entity: self.world.client.state.camera_entity,
+                show_local: self.perspective != Perspective::First && self.spectate_view.is_none(),
+                hide_entity: self
+                    .world
+                    .client
+                    .state
+                    .camera_entity
+                    .filter(|_| self.perspective == Perspective::First),
                 eye: camera.position.to_array(),
                 ghost: self
                     .ghost_age
@@ -2461,6 +2521,9 @@ impl Play {
                 local_using: self.using_item,
                 events: &self.entity_events,
                 skins: &self.skins,
+                spectator_outlines: state.player.game_mode
+                    == mcr_protocol::types::game::GameType::Spectator
+                    && self.held.is_active(self.keys.spectator_outlines),
             });
             let params = layer.frame_params(camera, aspect, env);
             layer.scene.prepare(&params);

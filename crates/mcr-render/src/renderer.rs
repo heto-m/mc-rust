@@ -19,6 +19,7 @@ use crate::mesh::SectionMesh;
 use crate::mesh::TINT_TABLE_WORDS;
 use crate::occlusion::HiZ;
 use crate::overlay::{Overlay, OverlayCtx};
+use crate::post::{MAX_POST_CHAINS, PostChain, PostStack};
 use crate::quad::{ModelQuad, PackedQuad};
 use crate::staging::{Dest, Uploader};
 use crate::texture::{MAX_TEXTURE_GROUPS, TextureArrayData, TextureGroupData};
@@ -278,6 +279,11 @@ pub struct Renderer {
     /// Mod mode with a window: the frame renders here and is blitted to the surface.
     scene: Option<(wgpu::Texture, PresentBlit)>,
     external: Option<Box<dyn ExternalSubmitter + Send>>,
+    post: PostStack,
+    post_chains: Vec<PostChain>,
+    menu_blur: u32,
+    /// A window without a scene texture renders here while post chains run, then blits.
+    post_window: Option<(wgpu::Texture, PresentBlit)>,
     size: (u32, u32),
     depth_view: wgpu::TextureView,
     hiz: HiZ,
@@ -562,6 +568,7 @@ impl Renderer {
         let offscreen = surface
             .is_none()
             .then(|| create_offscreen(&device, width, height));
+        let post = PostStack::new(&device, color_format);
 
         let max_sections = u64::from(config.max_sections);
         let geo = Geometry {
@@ -1011,6 +1018,10 @@ impl Renderer {
             offscreen,
             scene,
             external: None,
+            post,
+            post_chains: Vec::new(),
+            menu_blur: 5,
+            post_window: None,
             globals,
             geo,
             cull_early,
@@ -1103,6 +1114,8 @@ impl Renderer {
         if let Some((scene, _)) = &mut self.scene {
             *scene = create_offscreen(&self.device, width, height);
         }
+        self.post.release();
+        self.post_window = None;
         self.depth_view = depth_view(&self.device, width, height);
         self.hiz
             .resize(&self.device, &self.depth_view, width, height);
@@ -1642,6 +1655,25 @@ impl Renderer {
         }
     }
 
+    /// Post chains to run on the world image before UI overlays, in order; at most
+    /// [`MAX_POST_CHAINS`] are kept.
+    pub fn set_post_effects(&mut self, chains: &[PostChain]) {
+        if self.post_chains != chains {
+            self.post_chains.clear();
+            self.post_chains
+                .extend_from_slice(&chains[..chains.len().min(MAX_POST_CHAINS)]);
+        }
+    }
+
+    pub fn post_effects(&self) -> &[PostChain] {
+        &self.post_chains
+    }
+
+    /// The menu background blurriness (0..=10) the `blur` chain uses.
+    pub fn set_menu_blur(&mut self, radius: u32) {
+        self.menu_blur = radius.min(10);
+    }
+
     /// Hooks external GPU work into every frame; see [`ExternalSubmitter`].
     pub fn set_external(&mut self, external: Option<Box<dyn ExternalSubmitter + Send>>) {
         self.external = external;
@@ -1766,7 +1798,31 @@ impl Renderer {
                     ..Default::default()
                 });
                 surface_tex = Some(tex);
-                view
+                if self.post_chains.is_empty() {
+                    self.post_window = None;
+                    view
+                } else {
+                    let (main, _) = self.post_window.get_or_insert_with(|| {
+                        let t = self.device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("post window"),
+                            size: wgpu::Extent3d {
+                                width: w,
+                                height: h,
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: s.view_format,
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                                | wgpu::TextureUsages::TEXTURE_BINDING,
+                            view_formats: &[],
+                        });
+                        (t, PresentBlit::new(&self.device, s.view_format))
+                    });
+                    surface_view = Some(view);
+                    main.create_view(&wgpu::TextureViewDescriptor::default())
+                }
             }
             (None, Some(t)) => t.create_view(&wgpu::TextureViewDescriptor::default()),
             (None, None) => unreachable!("renderer always has a target"),
@@ -2001,6 +2057,43 @@ impl Renderer {
                     label: Some("frame after external"),
                 });
         }
+        let post_main = self
+            .post_window
+            .as_ref()
+            .map(|(t, _)| t)
+            .or(self.scene_texture())
+            .filter(|_| !self.post_chains.is_empty())
+            .cloned();
+        if let Some(main) = &post_main {
+            self.post.record(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                main,
+                &self.post_chains,
+                self.menu_blur,
+            );
+        }
+        if let (Some(ext), Some(scene)) = (external.as_mut(), self.scene_texture()) {
+            if post_main.is_some() {
+                self.queue.submit([encoder.finish()]);
+                encoder = self
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("frame after post"),
+                    });
+            }
+            ext.before_ui(&ExternalCtx {
+                device: &self.device,
+                queue: &self.queue,
+                scene,
+                depth: &self.depth_view,
+                size: self.size,
+                camera: cam,
+                view: cam.view_rotation(),
+                proj: cam.projection(aspect),
+            });
+        }
         self.external = external;
         if let Some(overlay) = overlay {
             overlay.record_ui(&mut OverlayCtx {
@@ -2014,7 +2107,10 @@ impl Renderer {
                 camera: frame.camera,
             });
         }
-        if let (Some((_, blit)), Some(dst)) = (&self.scene, &surface_view) {
+        if let (Some((_, blit)), Some(dst)) = (
+            self.scene.as_ref().or(self.post_window.as_ref()),
+            &surface_view,
+        ) {
             blit.record(&self.device, &mut encoder, &color_view, dst);
         }
 

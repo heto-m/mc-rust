@@ -25,6 +25,7 @@
     "FramerateLimiterMixin",
     "GameConfigUserDataMixin",
     "GameRendererMixin",
+    "GameRendererPostEffectsMixin",
     "GuiMixin",
     "GuiRendererMixin",
     "InputConstantsMixin",

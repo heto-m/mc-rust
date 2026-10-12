@@ -36,6 +36,7 @@ pub struct SimKinds {
     pub player_type: i32,
     pub creeper_type: Option<i32>,
     pub dragon_type: Option<i32>,
+    pub knot_type: Option<i32>,
 }
 
 impl SimKinds {
@@ -76,11 +77,15 @@ impl SimKinds {
         let dragon_type = data
             .entity_type_by_name("minecraft:ender_dragon")
             .map(|id| id as i32);
+        let knot_type = data
+            .entity_type_by_name("minecraft:leash_knot")
+            .map(|id| id as i32);
         Self {
             by_type,
             player_type,
             creeper_type,
             dragon_type,
+            knot_type,
         }
     }
 

@@ -30,8 +30,11 @@ pub trait ExternalSubmitter {
     /// After all opaque terrain, before translucent terrain and world effects.
     fn after_opaque(&mut self, _ctx: &ExternalCtx<'_>) {}
 
-    /// After the world and world-space overlays, before UI overlays and the present blit.
+    /// After the world and world-space overlays, before post effects, UI overlays and the present blit.
     fn after_world(&mut self, ctx: &ExternalCtx<'_>);
+
+    /// After post effects, before UI overlays and the present blit: where an external GUI lands.
+    fn before_ui(&mut self, _ctx: &ExternalCtx<'_>) {}
 }
 
 /// Copies the scene image into a surface view of another format.

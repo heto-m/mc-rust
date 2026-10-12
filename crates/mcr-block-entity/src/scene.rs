@@ -365,6 +365,7 @@ impl BlockEntityScene {
             sky_light: light[1],
             uv_offset: [0.0; 2],
             origin,
+            outline: None,
         });
     }
 
@@ -1142,6 +1143,7 @@ impl BlockEntityScene {
             sky_light: light[1],
             uv_offset: [0.0, v_offset],
             origin,
+            outline: None,
         });
     }
 

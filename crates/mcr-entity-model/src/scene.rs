@@ -198,6 +198,8 @@ pub struct EntityScene {
     camera_angles: (f32, f32),
     billboard: Mat4,
     flash: bool,
+    /// Glow colour of the entity being emitted.
+    outline: Option<[u8; 3]>,
     sprite_models: FxHashMap<[u32; 4], ModelId>,
     bolts: FxHashMap<u32, ModelId>,
     block_top: Option<BlockTop>,
@@ -241,6 +243,7 @@ impl EntityScene {
             camera_angles: (0.0, 0.0),
             billboard: Mat4::IDENTITY,
             flash: false,
+            outline: None,
             sprite_models: FxHashMap::default(),
             bolts: FxHashMap::default(),
             block_top: None,
@@ -460,6 +463,7 @@ impl EntityScene {
     ) {
         let plan = &job.plan;
         let hurt = v.hurt || v.death_time > 0.0;
+        self.outline = v.outline;
         for pj in &job.parts {
             let part = &plan.parts[pj.part];
             self.gpu.push(&PartInstance {
@@ -475,6 +479,7 @@ impl EntityScene {
                 sky_light: v.light[1],
                 uv_offset: part.uv_offset,
                 origin: v.pos,
+                outline: self.outline,
             });
             self.stats.parts += 1;
         }
@@ -485,6 +490,7 @@ impl EntityScene {
             self.emit_attachments(v, plan, job, bm);
         }
         self.emit_free(v, plan);
+        self.outline = None;
         self.emit_shadow(v, plan, block_top);
         if let Some(name) = v.custom_name {
             let height = mcr_data::v26_3()
@@ -577,6 +583,7 @@ impl EntityScene {
                 sky_light: light[1],
                 uv_offset: [0.0; 2],
                 origin,
+                outline: self.outline,
             });
             self.stats.parts += 1;
             if glint {
@@ -600,6 +607,7 @@ impl EntityScene {
                     sky_light: light[1],
                     uv_offset: glint_scroll(age_ticks),
                     origin,
+                    outline: self.outline,
                 });
                 self.stats.parts += 1;
             }
@@ -641,7 +649,9 @@ impl EntityScene {
             );
         }
         if let Some((start, end)) = v.leash {
+            let outline = self.outline.take();
             self.push_leash(v, start, end);
+            self.outline = outline;
         }
         for g in &plan.free_geo {
             match g {
@@ -732,6 +742,7 @@ impl EntityScene {
                         sky_light: v.light[1],
                         uv_offset: [0.0; 2],
                         origin: v.pos,
+                        outline: self.outline,
                     });
                     self.stats.parts += 1;
                 }
@@ -843,6 +854,7 @@ impl EntityScene {
             sky_light: v.light[1],
             uv_offset: [0.0; 2],
             origin: v.pos,
+            outline: self.outline,
         });
         self.stats.parts += 1;
     }
@@ -882,6 +894,7 @@ impl EntityScene {
             sky_light: 15,
             uv_offset: [0.0; 2],
             origin: v.pos,
+            outline: self.outline,
         });
         self.stats.parts += 1;
     }
@@ -1020,6 +1033,14 @@ impl EntityScene {
 
     pub fn draw_blended(&self, pass: &mut wgpu::RenderPass<'_>) {
         self.gpu.draw_blended(pass);
+    }
+
+    pub fn has_outlines(&self) -> bool {
+        self.gpu.has_outlines()
+    }
+
+    pub fn draw_outlines(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.gpu.draw_outlines(pass);
     }
 }
 

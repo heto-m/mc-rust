@@ -41,7 +41,7 @@ pub use data::{
 };
 pub use gpu::{
     Bone34, CLASS_SIZES, EntityRenderer, LightInfo, MAX_BONES, MAX_INSTANCES, ModelId,
-    PartInstance, Pipeline, TargetFormats, TexId,
+    OUTLINE_COLOR_FORMAT, OUTLINE_DEPTH_FORMAT, PartInstance, Pipeline, TargetFormats, TexId,
 };
 pub use humanoids::default_skin;
 pub use items::clone_count;
