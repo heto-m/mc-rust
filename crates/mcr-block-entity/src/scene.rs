@@ -21,7 +21,7 @@ use crate::data::{
 use crate::flat::{FlatBind, FlatKind, FlatRenderer, FlatVertex};
 use crate::kind::BlockEntityKind;
 use crate::place::{ChestType, Dir, Oxidation, Placement};
-use crate::text::{SideLayout, TextQuad, layout_side};
+use crate::text::{DisplayLayout, SideLayout, TextQuad, layout_side};
 
 const WHITE: [u8; 4] = [255; 4];
 const OUTLINE_DISTANCE: f64 = 16.0;
@@ -60,6 +60,19 @@ struct Entry {
     data: BlockEntityData,
     anim: Anim,
     sign: Option<Box<[SideLayout; 2]>>,
+}
+
+/// One text display for this frame. `local` maps display space to entity space (billboard, then
+/// the transformation); the layout is placed like vanilla's `TextDisplayRenderer.submitInner`.
+#[derive(Debug, Clone)]
+pub struct TextDisplayDraw {
+    pub layout: Arc<DisplayLayout>,
+    pub origin: [f64; 3],
+    pub local: Mat4,
+    pub opacity: u8,
+    pub background: u32,
+    pub see_through: bool,
+    pub light: [u8; 2],
 }
 
 struct Display {
@@ -160,6 +173,7 @@ pub struct BlockEntityScene {
     stats: BlockEntityStats,
     time: f32,
     has_gateway: bool,
+    queued_text: Vec<TextDisplayDraw>,
 }
 
 impl BlockEntityScene {
@@ -203,7 +217,13 @@ impl BlockEntityScene {
             stats: BlockEntityStats::default(),
             time: 0.0,
             has_gateway: false,
+            queued_text: Vec::new(),
         })
+    }
+
+    /// Text displays drawn by the next [`update`](Self::update).
+    pub fn queue_text(&mut self, draws: Vec<TextDisplayDraw>) {
+        self.queued_text = draws;
     }
 
     pub fn set_christmas(&mut self, on: bool) {
@@ -437,6 +457,7 @@ impl BlockEntityScene {
             self.emit(*pos, e, lt, &ctx, &mut displays, ui.as_deref_mut());
         }
         self.entries = entries;
+        self.emit_text_displays(&ctx);
         let views: Vec<EntityView<'_>> = displays
             .iter()
             .map(|d| {
@@ -1482,6 +1503,73 @@ impl BlockEntityScene {
                 self.push_text(&layout.outline, &m, 0.0, level, layout.glowing);
             }
             self.push_text(&layout.main, &m, 0.02, level, layout.glowing);
+        }
+    }
+
+    fn emit_text_displays(&mut self, ctx: &Ctx<'_>) {
+        let cam = ctx.frame.params.camera;
+        for d in std::mem::take(&mut self.queued_text) {
+            let layout = &*d.layout;
+            if layout.height <= 0 {
+                continue;
+            }
+            let rel = Vec3::new(
+                (d.origin[0] - cam[0]) as f32,
+                (d.origin[1] - cam[1]) as f32,
+                (d.origin[2] - cam[2]) as f32,
+            );
+            let m = Mat4::from_translation(rel)
+                * d.local
+                * Mat4::from_rotation_y(PI)
+                * Mat4::from_scale(Vec3::splat(-0.025))
+                * t(
+                    1.0 - layout.width as f32 / 2.0,
+                    -(layout.height as f32),
+                    0.0,
+                );
+            let level = ctx.frame.params.light.color(d.light);
+            let kind = if d.see_through {
+                FlatKind::DisplayTextSeeThrough
+            } else {
+                FlatKind::DisplayText
+            };
+            let alpha = if d.opacity >= 4 { d.opacity } else { 255 };
+            if d.background >> 24 != 0 {
+                let argb = d.background;
+                let color = shade(
+                    [
+                        (argb >> 16) as u8,
+                        (argb >> 8) as u8,
+                        argb as u8,
+                        (argb >> 24) as u8,
+                    ],
+                    level,
+                );
+                let (x0, y0, x1, y1) = (-1.0, -1.0, layout.width as f32, layout.height as f32);
+                let v = |x: f32, y: f32| FlatVertex {
+                    pos: m.transform_point3(Vec3::new(x, y, -0.01)).to_array(),
+                    uv: layout.white,
+                    color,
+                };
+                self.flat.push_quad(
+                    kind,
+                    FlatBind::Background,
+                    [v(x0, y0), v(x0, y1), v(x1, y1), v(x1, y0)],
+                );
+            }
+            for q in &layout.quads {
+                let mut color = shade(q.color, level);
+                color[3] = (u32::from(q.color[3]) * u32::from(alpha) / 255) as u8;
+                let v = |i: usize| FlatVertex {
+                    pos: m
+                        .transform_point3(Vec3::new(q.pos[i][0], q.pos[i][1], 0.0))
+                        .to_array(),
+                    uv: q.uv[i],
+                    color,
+                };
+                self.flat
+                    .push_quad(kind, FlatBind::Page(q.page), [v(0), v(1), v(2), v(3)]);
+            }
         }
     }
 

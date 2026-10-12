@@ -17,6 +17,10 @@ pub enum FlatKind {
     BeamSolid,
     BeamGlow,
     Text,
+    /// Text display with polygon offset, as vanilla's default display mode.
+    DisplayText,
+    /// Text display with `see_through`: ignores the depth buffer.
+    DisplayTextSeeThrough,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -25,6 +29,8 @@ pub enum FlatBind {
     Gateway,
     Beam,
     GatewayBeam,
+    /// The white pixel of glyph page 0, for text backgrounds; sorts before the pages that draw over it.
+    Background,
     Page(u32),
 }
 
@@ -58,6 +64,13 @@ struct Texture {
     group: Option<wgpu::BindGroup>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DepthMode {
+    Test,
+    Offset,
+    Always,
+}
+
 pub const MAX_QUADS: usize = 1 << 17;
 
 /// Pipelines for geometry that does not fit the skinned entity renderer: portals, beam shells and sign text.
@@ -65,7 +78,7 @@ pub const MAX_QUADS: usize = 1 << 17;
 pub struct FlatRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipelines: [wgpu::RenderPipeline; 4],
+    pipelines: [wgpu::RenderPipeline; 6],
     globals: wgpu::Buffer,
     globals_group: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
@@ -211,57 +224,68 @@ impl FlatRenderer {
         let attributes = wgpu::vertex_attr_array![
             0 => Float32x3, 1 => Float32x2, 2 => Unorm8x4
         ];
-        let make = |entry: &str, blend: Option<wgpu::BlendState>, depth_write: bool| {
-            let compare = if formats.reverse_z {
-                wgpu::CompareFunction::Greater
-            } else {
-                wgpu::CompareFunction::Less
+        let make =
+            |entry: &str, blend: Option<wgpu::BlendState>, depth_write: bool, mode: DepthMode| {
+                let compare = match (mode, formats.reverse_z) {
+                    (DepthMode::Always, _) => wgpu::CompareFunction::Always,
+                    (_, true) => wgpu::CompareFunction::Greater,
+                    (_, false) => wgpu::CompareFunction::Less,
+                };
+                let bias = match mode {
+                    DepthMode::Offset => wgpu::DepthBiasState {
+                        constant: if formats.reverse_z { 16 } else { -16 },
+                        slope_scale: if formats.reverse_z { 2.0 } else { -2.0 },
+                        clamp: 0.0,
+                    },
+                    _ => Default::default(),
+                };
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[Some(wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<FlatVertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &attributes,
+                        })],
+                    },
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: formats.depth,
+                        depth_write_enabled: Some(depth_write),
+                        depth_compare: Some(compare),
+                        stencil: Default::default(),
+                        bias,
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: formats.sample_count.max(1),
+                        ..Default::default()
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(entry),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: formats.color,
+                            blend,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
             };
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(entry),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<FlatVertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &attributes,
-                    })],
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: formats.depth,
-                    depth_write_enabled: Some(depth_write),
-                    depth_compare: Some(compare),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: formats.sample_count.max(1),
-                    ..Default::default()
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: formats.color,
-                        blend,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
         let alpha = Some(wgpu::BlendState::ALPHA_BLENDING);
         let pipelines = [
-            make("fs_portal", None, true),
-            make("fs_tex", alpha, true),
-            make("fs_tex", alpha, false),
-            make("fs_tex", alpha, false),
+            make("fs_portal", None, true, DepthMode::Test),
+            make("fs_tex", alpha, true, DepthMode::Test),
+            make("fs_tex", alpha, false, DepthMode::Test),
+            make("fs_tex", alpha, false, DepthMode::Test),
+            make("fs_tex", alpha, false, DepthMode::Offset),
+            make("fs_tex", alpha, false, DepthMode::Always),
         ];
         let repeat = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("flat repeat"),
@@ -539,6 +563,7 @@ impl FlatRenderer {
             FlatBind::Portal | FlatBind::Gateway => self.sky.as_ref(),
             FlatBind::Beam => self.beam.as_ref(),
             FlatBind::GatewayBeam => self.gateway_beam.as_ref(),
+            FlatBind::Background => self.pages.first(),
             FlatBind::Page(i) => self.pages.get(i as usize),
         };
         texture.and_then(|t| t.group.as_ref())
@@ -555,7 +580,15 @@ impl FlatRenderer {
     }
 
     pub fn draw_blended(&self, pass: &mut wgpu::RenderPass<'_>) {
-        self.draw_filtered(pass, |k| matches!(k, FlatKind::BeamGlow | FlatKind::Text));
+        self.draw_filtered(pass, |k| {
+            matches!(
+                k,
+                FlatKind::BeamGlow
+                    | FlatKind::Text
+                    | FlatKind::DisplayText
+                    | FlatKind::DisplayTextSeeThrough
+            )
+        });
     }
 
     fn draw_filtered(&self, pass: &mut wgpu::RenderPass<'_>, keep: impl Fn(FlatKind) -> bool) {

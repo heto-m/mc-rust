@@ -45,6 +45,7 @@ mod source;
 mod stats;
 mod status;
 mod target;
+mod text_display;
 mod view;
 mod world_setup;
 

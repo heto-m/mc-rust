@@ -186,6 +186,8 @@ pub struct EntityView<'a> {
     pub player: PlayerView<'a>,
     /// Glow colour (`Entity.getTeamColor` of a glowing entity), drawn as an outline.
     pub outline: Option<[u8; 3]>,
+    /// Interpolated state of a display entity; without it the raw entity data is used.
+    pub display: Option<crate::display::DisplaySample>,
 }
 
 impl std::fmt::Debug for EntityView<'_> {
@@ -237,6 +239,7 @@ impl<'a> EntityView<'a> {
             passenger: false,
             invisible: false,
             outline: None,
+            display: None,
             custom_name: None,
             player: PlayerView::default(),
         }

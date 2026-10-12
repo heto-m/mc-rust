@@ -1,5 +1,9 @@
 use std::num::NonZeroU64;
 
+mod pack;
+
+pub use pack::PostOverrides;
+
 /// Most chains run in one frame; the server list plus the spectated chain is cut here.
 pub const MAX_POST_CHAINS: usize = 8;
 
@@ -88,7 +92,7 @@ pub(crate) enum Program {
     Blit {
         tint: [f32; 4],
     },
-    SpiderClip(&'static SpiderEye),
+    SpiderClip(SpiderEye),
     Sobel,
     OutlineBlur {
         dir: [f32; 2],
@@ -97,11 +101,11 @@ pub(crate) enum Program {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SpiderEye {
-    scale: [f32; 2],
-    offset: [f32; 2],
-    degrees: f32,
-    clip: [f32; 4],
-    fade: [f32; 4],
+    pub(crate) scale: [f32; 2],
+    pub(crate) offset: [f32; 2],
+    pub(crate) degrees: f32,
+    pub(crate) clip: [f32; 4],
+    pub(crate) fade: [f32; 4],
 }
 
 const PROGRAMS: usize = 8;
@@ -182,7 +186,7 @@ const fn blur(dir: [f32; 2], radius: f32, input: Slot, output: Slot) -> Pass {
     pass(Program::BoxBlur { dir, radius }, input, true, output)
 }
 
-const fn eye(input: Slot, aux: Slot, output: Slot, e: &'static SpiderEye) -> Pass {
+const fn eye(input: Slot, aux: Slot, output: Slot, e: SpiderEye) -> Pass {
     Pass {
         program: Program::SpiderClip(e),
         input,
@@ -240,7 +244,7 @@ const WIDE_FADE: [f32; 4] = [0.1, 0.1, 0.9, 0.9];
 const NARROW_CLIP: [f32; 4] = [0.21, 0.0, 0.79, 1.0];
 const NARROW_FADE: [f32; 4] = [0.31, 0.1, 0.69, 0.9];
 
-static EYES: [SpiderEye; 5] = [
+const EYES: [SpiderEye; 5] = [
     SpiderEye {
         scale: [1.25, 2.0],
         offset: [-0.125, -0.1],
@@ -283,11 +287,11 @@ static SPIDER: [Pass; 10] = [
     blur(V, 15.0, Slot::Temp, Slot::LargeBlur),
     blur(H, 7.0, Slot::Main, Slot::Temp),
     blur(V, 7.0, Slot::Temp, Slot::SmallBlur),
-    eye(Slot::Main, Slot::LargeBlur, Slot::Temp, &EYES[0]),
-    eye(Slot::SmallBlur, Slot::Temp, Slot::Swap, &EYES[1]),
-    eye(Slot::SmallBlur, Slot::Swap, Slot::Temp, &EYES[2]),
-    eye(Slot::SmallBlur, Slot::Temp, Slot::Swap, &EYES[3]),
-    eye(Slot::SmallBlur, Slot::Swap, Slot::Temp, &EYES[4]),
+    eye(Slot::Main, Slot::LargeBlur, Slot::Temp, EYES[0]),
+    eye(Slot::SmallBlur, Slot::Temp, Slot::Swap, EYES[1]),
+    eye(Slot::SmallBlur, Slot::Swap, Slot::Temp, EYES[2]),
+    eye(Slot::SmallBlur, Slot::Temp, Slot::Swap, EYES[3]),
+    eye(Slot::SmallBlur, Slot::Swap, Slot::Temp, EYES[4]),
     pass(
         Program::Blit {
             tint: [1.0, 0.8, 0.8, 1.0],
@@ -382,6 +386,7 @@ pub struct PostStack {
     pool: [Option<(wgpu::Texture, wgpu::TextureView)>; POOL],
     pool_size: (u32, u32),
     prepared: Option<Prepared>,
+    overrides: PostOverrides,
 }
 
 impl std::fmt::Debug for PostStack {
@@ -480,6 +485,15 @@ impl PostStack {
             pool: Default::default(),
             pool_size: (0, 0),
             prepared: None,
+            overrides: PostOverrides::default(),
+        }
+    }
+
+    /// Chains a resource pack re-tuned; every other chain runs as built in.
+    pub fn set_overrides(&mut self, overrides: PostOverrides) {
+        if self.overrides != overrides {
+            self.overrides = overrides;
+            self.prepared = None;
         }
     }
 
@@ -532,7 +546,10 @@ impl PostStack {
             self.pool_size = size;
             self.prepared = None;
         }
-        let outputs = chains.iter().flat_map(|c| c.passes()).map(|p| p.output);
+        let outputs = chains
+            .iter()
+            .flat_map(|c| self.overrides.passes(*c))
+            .map(|p| p.output);
         for k in outputs.filter_map(Slot::pool_index) {
             if self.pool[k].is_some() {
                 continue;
@@ -587,7 +604,7 @@ impl PostStack {
         let size = [main.width() as f32, main.height() as f32];
         self.staging.clear();
         let mut groups = Vec::new();
-        for p in chains.iter().flat_map(|c| c.passes()) {
+        for p in chains.iter().flat_map(|c| self.overrides.passes(*c)) {
             let mut block = [[0.0f32; 4]; 5];
             block[0] = [size[0], size[1], menu_radius as f32, 0.0];
             block[1..].copy_from_slice(&p.program.params());
@@ -666,14 +683,14 @@ impl PostStack {
         for kind in 0..PROGRAMS {
             if chains
                 .iter()
-                .flat_map(|c| c.passes())
+                .flat_map(|c| self.overrides.passes(*c))
                 .any(|p| p.program.kind() == kind)
             {
                 self.pipeline(device, kind);
             }
         }
         let prepared = self.prepared.as_ref().expect("prepared above");
-        let passes = chains.iter().flat_map(|c| c.passes());
+        let passes = chains.iter().flat_map(|c| self.overrides.passes(*c));
         for (i, (p, group)) in passes.zip(&prepared.groups).enumerate() {
             let Some(pipeline) = &self.pipelines[p.program.kind()] else {
                 continue;
@@ -748,7 +765,7 @@ mod tests {
 
     #[test]
     fn program_parameters_land_in_their_slots() {
-        let p = Program::SpiderClip(&EYES[1]).params();
+        let p = Program::SpiderClip(EYES[1]).params();
         assert_eq!(p[0], [2.35, 4.2, -1.1, -1.5]);
         assert_eq!(p[1][0], -45.0);
         assert_eq!(p[2], NARROW_CLIP);

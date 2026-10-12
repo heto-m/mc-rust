@@ -123,3 +123,20 @@ pub const THROWN_TRIDENT_FOIL: u8 = 12;
 
 /// `Cushion.DATA_COLOR`, the first field after `Entity`'s.
 pub const CUSHION_COLOR: u8 = 8;
+
+pub const DISPLAY_INTERPOLATION_DELAY: u8 = 8;
+pub const DISPLAY_INTERPOLATION_DURATION: u8 = 9;
+pub const DISPLAY_TRANSLATION: u8 = 11;
+pub const DISPLAY_SCALE: u8 = 12;
+pub const DISPLAY_LEFT_ROTATION: u8 = 13;
+pub const DISPLAY_RIGHT_ROTATION: u8 = 14;
+pub const DISPLAY_BILLBOARD: u8 = 15;
+pub const DISPLAY_BRIGHTNESS: u8 = 16;
+pub const DISPLAY_VIEW_RANGE: u8 = 17;
+pub const DISPLAY_WIDTH: u8 = 20;
+pub const DISPLAY_HEIGHT: u8 = 21;
+pub const TEXT_DISPLAY_TEXT: u8 = 23;
+pub const TEXT_DISPLAY_LINE_WIDTH: u8 = 24;
+pub const TEXT_DISPLAY_BACKGROUND: u8 = 25;
+pub const TEXT_DISPLAY_OPACITY: u8 = 26;
+pub const TEXT_DISPLAY_FLAGS: u8 = 27;

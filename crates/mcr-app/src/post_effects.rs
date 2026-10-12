@@ -1,4 +1,5 @@
-use mcr_render::{MAX_POST_CHAINS, PostChain};
+use mcr_assets::ResourceManager;
+use mcr_render::{MAX_POST_CHAINS, PostChain, PostOverrides};
 
 /// Vanilla's spectated-entity post effect.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -29,6 +30,29 @@ impl SpectatorEffect {
     }
 }
 
+/// The resource stack's `post_effect/<chain>.json` files, for the chains whose shape we can follow.
+pub fn pack_overrides(resources: &ResourceManager) -> PostOverrides {
+    let mut overrides = PostOverrides::default();
+    for chain in PostChain::ALL {
+        let path = format!("assets/minecraft/post_effect/{}.json", chain.name());
+        let Some(json) = resources
+            .read(&path)
+            .ok()
+            .flatten()
+            .and_then(|b| String::from_utf8(b).ok())
+        else {
+            continue;
+        };
+        if !overrides.set(chain, &json) {
+            tracing::warn!(
+                "post effect {} from the resource packs has another shape or custom shaders; using the built-in chain",
+                chain.name()
+            );
+        }
+    }
+    overrides
+}
+
 /// The chains to run this frame: the server's list, then the spectated chain.
 pub fn requested(server: &[String], spectated: Option<PostChain>, out: &mut Vec<PostChain>) {
     out.clear();
@@ -40,6 +64,34 @@ pub fn requested(server: &[String], spectated: Option<PostChain>, out: &mut Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pack_directory_retunes_only_the_chains_that_match() {
+        let root = std::env::temp_dir().join(format!("mcr-post-pack-{}", std::process::id()));
+        let dir = root.join("assets/minecraft/post_effect");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            root.join("pack.mcmeta"),
+            r#"{"pack":{"pack_format":75,"description":""}}"#,
+        )
+        .unwrap();
+        let invert = r#"{"passes":[
+            {"vertex_shader":"minecraft:core/screenquad","fragment_shader":"minecraft:post/invert",
+             "inputs":[{"sampler_name":"In","target":"minecraft:main"}],"output":"swap",
+             "uniforms":{"InvertConfig":[{"name":"InverseAmount","type":"float","value":0.3}]}},
+            {"vertex_shader":"minecraft:core/screenquad","fragment_shader":"minecraft:post/blit",
+             "inputs":[{"sampler_name":"In","target":"swap"}],"output":"minecraft:main",
+             "uniforms":{"BlitConfig":[{"name":"ColorModulate","type":"vec4","value":[1,1,1,1]}]}}]}"#;
+        std::fs::write(dir.join("invert.json"), invert).unwrap();
+        std::fs::write(dir.join("creeper.json"), r#"{"passes":[]}"#).unwrap();
+        let mut resources = ResourceManager::new();
+        resources.push_path(&root).unwrap();
+        let overrides = pack_overrides(&resources);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(overrides.follows(PostChain::Invert));
+        assert!(!overrides.follows(PostChain::Creeper));
+        assert!(!overrides.follows(PostChain::Spider));
+    }
 
     #[test]
     fn spectated_mobs_pick_vanilla_chains() {

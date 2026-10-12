@@ -261,6 +261,10 @@ impl EntityScene {
         self.billboard = camera_orientation(yaw, pitch);
     }
 
+    pub fn camera_angles(&self) -> (f32, f32) {
+        self.camera_angles
+    }
+
     /// Lets entities cast blob shadows on the top surface of the block below them.
     pub fn set_block_top(&mut self, block_top: Option<BlockTop>) {
         self.block_top = block_top;

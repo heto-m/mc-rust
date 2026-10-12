@@ -135,3 +135,69 @@ pub fn layout_side(ui: &mut Ui, side: &SignSide, hanging: bool) -> SideLayout {
 fn ceil_width(frame: &mut mcr_ui::UiFrame<'_>, cells: &[Cell]) -> i32 {
     frame.ui().width(cells).ceil() as i32
 }
+
+pub const MAX_DISPLAY_LINES: usize = 64;
+pub const MAX_DISPLAY_CELLS: usize = 4096;
+pub const MAX_DISPLAY_WIDTH: i32 = 1024;
+pub const DISPLAY_LINE_HEIGHT: i32 = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Align {
+    #[default]
+    Center,
+    Left,
+    Right,
+}
+
+/// Glyph quads of a text display in font pixels (x right, y down, origin at the first line's top left).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DisplayLayout {
+    pub quads: Vec<TextQuad>,
+    pub width: i32,
+    /// `lines * 10 - 1`, or 0 without text.
+    pub height: i32,
+    pub white: [f32; 2],
+}
+
+/// `TextDisplayRenderer.splitLines` plus the per-line alignment of `submitInner`.
+pub fn layout_display(
+    ui: &mut Ui,
+    cells: &[Cell],
+    line_width: i32,
+    align: Align,
+    shadow: bool,
+) -> DisplayLayout {
+    let cells = &cells[..cells.len().min(MAX_DISPLAY_CELLS)];
+    let white = ui.fonts().atlas().white_uv();
+    let mut lines = ui.wrap(cells, line_width.clamp(1, MAX_DISPLAY_WIDTH) as f32);
+    lines.truncate(MAX_DISPLAY_LINES);
+    let widths: Vec<i32> = lines
+        .iter()
+        .map(|r| ui.width(&cells[r.clone()]).ceil() as i32)
+        .collect();
+    let width = widths.iter().copied().max().unwrap_or(0);
+    let mut out = DisplayLayout {
+        quads: Vec::new(),
+        width,
+        height: if lines.is_empty() {
+            0
+        } else {
+            lines.len() as i32 * DISPLAY_LINE_HEIGHT - 1
+        },
+        white,
+    };
+    for (i, (range, lw)) in lines.iter().zip(&widths).enumerate() {
+        let x = match align {
+            Align::Left => 0.0,
+            Align::Right => (width - lw) as f32,
+            Align::Center => width as f32 / 2.0 - *lw as f32 / 2.0,
+        };
+        let y = (i as i32 * DISPLAY_LINE_HEIGHT) as f32;
+        {
+            let mut frame = ui.frame(1, 1);
+            frame.cells(&cells[range.clone()], x, y, 0xFFFF_FFFF, shadow);
+        }
+        collect(ui, white, true, &mut out.quads);
+    }
+    out
+}

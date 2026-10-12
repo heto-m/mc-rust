@@ -201,8 +201,74 @@ impl CycleButton {
     }
 }
 
+pub const CHECKBOX_SIZE: i32 = 17;
+const CHECKBOX_GAP: i32 = 4;
+
+#[derive(Clone, Debug)]
+pub struct Checkbox {
+    pub id: u32,
+    pub rect: [i32; 4],
+    pub label: String,
+    pub active: bool,
+    pub visible: bool,
+    selected: bool,
+}
+
+impl Checkbox {
+    pub fn new(id: u32, x: i32, y: i32, label: impl Into<String>, selected: bool) -> Self {
+        Self {
+            id,
+            rect: [x, y, CHECKBOX_SIZE, CHECKBOX_SIZE],
+            label: label.into(),
+            active: true,
+            visible: true,
+            selected,
+        }
+    }
+
+    pub fn selected(&self) -> bool {
+        self.selected
+    }
+
+    pub fn toggle(&mut self) {
+        self.selected = !self.selected;
+    }
+
+    pub fn fit_width(&mut self, label_width: i32) {
+        self.rect[2] = CHECKBOX_SIZE + CHECKBOX_GAP + label_width;
+    }
+
+    fn render(&self, cx: &mut RenderCx<'_, '_>, highlighted: bool) {
+        let [x, y, _, h] = self.rect;
+        let sprite = match (self.selected, highlighted) {
+            (false, false) => "widget/checkbox",
+            (false, true) => "widget/checkbox_highlighted",
+            (true, false) => "widget/checkbox_selected",
+            (true, true) => "widget/checkbox_selected_highlighted",
+        };
+        cx.sprite(sprite, x, y, CHECKBOX_SIZE, CHECKBOX_SIZE);
+        let resolved;
+        let label = match self.label.strip_prefix("lang:") {
+            Some(key) => {
+                resolved = cx.lang(key);
+                resolved.as_str()
+            }
+            None => &self.label,
+        };
+        let color = if self.active { WHITE } else { DISABLED_TEXT };
+        cx.text(
+            label,
+            x + CHECKBOX_SIZE + CHECKBOX_GAP,
+            y + (h - 8) / 2,
+            color,
+            true,
+        );
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Widget {
+    Checkbox(Checkbox),
     Button(Button),
     Slider(Slider),
     Cycle(CycleButton),
@@ -213,6 +279,7 @@ impl Widget {
     pub fn id(&self) -> u32 {
         match self {
             Self::Button(w) => w.id,
+            Self::Checkbox(w) => w.id,
             Self::Slider(w) => w.id,
             Self::Cycle(w) => w.id,
             Self::Edit(w) => w.id,
@@ -222,6 +289,7 @@ impl Widget {
     pub fn rect(&self) -> [i32; 4] {
         match self {
             Self::Button(w) => w.rect,
+            Self::Checkbox(w) => w.rect,
             Self::Slider(w) => w.rect,
             Self::Cycle(w) => w.rect,
             Self::Edit(w) => w.rect,
@@ -231,6 +299,7 @@ impl Widget {
     pub fn set_rect(&mut self, rect: [i32; 4]) {
         match self {
             Self::Button(w) => w.rect = rect,
+            Self::Checkbox(w) => w.rect = rect,
             Self::Slider(w) => w.rect = rect,
             Self::Cycle(w) => w.rect = rect,
             Self::Edit(w) => w.rect = rect,
@@ -240,6 +309,7 @@ impl Widget {
     pub fn active(&self) -> bool {
         match self {
             Self::Button(w) => w.active,
+            Self::Checkbox(w) => w.active,
             Self::Slider(w) => w.active,
             Self::Cycle(w) => w.active,
             Self::Edit(w) => w.active,
@@ -249,6 +319,7 @@ impl Widget {
     pub fn visible(&self) -> bool {
         match self {
             Self::Button(w) => w.visible,
+            Self::Checkbox(w) => w.visible,
             Self::Slider(w) => w.visible,
             Self::Cycle(w) => w.visible,
             Self::Edit(w) => w.visible,
@@ -262,6 +333,7 @@ impl Widget {
     pub fn set_active(&mut self, active: bool) {
         match self {
             Self::Button(w) => w.active = active,
+            Self::Checkbox(w) => w.active = active,
             Self::Slider(w) => w.active = active,
             Self::Cycle(w) => w.active = active,
             Self::Edit(w) => w.active = active,
@@ -271,6 +343,7 @@ impl Widget {
     pub fn set_visible(&mut self, visible: bool) {
         match self {
             Self::Button(w) => w.visible = visible,
+            Self::Checkbox(w) => w.visible = visible,
             Self::Slider(w) => w.visible = visible,
             Self::Cycle(w) => w.visible = visible,
             Self::Edit(w) => w.visible = visible,
@@ -281,6 +354,12 @@ impl Widget {
 impl From<Button> for Widget {
     fn from(w: Button) -> Self {
         Self::Button(w)
+    }
+}
+
+impl From<Checkbox> for Widget {
+    fn from(w: Checkbox) -> Self {
+        Self::Checkbox(w)
     }
 }
 
@@ -305,6 +384,7 @@ impl From<EditBox> for Widget {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WidgetEventKind {
     Pressed,
+    Toggled(bool),
     SliderChanged(f32),
     Cycled(usize),
     Edited,
@@ -369,6 +449,13 @@ impl WidgetSet {
     pub fn edit_mut(&mut self, id: u32) -> Option<&mut EditBox> {
         match self.find_mut(id)? {
             Widget::Edit(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    pub fn checkbox_mut(&mut self, id: u32) -> Option<&mut Checkbox> {
+        match self.find_mut(id)? {
+            Widget::Checkbox(c) => Some(c),
             _ => None,
         }
     }
@@ -444,6 +531,7 @@ impl WidgetSet {
                         hovered_tip = Some(t.clone());
                     }
                 }
+                Widget::Checkbox(c) => c.render(cx, hovered && c.active || focused),
                 Widget::Slider(s) => s.render(cx, hovered || focused),
                 Widget::Cycle(c) => c.render(cx, hovered && c.active || focused),
                 Widget::Edit(e) => e.render(cx, focused),
@@ -489,6 +577,13 @@ impl WidgetSet {
                         events.push(WidgetEvent {
                             id,
                             kind: WidgetEventKind::Pressed,
+                        });
+                    }
+                    Widget::Checkbox(c) if button == MouseButton::Left => {
+                        c.toggle();
+                        events.push(WidgetEvent {
+                            id,
+                            kind: WidgetEventKind::Toggled(c.selected()),
                         });
                     }
                     Widget::Cycle(c)
@@ -598,6 +693,14 @@ impl WidgetSet {
                     events.push(WidgetEvent {
                         id,
                         kind: WidgetEventKind::Pressed,
+                    });
+                    return true;
+                }
+                Widget::Checkbox(c) if c.active && matches!(key, Key::Enter | Key::Space) => {
+                    c.toggle();
+                    events.push(WidgetEvent {
+                        id,
+                        kind: WidgetEventKind::Toggled(c.selected()),
                     });
                     return true;
                 }
@@ -730,6 +833,17 @@ mod tests {
         );
         assert!(feed(&mut w, UiInput::press(10.0, 40.0, MouseButton::Left)).is_empty());
         assert!(feed(&mut w, UiInput::press(10.0, 10.0, MouseButton::Right)).is_empty());
+    }
+
+    #[test]
+    fn checkbox_toggles_on_click_and_keys() {
+        let mut w = WidgetSet::default();
+        w.add(Checkbox::new(1, 0, 0, "c", false));
+        let events = feed(&mut w, UiInput::press(5.0, 5.0, MouseButton::Left));
+        assert_eq!(events[0].kind, WidgetEventKind::Toggled(true));
+        let events = feed(&mut w, UiInput::key(Key::Space));
+        assert_eq!(events[0].kind, WidgetEventKind::Toggled(false));
+        assert!(!w.checkbox_mut(1).unwrap().selected());
     }
 
     #[test]

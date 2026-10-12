@@ -322,14 +322,18 @@ impl BlockEntities {
         self.scene.prepare(&frame);
     }
 
+    fn has_content(&self) -> bool {
+        !self.entries.is_empty() || self.scene.stats().text_quads > 0
+    }
+
     pub fn draw_opaque(&self, pass: &mut wgpu::RenderPass<'_>) {
-        if !self.entries.is_empty() {
+        if self.has_content() {
             self.scene.draw_opaque(pass);
         }
     }
 
     pub fn draw_blended(&self, pass: &mut wgpu::RenderPass<'_>) {
-        if !self.entries.is_empty() {
+        if self.has_content() {
             self.scene.draw_blended(pass);
         }
     }

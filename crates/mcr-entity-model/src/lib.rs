@@ -3,6 +3,7 @@ mod assets;
 mod catalog;
 mod cube;
 mod data;
+mod display;
 mod effects;
 mod equipment;
 mod extras;
@@ -39,6 +40,7 @@ pub use data::{
     AnimationDef, AnimationSet, ChannelDef, CubeDef, Interp, KeyframeDef, LayerDef, LayerSet,
     PartDef, RendererInfo, RendererSet, Target,
 };
+pub use display::{DisplaySample, DisplayTrack};
 pub use gpu::{
     Bone34, CLASS_SIZES, EntityRenderer, LightInfo, MAX_BONES, MAX_INSTANCES, ModelId,
     OUTLINE_COLOR_FORMAT, OUTLINE_DEPTH_FORMAT, PartInstance, Pipeline, TargetFormats, TexId,
@@ -46,7 +48,7 @@ pub use gpu::{
 pub use humanoids::default_skin;
 pub use items::clone_count;
 pub use maps::{MapDecoration, stack_map_id};
-pub use misc::hidden_while_fresh;
+pub use misc::{display_local, hidden_while_fresh};
 pub use model::{Bone, BoneId, Model};
 pub use plan::{Attach, AttachKind, FreeGeo, ItemContext, ItemSource, Part, Plan};
 pub use pose::{Pose, evaluate};

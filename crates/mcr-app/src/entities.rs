@@ -9,13 +9,17 @@ use mcr_entity_model::mcr_protocol::types::ItemStack;
 use mcr_entity_model::mcr_protocol::types::entity_data::{EntityDataValue, Pose as DataPose};
 use mcr_entity_model::wgpu;
 use mcr_entity_model::{
-    EntityData, EntityScene, EntityView, FrameParams, Glide, LightInfo, NoData, PlayerView,
-    Registries, SceneAssets, TargetFormats, hidden_while_fresh, slot,
+    DisplayTrack, EntityData, EntityScene, EntityView, FrameParams, Glide, LightInfo, NoData,
+    PlayerView, Registries, SceneAssets, TargetFormats, display_local, hidden_while_fresh, idx,
+    slot,
 };
 use mcr_physics::Pose as PhysPose;
 use mcr_render::{Camera, Frustum};
+use mcr_ui::Ui;
 use mcr_world::{ChunkPos, ChunkStore};
 use rustc_hash::FxHashMap;
+
+use crate::text_display::TextDisplays;
 
 const SWING_TICKS: i32 = 6;
 const HURT_TICKS: i32 = 10;
@@ -111,6 +115,15 @@ pub struct Track {
     seen: u64,
     living: bool,
     glide: GlideTrack,
+    display: DisplayTrack,
+    display_kind: DisplayKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisplayKind {
+    None,
+    Shape,
+    Text,
 }
 
 /// `LivingEntity.fallFlyTicks` and `ElytraAnimationState`, ticked with the entity.
@@ -222,6 +235,8 @@ impl Track {
             seen: 0,
             living,
             glide: GlideTrack::default(),
+            display: DisplayTrack::default(),
+            display_kind: DisplayKind::None,
         }
     }
 
@@ -318,6 +333,7 @@ pub struct EntityLayer {
     scale_attribute: Option<i32>,
     tick: u64,
     drawn_list: Vec<(i32, [f64; 3], f32, bool)>,
+    texts: TextDisplays,
     pub last_drawn: usize,
     pub last_culled: usize,
 }
@@ -352,6 +368,8 @@ pub struct FrameCtx<'a> {
     pub skins: &'a crate::skins::SkinStore,
     /// A spectator holds `key.spectatorOutlines`: every player glows.
     pub spectator_outlines: bool,
+    /// `getBackgroundOpacity(0.25)`: the default text display background.
+    pub text_background_opacity: f32,
 }
 
 /// `Entity.getTeamColor` when vanilla's `shouldEntityAppearGlowing` holds; `entry` is the
@@ -407,6 +425,7 @@ impl EntityLayer {
             scale_attribute,
             tick: 0,
             drawn_list: Vec::new(),
+            texts: TextDisplays::default(),
             last_drawn: 0,
             last_culled: 0,
         })
@@ -449,7 +468,13 @@ impl EntityLayer {
         self.tick += 1;
         let data = mcr_data::v26_3();
         for e in state.entities.iter() {
-            let living = data.entity_type_name(e.kind as u32).is_some_and(is_living);
+            let name = data.entity_type_name(e.kind as u32);
+            let living = name.is_some_and(is_living);
+            let display_kind = match name {
+                Some("minecraft:text_display") => DisplayKind::Text,
+                Some(n) if n.ends_with("_display") => DisplayKind::Shape,
+                _ => DisplayKind::None,
+            };
             let dead = health(e).is_some_and(|h| h <= 0.0);
             let tick = self.tick;
             let t = self
@@ -458,6 +483,10 @@ impl EntityLayer {
                 .or_insert_with(|| Track::new(e.pos, e.yaw, e.head_yaw, e.pitch, living));
             t.seen = tick;
             t.advance(e.pos, e.yaw, e.head_yaw, e.pitch, dead);
+            t.display_kind = display_kind;
+            if display_kind != DisplayKind::None {
+                t.display.tick(&e.data);
+            }
             if living {
                 let gliding = matches!(e.data.get(&0), Some(EntityDataValue::Byte(f)) if *f as u8 & 0x80 != 0);
                 let crouching = matches!(
@@ -469,6 +498,8 @@ impl EntityLayer {
         }
         let tick = self.tick;
         self.tracks.retain(|_, t| t.seen == tick);
+        let tracks = &self.tracks;
+        self.texts.forget_missing(|id| tracks.contains_key(&id));
         self.local.advance_local(&local);
         self.local.hurt = state.player.hurt_time;
     }
@@ -522,7 +553,7 @@ impl EntityLayer {
     }
 
     /// Builds this frame's instances; returns the drawn entity count.
-    pub fn update(&mut self, cx: &FrameCtx<'_>) {
+    pub fn update(&mut self, cx: &FrameCtx<'_>, ui: &mut Ui) {
         self.refresh_local(cx.state);
         let Self {
             scene,
@@ -533,6 +564,7 @@ impl EntityLayer {
             player_type,
             scale_attribute,
             drawn_list,
+            texts,
             ..
         } = self;
         drawn_list.clear();
@@ -541,6 +573,34 @@ impl EntityLayer {
         let culled = std::cell::Cell::new(0usize);
         let drawn = std::cell::Cell::new(0usize);
         let local_id = cx.state.player.entity_id;
+        texts.begin();
+        let camera_angles = scene.camera_angles();
+        for (id, t) in tracks.iter() {
+            if t.display_kind != DisplayKind::Text {
+                continue;
+            }
+            let Some(e) = cx.state.entities.get(*id) else {
+                continue;
+            };
+            let Some(sample) = t.display.sample(cx.partial) else {
+                continue;
+            };
+            let pos = entity_pos(cx, data, e, t);
+            if !display_visible(cx, pos, e) {
+                continue;
+            }
+            let mut view = make_view(e.id, e.uuid, e.kind, t, cx.partial, &e.data, 1.0);
+            view.display = Some(sample);
+            texts.push(
+                ui,
+                e,
+                &sample,
+                display_local(camera_angles, &view),
+                pos,
+                display_light(e, light_at(&cx.state.chunks, pos, eye_height(data, e.kind))),
+                cx.text_background_opacity,
+            );
+        }
         let local_view = cx.show_local.then(|| {
             let mut v = make_view(
                 local_id,
@@ -587,21 +647,14 @@ impl EntityLayer {
                     .and_then(|a| e.attributes.get(&a))
                     .map_or(1.0, |s| s.value(None) as f32)
                     .clamp(0.0625, 16.0);
-                let mut pos = lerp3(t.prev_pos, t.pos, f64::from(cx.partial));
-                if let Some(vehicle) = e.vehicle.and_then(|v| cx.state.entities.get(v)) {
-                    let (_, vh) = type_size(data, vehicle.kind);
-                    let names = (
-                        data.entity_type_name(vehicle.kind as u32).unwrap_or(""),
-                        data.entity_type_name(e.kind as u32).unwrap_or(""),
-                    );
-                    let seat = crate::seats::offset(names.0, vh, vehicle.yaw, names.1);
-                    pos = [
-                        vehicle.pos[0] + seat[0],
-                        vehicle.pos[1] + seat[1],
-                        vehicle.pos[2] + seat[2],
-                    ];
-                }
-                if !visible(cx, state_chunks(cx.state), pos, w * scale, h * scale) {
+                let pos = entity_pos(cx, data, e, t);
+                let in_view = match t.display_kind {
+                    DisplayKind::None => {
+                        visible(cx, state_chunks(cx.state), pos, w * scale, h * scale)
+                    }
+                    _ => display_visible(cx, pos, e),
+                };
+                if !in_view {
                     culled.set(culled.get() + 1);
                     return None;
                 }
@@ -638,6 +691,10 @@ impl EntityLayer {
                 view.light = light_at(&cx.state.chunks, pos, eye_height(data, e.kind) * scale);
                 if view.shared_flag(0) {
                     view.light[0] = 15;
+                }
+                if t.display_kind == DisplayKind::Shape {
+                    view.display = t.display.sample(cx.partial);
+                    view.light = display_light(e, view.light);
                 }
                 let is_player = e.kind == *player_type;
                 view.outline = glow_color(cx, &e.data, is_player, || {
@@ -708,6 +765,10 @@ impl EntityLayer {
         if self.has_parts() {
             self.scene.draw_blended(pass);
         }
+    }
+
+    pub fn take_text_draws(&mut self) -> Vec<mcr_block_entity::TextDisplayDraw> {
+        self.texts.take()
     }
 
     pub fn has_outlines(&self) -> bool {
@@ -849,6 +910,90 @@ fn type_size(data: &'static mcr_data::Version, kind: i32) -> (f32, f32) {
         .ok()
         .and_then(|k| data.entity_type_info(k))
         .map_or((0.6, 1.8), |i| (i.width, i.height))
+}
+
+/// Where the entity is drawn: interpolated, or on its vehicle's seat.
+fn entity_pos(
+    cx: &FrameCtx<'_>,
+    data: &'static mcr_data::Version,
+    e: &Entity,
+    t: &Track,
+) -> [f64; 3] {
+    let pos = lerp3(t.prev_pos, t.pos, f64::from(cx.partial));
+    let Some(vehicle) = e.vehicle.and_then(|v| cx.state.entities.get(v)) else {
+        return pos;
+    };
+    let (_, vh) = type_size(data, vehicle.kind);
+    let names = (
+        data.entity_type_name(vehicle.kind as u32).unwrap_or(""),
+        data.entity_type_name(e.kind as u32).unwrap_or(""),
+    );
+    let seat = crate::seats::offset(names.0, vh, vehicle.yaw, names.1);
+    [
+        vehicle.pos[0] + seat[0],
+        vehicle.pos[1] + seat[1],
+        vehicle.pos[2] + seat[2],
+    ]
+}
+
+/// `Display.getPackedBrightnessOverride`: `block << 4 | sky << 20`, or -1 for the world light.
+fn display_light(e: &Entity, world: [u8; 2]) -> [u8; 2] {
+    match e.data.get(&idx::DISPLAY_BRIGHTNESS) {
+        Some(EntityDataValue::Int(v)) if *v != -1 => {
+            [((*v >> 4) & 15) as u8, ((*v >> 20) & 15) as u8]
+        }
+        _ => world,
+    }
+}
+
+fn display_visible(cx: &FrameCtx<'_>, pos: [f64; 3], e: &Entity) -> bool {
+    if !pos.iter().all(|c| c.is_finite() && c.abs() < 3.0e7) {
+        return false;
+    }
+    let chunk = ChunkPos::new((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+    if state_chunks(cx.state).column(chunk).is_none() {
+        return false;
+    }
+    let float = |index: u8, default: f32| match e.data.get(&index) {
+        Some(EntityDataValue::Float(v)) if v.is_finite() => *v,
+        _ => default,
+    };
+    display_in_view(
+        cx.cull,
+        pos,
+        float(idx::DISPLAY_VIEW_RANGE, 1.0),
+        float(idx::DISPLAY_WIDTH, 0.0),
+        float(idx::DISPLAY_HEIGHT, 0.0),
+    )
+}
+
+/// `Display.shouldRenderAtSqrDistance` and the culling box; a zero width or height disables culling.
+pub fn display_in_view(cull: &Cull, pos: [f64; 3], view_range: f32, w: f32, h: f32) -> bool {
+    let rel = [
+        pos[0] - cull.camera_pos[0],
+        pos[1] - cull.camera_pos[1],
+        pos[2] - cull.camera_pos[2],
+    ];
+    let limit = f64::from(view_range.clamp(0.0, 1024.0)) * 64.0 * cull.distance_scale;
+    if rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2] >= limit * limit {
+        return false;
+    }
+    let (w, h) = (w.clamp(0.0, 1024.0), h.clamp(0.0, 1024.0));
+    if w == 0.0 || h == 0.0 {
+        return true;
+    }
+    let half = w / 2.0 + CULL_MARGIN;
+    let min = Vec3::new(
+        rel[0] as f32 - half,
+        rel[1] as f32 - CULL_MARGIN,
+        rel[2] as f32 - half,
+    );
+    let max = Vec3::new(
+        rel[0] as f32 + half,
+        rel[1] as f32 + h + CULL_MARGIN,
+        rel[2] as f32 + half,
+    );
+    cull.frustum.intersects_aabb(min, max)
 }
 
 fn dist_sq(a: [f64; 3], b: [f64; 3]) -> f64 {

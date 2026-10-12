@@ -19,7 +19,7 @@ use crate::mesh::SectionMesh;
 use crate::mesh::TINT_TABLE_WORDS;
 use crate::occlusion::HiZ;
 use crate::overlay::{Overlay, OverlayCtx};
-use crate::post::{MAX_POST_CHAINS, PostChain, PostStack};
+use crate::post::{MAX_POST_CHAINS, PostChain, PostOverrides, PostStack};
 use crate::quad::{ModelQuad, PackedQuad};
 use crate::staging::{Dest, Uploader};
 use crate::texture::{MAX_TEXTURE_GROUPS, TextureArrayData, TextureGroupData};
@@ -1663,6 +1663,11 @@ impl Renderer {
             self.post_chains
                 .extend_from_slice(&chains[..chains.len().min(MAX_POST_CHAINS)]);
         }
+    }
+
+    /// Resource-pack tuning of the built-in post chains; see [`PostOverrides`].
+    pub fn set_post_overrides(&mut self, overrides: PostOverrides) {
+        self.post.set_overrides(overrides);
     }
 
     pub fn post_effects(&self) -> &[PostChain] {

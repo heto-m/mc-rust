@@ -302,7 +302,7 @@ fn conduct_screen_answers() {
             UiInput::release(x, y, MouseButton::Left),
         ]
     };
-    send(&mut screen, &NoView, &click(200.0, 198.0));
+    send(&mut screen, &NoView, &click(40.0, 198.0));
     assert!(screen.remember());
     let out = send(&mut screen, &NoView, &click(80.0, 222.0));
     assert!(out.iter().any(|a| matches!(

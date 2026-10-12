@@ -5,7 +5,7 @@ use super::input::{Key, UiInput};
 use super::list::ScrollList;
 use super::menus::{WHITE, draw_menu_background};
 use super::screen::{Screen, ScreenAction};
-use super::widgets::{Button, WidgetEventKind, WidgetSet};
+use super::widgets::{Button, CHECKBOX_SIZE, Checkbox, WidgetEventKind, WidgetSet};
 use crate::style::Cell;
 
 const REMEMBER: u32 = 1;
@@ -62,10 +62,6 @@ impl ConductScreen {
         (self.gui.0 - 40).clamp(80, MAX_WIDTH)
     }
 
-    fn remember_label(&self, cx_label: &str) -> String {
-        format!("[{}] {}", if self.remember { "x" } else { " " }, cx_label)
-    }
-
     fn answer(&self, accept: bool) -> ScreenAction {
         ScreenAction::ConductAnswer {
             accept,
@@ -86,10 +82,12 @@ impl Screen for ConductScreen {
         self.widgets.clear();
         let bottom = height - 28;
         let half = (w - 4) / 2;
-        self.widgets.add(Button::new(
+        self.widgets.add(Checkbox::new(
             REMEMBER,
-            [left, bottom - 24, w, 20],
+            left,
+            bottom - 4 - CHECKBOX_SIZE,
             "lang:multiplayer.codeOfConduct.check",
+            self.remember,
         ));
         self.widgets.add(Button::new(
             ACCEPT,
@@ -114,9 +112,12 @@ impl Screen for ConductScreen {
             self.wrapped_for = rect[2];
         }
         let check = cx.lang("multiplayer.codeOfConduct.check");
-        let label = self.remember_label(&check);
-        if let Some(b) = self.widgets.button_mut(REMEMBER) {
-            b.label = label;
+        let label_width = cx.text_width(&check);
+        let panel = self.panel_width();
+        let panel_left = (self.gui.0 - panel) / 2;
+        if let Some(c) = self.widgets.checkbox_mut(REMEMBER) {
+            c.fit_width(label_width);
+            c.rect[0] = panel_left + (panel - c.rect[2]) / 2;
         }
         cx.frame.fill_rect(
             rect[0] - 1,
@@ -163,12 +164,16 @@ impl Screen for ConductScreen {
         let mut events = Vec::new();
         let used = self.widgets.input(env, input, &mut events);
         for e in events {
+            if let WidgetEventKind::Toggled(on) = e.kind {
+                self.remember = on;
+                out.push(ScreenAction::ClickSound);
+                continue;
+            }
             if e.kind != WidgetEventKind::Pressed {
                 continue;
             }
             out.push(ScreenAction::ClickSound);
             match e.id {
-                REMEMBER => self.remember = !self.remember,
                 ACCEPT => out.extend([self.answer(true), ScreenAction::Pop]),
                 DECLINE => out.extend([self.answer(false), ScreenAction::Pop]),
                 _ => {}

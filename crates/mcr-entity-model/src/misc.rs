@@ -598,6 +598,9 @@ fn orientation_for(mode: u8, camera: (f32, f32), entity: (f32, f32)) -> Mat4 {
 }
 
 fn display_transform(v: &EntityView<'_>) -> Mat4 {
+    if let Some(d) = &v.display {
+        return d.transform;
+    }
     let vec = |i: u8, d: Vec3| match v.raw(i) {
         Some(EntityDataValue::Vector3(x)) => Vec3::new(x.x, x.y, x.z),
         _ => d,
@@ -619,6 +622,11 @@ fn display_transform(v: &EntityView<'_>) -> Mat4 {
         * Mat4::from_quat(quat(13))
         * Mat4::from_scale(s)
         * Mat4::from_quat(quat(14))
+}
+
+/// Display-local to entity space: billboard orientation, then the interpolated transformation.
+pub fn display_local(camera_angles: (f32, f32), v: &EntityView<'_>) -> Mat4 {
+    display_orientation(camera_angles, v) * display_transform(v)
 }
 
 fn block_display(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {

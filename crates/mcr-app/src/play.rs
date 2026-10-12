@@ -450,6 +450,7 @@ impl Play {
         effects.set_options(&options);
         let mut renderer = renderer;
         renderer.set_effect_assets(&effects::effect_assets(&assets));
+        renderer.set_post_overrides(crate::post_effects::pack_overrides(&assets.resources));
         let (entities, block_entities, hand, preview) = match scene_assets {
             Some(sa) => (
                 EntityLayer::new(renderer.device(), renderer.queue(), format, sa.clone()),
@@ -1673,6 +1674,7 @@ impl Play {
         self.effects.set_options(&self.options);
         let renderer = &mut self.render.renderer;
         renderer.set_effect_assets(&effects::effect_assets(&assets));
+        renderer.set_post_overrides(crate::post_effects::pack_overrides(&assets.resources));
         let format = renderer.target_format();
         (self.entities, self.block_entities, self.hand, self.preview) = match assets.scene.clone() {
             Some(sa) => (
@@ -2507,29 +2509,41 @@ impl Play {
                 180.0 - camera.yaw.to_degrees(),
                 -camera.pitch.to_degrees(),
             );
-            layer.update(&FrameCtx {
-                state,
-                partial,
-                cull: &cull,
-                show_local: self.perspective != Perspective::First && self.spectate_view.is_none(),
-                hide_entity: self
-                    .world
-                    .client
-                    .state
-                    .camera_entity
-                    .filter(|_| self.perspective == Perspective::First),
-                eye: camera.position.to_array(),
-                ghost: self
-                    .ghost_age
-                    .map(|a| (a as f32 + partial) / GHOST_TICKS as f32),
-                local_swing: swing,
-                local_using: self.using_item,
-                events: &self.entity_events,
-                skins: &self.skins,
-                spectator_outlines: state.player.game_mode
-                    == mcr_protocol::types::game::GameType::Spectator
-                    && self.held.is_active(self.keys.spectator_outlines),
-            });
+            layer.update(
+                &FrameCtx {
+                    state,
+                    partial,
+                    cull: &cull,
+                    show_local: self.perspective != Perspective::First
+                        && self.spectate_view.is_none(),
+                    hide_entity: self
+                        .world
+                        .client
+                        .state
+                        .camera_entity
+                        .filter(|_| self.perspective == Perspective::First),
+                    eye: camera.position.to_array(),
+                    ghost: self
+                        .ghost_age
+                        .map(|a| (a as f32 + partial) / GHOST_TICKS as f32),
+                    local_swing: swing,
+                    local_using: self.using_item,
+                    events: &self.entity_events,
+                    skins: &self.skins,
+                    spectator_outlines: state.player.game_mode
+                        == mcr_protocol::types::game::GameType::Spectator
+                        && self.held.is_active(self.keys.spectator_outlines),
+                    text_background_opacity: if self.options.background_for_chat_only {
+                        0.25
+                    } else {
+                        self.options.text_background_opacity as f32
+                    },
+                },
+                &mut self.gui.ui,
+            );
+            if let Some(block_entities) = &mut self.block_entities {
+                block_entities.scene.queue_text(layer.take_text_draws());
+            }
             let params = layer.frame_params(camera, aspect, env);
             layer.scene.prepare(&params);
             if let Some(block_entities) = &mut self.block_entities {

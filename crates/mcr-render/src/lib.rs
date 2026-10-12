@@ -33,7 +33,7 @@ pub use graph::SectionVisibility;
 pub use mesh::SectionMesh;
 pub use mesh::{TINT_KINDS, TINT_TABLE_WORDS, TintTable};
 pub use overlay::{Overlay, OverlayCtx};
-pub use post::{MAX_POST_CHAINS, PostChain, PostStack};
+pub use post::{MAX_POST_CHAINS, PostChain, PostOverrides, PostStack};
 pub use quad::{
     CubeQuad, Face, LIGHT_FULL_SKY, ModelQuad, ModelQuadDesc, PackedQuad, QuadError,
     cube_ao_brightness, light_block, light_sky, model_ao, pack_light,
