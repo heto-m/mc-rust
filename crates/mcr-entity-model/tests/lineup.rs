@@ -280,6 +280,13 @@ fn items_frames_paintings_blocks() {
         spec("minecraft:arrow"),
         spec("minecraft:tnt"),
         spec("minecraft:end_crystal"),
+        spec("minecraft:leash_knot"),
+        spec("minecraft:llama_spit"),
+        spec("minecraft:shulker_bullet"),
+        spec("minecraft:wind_charge"),
+        spec("minecraft:trident"),
+        spec("minecraft:wither_skull"),
+        spec("minecraft:wither_skull").d(8, V::Boolean(true)),
     ];
     let shot = row(&mut h, &specs, "items", 1.5, 2.0);
     assert!(shot.covered() > 4000);

@@ -167,6 +167,8 @@ pub struct EntityView<'a> {
     pub glide: Glide,
     /// `fuseRemainingInTicks` of primed TNT and lit TNT minecarts, with the partial tick applied.
     pub fuse: Option<f32>,
+    /// `Creeper.getSwelling` with the partial tick applied; 0 for everything else.
+    pub swelling: f32,
     pub tether: Option<[f64; 3]>,
     pub data: &'a dyn EntityData,
     pub equipment: Option<&'a [ItemStack; 8]>,
@@ -215,6 +217,7 @@ impl<'a> EntityView<'a> {
             events: EventAnim::default(),
             glide: Glide::default(),
             fuse: None,
+            swelling: 0.0,
             tether: None,
             data,
             equipment: None,

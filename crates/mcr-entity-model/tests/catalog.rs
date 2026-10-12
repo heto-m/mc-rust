@@ -439,3 +439,30 @@ fn minecarts_carry_their_display_block_and_tnt_carts_flash() {
         [FreeGeo::Block { state: 1, .. }]
     ));
 }
+
+#[test]
+fn creeper_flashes_white_on_alternate_tenths_of_the_swell() {
+    let Some(assets) = assets() else { return };
+    let catalog = Catalog::new();
+    let reg = TestRegistries::vanilla();
+    let mut tex = TextureCache::default();
+    let data = Data::default();
+    let mut plan_at = |swelling: f32| {
+        let mut cx = PlanCx {
+            reg: &reg,
+            assets: &assets,
+            tex: &mut tex,
+        };
+        let mut view = EntityView::named("minecraft:creeper", &data.0);
+        view.swelling = swelling;
+        let mut plan = Plan::default();
+        catalog.build(&mut cx, &view, &mut plan);
+        plan
+    };
+    assert!(!plan_at(0.0).flash_parts);
+    assert!(!plan_at(0.05).flash_parts);
+    assert!(plan_at(0.15).flash_parts);
+    assert!(!plan_at(0.25).flash_parts);
+    let full = plan_at(0.95);
+    assert!(full.flash_parts && full.extra_scale.x > 1.3 && full.extra_scale.y > 1.05);
+}

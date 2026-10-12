@@ -588,6 +588,7 @@ impl EntityLayer {
                 view.object_data = e.object_data;
                 view.equipment = Some(&e.equipment);
                 view.fuse = e.fuse_remaining(cx.partial);
+                view.swelling = e.swelling(cx.partial);
                 apply_events(&mut view, cx.events.view(e.id, cx.partial));
                 if e.kind == *player_type {
                     view.player = PlayerView {

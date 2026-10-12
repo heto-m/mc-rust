@@ -556,6 +556,7 @@ impl ClientState {
             scratch: &mut self.sim_scratch,
             follow: Some([pos[0], pos[1] + eye / 2.0, pos[2]]),
             frozen_except: frozen.then_some(self.sim_kinds.player_type),
+            creeper_type: self.sim_kinds.creeper_type,
         };
         self.entities.tick(&mut cx);
         if !frozen {

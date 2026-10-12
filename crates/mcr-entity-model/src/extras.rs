@@ -426,8 +426,8 @@ pub fn decorate(deco: Deco, name: &str, v: &EntityView<'_>, plan: &mut Plan) {
             plan.anim.has_chest = v.boolean(idx::END_CRYSTAL_SHOW_BOTTOM)
                 || v.raw(idx::END_CRYSTAL_SHOW_BOTTOM).is_none();
             plan.anim.flap = age;
-            plan.extra_scale = Vec3::new(-2.0, -2.0, 2.0);
-            plan.extra_offset = Vec3::new(0.0, 2.002, 0.0);
+            plan.unflipped(2.0);
+            plan.extra_offset = Vec3::new(0.0, -1.0, 0.0);
         }
         Deco::None => {}
     }

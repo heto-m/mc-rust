@@ -17,6 +17,8 @@ const MAX_PASSENGERS: usize = 4096;
 const MAX_EFFECTS: usize = 64;
 const MAX_ATTRIBUTES: usize = 128;
 const INTERPOLATION_STEPS: u8 = 3;
+const CREEPER_SWELL_DIR: u8 = 16;
+const CREEPER_IGNITED: u8 = 18;
 const TOO_BIG_TO_INTERPOLATE_SQR: f64 = 4096.0;
 const DELTA_SCALE: f64 = 4096.0;
 
@@ -32,6 +34,7 @@ pub struct SimShape {
 pub struct SimKinds {
     by_type: FxHashMap<i32, SimShape>,
     pub player_type: i32,
+    pub creeper_type: Option<i32>,
 }
 
 impl SimKinds {
@@ -66,9 +69,13 @@ impl SimKinds {
         let player_type = data
             .entity_type_by_name("minecraft:player")
             .map_or(-1, |id| id as i32);
+        let creeper_type = data
+            .entity_type_by_name("minecraft:creeper")
+            .map(|id| id as i32);
         Self {
             by_type,
             player_type,
+            creeper_type,
         }
     }
 
@@ -86,6 +93,7 @@ pub(crate) struct SimContext<'a, W: CollisionWorld + ?Sized> {
     pub follow: Option<[f64; 3]>,
     /// Set while the world is frozen: only entities of this type (players) and mounts keep ticking.
     pub frozen_except: Option<i32>,
+    pub creeper_type: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -154,6 +162,8 @@ pub struct Entity {
     pub sim: Option<SimShape>,
     /// `MinecartTNT.fuse`: client-side, primed by entity event 70; -1 while unlit.
     pub fuse: i32,
+    /// `Creeper.swell` and `oldSwell`: client-side, driven by the synched fuse direction and ignite flag.
+    pub swell: (i32, i32),
     sim_ticks: u32,
     interpolation_left: u8,
 }
@@ -183,6 +193,7 @@ impl Entity {
             attributes: FxHashMap::default(),
             sim: None,
             fuse: -1,
+            swell: (0, 0),
             sim_ticks: 0,
             interpolation_left: 0,
         }
@@ -210,6 +221,31 @@ impl Entity {
             Some(EntityDataValue::Int(f)) => *f,
             _ => TNT_DEFAULT_FUSE,
         }
+    }
+
+    pub fn tick_swell(&mut self) {
+        const MAX_SWELL: i32 = 30;
+        let ignited = matches!(
+            self.data.get(&CREEPER_IGNITED),
+            Some(EntityDataValue::Boolean(true))
+        );
+        let dir = match self.data.get(&CREEPER_SWELL_DIR) {
+            Some(EntityDataValue::Int(d)) => *d,
+            _ => -1,
+        };
+        let dir = if ignited { 1 } else { dir };
+        self.swell.1 = self.swell.0;
+        self.swell.0 = self
+            .swell
+            .0
+            .saturating_add(dir.clamp(-1, 1))
+            .clamp(0, MAX_SWELL);
+    }
+
+    /// `Creeper.getSwelling`.
+    pub fn swelling(&self, partial: f32) -> f32 {
+        let (now, old) = (self.swell.0 as f32, self.swell.1 as f32);
+        (old + (now - old) * partial) / 28.0
     }
 
     /// The fuse countdown both TNT entities run on the client between server updates.
@@ -449,6 +485,9 @@ impl Entities {
                 continue;
             }
             entity.tick_fuse();
+            if cx.creeper_type == Some(entity.kind) {
+                entity.tick_swell();
+            }
             match entity.sim {
                 Some(_) if simulated >= MAX_SIMULATED_PER_TICK => {}
                 Some(shape) => {

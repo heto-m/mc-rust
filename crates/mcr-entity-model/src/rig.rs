@@ -85,6 +85,7 @@ slots! {
     LeftTendril = "left_tendril", RightTendril = "right_tendril",
     UpperJaw = "upper_jaw", LowerJaw = "lower_jaw",
     OuterGlass = "outer_glass", InnerGlass = "inner_glass", Base = "base",
+    Main = "main", Wind = "wind", WindCharge = "wind_charge",
 }
 
 const SLOT_COUNT: usize = Slot::ALL.len();

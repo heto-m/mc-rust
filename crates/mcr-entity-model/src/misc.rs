@@ -3,11 +3,12 @@ use mcr_buf::IdOr;
 use mcr_protocol::types::entity_data::EntityDataValue;
 
 use crate::catalog::{BuildFn, PlanCx};
+use crate::gpu::Pipeline;
 use crate::idx;
 use crate::items::clone_count;
 use crate::mobs::short;
 use crate::plan::{FreeGeo, FreeItem, ItemContext, ItemSource, Part, Plan};
-use crate::rig::Rig;
+use crate::rig::{Rig, Slot};
 use crate::view::EntityView;
 
 const PAINTINGS: &[(&str, u8, u8)] = &[
@@ -88,6 +89,12 @@ pub(crate) fn builder(name: &str) -> Option<BuildFn> {
         "snowball" | "egg" | "ender_pearl" | "experience_bottle" | "splash_potion"
         | "lingering_potion" | "eye_of_ender" | "fireball" | "small_fireball" => thrown_item,
         "dragon_fireball" => dragon_fireball,
+        "leash_knot" => leash_knot,
+        "llama_spit" => llama_spit,
+        "shulker_bullet" => shulker_bullet,
+        "wind_charge" | "breeze_wind_charge" => wind_charge,
+        "trident" => trident,
+        "wither_skull" => wither_skull,
         _ => return None,
     })
 }
@@ -198,7 +205,7 @@ fn firework(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     plan.free_items.push(FreeItem {
         source: ItemSource::Data(idx::ITEM_STACK),
         context: ItemContext::Ground,
-        local: Mat4::from_translation(Vec3::new(0.0, 0.125, 0.0)),
+        local: Mat4::IDENTITY,
         ground_lift: false,
         billboard: true,
         post,
@@ -605,6 +612,97 @@ fn arrow(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     plan.tilt = v.pitch;
     plan.extra_scale = Vec3::new(-1.0, 1.0, 1.0) * 0.05625 * 16.0;
     plan.push(Part::new("minecraft:arrow#main", tex).no_hurt());
+}
+
+/// `LeashKnotRenderer`: flipped model, no living drop.
+fn leash_knot(_cx: &mut PlanCx<'_>, _v: &EntityView<'_>, plan: &mut Plan) {
+    plan.skip_rotation = true;
+    plan.model_y = 0.0;
+    plan.push(Part::new(
+        "minecraft:leash_knot#main",
+        "entity/lead_knot/lead_knot",
+    ));
+}
+
+/// `LlamaSpitRenderer`: `translate(0, 0.15, 0)`, yaw - 90 about Y, pitch about Z, unflipped model.
+fn llama_spit(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+    plan.skip_rotation = true;
+    plan.unflipped(1.0);
+    plan.pre_offset = Vec3::new(0.0, 0.15, 0.0);
+    plan.spin = (v.yaw - 90.0).to_radians();
+    plan.tilt = v.pitch;
+    plan.push(Part::new(
+        "minecraft:llama_spit#main",
+        "entity/llama/llama_spit",
+    ));
+}
+
+/// `ShulkerBulletRenderer`: a tumbling cube at half size plus a 1.5x translucent shell, full block light.
+fn shulker_bullet(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+    let t = v.age_ticks;
+    plan.skip_rotation = true;
+    plan.bright = true;
+    plan.model_y = 0.0;
+    plan.extra_scale = Vec3::splat(0.5);
+    plan.pre_offset = Vec3::new(0.0, 0.15, 0.0);
+    plan.post_rot = Mat4::from_rotation_y(((t * 0.1).sin() * 180.0).to_radians())
+        * Mat4::from_rotation_x(((t * 0.1).cos() * 180.0).to_radians())
+        * Mat4::from_rotation_z(((t * 0.15).sin() * 360.0).to_radians());
+    plan.rot_overrides.push((Slot::Main, [v.pitch, v.yaw, 0.0]));
+    plan.push(Part::new(
+        "minecraft:shulker_bullet#main",
+        "entity/shulker/spark",
+    ));
+    let mut shell = Part::new("minecraft:shulker_bullet#main", "entity/shulker/spark")
+        .pipeline(Pipeline::Translucent)
+        .no_hurt();
+    shell.tint = [255, 255, 255, 38];
+    shell.scale = 1.5;
+    plan.push(shell);
+}
+
+/// `WindChargeRenderer`: unflipped model at the entity origin, counter-rotating shells, scrolling texture.
+fn wind_charge(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+    let spin = v.age_ticks * 16.0;
+    plan.skip_rotation = true;
+    plan.unflipped(1.0);
+    plan.rot_overrides.push((Slot::Wind, [0.0, spin, 0.0]));
+    plan.rot_overrides
+        .push((Slot::WindCharge, [0.0, -spin, 0.0]));
+    let mut part = Part::new(
+        "minecraft:wind_charge#main",
+        "entity/projectiles/wind_charge",
+    )
+    .pipeline(Pipeline::Translucent)
+    .no_hurt();
+    part.uv_offset = [(v.age_ticks * 0.03) % 1.0, 0.0];
+    plan.push(part);
+}
+
+/// `ThrownTridentRenderer`: yaw - 90 about Y, pitch + 90 about Z, unflipped model.
+fn trident(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+    plan.skip_rotation = true;
+    plan.unflipped(1.0);
+    plan.spin = (v.yaw - 90.0).to_radians();
+    plan.tilt = v.pitch + 90.0;
+    plan.push(Part::new(
+        "minecraft:trident#main",
+        "entity/trident/trident",
+    ));
+}
+
+/// `WitherSkullRenderer`: the skull model turned by the projectile's yaw and pitch, full block light.
+fn wither_skull(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+    plan.skip_rotation = true;
+    plan.bright = true;
+    plan.model_y = 0.0;
+    plan.rot_overrides.push((Slot::Head, [v.pitch, v.yaw, 0.0]));
+    let texture = if v.boolean(idx::WITHER_SKULL_DANGEROUS) {
+        "entity/wither/wither_invulnerable"
+    } else {
+        "entity/wither/wither"
+    };
+    plan.push(Part::new("minecraft:wither_skull#main", texture).no_hurt());
 }
 
 #[cfg(test)]

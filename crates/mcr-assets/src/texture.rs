@@ -358,6 +358,7 @@ struct CutoutMip {
     alpha_ref: f32,
     coverage: f32,
     bias: f32,
+    dark: bool,
 }
 
 /// Alpha-weighted 2x2 box filter; odd edges clamp.
@@ -387,6 +388,66 @@ pub fn downsample(src: &[u8], width: u32, height: u32) -> (u32, u32, Vec<u8>) {
                 out.push(v as u8);
             }
             out.push(((alpha + 2) / 4) as u8);
+        }
+    }
+    (nw, nh, out)
+}
+
+/// `TextureUtil.fillEmptyAreasWithDarkColor`: transparent texels take 3/4 of the darkest opaque colour.
+fn darken_empty_texels(rgba: &mut [u8]) {
+    let darkest = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| p[3] != 0)
+        .min_by_key(|p| u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2]));
+    let Some(darkest) = darkest else { return };
+    let fill = [0, 1, 2].map(|c| (3 * u32::from(darkest[c]) / 4) as u8);
+    for p in rgba.as_chunks_mut::<4>().0 {
+        if p[3] == 0 {
+            p[..3].copy_from_slice(&fill);
+        }
+    }
+}
+
+fn srgb_to_linear(c: u8) -> f32 {
+    let c = f32::from(c) / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(l: f32) -> u8 {
+    let l = l.clamp(0.0, 1.0);
+    let c = if l <= 0.0031308 {
+        l * 12.92
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    };
+    (c * 255.0 + 0.5) as u8
+}
+
+/// `MipmapGenerator.darkenedAlphaBlend`: sums the linear channels of the non-empty texels and
+/// divides by four, so mips fade towards black where the texture has holes.
+pub fn downsample_dark(src: &[u8], width: u32, height: u32) -> (u32, u32, Vec<u8>) {
+    let (nw, nh) = ((width / 2).max(1), (height / 2).max(1));
+    let mut out = Vec::with_capacity((nw * nh * 4) as usize);
+    for y in 0..nh {
+        for x in 0..nw {
+            let mut sum = [0.0f32; 4];
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let sx = (x * 2 + dx).min(width - 1);
+                let sy = (y * 2 + dy).min(height - 1);
+                let i = ((sy * width + sx) * 4) as usize;
+                if src[i + 3] != 0 {
+                    for (c, total) in sum.iter_mut().enumerate() {
+                        *total += srgb_to_linear(src[i + c]);
+                    }
+                }
+            }
+            out.extend(sum.map(|t| linear_to_srgb(t / 4.0)));
         }
     }
     (nw, nh, out)
@@ -494,13 +555,19 @@ impl TextureArrayBuilder {
         let first_layer = group.layers;
         let mut transparency = Transparency::Opaque;
         let alpha_ref = sprite.mip.cutout_ref(&sprite.frames);
+        let dark = sprite.mip.strategy == MipStrategy::DarkCutout;
         for frame in &sprite.frames {
+            let start = group.data.len();
             group.data.extend_from_slice(frame);
+            if dark {
+                darken_empty_texels(&mut group.data[start..]);
+            }
             group.layers += 1;
             group.cutouts.push(alpha_ref.map(|alpha_ref| CutoutMip {
                 alpha_ref,
                 coverage: alpha_coverage(frame, sprite.width, sprite.height, alpha_ref, 1.0),
                 bias: sprite.mip.cutoff_bias,
+                dark,
             }));
             transparency = transparency.max(classify(frame));
         }
@@ -559,7 +626,12 @@ impl TextureArrayBuilder {
                     let mut next = Vec::new();
                     let mut dims = (w, h);
                     for (layer, cut) in prev.chunks_exact(layer_len).zip(&g.cutouts) {
-                        let (nw, nh, mut data) = downsample(layer, w, h);
+                        let dark = cut.is_some_and(|c| c.dark);
+                        let (nw, nh, mut data) = if dark {
+                            downsample_dark(layer, w, h)
+                        } else {
+                            downsample(layer, w, h)
+                        };
                         if let Some(cut) = cut {
                             keep_coverage(&mut data, nw, nh, *cut);
                         }
@@ -694,6 +766,28 @@ mod tests {
         assert_eq!(g.mips.len(), 5);
         assert_eq!(g.mip_size(4), (1, 1));
         assert_eq!(g.layer_bytes(4, 0), [9, 9, 9, 255]);
+    }
+
+    #[test]
+    fn dark_mips_fade_towards_black_over_holes() {
+        let full = [200u8, 100, 50, 255].repeat(4);
+        let (_, _, whole) = downsample_dark(&full, 2, 2);
+        assert!(whole[0].abs_diff(200) <= 1 && whole[3] == 255, "{whole:?}");
+        let mut holey = full.clone();
+        holey[4..16].fill(0);
+        let (_, _, out) = downsample_dark(&holey, 2, 2);
+        assert!(out[0] < 120 && out[1] < 70 && out[3] < 150, "{out:?}");
+        let (_, _, plain) = downsample(&holey, 2, 2);
+        assert_eq!(plain[0], 200);
+    }
+
+    #[test]
+    fn empty_texels_take_three_quarters_of_the_darkest_colour() {
+        let mut px = vec![200, 100, 50, 255, 40, 80, 120, 255, 9, 9, 9, 0, 0, 0, 0, 0];
+        darken_empty_texels(&mut px);
+        assert_eq!(&px[8..11], [30, 60, 90]);
+        assert_eq!(px[11], 0);
+        assert_eq!(&px[..4], [200, 100, 50, 255]);
     }
 
     #[test]

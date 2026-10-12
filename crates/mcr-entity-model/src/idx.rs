@@ -89,6 +89,7 @@ pub const HAPPY_GHAST_BABY: u8 = 16;
 pub const BOGGED_SHEARED: u8 = 16;
 pub const CREAKING_ACTIVE: u8 = 17;
 pub const WITHER_INVULNERABLE: u8 = 19;
+pub const WITHER_SKULL_DANGEROUS: u8 = 8;
 pub const DOLPHIN_BABY: u8 = 16;
 
 pub const PLAYER_MAIN_HAND: u8 = 15;

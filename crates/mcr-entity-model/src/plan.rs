@@ -30,6 +30,7 @@ pub struct Part {
     pub pose: Pose,
     pub hurt: bool,
     pub offset: Vec3,
+    pub scale: f32,
 }
 
 impl Part {
@@ -44,6 +45,7 @@ impl Part {
             pose: Pose::Rig,
             hurt: true,
             offset: Vec3::ZERO,
+            scale: 1.0,
         }
     }
 
@@ -158,8 +160,12 @@ pub struct Plan {
     pub bright: bool,
     /// Free geometry is drawn with the white overlay (lit TNT).
     pub flash: bool,
+    /// Model parts are drawn with the white overlay (swelling creeper).
+    pub flash_parts: bool,
     /// `LivingEntityRenderer`'s model drop below the flipped origin; non-living renderers skip it.
     pub model_y: f32,
+    /// Translation applied before the entity's rotations, like a `translate` before `rotateDegrees`.
+    pub pre_offset: Vec3,
 }
 
 pub const LIVING_MODEL_Y: f32 = 1.501;
@@ -187,7 +193,9 @@ impl Default for Plan {
             post_rot: Mat4::IDENTITY,
             bright: false,
             flash: false,
+            flash_parts: false,
             model_y: LIVING_MODEL_Y,
+            pre_offset: Vec3::ZERO,
         }
     }
 }
@@ -213,7 +221,15 @@ impl Plan {
         self.post_rot = Mat4::IDENTITY;
         self.bright = false;
         self.flash = false;
+        self.flash_parts = false;
         self.model_y = LIVING_MODEL_Y;
+        self.pre_offset = Vec3::ZERO;
+    }
+
+    /// Draws the model as a non-living renderer does: no flip and no living model drop, scaled by `scale`.
+    pub fn unflipped(&mut self, scale: f32) {
+        self.model_y = 0.0;
+        self.extra_scale = Vec3::new(-scale, -scale, scale);
     }
 
     pub fn push(&mut self, part: Part) -> &mut Part {

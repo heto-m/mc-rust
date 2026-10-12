@@ -167,7 +167,9 @@ fn eval_job(
                     *m = *xf * *m;
                 }
             }
-            let part_xf = *xf * Mat4::from_translation(part.offset);
+            let part_xf = *xf
+                * Mat4::from_translation(part.offset)
+                * Mat4::from_scale(Vec3::splat(part.scale));
             for (o, w) in out[cursor..cursor + n].iter_mut().zip(world.iter()) {
                 *o = crate::gpu::Bone34::from_mat(&(part_xf * *w));
             }
@@ -459,9 +461,9 @@ impl EntityScene {
                 bone_base: base + pj.bone_off,
                 tint: part.tint,
                 hurt: hurt && part.hurt,
-                flash: false,
+                flash: plan.flash_parts && part.hurt,
                 fullbright: part.fullbright,
-                block_light: v.light[0],
+                block_light: if plan.bright { 15 } else { v.light[0] },
                 sky_light: v.light[1],
                 uv_offset: part.uv_offset,
                 origin: v.pos,
@@ -977,7 +979,8 @@ fn entity_transform(v: &EntityView<'_>, plan: &Plan) -> Mat4 {
     } else {
         v.body_yaw + plan.body_yaw_offset
     };
-    let mut m = Mat4::from_scale(Vec3::splat(v.scale * plan.scale));
+    let mut m = Mat4::from_scale(Vec3::splat(v.scale * plan.scale))
+        * Mat4::from_translation(plan.pre_offset);
     if !plan.skip_rotation {
         m *= Mat4::from_rotation_y((180.0 - yaw).to_radians());
     }

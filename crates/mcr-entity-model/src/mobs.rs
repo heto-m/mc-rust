@@ -299,62 +299,6 @@ static SIMPLE: &[(&str, Simple)] = &[
         Rig::Static,
     ),
     simple_entry(
-        "minecraft:leash_knot",
-        "minecraft:leash_knot#main",
-        None,
-        "entity/lead_knot/lead_knot",
-        None,
-        Rig::Static,
-    ),
-    simple_entry(
-        "minecraft:llama_spit",
-        "minecraft:llama_spit#main",
-        None,
-        "entity/llama/llama_spit",
-        None,
-        Rig::Static,
-    ),
-    simple_entry(
-        "minecraft:shulker_bullet",
-        "minecraft:shulker_bullet#main",
-        None,
-        "entity/shulker/spark",
-        None,
-        Rig::Static,
-    ),
-    simple_entry(
-        "minecraft:wind_charge",
-        "minecraft:wind_charge#main",
-        None,
-        "entity/projectiles/wind_charge",
-        None,
-        Rig::Static,
-    ),
-    simple_entry(
-        "minecraft:breeze_wind_charge",
-        "minecraft:wind_charge#main",
-        None,
-        "entity/projectiles/wind_charge",
-        None,
-        Rig::Static,
-    ),
-    simple_entry(
-        "minecraft:trident",
-        "minecraft:trident#main",
-        None,
-        "entity/trident/trident",
-        None,
-        Rig::Static,
-    ),
-    simple_entry(
-        "minecraft:wither_skull",
-        "minecraft:wither_skull#main",
-        None,
-        "entity/wither/wither",
-        None,
-        Rig::Static,
-    ),
-    simple_entry(
         "minecraft:copper_golem",
         "minecraft:copper_golem#main",
         None,
@@ -649,8 +593,9 @@ fn creeper(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         "minecraft:creeper#main",
         "entity/creeper/creeper",
     ));
-    let swell = v.int(idx::CREEPER_SWELL).unwrap_or(-1).max(0) as f32 / 28.0;
+    let swell = v.swelling;
     if swell > 0.0 {
+        plan.flash_parts = (swell * 10.0) as i32 % 2 != 0;
         let wobble = 1.0 + (swell * 100.0).sin() * swell * 0.01;
         let g = swell.clamp(0.0, 1.0).powi(4);
         plan.extra_scale = Vec3::new(
