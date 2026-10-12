@@ -38,6 +38,34 @@ pub struct JavaWindow {
     pub text_input: Option<Option<[i32; 4]>>,
 }
 
+/// Keyboard keys physically down, by USB HID usage.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct DownKeys([u64; 8]);
+
+impl DownKeys {
+    fn set(&mut self, hid: i32, down: bool) {
+        if let Ok(n @ 0..512) = usize::try_from(hid) {
+            let (word, bit) = (n / 64, 1u64 << (n % 64));
+            if down {
+                self.0[word] |= bit;
+            } else {
+                self.0[word] &= !bit;
+            }
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = InputKey> + '_ {
+        (0..512usize)
+            .filter(|n| self.0[n / 64] & (1 << (n % 64)) != 0)
+            .map(|n| InputKey::Keyboard(n as i32))
+    }
+}
+
+/// Text that comes with a key press: with an IME active, only `Ime::Commit` delivers text.
+fn key_text(ime_active: bool, text: Option<&str>) -> Option<&str> {
+    if ime_active { None } else { text }
+}
+
 #[derive(Debug, Default)]
 pub struct Route {
     input: Option<ModInput>,
@@ -46,6 +74,8 @@ pub struct Route {
     pub gui: bool,
     pub java: JavaInput,
     cursor: (f64, f64),
+    down: DownKeys,
+    ime_active: bool,
 }
 
 impl Route {
@@ -70,6 +100,7 @@ fn mcr_menu() -> ConfirmScreen {
             ("lang:gui.done".into(), Box::new(|| vec![ScreenAction::Pop])),
         ],
     )
+    .with_panel()
 }
 
 impl Shell {
@@ -112,6 +143,13 @@ impl Shell {
             }
             if prev.java() && !next.java() {
                 input.release_all();
+            }
+            if prev == Authority::JavaScreen
+                && next == Authority::JavaGame
+                && let Some(play) = &mut self.play
+            {
+                let held: Vec<InputKey> = self.route.down.iter().collect();
+                play.resume_held(&held);
             }
         }
         let scale = (gui && java.gui_scale > 0).then_some(java.gui_scale as i32);
@@ -171,6 +209,9 @@ impl Shell {
         repeat: bool,
         text: Option<&str>,
     ) -> bool {
+        if let (Some(_), InputKey::Keyboard(hid)) = (&self.route.input, key) {
+            self.route.down.set(hid, pressed);
+        }
         let Some(input) = self.java_input() else {
             return false;
         };
@@ -182,7 +223,7 @@ impl Shell {
                 input.key(scancode, printable, pressed, repeat);
                 if pressed
                     && self.route.java.text_input
-                    && let Some(text) = text
+                    && let Some(text) = key_text(self.route.ime_active, text)
                 {
                     input.text(text);
                 }
@@ -272,6 +313,10 @@ impl Shell {
         true
     }
 
+    pub fn ime_active(&mut self, active: bool) {
+        self.route.ime_active = active;
+    }
+
     /// Committed IME text.
     pub fn ime_commit(&mut self, text: &str) {
         if self.route.java.text_input {
@@ -333,5 +378,29 @@ impl Shell {
 
     pub fn mod_authority(&self) -> Authority {
         self.route.authority
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ime_commit_is_the_only_text_source_while_active() {
+        assert_eq!(key_text(false, Some("a")), Some("a"));
+        assert_eq!(key_text(true, Some("a")), None);
+        assert_eq!(key_text(true, None), None);
+    }
+
+    #[test]
+    fn down_keys_track_presses_and_ignore_out_of_range() {
+        let mut down = DownKeys::default();
+        down.set(26, true);
+        down.set(4, true);
+        down.set(26, false);
+        down.set(-1, true);
+        down.set(5000, true);
+        let keys: Vec<_> = down.iter().collect();
+        assert_eq!(keys, vec![InputKey::Keyboard(4)]);
     }
 }

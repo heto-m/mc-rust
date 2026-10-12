@@ -6,6 +6,8 @@ import dev.mcr.bridge.net.McrNet;
 import net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl;
 import net.minecraft.network.Connection;
 import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.common.ClientboundResourcePackPopPacket;
+import net.minecraft.network.protocol.common.ClientboundResourcePackPushPacket;
 import net.minecraft.network.protocol.game.ServerboundChatCommandPacket;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -32,6 +34,21 @@ abstract class ClientCommonPacketListenerImplMixin {
     private void mcr$command(Packet<?> packet, CallbackInfo ci) {
         if (packet instanceof ServerboundChatCommandPacket command && McrNet.bridged()) {
             McrNet.sendChat(BridgeAbi.CHAT_COMMAND, command.command());
+            ci.cancel();
+        }
+    }
+
+    /** Rust prompts, downloads and answers server packs; Java's answer would be dropped by the outbound filter. */
+    @Inject(method = "handleResourcePackPush", at = @At("HEAD"), cancellable = true)
+    private void mcr$packPush(ClientboundResourcePackPushPacket packet, CallbackInfo ci) {
+        if (McrNet.bridged()) {
+            ci.cancel();
+        }
+    }
+
+    @Inject(method = "handleResourcePackPop", at = @At("HEAD"), cancellable = true)
+    private void mcr$packPop(ClientboundResourcePackPopPacket packet, CallbackInfo ci) {
+        if (McrNet.bridged()) {
             ci.cancel();
         }
     }

@@ -1,7 +1,9 @@
 //! Glue between the mod manager (`mcr-modbridge::manager`) and the native Mods screen.
 
 use std::cell::RefCell;
+use std::ffi::OsString;
 use std::path::Path;
+use std::process::{Child, Command};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -274,11 +276,28 @@ impl ModsApp {
             }),
             Box::new(move || {
                 retry.reset_session();
-                vec![ScreenAction::Quit]
+                match relaunch() {
+                    Ok(_) => vec![ScreenAction::Quit],
+                    Err(e) => {
+                        eprintln!("[mods] could not restart mcr: {e}");
+                        vec![ScreenAction::Pop]
+                    }
+                }
             }),
             open_report,
         )))
     }
+}
+
+fn relaunch_command(exe: &Path, args: impl IntoIterator<Item = OsString>) -> Command {
+    let mut command = Command::new(exe);
+    command.args(args);
+    command
+}
+
+/// A fresh mcr with this process's arguments; the caller quits so the new one boots Java.
+fn relaunch() -> std::io::Result<Child> {
+    relaunch_command(&std::env::current_exe()?, std::env::args_os().skip(1)).spawn()
 }
 
 #[cfg(test)]
@@ -408,6 +427,17 @@ mod tests {
             "{notice}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn relaunch_keeps_the_arguments() {
+        let command = relaunch_command(
+            Path::new("/usr/bin/mcr"),
+            ["--connect", "localhost"].map(OsString::from),
+        );
+        assert_eq!(command.get_program(), "/usr/bin/mcr");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["--connect", "localhost"]);
     }
 
     #[test]

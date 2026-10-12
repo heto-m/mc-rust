@@ -116,6 +116,8 @@ pub struct ConfirmScreen {
     gui: (i32, i32),
     delay: u32,
     dark: bool,
+    panel: bool,
+    panel_rect: [i32; 4],
     escape: Option<usize>,
 }
 
@@ -139,6 +141,8 @@ impl ConfirmScreen {
             gui: (0, 0),
             delay: 0,
             dark: false,
+            panel: false,
+            panel_rect: [0; 4],
             escape,
         }
     }
@@ -221,6 +225,12 @@ impl ConfirmScreen {
         self
     }
 
+    /// An opaque panel behind the title and buttons, for screens drawn over another GUI.
+    pub fn with_panel(mut self) -> Self {
+        self.panel = true;
+        self
+    }
+
     fn text(cx: &mut RenderCx<'_, '_>, raw: &str) -> String {
         let mut out = String::new();
         for (i, line) in raw.split('\n').enumerate() {
@@ -256,6 +266,9 @@ impl ConfirmScreen {
                 b.active = self.delay == 0;
             }
         }
+        let top = self.gui.1 / 2 - 50 - 14;
+        let width = (total + 40).min(self.gui.0);
+        self.panel_rect = [(self.gui.0 - width) / 2, top, width, y + 20 + 14 - top];
     }
 }
 
@@ -280,9 +293,15 @@ impl Screen for ConfirmScreen {
         let title = Self::text(cx, &self.title);
         let message = Self::text(cx, &self.message);
         let center = self.gui.0 / 2;
-        cx.centered_text(&title, center, self.gui.1 / 2 - 50, WHITE, true);
         let cells = crate::text::parse_legacy(&message);
         let lines = cx.frame.ui().wrap(&cells, (self.gui.0 - 50) as f32);
+        self.layout(lines.len() as i32);
+        if self.panel {
+            let [x, y, w, h] = self.panel_rect;
+            cx.frame.fill_rect(x - 1, y - 1, w + 2, h + 2, 0xFF55_5555);
+            cx.frame.fill_rect(x, y, w, h, 0xFF10_1010);
+        }
+        cx.centered_text(&title, center, self.gui.1 / 2 - 50, WHITE, true);
         for (i, range) in lines.iter().take(MAX_LINES).enumerate() {
             let w = cx.frame.ui().width(&cells[range.clone()]);
             cx.frame.cells(
@@ -293,7 +312,6 @@ impl Screen for ConfirmScreen {
                 true,
             );
         }
-        self.layout(lines.len() as i32);
         self.widgets.render(cx);
     }
 
@@ -913,5 +931,35 @@ impl Screen for DirectConnectScreen {
         }
         self.update_buttons();
         used
+    }
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::*;
+
+    #[test]
+    fn panel_spans_title_and_buttons() {
+        for (w, h) in [(320, 240), (427, 240), (640, 360)] {
+            let mut s = ConfirmScreen::new(
+                "mcr",
+                "",
+                vec![
+                    ("a".into(), Box::new(Vec::new)),
+                    ("b".into(), Box::new(Vec::new)),
+                    ("c".into(), Box::new(Vec::new)),
+                ],
+            )
+            .with_panel();
+            s.init(w, h);
+            s.layout(0);
+            let [px, py, pw, ph] = s.panel_rect;
+            assert!(py < h / 2 - 50, "title sits inside the panel");
+            for i in 0..3 {
+                let [bx, by, bw, bh] = s.widgets.button_mut(i).unwrap().rect;
+                assert!(bx >= px && bx + bw <= px + pw, "{w}x{h} button {i} x");
+                assert!(by >= py && by + bh <= py + ph, "{w}x{h} button {i} y");
+            }
+        }
     }
 }

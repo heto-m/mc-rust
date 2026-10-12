@@ -1345,6 +1345,24 @@ impl Play {
         self.tab_held = false;
     }
 
+    /// Keys still physically down when a Java screen closed, as if freshly pressed (vanilla
+    /// resumes movement on close); only movement mappings, so a click on a closing button
+    /// does not attack.
+    pub fn resume_held(&mut self, keys: &[InputKey]) {
+        let k = self.keys;
+        let movement = [
+            k.forward, k.back, k.left, k.right, k.jump, k.sneak, k.sprint,
+        ];
+        for &key in keys {
+            let indices: Vec<usize> = self.bindings.lookup(key).to_vec();
+            for i in indices {
+                if movement.contains(&i) && !self.held.is_active(i) && !self.java_owns(i) {
+                    self.binding(i, true);
+                }
+            }
+        }
+    }
+
     pub fn mouse_motion(&mut self, dx: f64, dy: f64) {
         if self.busy() || self.closed.is_some() {
             return;

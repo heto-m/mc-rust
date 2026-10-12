@@ -40,7 +40,12 @@ pub mod keymod {
     pub const RALT: u16 = 0x0200;
     pub const LGUI: u16 = 0x0400;
     pub const RGUI: u16 = 0x0800;
+    pub const NUM: u16 = 0x1000;
+    pub const CAPS: u16 = 0x2000;
 }
+
+const SCAN_CAPS_LOCK: u32 = 57;
+const SCAN_NUM_LOCK: u32 = 83;
 
 fn is_keypad(scancode: u32) -> bool {
     matches!(scancode, 83..=99 | 103 | 133 | 134 | 176..=221)
@@ -446,6 +451,7 @@ pub(crate) struct InputQueue {
     events: VecDeque<InputEvent>,
     keys: [u64; 8],
     buttons: u64,
+    locks: u16,
     focused: bool,
     dropped: u64,
     native_seen: u32,
@@ -498,7 +504,7 @@ impl InputQueue {
         (224..232)
             .filter(|&s| self.key_down(s))
             .map(keymod_bit)
-            .fold(0, |a, b| a | b)
+            .fold(self.locks, |a, b| a | b)
     }
 
     fn key(&mut self, scancode: u32, printable: Option<char>, pressed: bool, repeat: bool) {
@@ -514,6 +520,13 @@ impl InputQueue {
             (true, false) => KeyAction::Press,
         };
         self.set_key(scancode, pressed);
+        if action == KeyAction::Press {
+            match scancode {
+                SCAN_CAPS_LOCK => self.locks ^= keymod::CAPS,
+                SCAN_NUM_LOCK => self.locks ^= keymod::NUM,
+                _ => {}
+            }
+        }
         let mods = self.mods();
         self.push(InputEvent::Key {
             scancode,
@@ -811,6 +824,23 @@ mod tests {
                 | keymod::LALT
                 | keymod::RALT
         );
+    }
+
+    #[test]
+    fn lock_keys_toggle_their_modifier_bits() {
+        let mut q = InputQueue::new();
+        q.key(57, None, true, false);
+        q.key(57, None, true, true);
+        q.key(57, None, false, false);
+        assert_eq!(q.mods(), keymod::CAPS);
+        q.key(83, None, true, false);
+        q.key(83, None, false, false);
+        assert_eq!(q.mods(), keymod::CAPS | keymod::NUM);
+        q.key(57, None, true, false);
+        q.key(57, None, false, false);
+        assert_eq!(q.mods(), keymod::NUM);
+        q.release_all();
+        assert_eq!(q.mods(), keymod::NUM);
     }
 
     #[test]

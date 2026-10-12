@@ -164,8 +164,14 @@ fn deep_json_does_not_overflow_the_stack() {
 }
 
 #[test]
-fn nested_jars_are_bounded_and_one_level_deep() {
-    let deep = Jar::fabric("level2", "1.0");
+fn nested_jars_are_bounded_and_two_levels_deep() {
+    let too_deep = Jar::fabric("level3", "1.0");
+    let deep = Jar::fabric_with(
+        "level2",
+        "1.0",
+        r#""jars":[{"file":"META-INF/jars/deeper.jar"}]"#,
+    )
+    .nested("META-INF/jars/deeper.jar", too_deep);
     let inner = Jar::fabric_with(
         "level1",
         "1.0",
@@ -181,7 +187,7 @@ fn nested_jars_are_bounded_and_one_level_deep() {
     .file("META-INF/jars/junk.jar", b"junk");
     let m = scan_one(&jar);
     let ids: Vec<&str> = m.nested.iter().map(|n| n.id.as_str()).collect();
-    assert_eq!(ids, ["level1"]);
+    assert_eq!(ids, ["level1", "level2"]);
 
     let many: String = (0..scan::MAX_NESTED + 40)
         .map(|i| format!(r#"{{"file":"j{i}.jar"}}"#))

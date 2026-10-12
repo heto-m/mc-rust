@@ -428,8 +428,11 @@ impl ApplicationHandler for App {
                     match ime {
                         Ime::Commit(text) => shell.ime_commit(&text),
                         Ime::Preedit(text, cursor) => shell.ime_preedit(&text, cursor),
-                        Ime::Disabled => shell.ime_preedit("", None),
-                        Ime::Enabled => {}
+                        Ime::Disabled => {
+                            shell.ime_active(false);
+                            shell.ime_preedit("", None);
+                        }
+                        Ime::Enabled => shell.ime_active(true),
                     }
                 }
             }

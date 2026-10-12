@@ -9,6 +9,8 @@ pub const MAX_JARS: usize = 512;
 pub const MAX_ENTRIES: usize = 200_000;
 pub const MAX_JSON_BYTES: u64 = 1 << 20;
 pub const MAX_NESTED: usize = 256;
+pub const MAX_NESTED_TOTAL: usize = 1024;
+const MAX_NESTED_DEPTH: u32 = 2;
 pub const MAX_NESTED_JAR_BYTES: u64 = 32 << 20;
 pub const MAX_NESTED_TOTAL_BYTES: u64 = 64 << 20;
 pub const MAX_ICON_BYTES: u64 = 512 << 10;
@@ -415,22 +417,46 @@ fn fill_fabric<R: Read + Seek>(
     Ok(())
 }
 
+struct NestedBudget {
+    bytes: u64,
+    jars: usize,
+}
+
 fn read_nested<R: Read + Seek>(zip: &mut ZipArchive<R>, files: &[String], info: &mut ModInfo) {
-    let mut budget = MAX_NESTED_TOTAL_BYTES;
+    let mut budget = NestedBudget {
+        bytes: MAX_NESTED_TOTAL_BYTES,
+        jars: MAX_NESTED_TOTAL,
+    };
+    read_nested_level(zip, files, info, &mut budget, MAX_NESTED_DEPTH);
+}
+
+fn read_nested_level<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    files: &[String],
+    info: &mut ModInfo,
+    budget: &mut NestedBudget,
+    depth: u32,
+) {
     for file in files {
+        if budget.jars == 0 {
+            info.warnings
+                .push("too many nested jars; the rest were not read".to_owned());
+            return;
+        }
         let Ok(entry) = zip.by_name(file) else {
             continue;
         };
         let size = entry.size();
         drop(entry);
-        if size > MAX_NESTED_JAR_BYTES || size > budget {
+        if size > MAX_NESTED_JAR_BYTES || size > budget.bytes {
             info.warnings.push(format!(
                 "nested jar {} was not read (too large)",
                 clean(file, 80)
             ));
             continue;
         }
-        budget -= size;
+        budget.bytes -= size;
+        budget.jars -= 1;
         let Ok(Some(bytes)) = read_named(zip, file, MAX_NESTED_JAR_BYTES) else {
             continue;
         };
@@ -446,6 +472,9 @@ fn read_nested<R: Read + Seek>(zip: &mut ZipArchive<R>, files: &[String], info: 
                 version: m.version,
                 provides: m.provides,
             });
+            if depth > 1 {
+                read_nested_level(&mut inner, &m.jars, info, budget, depth - 1);
+            }
         }
     }
 }
