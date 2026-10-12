@@ -57,3 +57,4 @@ pub fn jvm_tests() -> bool {
 }
 pub mod compose;
 pub mod image;
+pub mod input;

@@ -241,6 +241,7 @@ public final class McrNet {
             ch.writeInbound(frame);
         } catch (Throwable t) {
             LOGGER.error("bridge channel failed on an inbound frame", t);
+            ch.markFailed();
             ch.connection.disconnect(Component.literal("mcr bridge: " + t));
         }
         feedNanos += System.nanoTime() - start;
@@ -295,7 +296,8 @@ public final class McrNet {
             PlayerShadow.reset();
         }
         if (!ch.closedByRust && ch.session != 0) {
-            push(BridgeAbi.OUT_DISCONNECT, 0, ch.session, ch.closeReason.getBytes(StandardCharsets.UTF_8));
+            int tag = ch.failed ? BridgeAbi.DISCONNECT_FAILED : BridgeAbi.DISCONNECT_LEFT;
+            push(BridgeAbi.OUT_DISCONNECT, tag, ch.session, ch.closeReason.getBytes(StandardCharsets.UTF_8));
         }
     }
 

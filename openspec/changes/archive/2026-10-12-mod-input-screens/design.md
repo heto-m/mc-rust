@@ -97,3 +97,50 @@ supported yet"). Multiplayer is Java's `JoinMultiplayerScreen` over `<data>/java
 - Raw mouse deltas versus SDL relative mode scaling: verify that sensitivity matches vanilla, where mods compute
   from deltas.
 - winit cursor lock is unsupported on some platforms (X11 confined only). The fallback is confine plus recenter.
+
+## As built
+
+Where the implementation departs from the decisions above:
+
+- **Input travels with the frame.** `ModInput` (`mcr-modbridge/src/input.rs`) is the one entry point for the
+  shell and the test driver. It keeps held keys and buttons, coalesces motion and holds at most 1024 events
+  (overflow counts into `dropped`). `FrameLink::post` flushes it into the control ring as `MSG_INPUT` under
+  the writer lock right before `MSG_FRAME`, so a frame's input is delivered (`McrInput.deliver`, after
+  `McrNet.pump`) before that frame's ticks. When the ring is full, events stay queued for the next frame, so a
+  hung Java never blocks mcr. Detached or not running, the queue is discarded.
+- **Key state and modifiers live in shared memory.** The input state block (`SHARED_INPUT_STATE`, 128 bytes)
+  holds the 512-bit key bitset, `SDL_Keymod`, focus, and what Java publishes back each frame and on every
+  `Gui.setScreen`: screen/overlay/grabbed/text-input/quit flags, cursor kind, GUI scale and the text-input
+  area. Rust reads that snapshot per frame instead of taking downcalls for grab, cursor, IME and quit. The
+  "mcr" button bumps a sequence counter there (`open_native`). Only the clipboard is a downcall pair
+  (`clipboard_get`/`clipboard_set`, ABI 6), bounded at 1 MiB and caught against panics.
+- **Overlay entry by mixin.** `TitleScreen`/`PauseScreen` `init` TAIL mixins add the "mcr" button (top left),
+  with no dependency on Fabric's screen API. It opens a native menu (Options, Mods, Done) through
+  `Shell::open_native` → `Play::show_screen` in game, the shell stack on the title; "Mods..." reaches
+  `Shell::open_mods`.
+- **Singleplayer and Realms** are blocked at `Gui.setScreen` HEAD (`SelectWorldScreen`, `RealmsMainScreen`)
+  with a `NOT_SUPPORTED` system toast, catching every path to them.
+- **Four authorities** (`mcr-app/src/shell/route.rs`): `Native` (no Java GUI), `Overlay` (a native screen
+  above Java's GUI takes all input), `JavaScreen` (a Java screen, the title or Java's loading overlay),
+  `JavaGame` (in game: gameplay keys reach both, Java's vanilla gameplay mappings stay suppressed). Leaving
+  `JavaGame` releases Play's held keys; leaving Java's authorities releases Java's. Native screens use Java's
+  GUI scale while Java's GUI is composed.
+- **Keybind split as built.** Inventory moved to Java (removed from the suppressed list); toggle perspective,
+  smooth camera and fullscreen joined it. mcr ignores chat, command, inventory, advancements, player list
+  and F3 bindings in mod mode, does not pause on Esc or focus loss, and skips its native container, sign,
+  book, block-editor, minecart, credits, death and dialog screens while keeping its container model.
+- **Mouse.** Positions are window pixels from `CursorMoved`; while Java holds the grab, raw
+  `DeviceEvent::MouseMotion` deltas go with the last position. `turnPlayer` and `resyncMousePosition` are
+  cancelled. Java releasing the grab recentres mcr's cursor.
+- **Java connection failures detach Java.** A Java packet-handling exception (`McrNet.feed`,
+  `Connection.exceptionCaught`, `ClientCommonPacketListenerImpl.onPacketError`) closes its channel with
+  `OUT_DISCONNECT` tagged failed. Rust detaches the bridge and stays connected instead of leaving the server.
+- **Forward list.** The audit added `custom_click_action` (configuration and play: Java's dialogs),
+  `seen_advancements`, `bundle_item_selected`, `change_game_mode` (F3+F4) and the operator block editors.
+  The live run dropped only packets Rust answers itself.
+- **Tests.** `tests/gpu_common/input.rs` drives `ModInput` against the composing rig. `input_title` covers
+  the "mcr" button, the singleplayer block, typing in Mod Menu's search box, paste and copy, Esc and Quit.
+  `input_live` (opt-in, against `xtask server`) covers the inventory shift-click confirmed by the server,
+  chat through Java, a Fabric key mapping and the pause-screen button. The autopilot gained `wait_mods`.
+- **Not done.** SDL window resize events are not synthesised: Java's `Window` size is pushed per frame.
+  Caps and num lock modifier bits are not set.

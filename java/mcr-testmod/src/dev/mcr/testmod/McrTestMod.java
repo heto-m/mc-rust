@@ -1,9 +1,13 @@
 package dev.mcr.testmod;
 
+import com.mojang.blaze3d.platform.InputConstants;
+import dev.mcr.bridge.Bridge;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.ByteBufCodecs;
 import net.minecraft.network.codec.StreamCodec;
@@ -22,7 +26,14 @@ public final class McrTestMod implements ClientModInitializer {
     /** `-Dmcr.testmod.hangAfterTicks=N`: N client ticks after loading, the render thread blocks for good. */
     private static final int HANG_AFTER = Integer.getInteger("mcr.testmod.hangAfterTicks", -1);
 
+    private static final KeyMapping PING = new KeyMapping(
+            "key.mcr_testmod.ping",
+            InputConstants.Type.KEYBOARD,
+            InputConstants.KEY_K,
+            KeyMapping.Category.register(Identifier.fromNamespaceAndPath("mcr_testmod", "test")));
+
     private static int commandIn;
+    private static int pings;
     private static int loadedTicks;
 
     public record Hello(String message) implements CustomPacketPayload {
@@ -39,12 +50,16 @@ public final class McrTestMod implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         PayloadTypeRegistry.serverboundPlay().register(Hello.TYPE, Hello.CODEC);
+        KeyMappingHelper.registerKeyMapping(PING);
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
             sender.sendPacket(new Hello(MESSAGE));
             commandIn = COMMAND_DELAY_TICKS;
         });
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             GuiCapture.tick(client);
+            while (PING.consumeClick()) {
+                Bridge.info("testmod_key", ++pings);
+            }
             if (SoundSelfTest.enabled()) {
                 SoundSelfTest.tick(client);
             }

@@ -2,6 +2,11 @@ package dev.mcr.bridge.mixin;
 
 import dev.mcr.bridge.Bridge;
 import dev.mcr.bridge.BridgeAbi;
+import dev.mcr.bridge.McrInput;
+import com.mojang.realmsclient.RealmsMainScreen;
+import net.minecraft.client.gui.components.toasts.SystemToast;
+import net.minecraft.client.gui.screens.worldselection.SelectWorldScreen;
+import net.minecraft.network.chat.Component;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Gui;
 import net.minecraft.client.gui.components.AbstractWidget;
@@ -16,17 +21,36 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(Gui.class)
 abstract class GuiMixin {
+    private static final SystemToast.SystemToastId NOT_SUPPORTED = new SystemToast.SystemToastId();
+
     @Shadow
     public abstract @Nullable Screen screen();
 
+    @Inject(method = "setScreen", at = @At("HEAD"), cancellable = true)
+    private void mcr$notYet(@Nullable Screen requested, CallbackInfo ci) {
+        if (McrInput.active() && (requested instanceof SelectWorldScreen || requested instanceof RealmsMainScreen)) {
+            Minecraft minecraft = Minecraft.getInstance();
+            SystemToast.addOrUpdate(
+                    minecraft.gui.toastManager(),
+                    NOT_SUPPORTED,
+                    Component.literal(requested instanceof SelectWorldScreen ? "Singleplayer" : "Realms"),
+                    Component.literal("Not supported in mcr yet"));
+            ci.cancel();
+        }
+    }
+
     @Inject(method = "setScreen", at = @At("TAIL"))
     private void mcr$reportScreen(@Nullable Screen requested, CallbackInfo ci) {
+        if (McrInput.active()) {
+            McrInput.publish(Minecraft.getInstance());
+        }
         Screen screen = screen();
         if (screen == null) {
             Bridge.report(BridgeAbi.REPORT_SCREEN, "");
             return;
         }
         Bridge.report(BridgeAbi.REPORT_SCREEN, screen.getClass().getName());
+        McrInput.probeEditBoxes(screen);
         StringBuilder labels = new StringBuilder();
         StringBuilder layout = new StringBuilder().append(Minecraft.getInstance().getWindow().getGuiScale());
         for (GuiEventListener child : screen.children()) {

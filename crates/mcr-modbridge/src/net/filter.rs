@@ -5,10 +5,10 @@ use mcr_protocol::{Direction, PacketIds};
 use super::phase::NetPhase;
 
 /// Serverbound packets Java may send through Rust's connection; everything else is Rust's.
-/// `mod-input-screens` extends the play row as Java screens take over.
 pub const FORWARD: &[(NetPhase, &str)] = &[
     (NetPhase::Login, "custom_query_answer"),
     (NetPhase::Configuration, "custom_payload"),
+    (NetPhase::Configuration, "custom_click_action"),
     (NetPhase::Play, "custom_payload"),
     (NetPhase::Play, "container_click"),
     (NetPhase::Play, "container_button_click"),
@@ -25,6 +25,17 @@ pub const FORWARD: &[(NetPhase, &str)] = &[
     (NetPhase::Play, "set_creative_mode_slot"),
     (NetPhase::Play, "command_suggestion"),
     (NetPhase::Play, "client_command"),
+    (NetPhase::Play, "custom_click_action"),
+    (NetPhase::Play, "seen_advancements"),
+    (NetPhase::Play, "bundle_item_selected"),
+    (NetPhase::Play, "change_game_mode"),
+    (NetPhase::Play, "set_command_block"),
+    (NetPhase::Play, "set_command_minecart"),
+    (NetPhase::Play, "set_structure_block"),
+    (NetPhase::Play, "set_jigsaw_block"),
+    (NetPhase::Play, "jigsaw_generate"),
+    (NetPhase::Play, "set_test_block"),
+    (NetPhase::Play, "test_instance_block_action"),
 ];
 
 /// Rust sends its own brand; a mod-mode brand from Java would contradict it.
@@ -162,7 +173,7 @@ mod tests {
     fn configuration_row() {
         check(
             NetPhase::Configuration,
-            &["custom_payload"],
+            &["custom_payload", "custom_click_action"],
             &[
                 "client_information",
                 "select_known_packs",
@@ -172,7 +183,6 @@ mod tests {
                 "resource_pack",
                 "accept_code_of_conduct",
                 "cookie_response",
-                "custom_click_action",
             ],
         );
     }
@@ -198,6 +208,17 @@ mod tests {
                 "set_creative_mode_slot",
                 "command_suggestion",
                 "client_command",
+                "custom_click_action",
+                "seen_advancements",
+                "bundle_item_selected",
+                "change_game_mode",
+                "set_command_block",
+                "set_command_minecart",
+                "set_structure_block",
+                "set_jigsaw_block",
+                "jigsaw_generate",
+                "set_test_block",
+                "test_instance_block_action",
             ],
             &[
                 "keep_alive",

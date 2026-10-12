@@ -5,6 +5,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use mcr_modbridge::ModInput;
 use mcr_modbridge::manager::{Manager, SessionStore, SessionTracker};
 use mcr_modbridge::sound::SoundLink;
 use mcr_modbridge::{
@@ -33,6 +34,8 @@ pub struct ModNet {
     pub sound: Option<SoundLink>,
     /// Java's frames in lockstep with the renderer; its GUI replaces the native one while shown.
     pub frames: Option<ModFrames>,
+    /// Java's input while its GUI is composed.
+    pub input: Option<ModInput>,
     connects: Arc<Mutex<Vec<String>>>,
 }
 
@@ -156,10 +159,16 @@ impl ModHost {
         if let Some(f) = &frames {
             renderer.set_external(Some(Box::new(f.clone())));
         }
+        let input = frames.is_some().then(|| {
+            let input = bridge.input();
+            input.set_clipboard(crate::mod_input::SystemClipboard::open());
+            input
+        });
         let net = ModNet {
             link: bridge.net(),
             sound: SoundLink::get().ok(),
             frames,
+            input,
             connects: Arc::new(Mutex::new(Vec::new())),
         };
         let connects = net.connects.clone();

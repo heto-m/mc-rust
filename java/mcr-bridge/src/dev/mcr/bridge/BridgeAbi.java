@@ -4,7 +4,7 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 5;
+    public static final int VERSION = 6;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
     public static final String COMPOSE_PROPERTY = "mcr.compose";
 
@@ -17,9 +17,48 @@ public final class BridgeAbi {
     public static final int SHARED_SOUND_CONTROL = 6;
     public static final int SHARED_FRAME_STATE = 16;
     public static final int SHARED_FRAME_BELL = 17;
+    public static final int SHARED_INPUT_STATE = 18;
 
     public static final int MSG_FRAME = 1;
     public static final int MSG_SHUTDOWN = 2;
+    public static final int MSG_INPUT = 3;
+
+    public static final int IN_TYPE = 0;
+    public static final int IN_A = 4;
+    public static final int IN_B = 8;
+    public static final int IN_C = 12;
+    public static final int IN_D = 16;
+    public static final int IN_X = 24;
+    public static final int IN_Y = 32;
+    public static final int IN_DX = 40;
+    public static final int IN_DY = 48;
+    public static final int IN_TEXT_DATA = 56;
+    public static final int IN_KEY = 1;
+    public static final int IN_TEXT = 2;
+    public static final int IN_PREEDIT = 3;
+    public static final int IN_MOTION = 4;
+    public static final int IN_BUTTON = 5;
+    public static final int IN_WHEEL = 6;
+    public static final int IN_DROP = 7;
+    public static final int INPUT_MAX_TEXT = 4096;
+    public static final int INPUT_MAX_CLIPBOARD = 1048576;
+
+    public static final int ISTATE_KEYS = 0;
+    public static final int ISTATE_MODS = 64;
+    public static final int ISTATE_RUST_FLAGS = 68;
+    public static final int ISTATE_JAVA_FLAGS = 72;
+    public static final int ISTATE_GUI_SCALE = 76;
+    public static final int ISTATE_CURSOR = 80;
+    public static final int ISTATE_NATIVE_SEQ = 84;
+    public static final int ISTATE_NATIVE_KIND = 88;
+    public static final int ISTATE_TEXT_AREA = 96;
+    public static final int ISTATE_SIZE = 128;
+    public static final int RUST_FOCUSED = 1;
+    public static final int JAVA_SCREEN = 1;
+    public static final int JAVA_OVERLAY = 2;
+    public static final int JAVA_GRABBED = 4;
+    public static final int JAVA_TEXT_INPUT = 8;
+    public static final int JAVA_QUIT = 16;
 
     public static final int FRAME_INDEX = 0;
     public static final int FRAME_TICKS = 8;
@@ -75,6 +114,8 @@ public final class BridgeAbi {
     public static final int OUT_CHAT = 2;
     public static final int OUT_DISCONNECT = 3;
     public static final int OUT_PROBE = 4;
+    public static final int DISCONNECT_LEFT = 0;
+    public static final int DISCONNECT_FAILED = 1;
 
     public static final int CHAT_MESSAGE = 0;
     public static final int CHAT_COMMAND = 1;
@@ -225,7 +266,9 @@ public final class BridgeAbi {
         SOUND_UPLOAD("sound_upload", "(JIIII)I", Flavour.NORMAL),
         SOUND_FREE("sound_free", "(I)V", Flavour.NORMAL),
         SOUND_STREAM_OPEN("sound_stream_open", "(IIIII)I", Flavour.NORMAL),
-        SOUND_STREAM_PUSH("sound_stream_push", "(IIJI)I", Flavour.NORMAL);
+        SOUND_STREAM_PUSH("sound_stream_push", "(IIJI)I", Flavour.NORMAL),
+        CLIPBOARD_GET("clipboard_get", "(JI)I", Flavour.NORMAL),
+        CLIPBOARD_SET("clipboard_set", "(JI)V", Flavour.NORMAL);
 
         public final String symbol;
         public final String descriptor;

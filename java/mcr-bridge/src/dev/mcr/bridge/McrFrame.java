@@ -50,6 +50,11 @@ public final class McrFrame {
         return COMPOSE && (flags & BridgeAbi.FRAME_LOCKSTEP) != 0;
     }
 
+    /** Rust asked Java to shut down; Java's own Quit is a request to Rust instead. */
+    public static boolean stopping() {
+        return stopping;
+    }
+
     public static float partialTick() {
         return partialTick;
     }
@@ -86,6 +91,9 @@ public final class McrFrame {
                         applySize(minecraft);
                     }
                     McrNet.pump(minecraft);
+                    if (lockstep()) {
+                        McrInput.deliver(minecraft);
+                    }
                 }
                 return;
             }
@@ -107,6 +115,7 @@ public final class McrFrame {
                     }
                     woke = true;
                 }
+                case BridgeAbi.MSG_INPUT -> McrInput.enqueue(payload);
                 case BridgeAbi.MSG_SHUTDOWN -> {
                     stopping = true;
                     woke = true;
@@ -159,6 +168,7 @@ public final class McrFrame {
             return;
         }
         boolean loaded = minecraft.isGameLoadFinished() && minecraft.gui.overlay() == null;
+        McrInput.publish(minecraft);
         publish(Bridge.get(), minecraft, BridgeAbi.FSTATE_READY | (loaded ? BridgeAbi.FSTATE_LOADED : 0));
     }
 

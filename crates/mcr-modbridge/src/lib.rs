@@ -5,6 +5,7 @@ pub mod compose;
 mod events;
 pub mod frame;
 pub mod gpu;
+pub mod input;
 mod launch;
 pub mod manager;
 pub mod net;
@@ -23,6 +24,7 @@ use mcr_jvm::{DestroyOutcome, HomeSearch, JavaVm, JvmConfig, JvmError, RingError
 pub use abi::{BRIDGE_VERSION, COMPOSE_PROPERTY, ENTRIES, FrameBegin, TABLE_PROPERTY};
 pub use compose::{ComposeStats, FrameLink, ModFrames};
 pub use events::BridgeEvent;
+pub use input::ModInput;
 pub use launch::{
     BOOT_JAR, BRIDGE_JAR, BridgeConfig, LAUNCH_MANIFEST, LaunchManifest, LaunchPlan, plan,
     prepare_game_dir,
@@ -93,6 +95,7 @@ pub struct Bridge {
     watcher: Option<JoinHandle<()>>,
     vm: VmState,
     frames: Option<ModFrames>,
+    input: ModInput,
 }
 
 impl Bridge {
@@ -156,9 +159,10 @@ impl Bridge {
         controls
             .external
             .store(config.compose, std::sync::atomic::Ordering::Release);
+        let input = ModInput::new(&shared.input);
         let frames = config
             .compose
-            .then(|| ModFrames::new(FrameLink::new(writer.clone(), shared)));
+            .then(|| ModFrames::new(FrameLink::new(writer.clone(), shared, input.clone())));
         let pacer = pacer::spawn(writer, shared, controls.clone())?;
         Ok(Self {
             events,
@@ -167,6 +171,7 @@ impl Bridge {
             watcher: Some(watcher),
             vm: VmState::Running,
             frames,
+            input,
         })
     }
 
@@ -183,6 +188,11 @@ impl Bridge {
                 .expect("the bridge started with its shared state")
                 .net,
         )
+    }
+
+    /// Java's input; one per process like the VM. Events reach Java with its next composed frame.
+    pub fn input(&self) -> ModInput {
+        self.input.clone()
     }
 
     /// Stops posting frames (Java stays blocked in its wait) or resumes.

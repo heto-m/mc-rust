@@ -4,11 +4,13 @@ import dev.mcr.bridge.net.BridgeChannel;
 import dev.mcr.bridge.net.McrNet;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelHandlerContext;
 import java.net.InetSocketAddress;
 import net.minecraft.network.Connection;
 import net.minecraft.network.DisconnectionDetails;
 import net.minecraft.network.PacketListener;
 import net.minecraft.network.ProtocolInfo;
+import net.minecraft.network.SkipPacketException;
 import net.minecraft.server.network.EventLoopGroupHolder;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -38,6 +40,13 @@ abstract class ConnectionMixin {
     private <T extends PacketListener> void mcr$inboundPhase(ProtocolInfo<T> protocol, T listener, CallbackInfo ci) {
         if (channel instanceof BridgeChannel bridge) {
             bridge.setInboundPhase(McrNet.phaseOf(protocol.id()));
+        }
+    }
+
+    @Inject(method = "exceptionCaught", at = @At("HEAD"))
+    private void mcr$failed(ChannelHandlerContext ctx, Throwable cause, CallbackInfo ci) {
+        if (channel instanceof BridgeChannel bridge && !(cause instanceof SkipPacketException)) {
+            bridge.markFailed();
         }
     }
 

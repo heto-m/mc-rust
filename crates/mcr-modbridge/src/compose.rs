@@ -14,6 +14,7 @@ use crate::abi::{self, FRAME_LOCKSTEP, FrameBegin, MSG_FRAME, Shared};
 use crate::events::BridgeEvent;
 use crate::frame::{JavaFrame, LinkState, Lockstep, TickBank};
 use crate::gpu::backend::Backend;
+use crate::input::ModInput;
 use crate::pacer::{self, SharedWriter};
 
 const SAMPLES: usize = 1 << 14;
@@ -192,10 +193,11 @@ pub struct FrameLink {
     notice: Option<String>,
     size_mismatch_logged: bool,
     stats: ComposeStats,
+    input: ModInput,
 }
 
 impl FrameLink {
-    pub(crate) fn new(writer: SharedWriter, shared: &'static Shared) -> Self {
+    pub(crate) fn new(writer: SharedWriter, shared: &'static Shared, input: ModInput) -> Self {
         Self {
             writer,
             shared,
@@ -206,6 +208,7 @@ impl FrameLink {
             notice: None,
             size_mismatch_logged: false,
             stats: ComposeStats::default(),
+            input,
         }
     }
 
@@ -256,6 +259,7 @@ impl FrameLink {
 
     fn detach(&mut self, reason: &str) {
         self.lockstep.detach();
+        self.input.queue().discard();
         self.shown = None;
         tracing::error!("mod bridge detached from rendering: {reason}");
         self.notice = Some(format!(
@@ -292,7 +296,16 @@ impl FrameLink {
             view: ctx.view.to_cols_array(),
             proj: ctx.proj.to_cols_array(),
         };
-        let pushed = pacer::lock(&self.writer).try_push(MSG_FRAME, &frame.encode());
+        let pushed = {
+            let mut writer = pacer::lock(&self.writer);
+            let mut input = self.input.queue();
+            if self.lockstep.state() == LinkState::Running {
+                input.flush(&mut writer, &self.shared.input);
+            } else {
+                input.discard();
+            }
+            writer.try_push(MSG_FRAME, &frame.encode())
+        };
         match pushed {
             Ok(()) => {
                 self.stats.posted += 1;
@@ -314,6 +327,9 @@ impl FrameLink {
         };
         if self.shared.frame.is_gone() && self.lockstep.state() != LinkState::Detached {
             self.detach("Java stopped");
+        }
+        if self.shared.net.is_detached() && self.lockstep.state() == LinkState::Running {
+            self.detach("Java lost its connection");
         }
         let java = self.java();
         if java.ready {

@@ -1,5 +1,9 @@
 //! Owns the app flow: menus while no session exists, a [`Play`] while one runs.
 
+mod route;
+
+pub use route::JavaWindow;
+
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -81,6 +85,7 @@ pub struct Shell {
     prompt_open: bool,
     current_address: String,
     dialogs: Option<DialogEnd>,
+    route: route::Route,
 }
 
 impl std::fmt::Debug for Shell {
@@ -167,6 +172,7 @@ impl Shell {
             prompt_open: false,
             current_address: String::new(),
             dialogs: None,
+            route: route::Route::new(cfg.mod_net.as_ref().and_then(|n| n.input.clone())),
             cfg,
         };
         shell.show_title();
@@ -226,6 +232,7 @@ impl Shell {
         }
         for request in requests {
             match request {
+                DialogRequest::Show(_) | DialogRequest::Clear if self.route.gui => {}
                 DialogRequest::Show(compound) => {
                     let Some(dialog) = Dialog::from_nbt(&Value::Compound(compound)) else {
                         eprintln!("ignoring a malformed server dialog");
@@ -450,7 +457,7 @@ impl Shell {
     }
 
     fn update_menu_size(&mut self) {
-        let max = self.settings.borrow().file.options.gui_scale;
+        let max = self.gui_scale_setting();
         let (size, _) = gui::gui_size(self.renderer_size(), max);
         if size != self.gui_size {
             self.gui_size = size;
@@ -467,6 +474,9 @@ impl Shell {
     }
 
     pub fn wants_grab(&self) -> bool {
+        if let Some(grab) = self.route_grab() {
+            return grab;
+        }
         self.play.as_ref().is_some_and(Play::wants_grab)
     }
 
@@ -531,7 +541,8 @@ impl Shell {
             && self.play.is_none()
             && self.connecting.is_none()
         {
-            self.connect(&address.clone(), true);
+            let with_screen = !self.route.gui;
+            self.connect(&address.clone(), with_screen);
         }
     }
 
@@ -588,6 +599,7 @@ impl Shell {
     }
 
     pub fn advance(&mut self, dt: f32) {
+        self.update_route();
         let now = Instant::now();
         self.last_frame = now;
         self.poll_connect();
@@ -818,7 +830,30 @@ impl Shell {
         }
     }
 
+    /// Scripted keys: printable keys type what a US layout would.
     pub fn key_event(&mut self, key: InputKey, pressed: bool, text: Option<&str>) {
+        let printable = match key {
+            InputKey::Keyboard(hid) => u32::try_from(hid)
+                .ok()
+                .and_then(mcr_modbridge::input::us_printable),
+            _ => None,
+        };
+        self.key_input(key, printable, pressed, false, text);
+    }
+
+    /// A key or button from the window; `printable` is the layout's character without modifiers.
+    pub fn key_input(
+        &mut self,
+        key: InputKey,
+        printable: Option<char>,
+        pressed: bool,
+        repeat: bool,
+        text: Option<&str>,
+    ) {
+        if self.route_key(key, printable, pressed, repeat, text) || repeat && !self.accepts_repeat()
+        {
+            return;
+        }
         if let Some(play) = &mut self.play {
             play.key_event(key, pressed, text);
             return;
@@ -830,11 +865,14 @@ impl Shell {
     }
 
     pub fn cursor_moved(&mut self, px: f64, py: f64) {
+        if self.route_cursor(px, py) {
+            return;
+        }
         if let Some(play) = &mut self.play {
             play.cursor_moved(px, py);
             return;
         }
-        let max = self.settings.borrow().file.options.gui_scale;
+        let max = self.gui_scale_setting();
         let (_, scale) = gui::gui_size(self.renderer_size(), max);
         let scale = f64::from(scale);
         self.menu_input(UiInput::MouseMove {
@@ -866,12 +904,18 @@ impl Shell {
     }
 
     pub fn ui_text(&mut self, text: &str) {
+        if self.route_text(text) {
+            return;
+        }
         for c in text.chars().filter(|c| !c.is_control()) {
             self.ui_input(UiInput::Char(c));
         }
     }
 
     pub fn ui_key(&mut self, key: mcr_ui::Key) {
+        if self.route_ui_key(key) {
+            return;
+        }
         let mods = self.mods;
         self.ui_input(UiInput::Key {
             key,
@@ -887,12 +931,18 @@ impl Shell {
     }
 
     pub fn mouse_motion(&mut self, dx: f64, dy: f64) {
+        if self.route_motion(dx, dy) {
+            return;
+        }
         if let Some(play) = &mut self.play {
             play.mouse_motion(dx, dy);
         }
     }
 
     pub fn screen_click(&mut self, x: f32, y: f32, button: mcr_ui::MouseButton) {
+        if self.route_click(x, y, button) {
+            return;
+        }
         let mods = self.mods;
         self.ui_input(UiInput::MouseMove { x, y });
         self.ui_input(UiInput::MousePress {
@@ -907,24 +957,25 @@ impl Shell {
 
     pub fn frame(&mut self) -> Option<FrameStats> {
         let java_gui = self.java_gui();
+        self.update_route();
         if let Some(play) = &mut self.play {
             play.java_gui = java_gui;
             return play.frame();
         }
         self.update_menu_size();
+        let max_scale = u32::try_from(self.gui_scale_setting()).unwrap_or(0);
         let parts = self.parts.as_mut()?;
         parts
             .gui
             .sync_language(&self.settings.borrow().file.options.language);
         let size = parts.renderer.size();
-        let max_scale = u32::try_from(self.settings.borrow().file.options.gui_scale).unwrap_or(0);
         {
             let gui = &mut parts.gui;
             let mut frame = gui.ui.frame_scaled(size.0, size.1, max_scale);
             let mut cx = RenderCx::new(&mut frame, &mut gui.icons, &gui.assets, &NoView);
             cx.mouse = self.mouse;
             cx.now_ms = self.started.elapsed().as_millis() as u64;
-            if !java_gui {
+            if !java_gui || self.stack.len() > 1 {
                 self.stack.render(&mut cx);
             }
             if !gui.toasts.is_empty() {

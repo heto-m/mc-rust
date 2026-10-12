@@ -22,12 +22,15 @@ public final class Bridge {
     public final MethodHandle gpuEncode;
     public final MethodHandle gpuPass;
     public final MethodHandle gpuError;
+    final MethodHandle clipboardGet;
+    final MethodHandle clipboardSet;
     final Ring control;
     final Doorbell controlBell;
     public final Ring netIn;
     public final Ring netOut;
     final MemorySegment frameState;
     final Doorbell frameBell;
+    final MemorySegment inputState;
 
     private Bridge(NativeTable table) {
         this.table = table;
@@ -37,12 +40,15 @@ public final class Bridge {
         this.gpuEncode = downcall(table, BridgeAbi.Entry.GPU_ENCODE);
         this.gpuPass = downcall(table, BridgeAbi.Entry.GPU_PASS);
         this.gpuError = downcall(table, BridgeAbi.Entry.GPU_ERROR);
+        this.clipboardGet = downcall(table, BridgeAbi.Entry.CLIPBOARD_GET);
+        this.clipboardSet = downcall(table, BridgeAbi.Entry.CLIPBOARD_SET);
         this.control = Ring.at(shared(BridgeAbi.SHARED_CONTROL_RING));
         this.controlBell = new Doorbell(shared(BridgeAbi.SHARED_CONTROL_BELL));
         this.netIn = Ring.at(shared(BridgeAbi.SHARED_NET_IN_RING));
         this.netOut = Ring.at(shared(BridgeAbi.SHARED_NET_OUT_RING));
         this.frameState = MemorySegment.ofAddress(shared(BridgeAbi.SHARED_FRAME_STATE)).reinterpret(BridgeAbi.FSTATE_SIZE);
         this.frameBell = new Doorbell(shared(BridgeAbi.SHARED_FRAME_BELL));
+        this.inputState = MemorySegment.ofAddress(shared(BridgeAbi.SHARED_INPUT_STATE)).reinterpret(BridgeAbi.ISTATE_SIZE);
     }
 
     private static MethodHandle downcall(NativeTable table, BridgeAbi.Entry entry) {

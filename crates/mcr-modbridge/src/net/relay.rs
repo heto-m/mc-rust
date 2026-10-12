@@ -7,7 +7,8 @@ use super::phase::NetPhase;
 use super::wire::{PlayerState, WorldProbe, header};
 use super::{NetShared, lock};
 use crate::abi::{
-    CHAT_COMMAND, CHAT_MESSAGE, NET_HEADER, OUT_CHAT, OUT_DISCONNECT, OUT_FRAME, OUT_PROBE,
+    CHAT_COMMAND, CHAT_MESSAGE, DISCONNECT_LEFT, NET_HEADER, OUT_CHAT, OUT_DISCONNECT, OUT_FRAME,
+    OUT_PROBE,
 };
 
 /// Bounds one poll so a flood from Java cannot stall a game tick.
@@ -53,6 +54,7 @@ impl Relay for NetRelay {
         let c = &shared.counters;
         let mut rx = lock(&shared.rx);
         let mut corrupt = None;
+        let mut failed = false;
         for _ in 0..MAX_MESSAGES_PER_POLL {
             let msg = match rx.try_pop() {
                 Ok(Some(msg)) => msg,
@@ -111,7 +113,15 @@ impl Relay for NetRelay {
                         }
                     }
                 }
-                OUT_DISCONNECT => sink(Relayed::Disconnect(&text(body))),
+                OUT_DISCONNECT if tag == DISCONNECT_LEFT => sink(Relayed::Disconnect(&text(body))),
+                OUT_DISCONNECT => {
+                    tracing::error!(
+                        reason = %text(body),
+                        "java's connection failed; detaching java and staying connected"
+                    );
+                    failed = true;
+                    break;
+                }
                 _ => {
                     c.malformed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -120,6 +130,9 @@ impl Relay for NetRelay {
         drop(rx);
         if let Some(e) = corrupt {
             tracing::error!("corrupt serverbound bridge ring: {e}");
+            shared.detach();
+        }
+        if failed {
             shared.detach();
         }
     }
@@ -258,7 +271,13 @@ mod tests {
             session,
             b"/time query day",
         );
-        message(&mut java_out, OUT_DISCONNECT, 0, session, b"Quit");
+        message(
+            &mut java_out,
+            OUT_DISCONNECT,
+            DISCONNECT_LEFT,
+            session,
+            b"Quit",
+        );
         let got = poll(relay.as_mut(), Phase::Play);
         assert_eq!(
             got,
@@ -280,6 +299,45 @@ mod tests {
         assert!(dropped.contains(&(play.tag(), "move_player_pos")));
         assert!(dropped.contains(&(cfg.tag(), "custom_payload")));
         assert!(relay.answers_custom_queries());
+    }
+
+    #[test]
+    fn a_failed_java_connection_detaches_java_and_keeps_rust_connected() {
+        let (link, mut java_in, mut java_out) = link(1 << 20);
+        let mut hooks = link.hooks("localhost", 25565);
+        let session = session_of(java_in.try_pop().unwrap().unwrap().payload());
+        let mut relay = hooks.relay.take().unwrap();
+        let play = NetPhase::Play;
+        let mut custom = Vec::new();
+        mcr_buf::write_varint(&mut custom, 4);
+        custom.extend_from_slice(b"a:bc");
+        message(
+            &mut java_out,
+            OUT_DISCONNECT,
+            crate::abi::DISCONNECT_FAILED,
+            session,
+            b"Internal Exception: boom",
+        );
+        frame(
+            &mut java_out,
+            play,
+            session,
+            sb(play, "custom_payload"),
+            &custom,
+        );
+        assert!(
+            poll(relay.as_mut(), Phase::Play).is_empty(),
+            "no disconnect"
+        );
+        assert!(link.is_detached());
+        assert!(
+            !relay.answers_custom_queries(),
+            "rust answers queries again"
+        );
+        assert!(
+            poll(relay.as_mut(), Phase::Play).is_empty(),
+            "nothing is forwarded after the failure"
+        );
     }
 
     #[test]

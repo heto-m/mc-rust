@@ -21,6 +21,7 @@ mod input;
 mod language;
 mod map;
 mod mesh_world;
+mod mod_input;
 mod mods;
 mod mods_ui;
 mod movement_sounds;
@@ -57,11 +58,11 @@ use mcr_render::{Camera, FrameInputs, Renderer, RendererConfig, Target};
 use shell::{Shell, ShellConfig};
 use stats::StatWindow;
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseScrollDelta, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::event::{DeviceEvent, DeviceId, ElementState, Ime, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{CursorGrabMode, Window, WindowId};
+use winit::window::{CursorGrabMode, CursorIcon, Window, WindowId};
 
 struct SyntheticScene {
     renderer: Renderer,
@@ -104,6 +105,8 @@ struct App {
     ready_reported: bool,
     exit: bool,
     mod_host: Option<mods::ModHost>,
+    cursor: CursorIcon,
+    ime: Option<Option<[i32; 4]>>,
     boot: Option<mods::BootPlan>,
     mods_app: mods_ui::ModsApp,
 }
@@ -122,6 +125,8 @@ impl App {
             ready_reported: false,
             exit: false,
             mod_host: None,
+            cursor: CursorIcon::Default,
+            ime: None,
             boot: started.boot,
             mods_app: started.app,
         }
@@ -235,6 +240,35 @@ impl App {
         }
     }
 
+    /// Vanilla puts the cursor back in the middle when it releases the mouse.
+    fn center_cursor(&self) {
+        if let Some(window) = &self.window {
+            let size = window.inner_size();
+            let centre =
+                PhysicalPosition::new(f64::from(size.width) / 2.0, f64::from(size.height) / 2.0);
+            let _ = window.set_cursor_position(centre);
+        }
+    }
+
+    fn apply_java_window(&mut self, java: Option<shell::JavaWindow>) {
+        let Some(window) = &self.window else { return };
+        let cursor = java.map_or(CursorIcon::Default, |j| mod_input::cursor_icon(j.cursor));
+        if cursor != self.cursor {
+            window.set_cursor(cursor);
+            self.cursor = cursor;
+        }
+        let ime = java.and_then(|j| j.text_input);
+        if ime.is_some() != self.ime.is_some() {
+            window.set_ime_allowed(ime.is_some());
+        }
+        if let Some(Some([x, y, w, h])) = ime
+            && ime != self.ime
+        {
+            window.set_ime_cursor_area(PhysicalPosition::new(x, y), PhysicalSize::new(w, h));
+        }
+        self.ime = ime;
+    }
+
     fn key(&mut self, code: KeyCode, pressed: bool) {
         match code {
             KeyCode::KeyW => self.fly.forward = pressed,
@@ -278,9 +312,14 @@ impl App {
             }
             let want = shell.wants_grab();
             let cap = shell.max_fps();
+            let java = shell.java_window();
             if want != self.grabbed {
                 self.set_grab(want);
+                if !want && java.is_some() {
+                    self.center_cursor();
+                }
             }
+            self.apply_java_window(java);
             if !self.opts.vsync && (10..260).contains(&cap) {
                 let budget = std::time::Duration::from_secs_f64(1.0 / f64::from(cap));
                 if let Some(rest) = budget.checked_sub(now.elapsed()) {
@@ -365,20 +404,38 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(Scene::Shell(shell)) = &mut self.scene {
-                    if let PhysicalKey::Code(code) = event.physical_key
-                        && (!event.repeat || shell.accepts_repeat())
-                    {
+                    if let PhysicalKey::Code(code) = event.physical_key {
                         let pressed = event.state == ElementState::Pressed;
-                        let text = event.text.as_deref();
-                        shell.key_event(input::key_from_winit(code), pressed, text);
+                        shell.key_input(
+                            input::key_from_winit(code),
+                            mod_input::printable(&event),
+                            pressed,
+                            event.repeat,
+                            event.text.as_deref(),
+                        );
                     }
                 } else if let PhysicalKey::Code(code) = event.physical_key {
                     self.key(code, event.state == ElementState::Pressed);
                 }
             }
-            WindowEvent::Focused(false) => {
+            WindowEvent::Focused(focused) => {
                 if let Some(Scene::Shell(shell)) = &mut self.scene {
-                    shell.lose_focus();
+                    shell.focus(focused);
+                }
+            }
+            WindowEvent::Ime(ime) => {
+                if let Some(Scene::Shell(shell)) = &mut self.scene {
+                    match ime {
+                        Ime::Commit(text) => shell.ime_commit(&text),
+                        Ime::Preedit(text, cursor) => shell.ime_preedit(&text, cursor),
+                        Ime::Disabled => shell.ime_preedit("", None),
+                        Ime::Enabled => {}
+                    }
+                }
+            }
+            WindowEvent::DroppedFile(path) => {
+                if let Some(Scene::Shell(shell)) = &mut self.scene {
+                    shell.dropped_file(&path);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -407,7 +464,8 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
                 };
                 if let Some(Scene::Shell(shell)) = &mut self.scene {
-                    shell.scroll(steps as f32);
+                    let (dx, dy) = mod_input::wheel(delta);
+                    shell.wheel(dx, dy, steps as f32);
                 } else {
                     self.fly.scale_speed(steps);
                 }

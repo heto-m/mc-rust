@@ -330,6 +330,12 @@ pub struct Play {
     hud_hidden: bool,
     /// Java's HUD is composed over the world in mod mode, replacing the native one.
     pub java_gui: bool,
+    /// A Java screen owns all input; gameplay input stops.
+    pub java_screen: bool,
+    /// Java's GUI scale in mod mode, which native overlays follow.
+    pub gui_scale_override: Option<i32>,
+    /// A native overlay asked for the Mods screen.
+    pub open_mods: bool,
     debug_on: bool,
     tab_held: bool,
     ctrl_held: bool,
@@ -463,6 +469,9 @@ impl Play {
             perspective: Perspective::First,
             hud_hidden: false,
             java_gui: false,
+            java_screen: false,
+            gui_scale_override: None,
+            open_mods: false,
             debug_on: false,
             tab_held: false,
             ctrl_held: false,
@@ -575,7 +584,26 @@ impl Play {
     }
 
     fn busy(&self) -> bool {
-        !self.stack.is_empty()
+        !self.stack.is_empty() || self.java_screen
+    }
+
+    fn gui_scale(&self) -> i32 {
+        self.gui_scale_override.unwrap_or(self.options.gui_scale)
+    }
+
+    /// In mod mode Java opens these screens and toggles its own debug overlay.
+    fn java_owns(&self, i: usize) -> bool {
+        let k = &self.keys;
+        self.java_gui
+            && [
+                k.chat,
+                k.command,
+                k.inventory,
+                k.advancements,
+                k.playerlist,
+                k.debug,
+            ]
+            .contains(&i)
     }
 
     fn player_input(&self) -> PlayerInput {
@@ -916,6 +944,7 @@ impl Play {
                 println!("died");
                 self.death_message = message;
             }
+            ClientEvent::ContainerOpened { .. } if self.java_gui => self.container_open = false,
             ClientEvent::ContainerOpened {
                 menu_type, title, ..
             } => match MenuKind::from_registry_id(menu_type) {
@@ -930,6 +959,12 @@ impl Play {
                     self.net(Client::close_container);
                 }
             },
+            ClientEvent::SignEditorOpened { .. }
+            | ClientEvent::BookOpened { .. }
+            | ClientEvent::BlockEditorOpened { .. }
+            | ClientEvent::MinecartEditorOpened { .. }
+            | ClientEvent::ShowCredits
+                if self.java_gui => {}
             ClientEvent::SignEditorOpened { pos, side } => {
                 let screen = crate::editors::sign_screen(&self.world.client.state, pos, side);
                 self.push_screen(Box::new(screen));
@@ -1367,7 +1402,7 @@ impl Play {
             return;
         }
         if key == InputKey::Keyboard(KEY_ESCAPE) {
-            if pressed {
+            if pressed && !self.java_gui {
                 self.open_pause();
             }
             return;
@@ -1377,7 +1412,9 @@ impl Play {
         }
         let indices: Vec<usize> = self.bindings.lookup(key).to_vec();
         for i in indices {
-            self.binding(i, pressed);
+            if !self.java_owns(i) {
+                self.binding(i, pressed);
+            }
         }
     }
 
@@ -1408,7 +1445,7 @@ impl Play {
     }
 
     pub fn cursor_moved(&mut self, px: f64, py: f64) {
-        let (_, scale) = gui::gui_size(self.render.renderer.size(), self.options.gui_scale);
+        let (_, scale) = gui::gui_size(self.render.renderer.size(), self.gui_scale());
         let scale = f64::from(scale);
         let (x, y) = ((px / scale) as f32, (py / scale) as f32);
         self.mouse = (x, y);
@@ -1418,7 +1455,7 @@ impl Play {
     }
 
     fn update_gui_size(&mut self) {
-        let (size, _) = gui::gui_size(self.render.renderer.size(), self.options.gui_scale);
+        let (size, _) = gui::gui_size(self.render.renderer.size(), self.gui_scale());
         if size != self.gui_size {
             self.gui_size = size;
             self.stack.resize(size.0, size.1);
@@ -1557,7 +1594,7 @@ impl Play {
 
     pub fn lose_focus(&mut self) {
         self.release_all();
-        if self.options.pause_on_lost_focus {
+        if self.options.pause_on_lost_focus && !self.java_gui {
             self.open_pause();
         }
     }
@@ -1728,6 +1765,9 @@ impl Play {
     fn death_check(&mut self) {
         let player = &self.world.client.state.player;
         let (dead, show) = (player.dead, player.show_death_screen);
+        if self.java_gui {
+            return;
+        }
         if dead && show && !self.death_shown {
             self.death_shown = true;
             self.stack.clear();
@@ -1889,6 +1929,7 @@ impl Play {
                     self.net(|c| c.mark_recipe_seen(recipe));
                 }
                 ScreenAction::Quit => self.quit = true,
+                ScreenAction::OpenMods => self.open_mods = true,
                 ScreenAction::ResourcePackAnswer(accepted) => self.pack_answers.push(accepted),
                 _ => {}
             }
@@ -2146,7 +2187,7 @@ impl Play {
                 state: &self.world.client.state,
                 operator_items: self.options.operator_items_tab,
             };
-            let max_scale = u32::try_from(self.options.gui_scale).unwrap_or(0);
+            let max_scale = u32::try_from(self.gui_scale()).unwrap_or(0);
             let mut frame = self.gui.ui.frame_scaled(size.0, size.1, max_scale);
             if let Some(layer) = &self.entities {
                 let crosshair = match self.target {
@@ -2307,7 +2348,7 @@ impl Play {
             .top()
             .and_then(|s| s.entity_rect())
             .filter(|_| self.player_inventory);
-        let (_, scale) = gui::gui_size(size, self.options.gui_scale);
+        let (_, scale) = gui::gui_size(size, self.gui_scale());
         match (&mut self.preview, &mut self.entities, rect) {
             (Some(preview), Some(layer), Some(rect)) => {
                 let view = layer.local_view(state);

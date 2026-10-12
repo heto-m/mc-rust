@@ -38,6 +38,7 @@ png.workspace = true
 rustc-hash.workspace = true
 tracing.workspace = true
 winit = "0.30"
+arboard = { version = "3.6", default-features = false }
 anyhow = "1"
 thiserror.workspace = true
 

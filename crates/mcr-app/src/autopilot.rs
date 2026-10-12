@@ -10,6 +10,8 @@ use mcr_ui::{Key, MouseButton};
 pub enum Step {
     Wait(u32),
     WaitReady,
+    /// Until Java finished loading and its GUI is composed (mod mode).
+    WaitMods,
     /// First step only: the script drives the menus itself instead of waiting for the join.
     Early,
     Hold(Vec<InputKey>, u32),
@@ -73,6 +75,7 @@ pub fn parse(text: &str) -> Result<Vec<Step>, String> {
         steps.push(match cmd {
             "wait" => Step::Wait(rest.parse().map_err(|_| err("wait needs ticks"))?),
             "wait_ready" => Step::WaitReady,
+            "wait_mods" => Step::WaitMods,
             "early" => Step::Early,
             "hold" => {
                 let (keys, ticks) = rest
@@ -194,6 +197,12 @@ impl Autopilot {
                         return;
                     }
                 }
+                Step::WaitMods => {
+                    if !sh.mods_settled() {
+                        self.steps.push_front(Step::WaitMods);
+                        return;
+                    }
+                }
                 Step::Early => {}
                 Step::Hold(keys, ticks) => {
                     for &key in &keys {
@@ -274,7 +283,7 @@ impl Autopilot {
                         let state = &play.world.client.state;
                         let [block, sky] = crate::entities::light_at(&state.chunks, p, 1.62);
                         println!(
-                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?}",
+                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?} mod input {:?}",
                             play.ticks,
                             p[0],
                             p[1],
@@ -293,6 +302,7 @@ impl Autopilot {
                                 })
                                 .collect::<Vec<_>>(),
                             (state.inventory.cursor.item, state.inventory.cursor.count),
+                            sh.mod_authority(),
                         );
                     }
                 }
@@ -313,9 +323,10 @@ mod tests {
     #[test]
     fn parses_a_script() {
         let steps =
-            parse("wait 5\nhold w+shift 20 # go\nlook 90 -10\nchat /time set day\nshot a.png\n")
+            parse("wait 5\nhold w+shift 20 # go\nlook 90 -10\nchat /time set day\nshot a.png\nwait_mods\n")
                 .unwrap();
-        assert_eq!(steps.len(), 5);
+        assert_eq!(steps.len(), 6);
+        assert_eq!(steps[5], Step::WaitMods);
         assert!(matches!(&steps[1], Step::Hold(keys, 20) if keys.len() == 2));
         assert_eq!(steps[3], Step::Chat("/time set day".into()));
         assert!(parse("hold nonsense 3").is_err());

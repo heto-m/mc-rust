@@ -27,6 +27,8 @@ public final class BridgeChannel extends EmbeddedChannel {
     /** Phase of the encoder that produced the frame now leaving ({@code PacketEncoder.encode} HEAD). */
     int encodingPhase;
     boolean closedByRust;
+    /** Java's own handling failed (exception, packet error): Rust detaches Java instead of leaving. */
+    boolean failed;
     String closeReason = "Disconnected";
 
     private BridgeChannel(Connection connection, InetSocketAddress remote) {
@@ -60,6 +62,10 @@ public final class BridgeChannel extends EmbeddedChannel {
 
     public void setEncodingPhase(int phase) {
         encodingPhase = phase;
+    }
+
+    public void markFailed() {
+        failed = true;
     }
 
     public void setCloseReason(String reason) {

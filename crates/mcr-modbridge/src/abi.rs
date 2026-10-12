@@ -8,11 +8,12 @@ use mcr_jvm::{Doorbell, EntryDesc, ExtensionTable, Flavour, Ring, RingError};
 
 use crate::events::BridgeEvent;
 use crate::frame::FrameShared;
+use crate::input::{self, InputShared};
 use crate::net::{NetShared, SPILL_LIMIT};
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 5;
+pub const BRIDGE_VERSION: u32 = 6;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -26,9 +27,48 @@ pub const SHARED_SOUND_STATES: i32 = 5;
 pub const SHARED_SOUND_CONTROL: i32 = 6;
 pub const SHARED_FRAME_STATE: i32 = 16;
 pub const SHARED_FRAME_BELL: i32 = 17;
+pub const SHARED_INPUT_STATE: i32 = 18;
 
 pub const MSG_FRAME: u16 = 1;
 pub const MSG_SHUTDOWN: u16 = 2;
+pub const MSG_INPUT: u16 = 3;
+
+/// One `MSG_INPUT`: a fixed head (kind, four ints, four doubles), then UTF-8 for text kinds.
+pub const IN_TYPE: usize = 0;
+pub const IN_A: usize = 4;
+pub const IN_B: usize = 8;
+pub const IN_C: usize = 12;
+pub const IN_D: usize = 16;
+pub const IN_X: usize = 24;
+pub const IN_Y: usize = 32;
+pub const IN_DX: usize = 40;
+pub const IN_DY: usize = 48;
+pub const IN_TEXT_DATA: usize = 56;
+pub const IN_KEY: u32 = 1;
+pub const IN_TEXT: u32 = 2;
+pub const IN_PREEDIT: u32 = 3;
+pub const IN_MOTION: u32 = 4;
+pub const IN_BUTTON: u32 = 5;
+pub const IN_WHEEL: u32 = 6;
+pub const IN_DROP: u32 = 7;
+
+/// The input state block: Rust writes keys, modifiers and its flags; Java writes the rest.
+pub const ISTATE_KEYS: usize = 0;
+pub const ISTATE_MODS: usize = 64;
+pub const ISTATE_RUST_FLAGS: usize = 68;
+pub const ISTATE_JAVA_FLAGS: usize = 72;
+pub const ISTATE_GUI_SCALE: usize = 76;
+pub const ISTATE_CURSOR: usize = 80;
+pub const ISTATE_NATIVE_SEQ: usize = 84;
+pub const ISTATE_NATIVE_KIND: usize = 88;
+pub const ISTATE_TEXT_AREA: usize = 96;
+pub const ISTATE_SIZE: usize = 128;
+pub const RUST_FOCUSED: u32 = 1;
+pub const JAVA_SCREEN: u32 = 1;
+pub const JAVA_OVERLAY: u32 = 2;
+pub const JAVA_GRABBED: u32 = 4;
+pub const JAVA_TEXT_INPUT: u32 = 8;
+pub const JAVA_QUIT: u32 = 16;
 
 pub const FRAME_INDEX: usize = 0;
 pub const FRAME_TICKS: usize = 8;
@@ -87,6 +127,11 @@ pub const OUT_FRAME: u16 = 1;
 pub const OUT_CHAT: u16 = 2;
 pub const OUT_DISCONNECT: u16 = 3;
 pub const OUT_PROBE: u16 = 4;
+/// `OUT_DISCONNECT` tags: Java left on purpose, or its connection failed on its own (any tag but
+/// `DISCONNECT_LEFT` detaches Java).
+pub const DISCONNECT_LEFT: u8 = 0;
+#[cfg(test)]
+pub const DISCONNECT_FAILED: u8 = 1;
 
 pub const CHAT_MESSAGE: u8 = 0;
 pub const CHAT_COMMAND: u8 = 1;
@@ -197,6 +242,16 @@ pub const ENTRIES: &[EntryDesc] = &[
         descriptor: "(IIJI)I",
         flavour: Flavour::Normal,
     },
+    EntryDesc {
+        name: "clipboard_get",
+        descriptor: "(JI)I",
+        flavour: Flavour::Normal,
+    },
+    EntryDesc {
+        name: "clipboard_set",
+        descriptor: "(JI)V",
+        flavour: Flavour::Normal,
+    },
 ];
 
 /// One `MSG_FRAME`: what Java's next frame runs with.
@@ -284,6 +339,7 @@ pub(crate) struct Shared {
     pub net: NetShared,
     pub frame: FrameShared,
     pub sound: Arc<SoundShared>,
+    pub input: InputShared,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -305,6 +361,7 @@ pub(crate) fn shared() -> Result<&'static Shared, RingError> {
         net,
         frame: FrameShared::new(),
         sound,
+        input: InputShared::new(),
     }))
 }
 
@@ -315,7 +372,7 @@ pub(crate) fn shared_now() -> Option<&'static Shared> {
 pub(crate) fn table() -> &'static ExtensionTable {
     TABLE.get_or_init(|| {
         use crate::gpu::ffi;
-        let fns: [*const c_void; 10] = [
+        let fns: [*const c_void; 12] = [
             shared_address as *const c_void,
             report as *const c_void,
             ffi::gpu_device as *const c_void,
@@ -326,6 +383,8 @@ pub(crate) fn table() -> &'static ExtensionTable {
             sound::sound_free as *const c_void,
             sound::sound_stream_open as *const c_void,
             sound::sound_stream_push as *const c_void,
+            input::clipboard_get as *const c_void,
+            input::clipboard_set as *const c_void,
         ];
         let entries: Vec<_> = ENTRIES.iter().copied().zip(fns).collect();
         ExtensionTable::leak(BRIDGE_VERSION, &entries)
@@ -365,6 +424,7 @@ extern "C" fn shared_address(id: i32) -> i64 {
         SHARED_SOUND_RING => shared.sound.ring_addr(),
         SHARED_SOUND_STATES => shared.sound.states_addr(),
         SHARED_SOUND_CONTROL => shared.sound.control_addr(),
+        SHARED_INPUT_STATE => shared.input.state_addr(),
         _ => 0,
     }
 }
@@ -480,8 +540,48 @@ mod tests {
             ("SHARED_SOUND_RING", SHARED_SOUND_RING.into()),
             ("SHARED_SOUND_STATES", SHARED_SOUND_STATES.into()),
             ("SHARED_SOUND_CONTROL", SHARED_SOUND_CONTROL.into()),
+            ("SHARED_INPUT_STATE", SHARED_INPUT_STATE.into()),
             ("MSG_FRAME", MSG_FRAME.into()),
             ("MSG_SHUTDOWN", MSG_SHUTDOWN.into()),
+            ("MSG_INPUT", MSG_INPUT.into()),
+            ("IN_TYPE", IN_TYPE as i64),
+            ("IN_A", IN_A as i64),
+            ("IN_B", IN_B as i64),
+            ("IN_C", IN_C as i64),
+            ("IN_D", IN_D as i64),
+            ("IN_X", IN_X as i64),
+            ("IN_Y", IN_Y as i64),
+            ("IN_DX", IN_DX as i64),
+            ("IN_DY", IN_DY as i64),
+            ("IN_TEXT_DATA", IN_TEXT_DATA as i64),
+            ("IN_KEY", IN_KEY.into()),
+            ("IN_TEXT", IN_TEXT.into()),
+            ("IN_PREEDIT", IN_PREEDIT.into()),
+            ("IN_MOTION", IN_MOTION.into()),
+            ("IN_BUTTON", IN_BUTTON.into()),
+            ("IN_WHEEL", IN_WHEEL.into()),
+            ("IN_DROP", IN_DROP.into()),
+            ("ISTATE_KEYS", ISTATE_KEYS as i64),
+            ("ISTATE_MODS", ISTATE_MODS as i64),
+            ("ISTATE_RUST_FLAGS", ISTATE_RUST_FLAGS as i64),
+            ("ISTATE_JAVA_FLAGS", ISTATE_JAVA_FLAGS as i64),
+            ("ISTATE_GUI_SCALE", ISTATE_GUI_SCALE as i64),
+            ("ISTATE_CURSOR", ISTATE_CURSOR as i64),
+            ("ISTATE_NATIVE_SEQ", ISTATE_NATIVE_SEQ as i64),
+            ("ISTATE_NATIVE_KIND", ISTATE_NATIVE_KIND as i64),
+            ("ISTATE_TEXT_AREA", ISTATE_TEXT_AREA as i64),
+            ("ISTATE_SIZE", ISTATE_SIZE as i64),
+            ("RUST_FOCUSED", RUST_FOCUSED.into()),
+            ("JAVA_SCREEN", JAVA_SCREEN.into()),
+            ("JAVA_OVERLAY", JAVA_OVERLAY.into()),
+            ("JAVA_GRABBED", JAVA_GRABBED.into()),
+            ("JAVA_TEXT_INPUT", JAVA_TEXT_INPUT.into()),
+            ("JAVA_QUIT", JAVA_QUIT.into()),
+            ("INPUT_MAX_TEXT", crate::input::MAX_EVENT_TEXT as i64),
+            (
+                "INPUT_MAX_CLIPBOARD",
+                crate::input::MAX_CLIPBOARD_BYTES as i64,
+            ),
             ("FRAME_INDEX", FRAME_INDEX as i64),
             ("FRAME_TICKS", FRAME_TICKS as i64),
             ("FRAME_WIDTH", FRAME_WIDTH as i64),
@@ -534,6 +634,8 @@ mod tests {
             ("OUT_CHAT", OUT_CHAT.into()),
             ("OUT_DISCONNECT", OUT_DISCONNECT.into()),
             ("OUT_PROBE", OUT_PROBE.into()),
+            ("DISCONNECT_LEFT", DISCONNECT_LEFT.into()),
+            ("DISCONNECT_FAILED", DISCONNECT_FAILED.into()),
             ("CHAT_MESSAGE", CHAT_MESSAGE.into()),
             ("CHAT_COMMAND", CHAT_COMMAND.into()),
             ("OPEN_PORT", OPEN_PORT as i64),
@@ -721,6 +823,7 @@ mod tests {
         assert_ne!(shared_address(SHARED_SOUND_RING), 0);
         assert_ne!(shared_address(SHARED_SOUND_STATES), 0);
         assert_ne!(shared_address(SHARED_SOUND_CONTROL), 0);
+        assert_ne!(shared_address(SHARED_INPUT_STATE), 0);
         *shared().unwrap().events.lock().unwrap() = None;
     }
 }

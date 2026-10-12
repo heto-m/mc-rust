@@ -15,8 +15,8 @@ In mod mode, keyboard, text, IME pre-edit, mouse motion, button, wheel and file-
 Java's key-state queries, cursor grab and release, cursor shape, clipboard and text-input requests SHALL be served by mcr's window and input state instead of SDL.
 
 #### Scenario: Paste
-- **WHEN** the system clipboard holds `hello` and the user presses Ctrl+V in Java's chat box
-- **THEN** the chat box contains `hello`
+- **WHEN** the system clipboard holds `hello` and the user presses Ctrl+V in a focused Java text field
+- **THEN** the field contains `hello`
 
 ### Requirement: UI authority in mod mode
 In mod mode, Java SHALL own all game screens, the HUD and chat. Rust SHALL own movement, look, attack, use, pick, drop and hotbar input only while no Java screen or overlay is open, and SHALL release held gameplay keys when one opens. Server-opened screens SHALL open only in Java.
@@ -34,7 +34,7 @@ Java's title and pause screens SHALL offer an entry that opens mcr's native sett
 
 #### Scenario: Open mcr settings from pause
 - **WHEN** the user clicks the mcr button on Java's pause screen
-- **THEN** mcr's settings overlay appears and Java receives no input until it closes
+- **THEN** mcr's menu overlay (settings and mod manager) appears and Java receives no input until it closes
 
 ### Requirement: Quit propagation
 Quitting from Java SHALL quit mcr.

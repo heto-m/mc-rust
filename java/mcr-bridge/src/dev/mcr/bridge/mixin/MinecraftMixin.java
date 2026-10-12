@@ -2,6 +2,7 @@ package dev.mcr.bridge.mixin;
 
 import dev.mcr.bridge.McrCrash;
 import dev.mcr.bridge.McrFrame;
+import dev.mcr.bridge.McrInput;
 import dev.mcr.bridge.gpu.GpuSelfTest;
 import dev.mcr.bridge.net.GameplayKeys;
 import dev.mcr.bridge.net.McrNet;
@@ -37,6 +38,20 @@ abstract class MinecraftMixin {
     private void mcr$rustOwnsGameplayKeys(CallbackInfo ci) {
         if (McrNet.bridged()) {
             GameplayKeys.suppress(((Minecraft) (Object) this).options);
+        }
+    }
+
+    @Inject(method = "stop", at = @At("TAIL"))
+    private void mcr$quit(CallbackInfo ci) {
+        if (McrInput.active() && !McrFrame.stopping()) {
+            McrInput.quit();
+        }
+    }
+
+    @Inject(method = "toggleFullscreen", at = @At("HEAD"), cancellable = true)
+    private void mcr$rustOwnsFullscreen(CallbackInfo ci) {
+        if (McrInput.active()) {
+            ci.cancel();
         }
     }
 

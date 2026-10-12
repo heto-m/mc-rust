@@ -61,7 +61,7 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
 | GPU | `PreferredGraphicsApi.getBackendsToTry` → `McrGpuBackend` implementing `com.mojang.renderpearl.api.device.GpuBackend`; `createDevice` returns `new FrontendGpuDevice(new McrDeviceBackend())` (`GpuDeviceBackend`, `CommandEncoderBackend`, `RenderPassBackend`, `GpuSurfaceBackend`) | Java records, Rust submits |
 | Shaders | Frontend `GlslCompiler` already emits SPIR-V (shaderc). The backend gets `SpvModule` plus flattened bindings (set 0, binding = uniform index) → Rust splits combined image samplers → naga `spv-in` → wgpu | Rust |
 | Window | SDL3 `offscreen` video driver (hint set in `RenderSystem.initBackendSystem`), so `Window` works on a fake window. Size and scale are pushed per frame | Rust |
-| Input | Drained at `SDLEventHandler.pollEvents` into `KeyboardHandler.keyPress/charTyped`, `MouseHandler.onButton/onMove/onScroll`. `InputConstants.isKeyDown/grabMouse/releaseMouse` and `ClipboardManager` are redirected | Rust |
+| Input | `ModInput` events ride the control ring as `MSG_INPUT` ahead of each `MSG_FRAME`; `McrInput.deliver` calls `KeyboardHandler.keyPress/textInput/textEditing` and `MouseHandler.onMove/onButton/onScroll/onDrop` with SDL3 values. `InputConstants.isKeyDown/grabMouse/releaseMouse`, `Window.isFocused/selectCursor`, `ClipboardManager`, `TextInputManager`, `SDL_GetModState` sites and `turnPlayer` are redirected | Rust |
 | Network | `Connection.connect` is redirected to a `BridgeChannel` (netty `EmbeddedChannel` confined to the render thread by its own event loop) carrying vanilla codecs, so `ConnectScreen` runs unchanged while Rust connects. Frames travel in two net rings (32 MiB in, 4 MiB out) tagged with phase and session; outbound packets are filtered by (phase, packet class), chat goes to Rust as text | Rust owns socket and state |
 | Player | Rust's local player and camera overwrite `LocalPlayer`/`Camera` every tick and frame. Vanilla gameplay keybinds are suppressed in Java | Rust |
 | World | Java keeps its own `ClientLevel`/`ClientChunkCache`. Terrain compile and draw are disabled (`LevelRenderer.compileSections`, `ChunkSectionsToRender.renderGroup`) | duplicated, see below |
@@ -88,6 +88,23 @@ outline, `LevelExtractor`) is off until `mod-entity-render-hooks`, which adds wo
 misses the 2 s deadline detaches the bridge from rendering: mcr's native HUD returns and a toast says so. In mod
 mode, Rust renders terrain, sky, clouds, weather, water, particles, entities and the hand; Java draws GUI and HUD.
 
+## Input and UI authority
+
+`mcr-app/src/shell/route.rs` decides per frame who gets input, from the state Java publishes in the shared
+input block (screen, overlay, grab, text input, cursor, GUI scale, quit):
+
+| Authority | When | Input goes to |
+|---|---|---|
+| `Native` | no Java GUI (no mods, booting, detached) | mcr only |
+| `Overlay` | an mcr screen above Java's GUI ("mcr" button, mod manager) | mcr only |
+| `JavaScreen` | a Java screen, the title or Java's loading overlay | Java only |
+| `JavaGame` | in game, no screen | both; gameplay keys act in mcr, Java's vanilla gameplay mappings stay suppressed |
+
+Java owns inventory, chat, commands, advancements, the player list, F3 and Esc in mod mode. mcr keeps its
+container model but opens no native game screens. Java's "mcr" button on the title and pause screens opens the
+native menu (options, mod manager). Singleplayer and Realms show a "not supported" toast. Quitting from Java
+quits mcr. Held keys are released on every authority change, so nothing sticks across a screen.
+
 ## World duplication
 
 Java's `ClientLevel` parses every chunk again (`ClientChunkCache.replaceWithPacketData` → `LevelChunk`, `PalettedContainer`,
@@ -108,7 +125,8 @@ off-heap section arrays (`BitStorage` is an interface), if measurements say it p
 - With mods, Java has GUI authority: screens, HUD and chat come from Java. Native screens remain for mcr-only UI
   (mod manager, debug, crash fallback). On a Java crash, mcr detaches the bridge and continues natively.
 - Rust answers every vanilla protocol acknowledgement. From Java it forwards only custom payloads, custom query
-  answers, container and screen actions, and chat/commands (re-signed by Rust).
+  answers, container and screen actions (including dialogs, advancement tabs and operator block editors), and
+  chat/commands (re-signed by Rust). A Java packet-handling failure detaches Java; Rust stays connected.
 - Performance and renderer mods that need OpenGL (Sodium, Iris, ImmediatelyFast, Distant Horizons, Xaero's,
   JourneyMap, FancyMenu) are blocked with a reason shown in the mod manager.
 
