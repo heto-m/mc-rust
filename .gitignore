@@ -6,3 +6,4 @@
 /.claude/worktrees
 /.claude/settings.local.json
 /crates/*/logs
+/.claude/scheduled_tasks.lock
