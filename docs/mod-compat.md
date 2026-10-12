@@ -15,7 +15,7 @@ refuses to load it and the Mods screen gives the reason.
 | Just Enough Items | 31.10.0.63 | works | item list and recipes; same join-time stall as REI |
 | AppleSkin | 3.0.10 | works | food tooltips and HUD saturation overlay; harmless warning about a missing JEI mixin target |
 | Jade | 26.3.5 | works | block tooltip at the top of the screen |
-| Mod Menu | 21.0.0 | works | Mods button and list; its update check is refused by mcr's HTTP proxy (Modrinth is not allow-listed) |
+| Mod Menu | 21.0.0 | works | Mods button and list; its update check is refused by mcr's HTTP proxy (Modrinth is not allow-listed), logged as one line |
 | Entity Model Features | 3.3.11 | works | boots and entities render; was rejected before: its manifest has a raw newline inside a string; no CEM pack tested |
 | Entity Texture Features | 7.2.5 | works | boots and entities render; no random-texture pack tested |
 | Not Enough Animations | 1.12.6 | works | third-person animations; its config could not be written before Java ran from its game dir |
@@ -24,9 +24,9 @@ refuses to load it and the Mods screen gives the reason.
 | BetterF3 | 20.0.0 | works | replaces the F3 screen |
 | Zoomify | 2.17.0 | works | zoom key narrows mcr's camera; had no effect before Java's FOV reached Rust |
 | Mouse Tweaks | 2.31 | works | boots and joins; drag-click behaviour not exercised by the autopilot |
-| Inventory Profiles Next | 2.3.8 | works | sort and profile buttons in containers; update check refused by the proxy |
+| Inventory Profiles Next | 2.3.8 | works | sort and profile buttons in containers; update check refused by the proxy, logged as one line |
 | Shulker Box Tooltip | 5.4.2 | works | shulker box contents tooltip |
-| Controlling | 26.3.4 | partial | key search works; rebinding vanilla movement keys in Java does not change mcr's own bindings |
+| Controlling | 26.3.4 | works | key search works; rebinding vanilla keys in Java rebinds mcr's (`mod-polish-2`) |
 | Chat Heads | 1.3.2 | works | player heads next to chat lines |
 | Durability Tooltip | 1.2.0a | works | durability line on tool tooltips |
 | Continuity | 3.0.1 | partial | policy: terrain is rendered by mcr, so connected textures have no visible effect |
@@ -47,4 +47,5 @@ SuperMartijn642's Config Lib 1.1.8a.
 Not released for Fabric 26.3 when swept: EMI, WTHIT, ModernFix.
 
 All 28 mods and 10 libraries together (107 mod ids) boot, join and keep Java's GUI and entities composed after
-the REI/JEI stall. Vanilla `minecraft:*` particles are mcr's; particles of mod types are drawn by Java.
+the REI/JEI stall. Vanilla `minecraft:*` particles from packets and vanilla ticks are mcr's; particles of mod types, and vanilla ones
+that mod code spawns, are drawn by Java.

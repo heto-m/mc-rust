@@ -4,6 +4,7 @@ import dev.mcr.boot.Ring;
 import dev.mcr.bridge.Bridge;
 import dev.mcr.bridge.BridgeAbi;
 import dev.mcr.bridge.McrBridge;
+import dev.mcr.bridge.McrParticles;
 import dev.mcr.bridge.mixin.ConnectionAccessor;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelFuture;
@@ -165,7 +166,12 @@ public final class McrNet {
         }
         loop.runTasks();
         activatePending();
-        drainInbound(minecraft);
+        McrParticles.enter();
+        try {
+            drainInbound(minecraft);
+        } finally {
+            McrParticles.exit();
+        }
         flushOutSpill();
         if (SELF_TEST) {
             NetSeamSelfTest.maybeRun(minecraft);

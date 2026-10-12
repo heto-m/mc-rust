@@ -13,7 +13,7 @@ use crate::net::{NetShared, SPILL_LIMIT};
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 8;
+pub const BRIDGE_VERSION: u32 = 9;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -32,6 +32,12 @@ pub const SHARED_INPUT_STATE: i32 = 18;
 pub const MSG_FRAME: u16 = 1;
 pub const MSG_SHUTDOWN: u16 = 2;
 pub const MSG_INPUT: u16 = 3;
+/// `name\tkey` lines: Rust's vanilla key bindings, which Java's mappings follow.
+pub const MSG_KEYS: u16 = 4;
+/// One absolute pack file path per line, in server push order: the server packs Rust applied.
+pub const MSG_PACKS: u16 = 5;
+/// Java caps the lines of `MSG_KEYS`, `MSG_PACKS` and `REPORT_KEYS` at this many.
+pub const SYNC_MAX_LINES: usize = 256;
 
 /// One `MSG_INPUT`: a fixed head (kind, four ints, four doubles), then UTF-8 for text kinds.
 pub const IN_TYPE: usize = 0;
@@ -82,7 +88,9 @@ pub const FRAME_YAW: usize = 56;
 pub const FRAME_PITCH: usize = 60;
 pub const FRAME_VIEW: usize = 64;
 pub const FRAME_PROJ: usize = 128;
-pub const FRAME_SIZE: usize = 192;
+pub const FRAME_RENDER_DISTANCE: usize = 192;
+pub const FRAME_ENTITY_SCALE: usize = 196;
+pub const FRAME_SIZE: usize = 200;
 /// Java signals every frame it finishes and tags its GPU work with slots.
 pub const FRAME_LOCKSTEP: u32 = 1;
 /// mcr's camera is in third person: Java renders the local player and no hand.
@@ -117,6 +125,8 @@ pub const REPORT_CRASH: i32 = 4;
 pub const REPORT_INFO: i32 = 5;
 pub const REPORT_CONNECT: i32 = 6;
 pub const REPORT_STOPPING: i32 = 7;
+/// `name\tkey` lines: vanilla mappings Java rebound since it last applied or reported them.
+pub const REPORT_KEYS: i32 = 8;
 
 pub const PHASE_LOGIN: u8 = 1;
 pub const PHASE_CONFIGURATION: u8 = 2;
@@ -281,6 +291,10 @@ pub struct FrameBegin {
     pub view: [f32; 16],
     /// Column-major reverse-Z projection.
     pub proj: [f32; 16],
+    /// mcr's render distance in chunks (its fog distance); 0 leaves Java's own.
+    pub render_distance: u32,
+    /// mcr's entity distance scaling; 0 leaves Java's own.
+    pub entity_scale: f32,
 }
 
 impl Default for FrameBegin {
@@ -298,6 +312,8 @@ impl Default for FrameBegin {
             pitch: 0.0,
             view: IDENTITY,
             proj: IDENTITY,
+            render_distance: 0,
+            entity_scale: 0.0,
         }
     }
 }
@@ -334,6 +350,16 @@ impl FrameBegin {
         for (i, v) in self.proj.iter().enumerate() {
             put(&mut out, FRAME_PROJ + i * 4, &v.to_ne_bytes());
         }
+        put(
+            &mut out,
+            FRAME_RENDER_DISTANCE,
+            &self.render_distance.to_ne_bytes(),
+        );
+        put(
+            &mut out,
+            FRAME_ENTITY_SCALE,
+            &self.entity_scale.to_ne_bytes(),
+        );
         out
     }
 }
@@ -554,6 +580,10 @@ mod tests {
             ("MSG_FRAME", MSG_FRAME.into()),
             ("MSG_SHUTDOWN", MSG_SHUTDOWN.into()),
             ("MSG_INPUT", MSG_INPUT.into()),
+            ("MSG_KEYS", MSG_KEYS.into()),
+            ("MSG_PACKS", MSG_PACKS.into()),
+            ("SYNC_MAX_LINES", SYNC_MAX_LINES as i64),
+            ("REPORT_KEYS", REPORT_KEYS.into()),
             ("IN_TYPE", IN_TYPE as i64),
             ("IN_A", IN_A as i64),
             ("IN_B", IN_B as i64),
@@ -604,6 +634,8 @@ mod tests {
             ("FRAME_PITCH", FRAME_PITCH as i64),
             ("FRAME_VIEW", FRAME_VIEW as i64),
             ("FRAME_PROJ", FRAME_PROJ as i64),
+            ("FRAME_RENDER_DISTANCE", FRAME_RENDER_DISTANCE as i64),
+            ("FRAME_ENTITY_SCALE", FRAME_ENTITY_SCALE as i64),
             ("FRAME_SIZE", FRAME_SIZE as i64),
             ("FRAME_LOCKSTEP", FRAME_LOCKSTEP.into()),
             ("FRAME_DETACHED", FRAME_DETACHED.into()),
@@ -787,6 +819,8 @@ mod tests {
             pitch: -12.5,
             view,
             proj,
+            render_distance: 7,
+            entity_scale: 1.5,
         };
         let b = f.encode();
         let u32_at = |o: usize| u32::from_ne_bytes(b[o..o + 4].try_into().unwrap());
@@ -812,7 +846,9 @@ mod tests {
         assert_eq!(f32::from_bits(u32_at(FRAME_PITCH)), -12.5);
         assert_eq!(f32::from_bits(u32_at(FRAME_VIEW + 60)), 7.5);
         assert_eq!(f32::from_bits(u32_at(FRAME_PROJ)), -3.0);
-        assert_eq!(FRAME_PROJ + 64, FRAME_SIZE);
+        assert_eq!(u32_at(FRAME_RENDER_DISTANCE), 7);
+        assert_eq!(f32::from_bits(u32_at(FRAME_ENTITY_SCALE)), 1.5);
+        assert_eq!(FRAME_ENTITY_SCALE + 4, FRAME_SIZE);
     }
 
     #[test]

@@ -53,6 +53,7 @@ public final class McrTestMod implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         writeRelativeConfig();
+        SyncProbe.init();
         MarkerLayer.register();
         MarkerParticle.register();
         PayloadTypeRegistry.serverboundPlay().register(Hello.TYPE, Hello.CODEC);
@@ -64,9 +65,11 @@ public final class McrTestMod implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             GuiCapture.tick(client);
             MarkerParticle.tick(client);
+            SyncProbe.tick(client);
             while (PING.consumeClick()) {
                 Bridge.info("testmod_key", ++pings);
                 MarkerParticle.start();
+                SyncProbe.spawnVanillaParticle(client);
             }
             if (SoundSelfTest.enabled()) {
                 SoundSelfTest.tick(client);

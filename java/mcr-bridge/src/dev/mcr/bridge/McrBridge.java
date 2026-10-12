@@ -6,12 +6,19 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.api.ModContainer;
 import net.fabricmc.loader.api.entrypoint.EntrypointContainer;
+import net.fabricmc.loader.api.entrypoint.PreLaunchEntrypoint;
 
-public final class McrBridge implements ClientModInitializer {
+public final class McrBridge implements ClientModInitializer, PreLaunchEntrypoint {
     public static final String TEST_PROPERTY = "mcr.bridge.test";
 
     @Override
+    public void onPreLaunch() {
+        QuietRefusals.install();
+    }
+
+    @Override
     public void onInitializeClient() {
+        QuietRefusals.install();
         FabricLoader loader = FabricLoader.getInstance();
         for (ModContainer mod : loader.getAllMods()) {
             var meta = mod.getMetadata();

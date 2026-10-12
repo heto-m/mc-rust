@@ -107,6 +107,9 @@ pub(super) fn line_count(cx: &mut RenderCx<'_, '_>, component: &Component, max_w
 
 type Choice = (String, Box<dyn Fn() -> Vec<ScreenAction>>);
 
+/// Behind a panel the whole screen is nearly covered, so another GUI underneath does not show around it.
+const PANEL_BACKDROP: u32 = 0xF010_1010;
+
 /// A title, a message and a row of buttons whose outcomes are produced by closures.
 pub struct ConfirmScreen {
     title: String,
@@ -287,6 +290,9 @@ impl Screen for ConfirmScreen {
         if self.dark {
             let (w, h) = cx.gui_size();
             cx.frame.fill_gradient(0, 0, w, h, 0x6050_0000, 0xA080_3030);
+        } else if self.panel {
+            let (w, h) = cx.gui_size();
+            cx.frame.fill_rect(0, 0, w, h, PANEL_BACKDROP);
         } else {
             draw_dim_background(cx);
         }
@@ -298,8 +304,9 @@ impl Screen for ConfirmScreen {
         self.layout(lines.len() as i32);
         if self.panel {
             let [x, y, w, h] = self.panel_rect;
-            cx.frame.fill_rect(x - 1, y - 1, w + 2, h + 2, 0xFF55_5555);
-            cx.frame.fill_rect(x, y, w, h, 0xFF10_1010);
+            cx.frame
+                .fill_rect(x - 1, y - 1, x + w + 1, y + h + 1, 0xFF55_5555);
+            cx.frame.fill_rect(x, y, x + w, y + h, 0xFF10_1010);
         }
         cx.centered_text(&title, center, self.gui.1 / 2 - 50, WHITE, true);
         for (i, range) in lines.iter().take(MAX_LINES).enumerate() {

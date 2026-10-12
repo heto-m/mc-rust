@@ -7,9 +7,16 @@
   "license": "MIT",
   "environment": "client",
   "entrypoints": {
-    "client": ["dev.mcr.bridge.McrBridge"]
+    "client": [
+      "dev.mcr.bridge.McrBridge"
+    ],
+    "preLaunch": [
+      "dev.mcr.bridge.McrBridge"
+    ]
   },
-  "mixins": ["mcr_bridge.mixins.json"],
+  "mixins": [
+    "mcr_bridge.mixins.json"
+  ],
   "depends": {
     "fabricloader": ">=0.19.3",
     "minecraft": "26.3",

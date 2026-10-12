@@ -875,6 +875,11 @@ impl Play {
         }
     }
 
+    /// The render distance mcr's terrain and fog use, in chunks.
+    pub fn render_distance(&self) -> i32 {
+        self.world.render_distance()
+    }
+
     pub fn third_person(&self) -> bool {
         self.perspective != Perspective::First
     }

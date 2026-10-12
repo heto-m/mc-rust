@@ -12,6 +12,7 @@ pub mod net;
 mod pacer;
 pub mod proxy;
 pub mod sound;
+pub mod sync;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;

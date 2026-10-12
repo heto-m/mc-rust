@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 
 use crate::abi::{
-    REPORT_CONNECT, REPORT_CRASH, REPORT_INFO, REPORT_INIT, REPORT_MOD_LOADED, REPORT_SCREEN,
-    REPORT_STOPPING,
+    REPORT_CONNECT, REPORT_CRASH, REPORT_INFO, REPORT_INIT, REPORT_KEYS, REPORT_MOD_LOADED,
+    REPORT_SCREEN, REPORT_STOPPING, SYNC_MAX_LINES,
 };
+
+/// Longest mapping or key name accepted from Java.
+const MAX_KEY_NAME: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeEvent {
@@ -27,6 +30,8 @@ pub enum BridgeEvent {
         server: String,
     },
     Stopping,
+    /// Vanilla key mappings Java rebound: `(mapping name, key name)` in vanilla's `options.txt` spelling.
+    KeysChanged(Vec<(String, String)>),
     /// Java missed a frame deadline or died; mcr stopped composing its GUI.
     RenderDetached {
         reason: String,
@@ -73,6 +78,7 @@ impl BridgeEvent {
                 server: tail.into(),
             },
             REPORT_STOPPING => Self::Stopping,
+            REPORT_KEYS => Self::KeysChanged(parse_keys(text)),
             _ => Self::Unknown {
                 kind,
                 text: text.into(),
@@ -95,6 +101,20 @@ impl BridgeEvent {
     pub fn is_title_screen(&self) -> bool {
         matches!(self, Self::Screen(class) if class == "net.minecraft.client.gui.screens.TitleScreen")
     }
+}
+
+/// `name\tkey` lines, bounded in count and length; malformed lines are skipped.
+pub(crate) fn parse_keys(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .take(SYNC_MAX_LINES)
+        .filter_map(|line| {
+            let (name, key) = line.split_once('\t')?;
+            let ok = |s: &str| {
+                !s.is_empty() && s.len() <= MAX_KEY_NAME && s.bytes().all(|b| b.is_ascii_graphic())
+            };
+            (ok(name) && ok(key)).then(|| (name.to_owned(), key.to_owned()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -128,6 +148,18 @@ mod tests {
             )
             .is_title_screen()
         );
+        assert_eq!(
+            BridgeEvent::from_report(
+                REPORT_KEYS,
+                "key.jump\tkey.keyboard.j\nbad\n\tx\nkey.a b\tk\n"
+            ),
+            BridgeEvent::KeysChanged(vec![("key.jump".into(), "key.keyboard.j".into())])
+        );
+        let many = "key.x\tkey.keyboard.x\n".repeat(SYNC_MAX_LINES + 10);
+        assert!(matches!(
+            BridgeEvent::from_report(REPORT_KEYS, &many),
+            BridgeEvent::KeysChanged(v) if v.len() == SYNC_MAX_LINES
+        ));
         assert_eq!(
             BridgeEvent::from_report(99, "x"),
             BridgeEvent::Unknown {

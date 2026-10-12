@@ -4,7 +4,7 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 8;
+    public static final int VERSION = 9;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
     public static final String COMPOSE_PROPERTY = "mcr.compose";
 
@@ -22,6 +22,9 @@ public final class BridgeAbi {
     public static final int MSG_FRAME = 1;
     public static final int MSG_SHUTDOWN = 2;
     public static final int MSG_INPUT = 3;
+    public static final int MSG_KEYS = 4;
+    public static final int MSG_PACKS = 5;
+    public static final int SYNC_MAX_LINES = 256;
 
     public static final int IN_TYPE = 0;
     public static final int IN_A = 4;
@@ -72,7 +75,9 @@ public final class BridgeAbi {
     public static final int FRAME_PITCH = 60;
     public static final int FRAME_VIEW = 64;
     public static final int FRAME_PROJ = 128;
-    public static final int FRAME_SIZE = 192;
+    public static final int FRAME_RENDER_DISTANCE = 192;
+    public static final int FRAME_ENTITY_SCALE = 196;
+    public static final int FRAME_SIZE = 200;
     public static final int FRAME_LOCKSTEP = 1;
     public static final int FRAME_DETACHED = 2;
 
@@ -101,6 +106,7 @@ public final class BridgeAbi {
     public static final int REPORT_INFO = 5;
     public static final int REPORT_CONNECT = 6;
     public static final int REPORT_STOPPING = 7;
+    public static final int REPORT_KEYS = 8;
 
     public static final int PHASE_LOGIN = 1;
     public static final int PHASE_CONFIGURATION = 2;

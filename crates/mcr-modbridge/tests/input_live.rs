@@ -79,7 +79,13 @@ fn java_screens_take_scripted_input_on_a_live_server() {
     };
     let (host, port) = addr.rsplit_once(':').expect("host:port");
     let port: u16 = port.parse().expect("port");
-    let mut cfg = config("input-live", &["-Dmcr.bridge.probeInput=true".into()]);
+    let mut cfg = config(
+        "input-live",
+        &[
+            "-Dmcr.bridge.probeInput=true".into(),
+            "-Dmcr.testmod.syncProbe=true".into(),
+        ],
+    );
     (cfg.width, cfg.height) = (1280, 720);
     cfg.username = USERNAME.into();
     cfg.uuid = mcr_auth::offline::offline_uuid(USERNAME)
@@ -136,6 +142,22 @@ fn java_screens_take_scripted_input_on_a_live_server() {
 
     l.tap(KEY_K);
     l.wait_info("testmod_key", "1");
+    l.wait_info("vanilla_particle_kept", "true");
+
+    let dropped = |l: &Live| -> u64 {
+        l.rig
+            .infos
+            .get("particles_dropped")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    };
+    let before = dropped(&l);
+    console(&format!(
+        "execute at {USERNAME} run particle minecraft:flame ~ ~1 ~ 0.3 0.3 0.3 0 40 force {USERNAME}"
+    ));
+    l.until("java dropping the server's flame particles", |l| {
+        dropped(l) >= before + 40
+    });
 
     l.tap(ESCAPE);
     l.wait_screen("PauseScreen");

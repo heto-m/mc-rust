@@ -95,9 +95,11 @@ public final class McrFrame {
             if (drain(bridge, minecraft)) {
                 if (!stopping) {
                     frameStart = System.nanoTime();
+                    McrParticles.reset();
                     if (lockstep()) {
                         FrameSlots.beginFrame(frameIndex);
                         applySize(minecraft);
+                        McrSync.applyEntityScale(minecraft);
                     }
                     McrNet.pump(minecraft);
                     if (lockstep()) {
@@ -125,6 +127,8 @@ public final class McrFrame {
                     woke = true;
                 }
                 case BridgeAbi.MSG_INPUT -> McrInput.enqueue(payload);
+                case BridgeAbi.MSG_KEYS -> McrSync.applyKeys(payload);
+                case BridgeAbi.MSG_PACKS -> McrSync.applyPacks(minecraft, payload);
                 case BridgeAbi.MSG_SHUTDOWN -> {
                     stopping = true;
                     woke = true;
@@ -152,6 +156,7 @@ public final class McrFrame {
         partialTick = Float.isFinite(partial) ? Math.clamp(partial, 0.0F, 1.0F) : 0.0F;
         flags = p.get(INT, BridgeAbi.FRAME_FLAGS);
         camera.read(p, (flags & BridgeAbi.FRAME_DETACHED) != 0);
+        McrSync.readView(p);
     }
 
     /** The mcr window's size reaches `Window` and the main target before this frame renders. */

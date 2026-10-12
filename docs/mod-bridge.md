@@ -100,11 +100,16 @@ again (REI and JEI reloading their plugins on join stall Java for over 2 s). Thr
 the next stall, Java stopping or Java losing its connection detach for good.
 
 Java's camera FOV over vanilla's (zoom mods, FOV effects mods add) reaches Rust as `FSTATE_FOV_SCALE`, clamped to
-0.02–4, and scales mcr's projection and mouse sensitivity while Java draws the world.
+0.02–4, and scales mcr's projection and mouse sensitivity while Java draws the world. The other way, `FrameBegin`
+carries mcr's render distance (the one its fog uses) and entity distance scaling: Java's
+`Options.getEffectiveRenderDistance` returns it while in lockstep, so Java's fog, entity view scale and culling
+match mcr's terrain.
 
 In mod mode Java draws entities, block entities, nametags, the first-person hand, glowing outlines, post effects,
 particles of non-`minecraft` types, GUI and HUD. Rust draws terrain, sky, clouds, weather, world border, water,
-block outline, destroy overlay and vanilla particles. Java culls with a finite perspective built from Rust's field
+block outline, destroy overlay and vanilla particles. Java drops a `minecraft:*` particle only inside a path mcr
+mirrors (`McrParticles`: the packet drain except custom payloads, per-entity, block entity, level, ambient block,
+game renderer and particle ticks); vanilla particles that mod code spawns elsewhere stay in Java. Java culls with a finite perspective built from Rust's field
 of view (Rust's reverse-Z infinite matrix sends vanilla's frustum walk into an endless loop).
 
 ## Input and UI authority
@@ -124,6 +129,12 @@ container model but opens no native game screens. Java's "mcr" button on the tit
 native menu (options, mod manager). Singleplayer and Realms show a "not supported" toast. Quitting from Java
 quits mcr. Held keys are released on every authority change, so nothing sticks across a screen.
 
+Vanilla key mappings live in mcr's `options.txt` only. `MSG_KEYS` sends every vanilla mapping to Java whenever
+mcr's settings change (and before Java's first frame), so stale lines in Java's own `options.txt` never win. After
+`KeyMapping.resetMapping` or `Options.save` (vanilla's Controls screen, Controlling), Java reports the vanilla
+mappings it rebound as `REPORT_KEYS`, and mcr applies and saves them. Mod mappings stay Java-only. Caps Lock and
+Num Lock start from the keyboard LEDs on Linux (`/sys/class/leds`).
+
 ## World duplication
 
 Java's `ClientLevel` parses every chunk again (`ClientChunkCache.replaceWithPacketData` → `LevelChunk`, `PalettedContainer`,
@@ -139,7 +150,9 @@ off-heap section arrays (`BitStorage` is an interface), if measurements say it p
   HTTP (skins, mod web APIs) goes through a Rust loopback proxy (`proxy.rs`: `CONNECT` for https, absolute-form
   requests for http, forced `Connection: close`) set as `http(s).proxyHost/proxyPort` and as Minecraft's own
   `Proxy`. It reaches only Mojang's hosts plus the policy's `http_hosts` (`*.example.com` for subdomains), only
-  global addresses, ports 80 and 443, at most 16 connections, 8 KiB of request head, 30 s idle.
+  global addresses, ports 80 and 443, at most 16 connections, 8 KiB of request head, 30 s idle. A log4j filter
+  (`QuietRefusals`) turns the errors mods log for refused hosts (Mod Menu and IPN update checks) into one line per
+  logger.
   `System.exit` or a crash in Java freezes or parks the VM for good: the bridge detaches, and mcr exits the
   process on shutdown instead of destroying the VM. A detached net bridge copies and forwards nothing; the native
   client keeps playing.
@@ -148,6 +161,9 @@ off-heap section arrays (`BitStorage` is an interface), if measurements say it p
 - Rust answers every vanilla protocol acknowledgement. From Java it forwards only custom payloads, custom query
   answers, container and screen actions (including dialogs, advancement tabs and operator block editors), and
   chat/commands (re-signed by Rust). A Java packet-handling failure detaches Java; Rust stays connected.
+- Server resource packs: Java's push and pop handlers are cancelled while bridged, and only mcr prompts, downloads
+  and answers. After mcr's reload succeeds, `MSG_PACKS` gives Java the applied pack files, which it loads with
+  `DownloadedPackSource.pushLocalPack` (and pops when they leave the list), so Java's entities and GUI use them too.
 - Performance and renderer mods that need OpenGL (Sodium, Iris, ImmediatelyFast, Distant Horizons, Xaero's,
   JourneyMap, FancyMenu) are blocked with a reason shown in the mod manager. Results for real mods are in
   [mod-compat.md](mod-compat.md).

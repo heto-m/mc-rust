@@ -675,6 +675,12 @@ impl ModInput {
         self.queue().focused = focused;
     }
 
+    /// Lock key state from the keyboard; later presses toggle from here.
+    pub fn set_locks(&self, caps: bool, num: bool) {
+        let mut q = self.queue();
+        q.locks = if caps { keymod::CAPS } else { 0 } | if num { keymod::NUM } else { 0 };
+    }
+
     /// Key and button releases for everything Java still holds (input moves away from Java).
     pub fn release_all(&self) {
         self.queue().release_all();
@@ -841,6 +847,18 @@ mod tests {
         assert_eq!(q.mods(), keymod::NUM);
         q.release_all();
         assert_eq!(q.mods(), keymod::NUM);
+    }
+
+    #[test]
+    fn seeded_locks_toggle_from_the_keyboard_state() {
+        let shared: &'static InputShared = Box::leak(Box::new(InputShared::new()));
+        let input = ModInput::new(shared);
+        input.set_locks(false, true);
+        assert_eq!(input.queue().mods(), keymod::NUM);
+        input.key(83, None, true, false);
+        input.key(83, None, false, false);
+        input.key(57, None, true, false);
+        assert_eq!(input.queue().mods(), keymod::CAPS);
     }
 
     #[test]

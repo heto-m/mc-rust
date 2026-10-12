@@ -114,9 +114,66 @@ impl ClipboardHost for SystemClipboard {
     }
 }
 
+/// Caps Lock and Num Lock as the keyboard LEDs show them; winit does not report lock state.
+pub fn keyboard_locks() -> (bool, bool) {
+    if cfg!(target_os = "linux") {
+        lock_leds(std::path::Path::new("/sys/class/leds"))
+    } else {
+        (false, false)
+    }
+}
+
+/// Any `*::capslock` / `*::numlock` LED with a non-zero brightness under `dir` (one per keyboard).
+fn lock_leds(dir: &std::path::Path) -> (bool, bool) {
+    const MAX_LEDS: usize = 256;
+    let (mut caps, mut num) = (false, false);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (caps, num);
+    };
+    for entry in entries.flatten().take(MAX_LEDS) {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let slot = if name.ends_with("::capslock") {
+            &mut caps
+        } else if name.ends_with("::numlock") {
+            &mut num
+        } else {
+            continue;
+        };
+        let lit = std::fs::read(entry.path().join("brightness"))
+            .ok()
+            .filter(|b| b.len() <= 16)
+            .and_then(|b| String::from_utf8(b).ok())
+            .and_then(|t| t.trim().parse::<u32>().ok())
+            .is_some_and(|v| v > 0);
+        *slot |= lit;
+    }
+    (caps, num)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lock_leds_read_any_lit_keyboard() {
+        let dir = std::env::temp_dir().join(format!("mcr-leds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (name, value) in [
+            ("input3::capslock", "0\n"),
+            ("input9::capslock", "1\n"),
+            ("input3::numlock", "0\n"),
+            ("input3::scrolllock", "1\n"),
+        ] {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+            std::fs::write(dir.join(name).join("brightness"), value).unwrap();
+        }
+        assert_eq!(lock_leds(&dir), (true, false));
+        std::fs::write(dir.join("input3::numlock/brightness"), "255").unwrap();
+        assert_eq!(lock_leds(&dir), (true, true));
+        assert_eq!(lock_leds(&dir.join("missing")), (false, false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use crate::input::{key_from_winit, mouse_from_winit};
     use mcr_modbridge::input::{SDLK_SCANCODE_MASK, keymod, keymod_bit, sdl_keycode};
     use winit::event::MouseButton;

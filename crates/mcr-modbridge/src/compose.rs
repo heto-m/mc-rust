@@ -17,6 +17,7 @@ use crate::frame::{JavaFrame, LinkState, Lockstep, TickBank};
 use crate::gpu::backend::Backend;
 use crate::input::ModInput;
 use crate::pacer::{self, SharedWriter};
+use crate::sync::{self, Pending};
 
 const SAMPLES: usize = 1 << 14;
 
@@ -202,6 +203,9 @@ pub struct FrameLink {
     opaque_waited: bool,
     detached_camera: bool,
     input: ModInput,
+    pending: Pending,
+    render_distance: u32,
+    entity_scale: f32,
 }
 
 impl FrameLink {
@@ -221,12 +225,36 @@ impl FrameLink {
             opaque_waited: false,
             detached_camera: false,
             input,
+            pending: Pending::default(),
+            render_distance: 0,
+            entity_scale: 0.0,
         }
     }
 
     /// mcr's camera is in third person this frame, so Java draws the local player and no hand.
     pub fn set_third_person(&mut self, on: bool) {
         self.detached_camera = on;
+    }
+
+    /// mcr's render distance (chunks, as its fog uses it) and entity distance scaling; Java's
+    /// effective render distance follows them.
+    pub fn set_view(&mut self, render_distance: u32, entity_scale: f32) {
+        self.render_distance = render_distance;
+        self.entity_scale = if entity_scale.is_finite() {
+            entity_scale
+        } else {
+            0.0
+        };
+    }
+
+    /// mcr's vanilla key bindings as `(mapping, key)` names; sent before Java's next frame when changed.
+    pub fn set_key_bindings<'a>(&mut self, bindings: impl IntoIterator<Item = (&'a str, &'a str)>) {
+        self.pending.keys(sync::encode_keys(bindings));
+    }
+
+    /// The server pack files mcr applied, first pushed first; Java loads the same set.
+    pub fn set_server_packs(&mut self, paths: &[std::path::PathBuf]) {
+        self.pending.packs(sync::encode_packs(paths));
     }
 
     /// Java draws the world's entities, block entities and hand this frame; mcr's own stay off.
@@ -331,9 +359,20 @@ impl FrameLink {
             pitch: c.pitch,
             view: ctx.view.to_cols_array(),
             proj: ctx.proj.to_cols_array(),
+            render_distance: self.render_distance,
+            entity_scale: self.entity_scale,
         };
         let pushed = {
             let mut writer = pacer::lock(&self.writer);
+            self.pending
+                .flush(|kind, payload| match writer.try_push(kind, payload) {
+                    Ok(()) => true,
+                    Err(PushError::Full) => false,
+                    Err(e) => {
+                        tracing::warn!("bridge settings push failed: {e}");
+                        true
+                    }
+                });
             let mut input = self.input.queue();
             if self.lockstep.state() == LinkState::Running {
                 input.flush(&mut writer, &self.shared.input);

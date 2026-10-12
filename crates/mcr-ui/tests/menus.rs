@@ -323,3 +323,52 @@ fn conduct_screen_answers() {
         }
     )));
 }
+
+/// The "mcr" menu over Java's pause screen: nothing bright shows around its panel at 1280x720, scale 3.
+#[test]
+fn panel_menu_covers_the_screen_behind_it() {
+    let Some(mut h) = Harness::new() else { return };
+    let size = (1280, 720);
+    let mut screen = mcr_ui::ConfirmScreen::new(
+        "mcr",
+        "",
+        vec![
+            ("Options...".into(), Box::new(Vec::new)),
+            ("Mods...".into(), Box::new(Vec::new)),
+            ("Done".into(), Box::new(Vec::new)),
+        ],
+    )
+    .with_panel();
+    let scale = mcr_ui::gui_scale(size.0, size.1, 0);
+    assert_eq!(scale, 3);
+    screen.init((size.0 / scale) as i32, (size.1 / scale) as i32);
+    {
+        let mut frame = h.ui.frame(size.0, size.1);
+        let mut cx = mcr_ui::RenderCx::new(&mut frame, &mut h.icons, &h.assets, &NoView);
+        screen.render(&mut cx);
+        cx.finish();
+    }
+    let img = common::render(&h.gpu, &mut h.renderer, &mut h.ui, size, wgpu::Color::WHITE);
+    common::save_png("menu-panel-backdrop.png", size.0, size.1, &img);
+    for (x, y) in [
+        (20, 20),
+        (640, 20),
+        (40, 360),
+        (1240, 360),
+        (640, 700),
+        (1260, 700),
+    ] {
+        let i = ((y * size.0 + x) * 4) as usize;
+        assert!(
+            img[i..i + 3].iter().all(|&c| c < 40),
+            "({x},{y}) shows through: {:?}",
+            &img[i..i + 3]
+        );
+    }
+    let gap = ((437 * size.0 + 432) * 4) as usize;
+    assert!(
+        img[gap..gap + 3].iter().all(|&c| c <= 20),
+        "the opaque panel reaches the buttons: {:?}",
+        &img[gap..gap + 3]
+    );
+}

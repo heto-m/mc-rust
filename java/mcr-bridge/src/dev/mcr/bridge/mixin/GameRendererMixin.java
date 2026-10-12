@@ -4,6 +4,7 @@ import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import dev.mcr.bridge.BridgeAbi;
 import dev.mcr.bridge.McrCamera;
 import dev.mcr.bridge.McrFrame;
+import dev.mcr.bridge.McrParticles;
 import dev.mcr.bridge.gpu.FrameSlots;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.Projection;
@@ -64,5 +65,15 @@ abstract class GameRendererMixin {
         if (McrFrame.COMPOSE) {
             cir.setReturnValue(false);
         }
+    }
+
+    @Inject(method = "tick", at = @At("HEAD"))
+    private void mcr$tickStart(CallbackInfo ci) {
+        McrParticles.enter();
+    }
+
+    @Inject(method = "tick", at = @At("RETURN"))
+    private void mcr$tickEnd(CallbackInfo ci) {
+        McrParticles.exit();
     }
 }

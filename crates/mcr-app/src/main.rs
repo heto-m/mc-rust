@@ -22,6 +22,7 @@ mod language;
 mod map;
 mod mesh_world;
 mod mod_input;
+mod mod_sync;
 mod mods;
 mod mods_ui;
 mod movement_sounds;

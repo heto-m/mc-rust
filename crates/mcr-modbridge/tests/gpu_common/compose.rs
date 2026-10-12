@@ -23,6 +23,8 @@ pub struct Rig {
     /// Why the bridge stopped composing, if it did.
     pub detached: Option<String>,
     pub resumed: bool,
+    /// Vanilla key mappings Java reported rebinding.
+    pub keys_changed: Vec<(String, String)>,
     clock: TickClock,
     last: Instant,
     feed_ticks: bool,
@@ -71,6 +73,7 @@ impl Rig {
             frame_count: 0,
             detached: None,
             resumed: false,
+            keys_changed: Vec::new(),
             clock: TickClock::default(),
             last: Instant::now(),
             feed_ticks: true,
@@ -108,6 +111,7 @@ impl Rig {
                 BridgeEvent::Info { key, value } => {
                     self.infos.insert(key, value);
                 }
+                BridgeEvent::KeysChanged(keys) => self.keys_changed.extend(keys),
                 _ => {}
             }
         }

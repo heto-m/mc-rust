@@ -37,6 +37,7 @@ pub struct ModNet {
     /// Java's input while its GUI is composed.
     pub input: Option<ModInput>,
     connects: Arc<Mutex<Vec<String>>>,
+    keys: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl ModNet {
@@ -44,7 +45,15 @@ impl ModNet {
     pub fn take_connect_requests(&self) -> Vec<String> {
         std::mem::take(&mut *self.connects.lock().unwrap_or_else(PoisonError::into_inner))
     }
+
+    /// Vanilla mappings Java rebound, oldest first, as `(mapping, key)` names.
+    pub fn take_key_changes(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut *self.keys.lock().unwrap_or_else(PoisonError::into_inner))
+    }
 }
+
+/// Java's rebinds waiting for the shell; a stuck shell cannot grow it without bound.
+const MAX_KEY_CHANGES: usize = 1024;
 
 /// The mod mode decision and the Mods screen's model, made once at startup.
 pub struct Startup {
@@ -188,6 +197,8 @@ impl ModHost {
         let input = frames.is_some().then(|| {
             let input = bridge.input();
             input.set_clipboard(crate::mod_input::SystemClipboard::open());
+            let (caps, num) = crate::mod_input::keyboard_locks();
+            input.set_locks(caps, num);
             input
         });
         let net = ModNet {
@@ -196,8 +207,10 @@ impl ModHost {
             frames,
             input,
             connects: Arc::new(Mutex::new(Vec::new())),
+            keys: Arc::new(Mutex::new(Vec::new())),
         };
         let connects = net.connects.clone();
+        let keys = net.keys.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let watcher = tracker.clone();
@@ -209,11 +222,17 @@ impl ModHost {
                     if let Some(event) = bridge.next_event(Duration::from_millis(100)) {
                         eprintln!("[mods] {event:?}");
                         watcher.observe(&event);
-                        if let BridgeEvent::ConnectRequested { address, .. } = event {
-                            connects
+                        match event {
+                            BridgeEvent::ConnectRequested { address, .. } => connects
                                 .lock()
                                 .unwrap_or_else(PoisonError::into_inner)
-                                .push(address);
+                                .push(address),
+                            BridgeEvent::KeysChanged(changes) => {
+                                let mut queue = keys.lock().unwrap_or_else(PoisonError::into_inner);
+                                let room = MAX_KEY_CHANGES.saturating_sub(queue.len());
+                                queue.extend(changes.into_iter().take(room));
+                            }
+                            _ => {}
                         }
                     }
                 }

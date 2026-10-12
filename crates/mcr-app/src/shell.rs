@@ -32,6 +32,7 @@ use crate::audio::Audio;
 use crate::autopilot::Autopilot;
 use crate::gui::{self, Gui, UiOverlay};
 use crate::input::{track_modifiers, ui_inputs};
+use crate::mod_sync;
 use crate::play::{Parts, Play, PlayConfig, TICK_SECONDS};
 use crate::respacks::{PackAction, ResourceStack, ServerPacks, downloads_dir};
 use crate::servers::FileServers;
@@ -87,6 +88,7 @@ pub struct Shell {
     dialogs: Option<DialogEnd>,
     conduct: Option<ConductEnd>,
     route: route::Route,
+    java_settings_seen: u64,
 }
 
 impl std::fmt::Debug for Shell {
@@ -175,6 +177,7 @@ impl Shell {
             dialogs: None,
             conduct: None,
             route: route::Route::new(cfg.mod_net.as_ref().and_then(|n| n.input.clone())),
+            java_settings_seen: 0,
             cfg,
         };
         shell.show_title();
@@ -325,6 +328,9 @@ impl Shell {
                     }
                     PackAction::Reload(paths) => {
                         let ok = self.reload_resources(&paths);
+                        if ok && let Some(frames) = self.mod_frames() {
+                            frames.lock().set_server_packs(&paths);
+                        }
                         next.extend(self.packs.reload_finished(ok));
                     }
                     PackAction::SaveSetting(setting) => {
@@ -645,6 +651,7 @@ impl Shell {
         self.last_frame = now;
         self.poll_connect();
         self.poll_mod_connects();
+        self.sync_java_settings();
         self.poll_packs();
         self.poll_dialogs();
         self.poll_conduct();
@@ -683,6 +690,43 @@ impl Shell {
             frames.lock().add_ticks(ran, partial);
         }
         self.check_session();
+    }
+
+    /// Java's vanilla key rebinds become mcr's (and are saved); mcr's bindings go to Java when they change.
+    fn sync_java_settings(&mut self) {
+        let Some(net) = &self.cfg.mod_net else { return };
+        let changes = net.take_key_changes();
+        if !changes.is_empty() {
+            let edits = mod_sync::java_key_edits(&self.settings.borrow().file.bindings, &changes);
+            if !edits.is_empty() {
+                self.settings.borrow_mut().edit(|f| {
+                    for (index, key) in edits {
+                        f.bindings.set(index, key);
+                    }
+                });
+            }
+        }
+        let Some(frames) = &net.frames else { return };
+        let settings = self.settings.borrow();
+        if settings.version != self.java_settings_seen {
+            self.java_settings_seen = settings.version;
+            frames
+                .lock()
+                .set_key_bindings(mod_sync::key_table(&settings.file.bindings));
+        }
+    }
+
+    /// mcr's render distance as its fog uses it, and its entity distance scaling.
+    fn java_view(&self) -> (u32, f32) {
+        let options = &self.settings.borrow().file.options;
+        let distance = match &self.play {
+            Some(play) => play.render_distance(),
+            None => self.cfg.render_distance.unwrap_or(options.render_distance),
+        };
+        (
+            u32::try_from(distance.clamp(2, 64)).unwrap_or(2),
+            options.entity_distance_scaling as f32,
+        )
     }
 
     /// Without mods, or once Java finished loading and its GUI is composed.
@@ -1017,9 +1061,11 @@ impl Shell {
         let java_gui = self.java_gui();
         let third_person = self.play.as_ref().is_some_and(Play::third_person);
         let mut fov_scale = 1.0;
+        let (distance, entity_scale) = self.java_view();
         let java_world = self.mod_frames().is_some_and(|f| {
             let mut link = f.lock();
             link.set_third_person(third_person);
+            link.set_view(distance, entity_scale);
             fov_scale = link.java().fov_scale;
             link.world_active()
         });

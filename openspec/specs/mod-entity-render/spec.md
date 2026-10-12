@@ -6,11 +6,19 @@ In mod mode, Java draws entities, block entities, nametags, the hand, outlines a
 ## Requirements
 
 ### Requirement: World ownership split
-In mod mode, Java SHALL render entities, block entities, nametags, the first-person hand, glowing outlines, screen post effects and particles of non-`minecraft` types. mcr SHALL render terrain, sky, clouds, weather, world border, block outline, destroy overlay and vanilla particles, and SHALL NOT render entities, block entities or nametags natively.
+In mod mode, Java SHALL render entities, block entities, nametags, the hand, outlines, post effects, mod particle types and vanilla particles spawned by mod code outside the paths mcr mirrors. mcr SHALL render terrain, sky, clouds, weather, world border, block outline, destroy overlay and vanilla particles from packets and vanilla ticks, and SHALL NOT render entities, block entities or nametags natively.
 
 #### Scenario: No double drawing
 - **WHEN** a zombie stands in view in mod mode
 - **THEN** it is drawn once, by Java's entity renderer
+
+#### Scenario: Server particle
+- **WHEN** the server sends a `minecraft:flame` particle packet
+- **THEN** mcr draws it and Java does not create it
+
+#### Scenario: Mod spawns a vanilla particle
+- **WHEN** a mod's client tick handler spawns `minecraft:happy_villager`
+- **THEN** Java creates and draws it
 
 ### Requirement: Meshless sections
 Java's section compilation SHALL produce no geometry and SHALL list each section's renderable block entities, so that vanilla's section visibility and block entity extraction work without terrain meshing.
@@ -53,3 +61,10 @@ Java's HTTP and HTTPS requests SHALL go through a loopback proxy owned by Rust t
 #### Scenario: Unlisted host
 - **WHEN** Java asks the proxy for a host that is not on the allow-list
 - **THEN** the proxy answers 403 and opens no upstream connection
+
+### Requirement: Shared render distance
+Java's effective render distance and entity distance scaling SHALL follow mcr's every frame, so fog on Java-rendered entities matches mcr's terrain fog and Java culls entities at mcr's distance.
+
+#### Scenario: Render distance changed in mcr
+- **WHEN** the user sets mcr's render distance to 6
+- **THEN** Java's effective render distance is 6 from the next frame on
