@@ -12,6 +12,7 @@ mcr-client = { path = "../mcr-client" }
 mcr-jvm = { path = "../mcr-jvm" }
 mcr-physics = { path = "../mcr-physics" }
 mcr-protocol = { path = "../mcr-protocol" }
+mcr-render = { path = "../mcr-render" }
 naga = { version = "30", features = ["spv-in"] }
 pollster.workspace = true
 rustc-hash.workspace = true

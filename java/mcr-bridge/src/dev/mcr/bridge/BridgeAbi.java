@@ -4,8 +4,9 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 4;
+    public static final int VERSION = 5;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
+    public static final String COMPOSE_PROPERTY = "mcr.compose";
 
     public static final int SHARED_CONTROL_RING = 0;
     public static final int SHARED_CONTROL_BELL = 1;
@@ -14,6 +15,8 @@ public final class BridgeAbi {
     public static final int SHARED_SOUND_RING = 4;
     public static final int SHARED_SOUND_STATES = 5;
     public static final int SHARED_SOUND_CONTROL = 6;
+    public static final int SHARED_FRAME_STATE = 16;
+    public static final int SHARED_FRAME_BELL = 17;
 
     public static final int MSG_FRAME = 1;
     public static final int MSG_SHUTDOWN = 2;
@@ -24,7 +27,27 @@ public final class BridgeAbi {
     public static final int FRAME_HEIGHT = 16;
     public static final int FRAME_PARTIAL_TICK = 20;
     public static final int FRAME_SCALE = 24;
-    public static final int FRAME_SIZE = 32;
+    public static final int FRAME_FLAGS = 28;
+    public static final int FRAME_CAMERA = 32;
+    public static final int FRAME_YAW = 56;
+    public static final int FRAME_PITCH = 60;
+    public static final int FRAME_VIEW = 64;
+    public static final int FRAME_PROJ = 128;
+    public static final int FRAME_SIZE = 192;
+    public static final int FRAME_LOCKSTEP = 1;
+
+    public static final int FSTATE_DONE = 0;
+    public static final int FSTATE_TICKS = 8;
+    public static final int FSTATE_NANOS = 16;
+    public static final int FSTATE_FLAGS = 24;
+    public static final int FSTATE_WIDTH = 28;
+    public static final int FSTATE_HEIGHT = 32;
+    public static final int FSTATE_SIZE = 64;
+    public static final int FSTATE_READY = 1;
+    public static final int FSTATE_LOADED = 2;
+
+    public static final int SLOT_IMMEDIATE = 0;
+    public static final int SLOT_GUI = 1;
 
     public static final int REPORT_MOD_LOADED = 1;
     public static final int REPORT_INIT = 2;
@@ -126,6 +149,8 @@ public final class BridgeAbi {
     public static final int D_SURFACE_CONFIGURE = 12;
     public static final int D_SURFACE_PRESENT = 13;
     public static final int D_STATS = 14;
+    public static final int D_SLOT = 15;
+    public static final int GPU_TEXTURE_VIRTUAL = 1073741824;
 
     public static final int E_CLEAR = 1;
     public static final int E_CLEAR_REGION = 2;
@@ -141,6 +166,7 @@ public final class BridgeAbi {
     public static final int E_SUBMIT = 12;
     public static final int E_POLL = 13;
     public static final int E_WAIT = 14;
+    public static final int E_SPLIT = 15;
 
     public static final int P_PIPELINE = 1;
     public static final int P_UNIFORM_BUFFER = 2;

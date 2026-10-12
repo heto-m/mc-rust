@@ -43,6 +43,8 @@ public final class McrDeviceBackend implements GpuDeviceBackend {
     private static final int MAX_ANISOTROPY = 16;
     private static final int MAX_MULTI_DRAW = 1 << 16;
 
+    static volatile @Nullable McrDeviceBackend instance;
+
     private final DeviceInfo info;
     private final ConcurrentLinkedQueue<Long> pendingDestroys = new ConcurrentLinkedQueue<>();
     private @Nullable McrCommandEncoder encoder;
@@ -51,6 +53,7 @@ public final class McrDeviceBackend implements GpuDeviceBackend {
         checkEnums();
         this.info = readInfo();
         GpuNative.LOGGER.info("mcr GPU backend on {}", info.name());
+        instance = this;
     }
 
     private static void checkEnums() {
@@ -148,7 +151,7 @@ public final class McrDeviceBackend implements GpuDeviceBackend {
     public GpuTexture createTexture(
             @Nullable String label, int usage, GpuFormat format, int width, int height, int depthOrLayers, int mipLevels) {
         long h = GpuNative.require(
-                GpuNative.device(BridgeAbi.D_TEXTURE, usage, format.ordinal(), width, height, depthOrLayers, mipLevels),
+                GpuNative.device(BridgeAbi.D_TEXTURE, FrameSlots.textureUsage(usage), format.ordinal(), width, height, depthOrLayers, mipLevels),
                 "texture " + label);
         return new McrTexture(this, h, usage, label == null ? "" : label, format, width, height, depthOrLayers, mipLevels);
     }

@@ -55,4 +55,5 @@ pub fn jvm_tests() -> bool {
     }
     on
 }
+pub mod compose;
 pub mod image;

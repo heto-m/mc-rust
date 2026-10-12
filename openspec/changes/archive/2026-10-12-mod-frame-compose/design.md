@@ -92,3 +92,55 @@ mods that query SDL agree.
 - GUI blur correctness depends on main color holding the world at that point, which is true because the slot runs
   after mcr's world passes.
 - Java-side frame cost of the HUD in mod-heavy setups: measured, and pipelining is the escape hatch.
+
+## As built
+
+Where the implementation departs from the decisions above:
+
+- **Main target is real, and flipped in and out.** Renderpearl targets are bottom-up (GL row order) and
+  mcr's scene is top-down, so `MainTarget`'s color can't simply alias the scene. `MainTarget` textures are created
+  with a bridge-only `TEXTURE_VIRTUAL` usage bit (set by `MainTarget.allocateAttachments` and
+  `RenderTarget.createBuffers` mixins). At the GUI slot, the compositor (`compose.rs`):
+  1. copies the scene into Java's main color, flipped;
+  2. submits Java's queued buffers;
+  3. copies the result back, flipped.
+
+  That costs two fullscreen passes per frame. Color clears of virtual textures, `E_CLEAR` and pass load clears
+  alike, are dropped, so `GameRenderer.render`'s main clear needs no mixin. A pass that samples the target it
+  renders into reads a copy taken just before it.
+- **Slots by cutting the encoder.** Vanilla submits once per frame, after `GuiRenderer.render`. A new `E_SPLIT`
+  encoder op cuts the recording at `GuiRenderer.render` HEAD and RETURN. It queues what was recorded so far,
+  with its staged uploads, under the current slot, and leaves fences, readbacks and Java's transient memory to
+  the real submit. While composing, every Java submit is queued (`gpu/slots.rs`) and runs on the render thread
+  in FIFO order, inside a validation error scope. A fence wait on queued work returns false instead of
+  blocking, so Java can never deadlock against the render thread.
+- **Bounded waits.** The render thread waits for Java's frame for at most 100 ms once Java has loaded (50 ms
+  while loading), not the full 2 s. A late frame is presented without Java's newest GUI:
+  - in game, mcr's live world is shown;
+  - while loading, the last composite is shown, so the loading screen stays up.
+
+  The 2 s hang deadline (60 s while loading) still detaches the bridge. A hung mod therefore costs at most one
+  100 ms frame, never a 2 s freeze (`compose_hang` test).
+- **Ticks.** `TickBank` hands every Rust tick to the next posted frame. Java runs at most 10 per frame and
+  carries the rest, so no tick is lost. Ticks before Java's first frame are dropped, because Java has no game
+  to tick yet. `Minecraft.tick` HEAD counts Java's ticks into the shared frame state.
+- **Connecting.** `mcr --mods --connect` defers the join until Java has loaded and its GUI is composed. Java
+  processing play packets mid-reload threw in `ParticleEngine` and disconnected the session.
+- **Not done here.**
+  - `SDL_SetWindowSize` is called for mods that query SDL, but SDL's resize events are left to vanilla.
+  - The GUI scale stays Java's own option.
+  - Java's `logs/` directory lands in mcr's working directory, as it did before this change.
+
+## Measurements
+
+Ryzen 7 5800X, RX 6800 XT (Vulkan). Times are from leaving `awaitFrame` to `frame_done`, for Java's frame, and
+the render thread's blocking wait at `after_world`.
+
+| Run | Frames | Render-thread wait p50 / p99 / max | Java frame p50 / p99 / max |
+|---|---|---|---|
+| `mcr --mods --connect` at 1920×1080, 30 s in game (real terrain, uncapped fps) | 14 760 | 0.18 / 1.84 / 21.8 ms | 0.38 / 2.06 / 22.1 ms |
+| `compose_live` at 1920×1080, 20 s in game (sky only, 60 fps) | 1 233 | 0.19 / 2.33 / 3.2 ms | 0.39 / 2.61 / 3.7 ms |
+
+p99 is under the 4 ms target. The in-game runs had no late frames. Java's and Rust's tick counters matched
+exactly (707 = 707 and 1267 = 1267). mcr's whole frame in the first run, including the encoder split and both
+flips, took 0.90 ms p50 and 2.81 ms p99 of CPU time.

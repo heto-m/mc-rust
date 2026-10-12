@@ -1788,6 +1788,7 @@ dependencies = [
  "mcr-net",
  "mcr-physics",
  "mcr-protocol",
+ "mcr-render",
  "naga",
  "png",
  "pollster",

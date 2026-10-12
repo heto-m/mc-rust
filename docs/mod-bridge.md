@@ -69,15 +69,24 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
 
 ## Frame composition
 
-Java's `MainTarget` color and depth become *virtual targets*: the backend resolves them to Rust textures per
-**slot** (`WORLD_SOLID`, `WORLD_TRANSLUCENT`, `WORLD_AFTER`, `HAND`, `GUI`). In mod mode, mcr renders into an
-offscreen `Rgba8Unorm` + `Depth32Float` scene. That is exactly vanilla's `MainTarget` format and gamma-space look,
-and it is blitted to the swapchain at the end. World slots alias that scene color and its reverse-Z depth. Vanilla
-is reverse-Z too, and Java uses Rust's projection matrix. The GUI slot aliases the same color after mcr's world
-passes, so `GuiRenderer` draws straight onto our image and the menu blur samples our world. Java records each slot into its own wgpu command buffer on the Java thread. The mcr render thread submits
-them in slot order between its own passes (frame lockstep). Clears of virtual targets are dropped. In mod mode, Java
-renders entities, block entities, the hand and mod world overlays. Rust renders terrain, sky, clouds, weather,
-water and native particles.
+In mod mode mcr renders into an offscreen `Rgba8Unorm` + `Depth32Float` scene, which is vanilla's `MainTarget`
+format and gamma-space look, and blits it to the swapchain at the end. Java's frames run in lockstep with
+mcr's (`compose.rs`, `frame.rs`).
+
+1. **Post.** The render thread posts `FrameBegin` with Rust's ticks, partial tick, size and camera. Java runs
+   exactly those ticks through a `DeltaTracker.Timer` override, applies the size to `Window`, and renders.
+2. **Queue.** Java's submits are tagged with a slot (`IMMEDIATE`, or `GUI` around `GuiRenderer.render`, cut out
+   with `E_SPLIT`) and queued rather than submitted.
+3. **Compose.** After its world passes, the render thread waits for Java's `frame_done` (at most 100 ms once
+   loaded). It copies the scene into Java's real `MainTarget` color, flipped because renderpearl targets are
+   bottom-up. It then submits Java's queued buffers in order, so the GUI draws over the world and the menu blur
+   samples it. Finally it copies the result back, flipped.
+4. **Native overlays.** These draw after, then the frame is presented.
+
+Clears of the main target's color are dropped. Java's world rendering (`renderLevel`, post effects, the entity
+outline, `LevelExtractor`) is off until `mod-entity-render-hooks`, which adds world slots. A Java frame that
+misses the 2 s deadline detaches the bridge from rendering: mcr's native HUD returns and a toast says so. In mod
+mode, Rust renders terrain, sky, clouds, weather, water, particles, entities and the hand; Java draws GUI and HUD.
 
 ## World duplication
 

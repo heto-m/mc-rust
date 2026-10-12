@@ -25,6 +25,12 @@ abstract class MinecraftMixin {
     private void mcr$flushNet(boolean advanceGameTime, CallbackInfo ci) {
         McrNet.endOfTick();
         GpuSelfTest.onFrame((Minecraft) (Object) this);
+        McrFrame.frameDone((Minecraft) (Object) this);
+    }
+
+    @Inject(method = "tick", at = @At("HEAD"))
+    private void mcr$countTick(CallbackInfo ci) {
+        McrFrame.tickRan();
     }
 
     @Inject(method = "handleKeybinds", at = @At("HEAD"))

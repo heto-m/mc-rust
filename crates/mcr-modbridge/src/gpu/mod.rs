@@ -10,6 +10,7 @@ pub mod pipeline;
 pub mod resources;
 pub mod shader;
 pub mod slab;
+pub mod slots;
 pub mod spv;
 #[cfg(test)]
 mod tests;

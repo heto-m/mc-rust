@@ -30,6 +30,15 @@ pub enum GpuError {
     Device(String),
     #[error("a device was already chosen")]
     AlreadySet,
+    #[error("composition needs mcr-render's device installed first")]
+    NotInstalled,
+}
+
+static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The backend records on mcr-render's device rather than a headless one.
+pub fn installed() -> bool {
+    INSTALLED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Makes the backend share mcr-render's device; must run before Java creates its device.
@@ -41,6 +50,10 @@ pub fn install(
     let _guard = INIT.lock().unwrap_or_else(PoisonError::into_inner);
     let features = device.features();
     let limits = device.limits();
+    // wgpu's default handler panics; Java's errors on the shared device must only be logged.
+    device.on_uncaptured_error(Arc::new(|e: wgpu::Error| {
+        tracing::error!("uncaptured wgpu error on the shared device: {e}");
+    }));
     GPU.set(Gpu {
         device,
         queue,
@@ -48,7 +61,9 @@ pub fn install(
         features,
         limits,
     })
-    .map_err(|_| GpuError::AlreadySet)
+    .map_err(|_| GpuError::AlreadySet)?;
+    INSTALLED.store(true, std::sync::atomic::Ordering::Release);
+    Ok(())
 }
 
 pub fn gpu() -> Result<&'static Gpu, GpuError> {

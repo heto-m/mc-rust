@@ -102,11 +102,11 @@ struct App {
     stats: StatWindow,
     ready_reported: bool,
     exit: bool,
-    mod_net: Option<mods::ModNet>,
+    mod_host: Option<mods::ModHost>,
 }
 
 impl App {
-    fn new(opts: Options, launched: Instant, mod_net: Option<mods::ModNet>) -> Self {
+    fn new(opts: Options, launched: Instant) -> Self {
         Self {
             opts,
             launched,
@@ -118,7 +118,7 @@ impl App {
             stats: StatWindow::default(),
             ready_reported: false,
             exit: false,
-            mod_net,
+            mod_host: None,
         }
     }
 
@@ -131,8 +131,12 @@ impl App {
             )?,
         );
         let size = window.inner_size();
-        let config = world_setup::renderer_config(&self.opts, RendererConfig::default());
-        let renderer = Renderer::new(
+        let mut config = world_setup::renderer_config(&self.opts, RendererConfig::default());
+        if self.opts.mods.is_some() {
+            config.scene_texture = true;
+            config.optional_features = mcr_modbridge::gpu::context::OPTIONAL_FEATURES;
+        }
+        let mut renderer = Renderer::new(
             Target::Surface {
                 target: window.clone().into(),
                 width: size.width,
@@ -148,10 +152,13 @@ impl App {
             renderer.uses_draw_count(),
             renderer.has_timestamps()
         );
+        if let Some(dir) = self.opts.mods.clone() {
+            self.mod_host = mods::ModHost::start(&self.opts, &dir, &mut renderer)?;
+        }
         self.scene = Some(if self.opts.world.is_none() && !self.opts.synthetic {
             Scene::Shell(Box::new(Shell::new(
                 renderer,
-                shell_config(&self.opts, self.mod_net.clone()),
+                shell_config(&self.opts, self.mod_host.as_ref().map(mods::ModHost::net)),
             )?))
         } else if self.opts.synthetic {
             self.synthetic_scene(renderer)?
@@ -458,15 +465,11 @@ fn main() -> Result<()> {
         }
         return screenshot::run(&opts, &out, launched);
     }
-    let mod_host = match &opts.mods {
-        Some(dir) => mods::ModHost::start(&opts, dir)?,
-        None => None,
-    };
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mod_net = mod_host.as_ref().map(mods::ModHost::net);
-    let result = event_loop.run_app(&mut App::new(opts, launched, mod_net));
-    if let Some(host) = mod_host {
+    let mut app = App::new(opts, launched);
+    let result = event_loop.run_app(&mut app);
+    if let Some(host) = app.mod_host.take() {
         host.finish();
     }
     result?;

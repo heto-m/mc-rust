@@ -225,6 +225,9 @@ impl Overlay for FrameOverlay<'_> {
         if let Some(hand) = self.hand {
             hand.record(ctx);
         }
+    }
+
+    fn record_ui(&mut self, ctx: &mut OverlayCtx<'_>) {
         self.ui_renderer.prepare(ctx.device, ctx.queue, self.ui);
         {
             let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -325,6 +328,8 @@ pub struct Play {
     scroll: f32,
     perspective: Perspective,
     hud_hidden: bool,
+    /// Java's HUD is composed over the world in mod mode, replacing the native one.
+    pub java_gui: bool,
     debug_on: bool,
     tab_held: bool,
     ctrl_held: bool,
@@ -457,6 +462,7 @@ impl Play {
             scroll: 0.0,
             perspective: Perspective::First,
             hud_hidden: false,
+            java_gui: false,
             debug_on: false,
             tab_held: false,
             ctrl_held: false,
@@ -1646,6 +1652,10 @@ impl Play {
         self.gui.ui.lang().languages().to_vec()
     }
 
+    pub fn gui_mut(&mut self) -> &mut Gui {
+        &mut self.gui
+    }
+
     fn add_toast(&mut self, toast: mcr_client::ToastEvent) {
         use mcr_client::ToastEvent;
         use mcr_protocol::play::clientbound::ui::AdvancementFrame;
@@ -2100,6 +2110,7 @@ impl Play {
 
         self.update_gui_size();
         self.tick_toasts();
+        let hidden = self.hud_hidden || self.java_gui;
         let chat_open = self.chat_open();
         let debug = self.debug_on.then(|| {
             debug::build(&DebugInput {
@@ -2124,7 +2135,7 @@ impl Play {
             options: &self.options,
             tick: self.ticks as u32,
             partial: self.partial(),
-            hidden: self.hud_hidden,
+            hidden,
             tab_held: self.tab_held,
             chat_open,
             debug: debug.as_ref(),
@@ -2161,7 +2172,7 @@ impl Play {
                 );
             }
             self.hud.draw(&mut frame, &mut self.gui.icons, &input);
-            if !self.hud_hidden {
+            if !hidden {
                 let scoping = self.perspective == Perspective::First
                     && self.hand.as_ref().is_some_and(HeldHand::scoping);
                 let state = &self.world.client.state;
@@ -2186,13 +2197,13 @@ impl Play {
                 cx.now_ms = input.millis;
                 self.stack.render(&mut cx);
             }
-            if !self.hud_hidden && !self.gui.toasts.is_empty() {
+            if !hidden && !self.gui.toasts.is_empty() {
                 let mut cx =
                     RenderCx::new(&mut frame, &mut self.gui.icons, &self.gui.assets, &view);
                 cx.now_ms = input.millis;
                 self.gui.toasts.draw(&mut cx);
             }
-            if !self.hud_hidden {
+            if !hidden {
                 let toast = self.options.music_toast;
                 let audible = music_volume(&self.options) > 0.0;
                 let mut cx =

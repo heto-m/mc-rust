@@ -4,7 +4,7 @@ use mcr_jvm::JvmOptions;
 use serde_json::Value;
 
 use crate::BridgeError;
-use crate::abi::TABLE_PROPERTY;
+use crate::abi::{COMPOSE_PROPERTY, TABLE_PROPERTY};
 
 pub const LAUNCH_MANIFEST: &str = "fabric/launch.json";
 pub const BOOT_JAR: &str = "java/mcr-boot.jar";
@@ -102,6 +102,9 @@ pub struct BridgeConfig {
     pub max_heap: String,
     /// Extra `-D` options, e.g. test hooks.
     pub extra_jvm: Vec<String>,
+    /// The render thread drives Java's frames and composes its GUI ([`crate::Bridge::frames`]);
+    /// needs [`crate::gpu::install`] first.
+    pub compose: bool,
 }
 
 impl BridgeConfig {
@@ -116,6 +119,7 @@ impl BridgeConfig {
             height: 480,
             max_heap: "2G".into(),
             extra_jvm: Vec::new(),
+            compose: false,
         }
     }
 }
@@ -187,6 +191,9 @@ pub fn plan(
         "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED".into(),
         format!("-D{TABLE_PROPERTY}={:x}", table_address as u64),
     ];
+    if config.compose {
+        properties.push(format!("-D{COMPOSE_PROPERTY}=true"));
+    }
     properties.extend(manifest.jvm_args.iter().cloned());
     properties.extend(config.extra_jvm.iter().cloned());
 
@@ -305,6 +312,9 @@ mod tests {
         );
         let opts = p.jvm_options().to_strings().unwrap();
         assert!(opts.contains(&"-Xmx1536m".to_owned()));
+        cfg.compose = true;
+        let p = plan(&m, &cfg, 0x1234_abcd).unwrap();
+        assert!(p.properties.contains(&"-Dmcr.compose=true".to_owned()));
     }
 
     #[test]

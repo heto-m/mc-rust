@@ -208,7 +208,7 @@ impl Scene {
             SIZE,
         )
         .unwrap();
-        let n = s.submit(b.gpu, &b.stats, self.enc).unwrap();
+        let n = s.submit(b.gpu, &b.stats, &b.slots, self.enc).unwrap();
         assert!(s.wait(b.gpu, self.enc, n, None).unwrap());
         let mut ids = Vec::new();
         for _ in 0..100 {

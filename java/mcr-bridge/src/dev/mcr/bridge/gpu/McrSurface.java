@@ -5,10 +5,11 @@ import com.mojang.renderpearl.api.textures.GpuTextureView;
 import com.mojang.renderpearl.backend.api.CommandEncoderBackend;
 import com.mojang.renderpearl.backend.api.GpuSurfaceBackend;
 import dev.mcr.bridge.BridgeAbi;
+import dev.mcr.bridge.McrFrame;
 import java.util.Collection;
 import java.util.EnumSet;
 
-/** An offscreen RGBA8 image standing in for the window; Rust composes it later. */
+/** An offscreen RGBA8 image standing in for the window; unused while mcr composes Java's main target. */
 final class McrSurface implements GpuSurfaceBackend {
     private final McrDeviceBackend device;
     private final long handle;
@@ -34,12 +35,16 @@ final class McrSurface implements GpuSurfaceBackend {
 
     @Override
     public void blitFromTexture(CommandEncoderBackend commandEncoder, GpuTextureView textureView) {
-        ((McrCommandEncoder) commandEncoder).blit(handle, GpuNative.handleOf(textureView));
+        if (!McrFrame.COMPOSE) {
+            ((McrCommandEncoder) commandEncoder).blit(handle, GpuNative.handleOf(textureView));
+        }
     }
 
     @Override
     public void present() {
-        GpuNative.check(GpuNative.device(BridgeAbi.D_SURFACE_PRESENT, handle), "present");
+        if (!McrFrame.COMPOSE) {
+            GpuNative.check(GpuNative.device(BridgeAbi.D_SURFACE_PRESENT, handle), "present");
+        }
     }
 
     @Override

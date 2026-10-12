@@ -1,6 +1,5 @@
 //! Process-wide backend state behind Java's handles, and every device and encoder operation.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
@@ -13,6 +12,7 @@ use super::pass::BindCache;
 use super::pipeline::{Pipeline, PipelineError};
 use super::resources::{self, Buffer, Sampler, Texture, View};
 use super::slab::{Handle, Kind, Slab};
+use super::slots::{MAP_FAILED, MAP_OK, MAP_PENDING, Slots, Submission, SubmitTrack};
 
 /// Largest single upload or readback Java may request.
 pub const MAX_TRANSFER: u64 = 512 << 20;
@@ -188,13 +188,21 @@ impl UploadRing {
         )
     }
 
-    fn upload(&mut self, queue: &wgpu::Queue) -> u64 {
+    /// Writes the staged bytes now, or hands copies to `deferred` to write with the submit.
+    fn upload(
+        &mut self,
+        queue: &wgpu::Queue,
+        mut deferred: Option<&mut Vec<(wgpu::Buffer, u64, Vec<u8>)>>,
+    ) -> u64 {
         let mut bytes = 0;
         for b in &mut self.blocks {
             b.used_last = b.used > 0;
             if b.used > 0 {
                 let end = align(b.used as u64, 4) as usize;
-                queue.write_buffer(&b.buffer, 0, &b.data[..end]);
+                match deferred.as_deref_mut() {
+                    Some(out) => out.push((b.buffer.clone(), 0, b.data[..end].to_vec())),
+                    None => queue.write_buffer(&b.buffer, 0, &b.data[..end]),
+                }
                 bytes += end as u64;
                 b.used = 0;
             }
@@ -232,10 +240,6 @@ struct Readback {
     target: ReadbackTarget,
 }
 
-const MAP_PENDING: u8 = 0;
-const MAP_OK: u8 = 1;
-const MAP_FAILED: u8 = 2;
-
 #[derive(Debug)]
 pub struct Encoder {
     pub cmd: Option<wgpu::CommandEncoder>,
@@ -244,8 +248,7 @@ pub struct Encoder {
     pending: Vec<Readback>,
     /// Submits so far; the next submit gets `submits + 1`.
     pub submits: u64,
-    inflight: VecDeque<(u64, wgpu::SubmissionIndex)>,
-    done: Arc<AtomicU64>,
+    track: Arc<SubmitTrack>,
 }
 
 impl Encoder {
@@ -256,8 +259,7 @@ impl Encoder {
             recorded: Vec::new(),
             pending: Vec::new(),
             submits: 0,
-            inflight: VecDeque::new(),
-            done: Arc::new(AtomicU64::new(0)),
+            track: Arc::default(),
         }
     }
 
@@ -297,6 +299,8 @@ pub struct State {
     pub fan: Option<(wgpu::Buffer, u32)>,
     clears: FxHashMap<ClearKey, wgpu::RenderPipeline>,
     clear_shader: Option<wgpu::ShaderModule>,
+    /// Copy of a main target a pass samples while rendering into it.
+    pub feedback: Option<wgpu::Texture>,
 }
 
 #[derive(Debug)]
@@ -305,6 +309,7 @@ pub struct Backend {
     state: Mutex<State>,
     pipelines: Mutex<Slab<Arc<Pipeline>>>,
     pub stats: Stats,
+    pub slots: Slots,
 }
 
 static BACKEND: OnceLock<Backend> = OnceLock::new();
@@ -334,9 +339,11 @@ pub fn backend() -> OpResult<&'static Backend> {
             fan: None,
             clears: FxHashMap::default(),
             clear_shader: None,
+            feedback: None,
         }),
         pipelines: Mutex::new(Slab::new(Kind::Pipeline)),
         stats: Stats::default(),
+        slots: Slots::default(),
     }))
 }
 
@@ -425,7 +432,13 @@ impl Backend {
             layers,
             mips,
         )?;
-        insert(&mut self.lock().textures, tex)
+        let main_color = tex.virtual_main && tex.format.has_color_aspect();
+        let texture = tex.texture.clone();
+        let handle = insert(&mut self.lock().textures, tex)?;
+        if main_color {
+            self.slots.set_main_color(handle, texture);
+        }
+        Ok(handle)
     }
 
     pub fn create_view(&self, texture: Handle, base_mip: u32, mips: u32) -> OpResult<Handle> {
@@ -491,7 +504,10 @@ impl Backend {
         let mut state = self.lock();
         let removed = match kind {
             Kind::Buffer => state.buffers.remove(handle).map(drop),
-            Kind::Texture => state.textures.remove(handle).map(drop),
+            Kind::Texture => state
+                .textures
+                .remove(handle)
+                .map(|_| self.slots.forget(handle)),
             Kind::View => state.views.remove(handle).map(drop),
             Kind::Sampler => state.samplers.remove(handle).map(drop),
             Kind::Encoder => state.encoders.remove(handle).map(drop),
@@ -1187,6 +1203,10 @@ impl State {
         {
             return Err(invalid("color clear of a depth texture"));
         }
+        let color_tex = color_tex.filter(|(t, _)| !t.virtual_main);
+        if color_tex.is_none() && depth_tex.is_none() {
+            return Ok(());
+        }
         if let Some((t, _)) = depth_tex
             && !t.format.has_depth_aspect()
         {
@@ -1274,8 +1294,9 @@ impl State {
         {
             return Err(invalid("region clear attachments do not match"));
         }
+        let keep_color = !ct.virtual_main;
         let key = ClearKey {
-            color: Some(ct.format),
+            color: keep_color.then_some(ct.format),
             depth: Some(dt.format),
         };
         let has_stencil = dt.format.has_stencil_aspect();
@@ -1299,7 +1320,7 @@ impl State {
         let cmd = enc.cmd(&gpu.device);
         let mut pass = cmd.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("java region clear"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            color_attachments: &[keep_color.then_some(wgpu::RenderPassColorAttachment {
                 view: &cv,
                 depth_slice: None,
                 resolve_target: None,
@@ -1454,9 +1475,103 @@ impl State {
         Ok(())
     }
 
-    /// Uploads staged bytes, submits, maps readbacks and keeps at most two submits in flight.
-    pub fn submit(&mut self, gpu: &Gpu, stats: &Stats, encoder: Handle) -> OpResult<u64> {
-        let mut uploaded = 0;
+    /// Uploads staged bytes and submits (or queues the lot for the render thread), maps readbacks
+    /// and, when submitting directly, keeps at most two submits in flight.
+    pub fn submit(
+        &mut self,
+        gpu: &Gpu,
+        stats: &Stats,
+        slots: &Slots,
+        encoder: Handle,
+    ) -> OpResult<u64> {
+        let defer = slots.is_active();
+        let (writes, uploaded) = self.stage(gpu, encoder, defer)?;
+        let enc = self.encoder(encoder)?;
+        let cmd = enc.cmd.take().map(|c| c.finish());
+        enc.submits += 1;
+        let n = enc.submits;
+        let mut maps = Vec::new();
+        for mut rb in std::mem::take(&mut enc.recorded) {
+            rb.submit = n;
+            if let ReadbackTarget::Shadow {
+                staging, mapped, ..
+            } = &rb.target
+            {
+                maps.push((staging.clone(), mapped.clone()));
+            }
+            enc.pending.push(rb);
+        }
+        let (slot, frame) = slots.current();
+        let sub = Submission {
+            slot,
+            frame,
+            writes,
+            cmd,
+            maps,
+            track: enc.track.clone(),
+            n,
+        };
+        if defer {
+            slots.defer(gpu, sub);
+        } else {
+            sub.execute(gpu);
+        }
+        stats.submits.fetch_add(1, Ordering::Relaxed);
+        stats.uploaded.fetch_add(uploaded, Ordering::Relaxed);
+        if !defer && n > FRAMES_IN_FLIGHT {
+            self.wait(gpu, encoder, n - FRAMES_IN_FLIGHT, Some(SUBMIT_WAIT))?;
+        }
+        let destroyed = std::mem::take(&mut self.destroyed);
+        self.binds.purge(&destroyed);
+        Ok(n)
+    }
+
+    /// While composing, queues what was recorded so far under the current slot, so a slot change
+    /// can cut the frame; readbacks, fences and Java's transient memory still follow the next submit.
+    pub fn split(
+        &mut self,
+        gpu: &Gpu,
+        stats: &Stats,
+        slots: &Slots,
+        encoder: Handle,
+    ) -> OpResult<()> {
+        if !slots.is_active() {
+            self.encoder(encoder)?;
+            return Ok(());
+        }
+        let (writes, uploaded) = self.stage(gpu, encoder, true)?;
+        let enc = self.encoder(encoder)?;
+        let cmd = enc.cmd.take().map(|c| c.finish());
+        if cmd.is_none() && writes.is_empty() {
+            return Ok(());
+        }
+        let (slot, frame) = slots.current();
+        slots.defer(
+            gpu,
+            Submission {
+                slot,
+                frame,
+                writes,
+                cmd,
+                maps: Vec::new(),
+                track: enc.track.clone(),
+                n: enc.submits,
+            },
+        );
+        stats.uploaded.fetch_add(uploaded, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Collects the dirty host ranges and staged ring bytes for the next queue write; with `defer`
+    /// they are copied out to travel with a queued submission.
+    #[allow(clippy::type_complexity)]
+    fn stage(
+        &mut self,
+        gpu: &Gpu,
+        encoder: Handle,
+        defer: bool,
+    ) -> OpResult<(Vec<(wgpu::Buffer, u64, Vec<u8>)>, u64)> {
+        let mut writes = Vec::new();
         for block in std::mem::take(&mut self.dirty_blocks) {
             let Some(b) = self.buffers.get_mut(block) else {
                 continue;
@@ -1471,49 +1586,18 @@ impl State {
                 if host_end > s {
                     let mut data = bytes[s as usize..host_end as usize].to_vec();
                     data.resize((e - s) as usize, 0);
-                    gpu.queue.write_buffer(&b.buffer, s, &data);
-                    uploaded += e - s;
+                    writes.push((b.buffer.clone(), s, data));
                 }
             }
         }
+        let dirty: u64 = writes.iter().map(|(_, _, d)| d.len() as u64).sum();
         let enc = self.encoder(encoder)?;
-        uploaded += enc.ring.upload(&gpu.queue);
-        let cmd = enc.cmd.take();
-        enc.submits += 1;
-        let n = enc.submits;
-        let index = gpu.queue.submit(cmd.map(|c| c.finish()));
-        let done = enc.done.clone();
-        gpu.queue.on_submitted_work_done(move || {
-            done.fetch_max(n, Ordering::AcqRel);
-        });
-        enc.inflight.push_back((n, index));
-        for mut rb in std::mem::take(&mut enc.recorded) {
-            rb.submit = n;
-            if let ReadbackTarget::Shadow {
-                staging, mapped, ..
-            } = &rb.target
-            {
-                let flag = mapped.clone();
-                staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                    flag.store(
-                        if r.is_ok() { MAP_OK } else { MAP_FAILED },
-                        Ordering::Release,
-                    );
-                });
-            }
-            enc.pending.push(rb);
-        }
-        stats.submits.fetch_add(1, Ordering::Relaxed);
-        stats.uploaded.fetch_add(uploaded, Ordering::Relaxed);
-        if n > FRAMES_IN_FLIGHT {
-            self.wait(gpu, encoder, n - FRAMES_IN_FLIGHT, Some(SUBMIT_WAIT))?;
-        }
-        let destroyed = std::mem::take(&mut self.destroyed);
-        self.binds.purge(&destroyed);
-        Ok(n)
+        let ring = enc.ring.upload(&gpu.queue, defer.then_some(&mut writes));
+        Ok((writes, dirty + ring))
     }
 
-    /// Waits until submit `n` completed; `false` on timeout or when `n` was not submitted yet.
+    /// Waits until submit `n` completed; `false` on timeout or when `n` is not on the queue yet
+    /// (queued work waits for the render thread, which may be waiting for this very frame).
     pub fn wait(
         &mut self,
         gpu: &Gpu,
@@ -1522,23 +1606,27 @@ impl State {
         timeout: Option<Duration>,
     ) -> OpResult<bool> {
         let enc = self.encoder(encoder)?;
-        if enc.done.load(Ordering::Acquire) >= n {
+        let track = enc.track.clone();
+        if track.done.load(Ordering::Acquire) >= n {
             return Ok(true);
         }
-        if n > enc.submits {
+        if n > enc.submits || n > track.queued.load(Ordering::Acquire) {
             return Ok(false);
         }
-        let Some((_, index)) = enc.inflight.iter().find(|(k, _)| *k >= n) else {
+        let Some(index) = track
+            .inflight()
+            .iter()
+            .find(|(k, _)| *k >= n)
+            .map(|(_, i)| i.clone())
+        else {
             return Ok(true);
         };
-        let index = index.clone();
         let result = gpu.device.poll(wgpu::PollType::Wait {
             submission_index: Some(index),
             timeout,
         });
-        let enc = self.encoder(encoder)?;
-        let done = enc.done.load(Ordering::Acquire);
-        enc.inflight.retain(|(k, _)| *k > done);
+        let done = track.done.load(Ordering::Acquire);
+        track.inflight().retain(|(k, _)| *k > done);
         match result {
             Ok(_) => Ok(true),
             Err(wgpu::PollError::Timeout) => Ok(false),
@@ -1554,7 +1642,7 @@ impl State {
     pub fn poll(&mut self, gpu: &Gpu, encoder: Handle) -> OpResult<Vec<u64>> {
         let _ = gpu.device.poll(wgpu::PollType::Poll);
         let enc = self.encoder(encoder)?;
-        let done = enc.done.load(Ordering::Acquire);
+        let done = enc.track.done.load(Ordering::Acquire);
         let mut finished = Vec::new();
         let mut i = 0;
         while i < enc.pending.len() {

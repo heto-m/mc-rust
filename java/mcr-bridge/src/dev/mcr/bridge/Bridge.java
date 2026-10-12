@@ -26,6 +26,8 @@ public final class Bridge {
     final Doorbell controlBell;
     public final Ring netIn;
     public final Ring netOut;
+    final MemorySegment frameState;
+    final Doorbell frameBell;
 
     private Bridge(NativeTable table) {
         this.table = table;
@@ -39,6 +41,8 @@ public final class Bridge {
         this.controlBell = new Doorbell(shared(BridgeAbi.SHARED_CONTROL_BELL));
         this.netIn = Ring.at(shared(BridgeAbi.SHARED_NET_IN_RING));
         this.netOut = Ring.at(shared(BridgeAbi.SHARED_NET_OUT_RING));
+        this.frameState = MemorySegment.ofAddress(shared(BridgeAbi.SHARED_FRAME_STATE)).reinterpret(BridgeAbi.FSTATE_SIZE);
+        this.frameBell = new Doorbell(shared(BridgeAbi.SHARED_FRAME_BELL));
     }
 
     private static MethodHandle downcall(NativeTable table, BridgeAbi.Entry entry) {

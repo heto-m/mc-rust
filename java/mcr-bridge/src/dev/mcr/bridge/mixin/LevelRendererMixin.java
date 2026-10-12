@@ -1,5 +1,6 @@
 package dev.mcr.bridge.mixin;
 
+import dev.mcr.bridge.McrFrame;
 import net.minecraft.client.renderer.LevelRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -12,5 +13,12 @@ abstract class LevelRendererMixin {
     @Inject(method = "compileSections", at = @At("HEAD"), cancellable = true)
     private void mcr$rustOwnsTerrain(CallbackInfo ci) {
         ci.cancel();
+    }
+
+    @Inject(method = "blitEntityOutline", at = @At("HEAD"), cancellable = true)
+    private void mcr$noEntityOutline(CallbackInfo ci) {
+        if (McrFrame.COMPOSE) {
+            ci.cancel();
+        }
     }
 }

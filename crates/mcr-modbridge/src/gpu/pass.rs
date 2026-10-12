@@ -319,23 +319,25 @@ pub fn encode_pass(
         samplers,
         encoders,
         binds,
+        feedback,
         ..
     } = state;
     let enc = encoders
         .get_mut(encoder)
         .ok_or(OpError::Handle(Kind::Encoder, encoder))?;
 
-    let attachment = |h: Handle| -> OpResult<(wgpu::TextureView, wgpu::TextureFormat, u32, u32)> {
-        let v = views.get(h).ok_or(OpError::Handle(Kind::View, h))?;
-        textures
-            .get(v.texture)
-            .ok_or(OpError::Handle(Kind::Texture, v.texture))?;
-        let view = v
-            .attachment
-            .clone()
-            .ok_or_else(|| OpError::Invalid("view cannot be a render attachment".into()))?;
-        Ok((view, v.format, v.width, v.height))
-    };
+    let attachment =
+        |h: Handle| -> OpResult<(wgpu::TextureView, wgpu::TextureFormat, u32, u32, bool)> {
+            let v = views.get(h).ok_or(OpError::Handle(Kind::View, h))?;
+            let t = textures
+                .get(v.texture)
+                .ok_or(OpError::Handle(Kind::Texture, v.texture))?;
+            let view = v
+                .attachment
+                .clone()
+                .ok_or_else(|| OpError::Invalid("view cannot be a render attachment".into()))?;
+            Ok((view, v.format, v.width, v.height, t.virtual_main))
+        };
     let mut colors = Vec::with_capacity(desc.colors.len());
     let mut key = VariantKey {
         colors: [None; MAX_COLOR_ATTACHMENTS],
@@ -344,6 +346,7 @@ pub fn encode_pass(
         unfilterable: 0,
     };
     let mut size: Option<(u32, u32)> = None;
+    let mut virtual_targets: Vec<Handle> = Vec::new();
     let mut same_size = |w: u32, h: u32| -> OpResult<()> {
         match size {
             Some(s) if s != (w, h) => {
@@ -360,7 +363,7 @@ pub fn encode_pass(
             colors.push(None);
             continue;
         };
-        let (view, format, w, h) = attachment(c.view)?;
+        let (view, format, w, h, virtual_main) = attachment(c.view)?;
         if !format.has_color_aspect() {
             return Err(OpError::Invalid(
                 "depth view used as a color attachment".into(),
@@ -368,11 +371,14 @@ pub fn encode_pass(
         }
         same_size(w, h)?;
         key.colors[i] = Some(format);
-        colors.push(Some((view, c.clear)));
+        if virtual_main {
+            virtual_targets.extend(views.get(c.view).map(|v| v.texture));
+        }
+        colors.push(Some((view, c.clear.filter(|_| !virtual_main))));
     }
     let depth = match desc.depth {
         Some((h, clear)) => {
-            let (view, format, w, ht) = attachment(h)?;
+            let (view, format, w, ht, _) = attachment(h)?;
             if !format.has_depth_aspect() {
                 return Err(OpError::Invalid(
                     "color view used as a depth attachment".into(),
@@ -454,6 +460,19 @@ pub fn encode_pass(
     };
 
     let cmd = enc.cmd(&gpu.device);
+    let subst = if virtual_targets.is_empty() {
+        FxHashMap::default()
+    } else {
+        feedback_copies(
+            gpu,
+            cmd,
+            textures,
+            views,
+            feedback,
+            &virtual_targets,
+            stream,
+        )
+    };
     let mut pass = cmd.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("java pass"),
         color_attachments: &color_atts,
@@ -583,13 +602,22 @@ pub fn encode_pass(
                     layout: layout.id,
                     res,
                 };
+                let substituted = !subst.is_empty()
+                    && res
+                        .iter()
+                        .any(|r| matches!(r, Res::Texture(v, _, _) if subst.contains_key(v)));
                 if bound_group
                     .as_ref()
                     .is_some_and(|(k, o, n)| *k == bind_key && *o == offsets && *n == n_offsets)
                 {
                     return Ok(p);
                 }
-                let group = match binds.map.get(&bind_key) {
+                let cached = if substituted {
+                    None
+                } else {
+                    binds.map.get(&bind_key)
+                };
+                let group = match cached {
                     Some(g) => {
                         backend.stats.bind_hits.fetch_add(1, Ordering::Relaxed);
                         g.clone()
@@ -621,9 +649,10 @@ pub fn encode_pass(
                                 Res::Texture(vh, sh, nearest) => {
                                     let v = views.get(vh).expect("validated above");
                                     let s = samplers.get(sh).expect("validated above");
+                                    let view = subst.get(&vh).unwrap_or(&v.view);
                                     entries.push(wgpu::BindGroupEntry {
                                         binding: spv::texture_binding(i as u32),
-                                        resource: wgpu::BindingResource::TextureView(&v.view),
+                                        resource: wgpu::BindingResource::TextureView(view),
                                     });
                                     entries.push(wgpu::BindGroupEntry {
                                         binding: spv::sampler_binding(i as u32),
@@ -641,10 +670,12 @@ pub fn encode_pass(
                             layout: &layout.bind_group,
                             entries: &entries,
                         });
-                        if binds.map.len() >= MAX_BIND_CACHE {
-                            binds.map.clear();
+                        if !substituted {
+                            if binds.map.len() >= MAX_BIND_CACHE {
+                                binds.map.clear();
+                            }
+                            binds.map.insert(bind_key.clone(), g.clone());
                         }
-                        binds.map.insert(bind_key.clone(), g.clone());
                         g
                     }
                 };
@@ -1008,4 +1039,137 @@ pub fn encode_pass(
         .encode_ns
         .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     result.map(|()| report)
+}
+
+/// Views of `targets` that the pass samples while rendering into them; they read a copy instead,
+/// taken before the pass (wgpu forbids a texture as both attachment and binding).
+fn feedback_copies(
+    gpu: &super::context::Gpu,
+    cmd: &mut wgpu::CommandEncoder,
+    textures: &super::slab::Slab<super::resources::Texture>,
+    views: &super::slab::Slab<super::resources::View>,
+    scratch: &mut Option<wgpu::Texture>,
+    targets: &[Handle],
+    stream: &[u32],
+) -> FxHashMap<Handle, wgpu::TextureView> {
+    let mut sampled = Vec::new();
+    if sampled_views(stream, |v| sampled.push(v)).is_err() {
+        return FxHashMap::default();
+    }
+    let mut subst = FxHashMap::default();
+    let mut copied: Option<Handle> = None;
+    for vh in sampled {
+        let Some(v) = views.get(vh) else { continue };
+        if subst.contains_key(&vh)
+            || !targets.contains(&v.texture)
+            || copied.is_some_and(|c| c != v.texture)
+        {
+            continue;
+        }
+        let Some(t) = textures.get(v.texture) else {
+            continue;
+        };
+        let (w, h) = (t.texture.width(), t.texture.height());
+        let fits = scratch.as_ref().is_some_and(|s| {
+            (s.width(), s.height(), s.format(), s.mip_level_count()) == (w, h, t.format, t.mips)
+        });
+        if !fits {
+            *scratch = Some(gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("java feedback copy"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: t.mips,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: t.format,
+                usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            }));
+        }
+        let copy = scratch.as_ref().expect("created above");
+        if copied.replace(v.texture).is_none() {
+            cmd.copy_texture_to_texture(
+                t.texture.as_image_copy(),
+                copy.as_image_copy(),
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        subst.insert(
+            vh,
+            copy.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("java feedback view"),
+                base_mip_level: v.base_mip,
+                mip_level_count: Some(1),
+                ..Default::default()
+            }),
+        );
+    }
+    subst
+}
+
+/// Calls `f` with every texture view the stream binds.
+pub fn sampled_views(stream: &[u32], mut f: impl FnMut(Handle)) -> OpResult<()> {
+    let mut r = Reader {
+        words: stream,
+        at: 0,
+    };
+    let count = |n: u32, per: usize| {
+        (n as usize)
+            .checked_mul(per)
+            .ok_or_else(|| OpError::Invalid("count".into()))
+    };
+    while r.at < r.words.len() {
+        match r.u32()? {
+            P_UNIFORM_TEXTURE => {
+                r.u32()?;
+                f(r.u64()?);
+                r.u64()?;
+            }
+            P_PIPELINE => {
+                r.take(2)?;
+            }
+            P_UNIFORM_BUFFER => {
+                r.take(7)?;
+            }
+            P_UNIFORM_NONE => {
+                r.take(1)?;
+            }
+            P_PUSH => {
+                r.take(6)?;
+            }
+            P_SCISSOR | P_DRAW => {
+                r.take(4)?;
+            }
+            P_NO_SCISSOR | P_DEBUG_POP => {}
+            P_VERTEX | P_DRAW_INDEXED | P_DRAW_INDIRECT | P_DRAW_INDEXED_INDIRECT => {
+                r.take(5)?;
+            }
+            P_INDEX => {
+                r.take(3)?;
+            }
+            P_MULTI_DRAW => {
+                let n = r.u32()?;
+                r.take(2)?;
+                r.take(count(n, 2)?)?;
+            }
+            P_MULTI_DRAW_INDEXED => {
+                let n = r.u32()?;
+                r.take(2)?;
+                r.take(count(n, 3)?)?;
+            }
+            P_DEBUG_PUSH => {
+                let len = r.u32()? as usize;
+                r.take(len.div_ceil(4))?;
+            }
+            other => return Err(OpError::Invalid(format!("unknown pass op {other}"))),
+        }
+    }
+    Ok(())
 }

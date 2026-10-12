@@ -112,7 +112,9 @@ pub struct UiOverlay<'a> {
 }
 
 impl Overlay for UiOverlay<'_> {
-    fn record(&mut self, ctx: &mut OverlayCtx<'_>) {
+    fn record(&mut self, _ctx: &mut OverlayCtx<'_>) {}
+
+    fn record_ui(&mut self, ctx: &mut OverlayCtx<'_>) {
         self.ui_renderer.prepare(ctx.device, ctx.queue, self.ui);
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("ui"),

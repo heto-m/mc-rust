@@ -7,12 +7,15 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use mcr_jvm::{Doorbell, EntryDesc, ExtensionTable, Flavour, Ring, RingError};
 
 use crate::events::BridgeEvent;
+use crate::frame::FrameShared;
 use crate::net::{NetShared, SPILL_LIMIT};
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 4;
+pub const BRIDGE_VERSION: u32 = 5;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
+/// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
+pub const COMPOSE_PROPERTY: &str = "mcr.compose";
 
 pub const SHARED_CONTROL_RING: i32 = 0;
 pub const SHARED_CONTROL_BELL: i32 = 1;
@@ -21,6 +24,8 @@ pub const SHARED_NET_OUT_RING: i32 = 3;
 pub const SHARED_SOUND_RING: i32 = 4;
 pub const SHARED_SOUND_STATES: i32 = 5;
 pub const SHARED_SOUND_CONTROL: i32 = 6;
+pub const SHARED_FRAME_STATE: i32 = 16;
+pub const SHARED_FRAME_BELL: i32 = 17;
 
 pub const MSG_FRAME: u16 = 1;
 pub const MSG_SHUTDOWN: u16 = 2;
@@ -31,7 +36,29 @@ pub const FRAME_WIDTH: usize = 12;
 pub const FRAME_HEIGHT: usize = 16;
 pub const FRAME_PARTIAL_TICK: usize = 20;
 pub const FRAME_SCALE: usize = 24;
-pub const FRAME_SIZE: usize = 32;
+pub const FRAME_FLAGS: usize = 28;
+pub const FRAME_CAMERA: usize = 32;
+pub const FRAME_YAW: usize = 56;
+pub const FRAME_PITCH: usize = 60;
+pub const FRAME_VIEW: usize = 64;
+pub const FRAME_PROJ: usize = 128;
+pub const FRAME_SIZE: usize = 192;
+/// Java signals every frame it finishes and tags its GPU work with slots.
+pub const FRAME_LOCKSTEP: u32 = 1;
+
+/// Java's side of the lockstep, written by Java and read by the render thread.
+pub const FSTATE_DONE: usize = 0;
+pub const FSTATE_TICKS: usize = 8;
+pub const FSTATE_NANOS: usize = 16;
+pub const FSTATE_FLAGS: usize = 24;
+pub const FSTATE_WIDTH: usize = 28;
+pub const FSTATE_HEIGHT: usize = 32;
+pub const FSTATE_SIZE: usize = 64;
+pub const FSTATE_READY: u32 = 1;
+pub const FSTATE_LOADED: u32 = 2;
+
+pub const SLOT_IMMEDIATE: u32 = 0;
+pub const SLOT_GUI: u32 = 1;
 
 pub const REPORT_MOD_LOADED: i32 = 1;
 pub const REPORT_INIT: i32 = 2;
@@ -172,26 +199,76 @@ pub const ENTRIES: &[EntryDesc] = &[
     },
 ];
 
+/// One `MSG_FRAME`: what Java's next frame runs with.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Frame {
+pub struct FrameBegin {
     pub index: u64,
     pub ticks_to_do: u32,
     pub width: u32,
     pub height: u32,
     pub partial_tick: f32,
     pub scale: f32,
+    pub flags: u32,
+    pub camera_pos: [f64; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    /// Column-major, camera-relative rotation.
+    pub view: [f32; 16],
+    /// Column-major reverse-Z projection.
+    pub proj: [f32; 16],
 }
 
-impl Frame {
+impl Default for FrameBegin {
+    fn default() -> Self {
+        Self {
+            index: 0,
+            ticks_to_do: 0,
+            width: 854,
+            height: 480,
+            partial_tick: 0.0,
+            scale: 1.0,
+            flags: 0,
+            camera_pos: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            view: IDENTITY,
+            proj: IDENTITY,
+        }
+    }
+}
+
+const IDENTITY: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
+impl FrameBegin {
     pub fn encode(&self) -> [u8; FRAME_SIZE] {
+        fn put(out: &mut [u8], at: usize, bytes: &[u8]) {
+            out[at..at + bytes.len()].copy_from_slice(bytes);
+        }
         let mut out = [0u8; FRAME_SIZE];
-        out[FRAME_INDEX..FRAME_INDEX + 8].copy_from_slice(&self.index.to_ne_bytes());
-        out[FRAME_TICKS..FRAME_TICKS + 4].copy_from_slice(&self.ticks_to_do.to_ne_bytes());
-        out[FRAME_WIDTH..FRAME_WIDTH + 4].copy_from_slice(&self.width.to_ne_bytes());
-        out[FRAME_HEIGHT..FRAME_HEIGHT + 4].copy_from_slice(&self.height.to_ne_bytes());
-        out[FRAME_PARTIAL_TICK..FRAME_PARTIAL_TICK + 4]
-            .copy_from_slice(&self.partial_tick.to_ne_bytes());
-        out[FRAME_SCALE..FRAME_SCALE + 4].copy_from_slice(&self.scale.to_ne_bytes());
+        put(&mut out, FRAME_INDEX, &self.index.to_ne_bytes());
+        put(&mut out, FRAME_TICKS, &self.ticks_to_do.to_ne_bytes());
+        put(&mut out, FRAME_WIDTH, &self.width.to_ne_bytes());
+        put(&mut out, FRAME_HEIGHT, &self.height.to_ne_bytes());
+        put(
+            &mut out,
+            FRAME_PARTIAL_TICK,
+            &self.partial_tick.to_ne_bytes(),
+        );
+        put(&mut out, FRAME_SCALE, &self.scale.to_ne_bytes());
+        put(&mut out, FRAME_FLAGS, &self.flags.to_ne_bytes());
+        for (i, v) in self.camera_pos.iter().enumerate() {
+            put(&mut out, FRAME_CAMERA + i * 8, &v.to_ne_bytes());
+        }
+        put(&mut out, FRAME_YAW, &self.yaw.to_ne_bytes());
+        put(&mut out, FRAME_PITCH, &self.pitch.to_ne_bytes());
+        for (i, v) in self.view.iter().enumerate() {
+            put(&mut out, FRAME_VIEW + i * 4, &v.to_ne_bytes());
+        }
+        for (i, v) in self.proj.iter().enumerate() {
+            put(&mut out, FRAME_PROJ + i * 4, &v.to_ne_bytes());
+        }
         out
     }
 }
@@ -205,6 +282,7 @@ pub(crate) struct Shared {
     pub crashed: AtomicBool,
     pub dropped_events: AtomicU64,
     pub net: NetShared,
+    pub frame: FrameShared,
     pub sound: Arc<SoundShared>,
 }
 
@@ -225,6 +303,7 @@ pub(crate) fn shared() -> Result<&'static Shared, RingError> {
         crashed: AtomicBool::new(false),
         dropped_events: AtomicU64::new(0),
         net,
+        frame: FrameShared::new(),
         sound,
     }))
 }
@@ -281,6 +360,8 @@ extern "C" fn shared_address(id: i32) -> i64 {
         SHARED_CONTROL_BELL => shared.bell.addr(),
         SHARED_NET_IN_RING => shared.net.inbound_addr(),
         SHARED_NET_OUT_RING => shared.net.outbound_addr(),
+        SHARED_FRAME_STATE => shared.frame.state_addr(),
+        SHARED_FRAME_BELL => shared.frame.bell.addr(),
         SHARED_SOUND_RING => shared.sound.ring_addr(),
         SHARED_SOUND_STATES => shared.sound.states_addr(),
         SHARED_SOUND_CONTROL => shared.sound.control_addr(),
@@ -306,6 +387,7 @@ extern "C" fn report(kind: i32, ptr: i64, len: i32) {
         {
             shared.crashed.store(true, Ordering::Release);
             shared.net.detach();
+            shared.frame.java_gone();
         }
         emit(event);
     }));
@@ -393,6 +475,8 @@ mod tests {
             ("SHARED_CONTROL_BELL", SHARED_CONTROL_BELL.into()),
             ("SHARED_NET_IN_RING", SHARED_NET_IN_RING.into()),
             ("SHARED_NET_OUT_RING", SHARED_NET_OUT_RING.into()),
+            ("SHARED_FRAME_STATE", SHARED_FRAME_STATE.into()),
+            ("SHARED_FRAME_BELL", SHARED_FRAME_BELL.into()),
             ("SHARED_SOUND_RING", SHARED_SOUND_RING.into()),
             ("SHARED_SOUND_STATES", SHARED_SOUND_STATES.into()),
             ("SHARED_SOUND_CONTROL", SHARED_SOUND_CONTROL.into()),
@@ -404,7 +488,30 @@ mod tests {
             ("FRAME_HEIGHT", FRAME_HEIGHT as i64),
             ("FRAME_PARTIAL_TICK", FRAME_PARTIAL_TICK as i64),
             ("FRAME_SCALE", FRAME_SCALE as i64),
+            ("FRAME_FLAGS", FRAME_FLAGS as i64),
+            ("FRAME_CAMERA", FRAME_CAMERA as i64),
+            ("FRAME_YAW", FRAME_YAW as i64),
+            ("FRAME_PITCH", FRAME_PITCH as i64),
+            ("FRAME_VIEW", FRAME_VIEW as i64),
+            ("FRAME_PROJ", FRAME_PROJ as i64),
             ("FRAME_SIZE", FRAME_SIZE as i64),
+            ("FRAME_LOCKSTEP", FRAME_LOCKSTEP.into()),
+            ("FSTATE_DONE", FSTATE_DONE as i64),
+            ("FSTATE_TICKS", FSTATE_TICKS as i64),
+            ("FSTATE_NANOS", FSTATE_NANOS as i64),
+            ("FSTATE_FLAGS", FSTATE_FLAGS as i64),
+            ("FSTATE_WIDTH", FSTATE_WIDTH as i64),
+            ("FSTATE_HEIGHT", FSTATE_HEIGHT as i64),
+            ("FSTATE_SIZE", FSTATE_SIZE as i64),
+            ("FSTATE_READY", FSTATE_READY.into()),
+            ("FSTATE_LOADED", FSTATE_LOADED.into()),
+            ("SLOT_IMMEDIATE", SLOT_IMMEDIATE.into()),
+            ("SLOT_GUI", SLOT_GUI.into()),
+            ("D_SLOT", ffi::D_SLOT.into()),
+            (
+                "GPU_TEXTURE_VIRTUAL",
+                gpu::resources::TEXTURE_VIRTUAL as i64,
+            ),
             ("REPORT_MOD_LOADED", REPORT_MOD_LOADED.into()),
             ("REPORT_INIT", REPORT_INIT.into()),
             ("REPORT_SCREEN", REPORT_SCREEN.into()),
@@ -509,6 +616,7 @@ mod tests {
             ("E_SUBMIT", ffi::E_SUBMIT.into()),
             ("E_POLL", ffi::E_POLL.into()),
             ("E_WAIT", ffi::E_WAIT.into()),
+            ("E_SPLIT", ffi::E_SPLIT.into()),
             ("P_PIPELINE", gpu::pass::P_PIPELINE.into()),
             ("P_UNIFORM_BUFFER", gpu::pass::P_UNIFORM_BUFFER.into()),
             ("P_UNIFORM_TEXTURE", gpu::pass::P_UNIFORM_TEXTURE.into()),
@@ -537,17 +645,28 @@ mod tests {
             assert_eq!(int_const(&src, name), *value, "{name}");
         }
         assert!(src.contains(&format!("TABLE_PROPERTY = \"{TABLE_PROPERTY}\"")));
+        assert!(src.contains(&format!("COMPOSE_PROPERTY = \"{COMPOSE_PROPERTY}\"")));
     }
 
     #[test]
     fn frame_layout_round_trips() {
-        let f = Frame {
+        let mut view = [0.0f32; 16];
+        view[15] = 7.5;
+        let mut proj = [0.0f32; 16];
+        proj[0] = -3.0;
+        let f = FrameBegin {
             index: 0x0102_0304_0506_0708,
             ticks_to_do: 3,
             width: 854,
             height: 480,
             partial_tick: 0.25,
             scale: 2.0,
+            flags: FRAME_LOCKSTEP,
+            camera_pos: [1.5, -64.0, 1e7],
+            yaw: 90.0,
+            pitch: -12.5,
+            view,
+            proj,
         };
         let b = f.encode();
         let u32_at = |o: usize| u32::from_ne_bytes(b[o..o + 4].try_into().unwrap());
@@ -559,6 +678,21 @@ mod tests {
         assert_eq!((u32_at(FRAME_WIDTH), u32_at(FRAME_HEIGHT)), (854, 480));
         assert_eq!(f32::from_bits(u32_at(FRAME_PARTIAL_TICK)), 0.25);
         assert_eq!(f32::from_bits(u32_at(FRAME_SCALE)), 2.0);
+        let f64_at = |o: usize| f64::from_ne_bytes(b[o..o + 8].try_into().unwrap());
+        assert_eq!(u32_at(FRAME_FLAGS), FRAME_LOCKSTEP);
+        assert_eq!(
+            [
+                f64_at(FRAME_CAMERA),
+                f64_at(FRAME_CAMERA + 8),
+                f64_at(FRAME_CAMERA + 16)
+            ],
+            [1.5, -64.0, 1e7]
+        );
+        assert_eq!(f32::from_bits(u32_at(FRAME_YAW)), 90.0);
+        assert_eq!(f32::from_bits(u32_at(FRAME_PITCH)), -12.5);
+        assert_eq!(f32::from_bits(u32_at(FRAME_VIEW + 60)), 7.5);
+        assert_eq!(f32::from_bits(u32_at(FRAME_PROJ)), -3.0);
+        assert_eq!(FRAME_PROJ + 64, FRAME_SIZE);
     }
 
     #[test]
@@ -582,6 +716,8 @@ mod tests {
         assert_ne!(shared_address(SHARED_CONTROL_RING), 0);
         assert_ne!(shared_address(SHARED_NET_IN_RING), 0);
         assert_ne!(shared_address(SHARED_NET_OUT_RING), 0);
+        assert_ne!(shared_address(SHARED_FRAME_STATE), 0);
+        assert_ne!(shared_address(SHARED_FRAME_BELL), 0);
         assert_ne!(shared_address(SHARED_SOUND_RING), 0);
         assert_ne!(shared_address(SHARED_SOUND_STATES), 0);
         assert_ne!(shared_address(SHARED_SOUND_CONTROL), 0);

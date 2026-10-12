@@ -27,6 +27,10 @@ pub enum BridgeEvent {
         server: String,
     },
     Stopping,
+    /// Java missed a frame deadline or died; mcr stopped composing its GUI for good.
+    RenderDetached {
+        reason: String,
+    },
     Unknown {
         kind: i32,
         text: String,
@@ -77,6 +81,7 @@ impl BridgeEvent {
     pub(crate) fn log(&self) {
         match self {
             Self::Crash { report } => tracing::error!(?report, "java crashed; bridge detached"),
+            Self::RenderDetached { reason } => tracing::error!(reason, "java gui detached"),
             Self::VmExited { code } => {
                 tracing::error!(code, "java called System.exit; bridge detached")
             }

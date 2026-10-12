@@ -12,6 +12,7 @@ use mcr_client::{
     Client, ClientConfig, ClientError, DialogEnd, DialogReply, DialogRequest, TransferTarget,
     dialog_channel, sanitize_for_log,
 };
+use mcr_modbridge::ModFrames;
 use mcr_nbt::Value;
 use mcr_protocol::types::text::Component;
 use mcr_render::{Camera, FrameInputs, FrameStats, Renderer};
@@ -41,6 +42,7 @@ enum ConnectFailure {
 type Connect = Receiver<Result<Client, ConnectFailure>>;
 
 const MAX_DIALOG_REQUESTS_PER_FRAME: usize = 16;
+const BRIDGE_TOAST: u32 = 0x4d43_5242;
 
 #[derive(Debug, Clone)]
 pub struct ShellConfig {
@@ -167,7 +169,9 @@ impl Shell {
             cfg,
         };
         shell.show_title();
-        if let Some(addr) = shell.cfg.connect.clone() {
+        if shell.mod_frames().is_none()
+            && let Some(addr) = shell.cfg.connect.take()
+        {
             shell.connect(&addr, false);
         }
         Ok(shell)
@@ -577,20 +581,83 @@ impl Shell {
         self.poll_mod_connects();
         self.poll_packs();
         self.poll_dialogs();
+        // Java must finish loading before it mirrors a connection.
+        if self.mods_settled()
+            && let Some(addr) = self.cfg.connect.take()
+        {
+            self.connect(&addr, false);
+        }
+        let mut ran = 0;
         if let Some(play) = &mut self.play {
             self.accum = 0.0;
             let ticks = play.due_ticks(dt);
             for _ in 0..ticks {
                 self.tick_play();
             }
+            ran = ticks;
         } else {
             self.accum += dt.clamp(0.0, 0.25);
             while self.accum >= TICK_SECONDS {
                 self.accum -= TICK_SECONDS;
                 self.tick_menu();
+                ran += 1;
             }
         }
+        let partial = match &self.play {
+            Some(play) => play.partial(),
+            None => self.accum / TICK_SECONDS,
+        };
+        if let Some(frames) = self.mod_frames() {
+            frames.lock().add_ticks(ran, partial);
+        }
         self.check_session();
+    }
+
+    /// Without mods, or once Java finished loading and its GUI is composed.
+    pub fn mods_settled(&self) -> bool {
+        self.mod_frames().is_none_or(|f| {
+            let link = f.lock();
+            link.gui_active() && link.java().loaded
+        })
+    }
+
+    /// Starts Java's compose timings afresh (e.g. once in game).
+    pub fn reset_mod_stats(&self) {
+        if let Some(f) = self.mod_frames() {
+            f.lock().reset_stats();
+        }
+    }
+
+    fn mod_frames(&self) -> Option<&ModFrames> {
+        self.cfg.mod_net.as_ref()?.frames.as_ref()
+    }
+
+    /// Java's GUI is composed this frame, so the native HUD and title screen stay hidden.
+    fn java_gui(&mut self) -> bool {
+        let Some(frames) = self.mod_frames() else {
+            return false;
+        };
+        let (active, notice) = {
+            let mut link = frames.lock();
+            (link.gui_active(), link.take_notice())
+        };
+        if let Some(message) = notice {
+            eprintln!("[mods] {message}");
+            let toasts = match (&mut self.play, &mut self.parts) {
+                (Some(play), _) => Some(play.gui_mut()),
+                (None, Some(parts)) => Some(&mut parts.gui),
+                (None, None) => None,
+            };
+            if let Some(gui) = toasts {
+                gui.toasts.add_system(
+                    &mut gui.ui,
+                    mcr_ui::SystemToastId::new(BRIDGE_TOAST),
+                    "Mods detached",
+                    Some(&message),
+                );
+            }
+        }
+        active
     }
 
     fn tick_play(&mut self) {
@@ -825,7 +892,9 @@ impl Shell {
     }
 
     pub fn frame(&mut self) -> Option<FrameStats> {
+        let java_gui = self.java_gui();
         if let Some(play) = &mut self.play {
+            play.java_gui = java_gui;
             return play.frame();
         }
         self.update_menu_size();
@@ -841,8 +910,21 @@ impl Shell {
             let mut cx = RenderCx::new(&mut frame, &mut gui.icons, &gui.assets, &NoView);
             cx.mouse = self.mouse;
             cx.now_ms = self.started.elapsed().as_millis() as u64;
-            self.stack.render(&mut cx);
+            if !java_gui {
+                self.stack.render(&mut cx);
+            }
+            if !gui.toasts.is_empty() {
+                gui.toasts.draw(&mut cx);
+            }
         }
+        let now_ms = self.started.elapsed().as_millis() as u64;
+        let display_time = self
+            .settings
+            .borrow()
+            .file
+            .options
+            .notification_display_time;
+        parts.gui.tick_toasts(now_ms, display_time);
         let camera = Camera::default();
         let mut overlay = UiOverlay {
             ui_renderer: &mut parts.gui.ui_renderer,

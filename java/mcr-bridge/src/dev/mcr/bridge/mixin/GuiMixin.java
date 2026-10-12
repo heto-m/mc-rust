@@ -2,6 +2,7 @@ package dev.mcr.bridge.mixin;
 
 import dev.mcr.bridge.Bridge;
 import dev.mcr.bridge.BridgeAbi;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Gui;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.events.GuiEventListener;
@@ -27,15 +28,20 @@ abstract class GuiMixin {
         }
         Bridge.report(BridgeAbi.REPORT_SCREEN, screen.getClass().getName());
         StringBuilder labels = new StringBuilder();
+        StringBuilder layout = new StringBuilder().append(Minecraft.getInstance().getWindow().getGuiScale());
         for (GuiEventListener child : screen.children()) {
             if (child instanceof AbstractWidget widget) {
                 if (!labels.isEmpty()) {
                     labels.append('|');
                 }
-                labels.append(widget.getMessage().getString());
+                String label = widget.getMessage().getString();
+                labels.append(label);
+                layout.append('|').append(widget.getX()).append(',').append(widget.getY()).append(',')
+                        .append(widget.getWidth()).append(',').append(widget.getHeight()).append(',').append(label);
             }
         }
         Bridge.info("screen_widgets", labels);
+        Bridge.info("screen_layout", layout);
         Runtime rt = Runtime.getRuntime();
         Bridge.info("heap_mib", ((rt.totalMemory() - rt.freeMemory()) >> 20) + "/" + (rt.totalMemory() >> 20) + "/" + (rt.maxMemory() >> 20));
     }

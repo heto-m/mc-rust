@@ -1,11 +1,11 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use mcr_jvm::{Doorbell, PushError, RingWriter};
 
-use crate::abi::{Frame, MSG_FRAME, MSG_SHUTDOWN, Shared};
+use crate::abi::{FrameBegin, MSG_FRAME, MSG_SHUTDOWN, Shared};
 
 pub const FRAME_RATE: u32 = 60;
 pub const TICK_RATE: f64 = 20.0;
@@ -32,6 +32,8 @@ pub(crate) struct Controls {
     pub stop: AtomicBool,
     pub paused: AtomicBool,
     pub size: AtomicU32,
+    /// The render thread posts frames itself (composition); the pacer only sends the shutdown.
+    pub external: AtomicBool,
 }
 
 impl Controls {
@@ -40,8 +42,16 @@ impl Controls {
             stop: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             size: AtomicU32::new(pack(width, height)),
+            external: AtomicBool::new(false),
         })
     }
+}
+
+/// The control ring's single writer, shared by the pacer and the render thread's frame link.
+pub(crate) type SharedWriter = Arc<Mutex<RingWriter>>;
+
+pub(crate) fn lock(writer: &SharedWriter) -> MutexGuard<'_, RingWriter> {
+    writer.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn pack(width: u32, height: u32) -> u32 {
@@ -49,7 +59,7 @@ fn pack(width: u32, height: u32) -> u32 {
 }
 
 pub(crate) fn spawn(
-    writer: RingWriter,
+    writer: SharedWriter,
     shared: &'static Shared,
     controls: Arc<Controls>,
 ) -> std::io::Result<JoinHandle<()>> {
@@ -59,7 +69,7 @@ pub(crate) fn spawn(
 }
 
 fn run(
-    mut writer: RingWriter,
+    writer: SharedWriter,
     bell: &'static Doorbell,
     controls: Arc<Controls>,
     before_frame: impl Fn() + Send + 'static,
@@ -74,22 +84,25 @@ fn run(
             let mut index = 0u64;
             while !controls.stop.load(Ordering::Acquire) {
                 let now = Instant::now();
-                if controls.paused.load(Ordering::Acquire) {
+                if controls.paused.load(Ordering::Acquire)
+                    || controls.external.load(Ordering::Acquire)
+                {
                     last = now;
                 } else {
                     before_frame();
                     let (ticks_to_do, partial_tick) = clock.advance(now - last);
                     last = now;
                     let size = controls.size.load(Ordering::Relaxed);
-                    let frame = Frame {
+                    let frame = FrameBegin {
                         index,
                         ticks_to_do,
                         width: size >> 16,
                         height: size & 0xFFFF,
                         partial_tick,
-                        scale: 1.0,
+                        ..FrameBegin::default()
                     };
-                    match writer.try_push(MSG_FRAME, &frame.encode()) {
+                    let pushed = lock(&writer).try_push(MSG_FRAME, &frame.encode());
+                    match pushed {
                         Ok(()) => {
                             index += 1;
                             bell.notify();
@@ -108,7 +121,8 @@ fn run(
             }
             let deadline = Instant::now() + SHUTDOWN_PUSH_TIMEOUT;
             loop {
-                match writer.try_push(MSG_SHUTDOWN, &[]) {
+                let pushed = lock(&writer).try_push(MSG_SHUTDOWN, &[]);
+                match pushed {
                     Ok(()) => break,
                     Err(PushError::Full) if Instant::now() < deadline => {
                         bell.notify();
@@ -154,7 +168,8 @@ mod tests {
         let bell: &'static Doorbell = Box::leak(Box::new(Doorbell::new()));
         let controls = Controls::new(854, 480);
         let mut reader = ring.reader().unwrap();
-        let handle = run(ring.writer().unwrap(), bell, controls.clone(), || {}).unwrap();
+        let writer = Arc::new(Mutex::new(ring.writer().unwrap()));
+        let handle = run(writer, bell, controls.clone(), || {}).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         controls.stop.store(true, Ordering::Release);
         handle.join().unwrap();

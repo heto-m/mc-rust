@@ -13,6 +13,7 @@ use crate::effects::{
     CloudSettings, DestroyDecal, EffectAssets, Effects, WeatherSource, WorldBorderVisual,
 };
 use crate::environment::{Environment, Skybox};
+use crate::external::{ExternalCtx, ExternalSubmitter, PresentBlit};
 use crate::graph::VisibilityGraph;
 use crate::mesh::SectionMesh;
 use crate::mesh::TINT_TABLE_WORDS;
@@ -92,6 +93,11 @@ pub struct RendererConfig {
     pub max_translucent_sections: u32,
     pub occlusion_culling: bool,
     pub visibility_graph: bool,
+    /// Requested when the adapter has them (the mod bridge shares the device).
+    pub optional_features: wgpu::Features,
+    /// Render into an offscreen `Rgba8Unorm` scene that external work can sample, then blit it to
+    /// the surface; also raises texture and uniform limits to the adapter's.
+    pub scene_texture: bool,
 }
 
 impl Default for RendererConfig {
@@ -107,6 +113,8 @@ impl Default for RendererConfig {
             max_translucent_sections: 16384,
             occlusion_culling: true,
             visibility_graph: true,
+            optional_features: wgpu::Features::empty(),
+            scene_texture: false,
         }
     }
 }
@@ -267,6 +275,9 @@ pub struct Renderer {
 
     surface: Option<Surface>,
     offscreen: Option<wgpu::Texture>,
+    /// Mod mode with a window: the frame renders here and is blitted to the surface.
+    scene: Option<(wgpu::Texture, PresentBlit)>,
+    external: Option<Box<dyn ExternalSubmitter + Send>>,
     size: (u32, u32),
     depth_view: wgpu::TextureView,
     hiz: HiZ,
@@ -480,14 +491,21 @@ impl Renderer {
             return Err(RenderError::MissingFeature("INDIRECT_FIRST_INSTANCE"));
         }
         let optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | wgpu::Features::TIMESTAMP_QUERY;
-        let features = wgpu::Features::INDIRECT_FIRST_INSTANCE | (have & optional);
+        let features = wgpu::Features::INDIRECT_FIRST_INSTANCE
+            | (have & optional)
+            | (have & config.optional_features);
         let al = adapter.limits();
-        let limits = wgpu::Limits {
+        let mut limits = wgpu::Limits {
             max_storage_buffer_binding_size: al.max_storage_buffer_binding_size,
             max_buffer_size: al.max_buffer_size,
             max_texture_array_layers: al.max_texture_array_layers,
             ..wgpu::Limits::default()
         };
+        if config.scene_texture {
+            limits.max_uniform_buffer_binding_size = al.max_uniform_buffer_binding_size;
+            limits.max_texture_dimension_2d = al.max_texture_dimension_2d;
+            limits.max_color_attachments = al.max_color_attachments.min(8);
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("mcr-render"),
@@ -531,7 +549,16 @@ impl Renderer {
                 view_format,
             }
         });
-        let color_format = surface.as_ref().map_or(COLOR_FORMAT, |s| s.view_format);
+        let scene = surface.as_ref().filter(|_| config.scene_texture).map(|s| {
+            (
+                create_offscreen(&device, width, height),
+                PresentBlit::new(&device, s.view_format),
+            )
+        });
+        let color_format = match &surface {
+            Some(s) if scene.is_none() => s.view_format,
+            _ => COLOR_FORMAT,
+        };
         let offscreen = surface
             .is_none()
             .then(|| create_offscreen(&device, width, height));
@@ -982,6 +1009,8 @@ impl Renderer {
             config,
             surface,
             offscreen,
+            scene,
+            external: None,
             globals,
             geo,
             cull_early,
@@ -1070,6 +1099,9 @@ impl Renderer {
             s.surface.configure(&self.device, &s.config);
         } else {
             self.offscreen = Some(create_offscreen(&self.device, width, height));
+        }
+        if let Some((scene, _)) = &mut self.scene {
+            *scene = create_offscreen(&self.device, width, height);
         }
         self.depth_view = depth_view(&self.device, width, height);
         self.hiz
@@ -1604,9 +1636,23 @@ impl Renderer {
     }
 
     pub fn target_format(&self) -> wgpu::TextureFormat {
-        self.surface
+        match &self.surface {
+            Some(s) if self.scene.is_none() => s.view_format,
+            _ => COLOR_FORMAT,
+        }
+    }
+
+    /// Hooks external GPU work into every frame; see [`ExternalSubmitter`].
+    pub fn set_external(&mut self, external: Option<Box<dyn ExternalSubmitter + Send>>) {
+        self.external = external;
+    }
+
+    /// The image external work composes onto: the scene texture, or the offscreen target.
+    pub fn scene_texture(&self) -> Option<&wgpu::Texture> {
+        self.scene
             .as_ref()
-            .map_or(COLOR_FORMAT, |s| s.view_format)
+            .map(|(t, _)| t)
+            .or(self.offscreen.as_ref())
     }
 
     /// `overlay` records into the frame's encoder after the world pass; depth is kept for it.
@@ -1685,7 +1731,26 @@ impl Renderer {
         self.effects.prepare(&env, cam.position.to_array());
 
         let mut surface_tex = None;
+        let mut surface_view = None;
         let color_view = match (&self.surface, &self.offscreen) {
+            (Some(s), _) if self.scene.is_some() => {
+                let tex = match s.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(t)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+                    wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                        s.surface.configure(&self.device, &s.config);
+                        return Err(RenderError::SurfaceUnavailable);
+                    }
+                    _ => return Err(RenderError::SurfaceUnavailable),
+                };
+                surface_view = Some(tex.texture.create_view(&wgpu::TextureViewDescriptor {
+                    format: Some(s.view_format),
+                    ..Default::default()
+                }));
+                surface_tex = Some(tex);
+                let (scene, _) = self.scene.as_ref().expect("checked by the guard");
+                scene.create_view(&wgpu::TextureViewDescriptor::default())
+            }
             (Some(s), _) => {
                 let tex = match s.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(t)
@@ -1707,6 +1772,19 @@ impl Renderer {
             (None, None) => unreachable!("renderer always has a target"),
         };
 
+        let aspect = w as f32 / h as f32;
+        let mut external = self.external.take();
+        if let (Some(ext), Some(scene)) = (external.as_mut(), self.scene_texture()) {
+            ext.before_frame(&ExternalCtx {
+                device: &self.device,
+                queue: &self.queue,
+                scene,
+                size: self.size,
+                camera: cam,
+                view: cam.view_rotation(),
+                proj: cam.projection(aspect),
+            });
+        }
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1843,20 +1921,51 @@ impl Renderer {
             self.draw_late_layers(&mut pass, overlay.as_deref_mut(), trans_n);
         }
 
-        if let Some(overlay) = overlay {
+        let format = self.target_format();
+        if let Some(overlay) = overlay.as_deref_mut() {
             overlay.record(&mut OverlayCtx {
                 device: &self.device,
                 queue: &self.queue,
                 encoder: &mut encoder,
                 color: &color_view,
                 depth: &self.depth_view,
-                format: self
-                    .surface
-                    .as_ref()
-                    .map_or(COLOR_FORMAT, |s| s.view_format),
+                format,
                 size: self.size,
                 camera: frame.camera,
             });
+        }
+        if let (Some(ext), Some(scene)) = (external.as_mut(), self.scene_texture()) {
+            self.queue.submit([encoder.finish()]);
+            ext.after_world(&ExternalCtx {
+                device: &self.device,
+                queue: &self.queue,
+                scene,
+                size: self.size,
+                camera: cam,
+                view: cam.view_rotation(),
+                proj: cam.projection(aspect),
+            });
+            encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("frame after external"),
+                });
+        }
+        self.external = external;
+        if let Some(overlay) = overlay {
+            overlay.record_ui(&mut OverlayCtx {
+                device: &self.device,
+                queue: &self.queue,
+                encoder: &mut encoder,
+                color: &color_view,
+                depth: &self.depth_view,
+                format,
+                size: self.size,
+                camera: frame.camera,
+            });
+        }
+        if let (Some((_, blit)), Some(dst)) = (&self.scene, &surface_view) {
+            blit.record(&self.device, &mut encoder, &color_view, dst);
         }
 
         let slot = (0..READBACK_SLOTS)
@@ -2131,7 +2240,10 @@ fn create_offscreen(device: &wgpu::Device, w: u32, h: u32) -> wgpu::Texture {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: COLOR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     })
 }

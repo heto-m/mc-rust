@@ -9,6 +9,8 @@ pub const USAGE_MAP_WRITE: u32 = 2;
 pub const USAGE_INDIRECT: u32 = 512;
 
 pub const TEXTURE_CUBEMAP: u32 = 16;
+/// Bridge-only usage bit: a texture of Java's `MainTarget`, which the compositor reads.
+pub const TEXTURE_VIRTUAL: u32 = 1 << 30;
 
 /// Host memory Java reads and writes through a `MemorySegment` (mapped buffers, transient blocks).
 #[derive(Debug)]
@@ -180,6 +182,8 @@ pub struct Texture {
     pub layers: u32,
     pub mips: u32,
     pub cube: bool,
+    /// Part of Java's main target: color clears are dropped and the compositor reads it.
+    pub virtual_main: bool,
 }
 
 impl Texture {
@@ -289,6 +293,7 @@ pub fn create_texture(
         layers,
         mips,
         cube,
+        virtual_main: usage & TEXTURE_VIRTUAL != 0,
     })
 }
 

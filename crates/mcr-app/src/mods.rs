@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use mcr_modbridge::sound::SoundLink;
-use mcr_modbridge::{Bridge, BridgeConfig, BridgeEvent, NetLink, SHUTDOWN_TIMEOUT};
+use mcr_modbridge::{
+    Bridge, BridgeConfig, BridgeEvent, ComposeStats, ModFrames, NetLink, SHUTDOWN_TIMEOUT,
+};
+use mcr_render::Renderer;
 
 use crate::cli::Options;
 
@@ -25,6 +28,8 @@ pub struct ModNet {
     pub link: NetLink,
     /// Java's sound output, played by the shell's mixer.
     pub sound: Option<SoundLink>,
+    /// Java's frames in lockstep with the renderer; its GUI replaces the native one while shown.
+    pub frames: Option<ModFrames>,
     connects: Arc<Mutex<Vec<String>>>,
 }
 
@@ -47,7 +52,8 @@ pub fn mod_jars(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 impl ModHost {
-    pub fn start(opts: &Options, dir: &Path) -> Result<Option<Self>> {
+    /// Java records its GPU work on `renderer`'s device and its GUI is composed into every frame.
+    pub fn start(opts: &Options, dir: &Path, renderer: &mut Renderer) -> Result<Option<Self>> {
         let mods = mod_jars(dir)?;
         if mods.is_empty() {
             eprintln!(
@@ -62,12 +68,23 @@ impl ModHost {
             .unwrap_or_default()
             .hyphenated()
             .to_string();
-        config.width = opts.size.0;
-        config.height = opts.size.1;
+        (config.width, config.height) = renderer.size();
+        config.compose = true;
+        mcr_modbridge::gpu::install(
+            renderer.device().clone(),
+            renderer.queue().clone(),
+            renderer.adapter_info().clone(),
+        )
+        .context("sharing the GPU device with Java")?;
         let mut bridge = Bridge::start(config).context("starting the Fabric bridge")?;
+        let frames = bridge.frames();
+        if let Some(f) = &frames {
+            renderer.set_external(Some(Box::new(f.clone())));
+        }
         let net = ModNet {
             link: bridge.net(),
             sound: SoundLink::get().ok(),
+            frames,
             connects: Arc::new(Mutex::new(Vec::new())),
         };
         let connects = net.connects.clone();
@@ -98,6 +115,15 @@ impl ModHost {
 
     /// A Java side that exited or crashed is frozen for good, so the process exits here.
     pub fn finish(self) {
+        if let Some(frames) = &self.net.frames {
+            let s = frames.lock().stats();
+            let (w50, w99, wmax) = ComposeStats::percentiles(&s.waits_us);
+            let (j50, j99, jmax) = ComposeStats::percentiles(&s.java_us);
+            eprintln!(
+                "[mods] composed {} frames ({} late): render-thread wait p50 {w50} us p99 {w99} us max {wmax} us; java frame p50 {j50} us p99 {j99} us max {jmax} us; ticks java {} rust {}",
+                s.composed, s.late, s.java_ticks, s.rust_ticks
+            );
+        }
         self.stop.store(true, Ordering::Release);
         let Ok(bridge) = self.thread.join() else {
             return;

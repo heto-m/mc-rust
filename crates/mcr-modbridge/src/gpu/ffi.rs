@@ -25,6 +25,8 @@ pub const D_SURFACE: i32 = 11;
 pub const D_SURFACE_CONFIGURE: i32 = 12;
 pub const D_SURFACE_PRESENT: i32 = 13;
 pub const D_STATS: i32 = 14;
+/// `[slot, frame]`: tags the following submits for the compositor.
+pub const D_SLOT: i32 = 15;
 
 pub const E_CLEAR: i32 = 1;
 pub const E_CLEAR_REGION: i32 = 2;
@@ -40,6 +42,8 @@ pub const E_DIRTY: i32 = 11;
 pub const E_SUBMIT: i32 = 12;
 pub const E_POLL: i32 = 13;
 pub const E_WAIT: i32 = 14;
+/// Cuts the recording at a slot change without ending Java's submit.
+pub const E_SPLIT: i32 = 15;
 
 /// Slots in Java's argument block.
 pub const MAX_ARGS: usize = 32;
@@ -253,6 +257,10 @@ pub extern "C" fn gpu_device(op: i32, args: i64, count: i32) -> i64 {
                 .map(|()| 0),
             D_SURFACE_PRESENT => b.present(arg(a, 0)?).map(|()| 0),
             D_STATS => stats(b, arg(a, 0)?, arg(a, 1)?),
+            D_SLOT => {
+                b.slots.set_slot(u32_arg(a, 0)?, arg(a, 1)?);
+                Ok(0)
+            }
             other => Err(OpError::Invalid(format!("unknown device op {other}"))),
         }
     })
@@ -392,7 +400,8 @@ pub extern "C" fn gpu_encode(encoder: i64, op: i32, args: i64, count: i32) -> i6
             E_DIRTY => s
                 .transient_dirty(arg(a, 0)?, arg(a, 1)?, arg(a, 2)?)
                 .map(|()| 0),
-            E_SUBMIT => scoped(b, || s.submit(g, &b.stats, e)).map(|n| n as i64),
+            E_SUBMIT => scoped(b, || s.submit(g, &b.stats, &b.slots, e)).map(|n| n as i64),
+            E_SPLIT => scoped(b, || s.split(g, &b.stats, &b.slots, e)).map(|()| 0),
             E_POLL => {
                 let (out, cap) = (arg(a, 0)?, arg(a, 1)? as usize);
                 let ids = s.poll(g, e)?;
@@ -415,7 +424,7 @@ pub extern "C" fn gpu_encode(encoder: i64, op: i32, args: i64, count: i32) -> i6
             E_WAIT => {
                 let (n, timeout) = (arg(a, 0)?, arg(a, 1)?);
                 if n > s.fence_pending(e)? - 1 {
-                    scoped(b, || s.submit(g, &b.stats, e))?;
+                    scoped(b, || s.submit(g, &b.stats, &b.slots, e))?;
                 }
                 let timeout = (timeout != u64::MAX).then(|| Duration::from_nanos(timeout));
                 s.wait(g, e, n, timeout).map(i64::from)

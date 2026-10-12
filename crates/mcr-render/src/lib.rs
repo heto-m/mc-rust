@@ -3,6 +3,7 @@ mod arena;
 mod camera;
 mod effects;
 mod environment;
+mod external;
 mod graph;
 mod mesh;
 mod occlusion;
@@ -24,6 +25,7 @@ pub use effects::{
 pub use environment::{
     CARDINAL_DEFAULT, CARDINAL_NETHER, Environment, OverworldBase, Rgb, Skybox, hex, srgb_lerp,
 };
+pub use external::{ExternalCtx, ExternalSubmitter};
 pub use graph::SectionVisibility;
 pub use mesh::SectionMesh;
 pub use mesh::{TINT_KINDS, TINT_TABLE_WORDS, TintTable};

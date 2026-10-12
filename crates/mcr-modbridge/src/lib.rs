@@ -1,7 +1,9 @@
 //! Runs the stock client under Fabric inside mcr's embedded JVM and paces it from Rust.
 
 mod abi;
+pub mod compose;
 mod events;
+pub mod frame;
 pub mod gpu;
 mod launch;
 pub mod net;
@@ -11,13 +13,14 @@ pub mod sound;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::{Arc, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use mcr_jvm::{DestroyOutcome, HomeSearch, JavaVm, JvmConfig, JvmError, RingError, VmOutcome};
 
-pub use abi::{BRIDGE_VERSION, ENTRIES, Frame, TABLE_PROPERTY};
+pub use abi::{BRIDGE_VERSION, COMPOSE_PROPERTY, ENTRIES, FrameBegin, TABLE_PROPERTY};
+pub use compose::{ComposeStats, FrameLink, ModFrames};
 pub use events::BridgeEvent;
 pub use launch::{
     BOOT_JAR, BRIDGE_JAR, BridgeConfig, LAUNCH_MANIFEST, LaunchManifest, LaunchPlan, plan,
@@ -42,6 +45,8 @@ pub enum BridgeError {
     Ring(#[from] RingError),
     #[error("the bridge control ring already has a writer")]
     Busy,
+    #[error(transparent)]
+    Gpu(#[from] gpu::GpuError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +91,7 @@ pub struct Bridge {
     pacer: Option<JoinHandle<()>>,
     watcher: Option<JoinHandle<()>>,
     vm: VmState,
+    frames: Option<ModFrames>,
 }
 
 impl Bridge {
@@ -106,9 +112,14 @@ impl Bridge {
         let plan = launch::plan(&manifest, &config, table.address())?;
 
         let shared = abi::shared()?;
+        if config.compose {
+            compose::activate()?;
+        }
         let (tx, events) = abi::event_queue();
         *shared.events.lock().unwrap_or_else(PoisonError::into_inner) = Some(tx);
-        let writer = shared.control.writer().ok_or(BridgeError::Busy)?;
+        let writer = Arc::new(Mutex::new(
+            shared.control.writer().ok_or(BridgeError::Busy)?,
+        ));
 
         let mut jvm = JvmConfig::new(home, plan.jvm_options());
         jvm.args = plan.args.clone();
@@ -136,10 +147,17 @@ impl Bridge {
                 event.log();
                 if let Ok(shared) = abi::shared() {
                     shared.net.detach();
+                    shared.frame.java_gone();
                 }
                 abi::emit(event);
             })?;
         let controls = pacer::Controls::new(config.width, config.height);
+        controls
+            .external
+            .store(config.compose, std::sync::atomic::Ordering::Release);
+        let frames = config
+            .compose
+            .then(|| ModFrames::new(FrameLink::new(writer.clone(), shared)));
         let pacer = pacer::spawn(writer, shared, controls.clone())?;
         Ok(Self {
             events,
@@ -147,7 +165,14 @@ impl Bridge {
             pacer: Some(pacer),
             watcher: Some(watcher),
             vm: VmState::Running,
+            frames,
         })
+    }
+
+    /// The render thread's frame link when started with [`BridgeConfig::compose`]; install it
+    /// on the renderer with `set_external`.
+    pub fn frames(&self) -> Option<ModFrames> {
+        self.frames.clone()
     }
 
     /// The packet bridge; one per process like the VM.
@@ -201,6 +226,11 @@ impl Bridge {
     /// An exited or crashed VM is frozen for good; the outcome then asks the caller to end the process.
     pub fn shutdown(mut self, timeout: Duration) -> ShutdownOutcome {
         let start = Instant::now();
+        if self.frames.take().is_some()
+            && let Ok(backend) = gpu::backend()
+        {
+            backend.slots.deactivate(backend.gpu);
+        }
         self.controls.stop.store(true, Ordering::Release);
         if let Some(p) = self.pacer.take() {
             let _ = p.join();
