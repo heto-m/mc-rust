@@ -12,7 +12,9 @@ use super::pass::BindCache;
 use super::pipeline::{Pipeline, PipelineError};
 use super::resources::{self, Buffer, Sampler, Texture, View};
 use super::slab::{Handle, Kind, Slab};
-use super::slots::{MAP_FAILED, MAP_OK, MAP_PENDING, Slots, Submission, SubmitTrack};
+use super::slots::{
+    MAP_FAILED, MAP_OK, MAP_PENDING, Slots, Submission, SubmitTrack, WorldTargets, pooled_copy,
+};
 
 /// Largest single upload or readback Java may request.
 pub const MAX_TRANSFER: u64 = 512 << 20;
@@ -200,7 +202,7 @@ impl UploadRing {
             if b.used > 0 {
                 let end = align(b.used as u64, 4) as usize;
                 match deferred.as_deref_mut() {
-                    Some(out) => out.push((b.buffer.clone(), 0, b.data[..end].to_vec())),
+                    Some(out) => out.push((b.buffer.clone(), 0, pooled_copy(&b.data[..end]))),
                     None => queue.write_buffer(&b.buffer, 0, &b.data[..end]),
                 }
                 bytes += end as u64;
@@ -249,11 +251,14 @@ pub struct Encoder {
     /// Submits so far; the next submit gets `submits + 1`.
     pub submits: u64,
     track: Arc<SubmitTrack>,
+    /// State of a pass cut at a slot boundary, for its continuation.
+    pub resume: Option<super::pass::PassState>,
 }
 
 impl Encoder {
     fn new() -> Self {
         Self {
+            resume: None,
             cmd: None,
             ring: UploadRing::default(),
             recorded: Vec::new(),
@@ -1191,6 +1196,7 @@ impl State {
         encoder: Handle,
         color: Option<(Handle, [f32; 4])>,
         depth: Option<(Handle, f32)>,
+        world: Option<&WorldTargets>,
     ) -> OpResult<()> {
         let color_tex = color
             .map(|(h, c)| self.texture(h).map(|t| (t, c)))
@@ -1198,6 +1204,30 @@ impl State {
         let depth_tex = depth
             .map(|(h, d)| self.texture(h).map(|t| (t, d)))
             .transpose()?;
+        if let (Some((t, d)), Some(w)) = (depth_tex, world)
+            && t.virtual_main
+        {
+            if color_tex.is_some_and(|(t, _)| !t.virtual_main) {
+                self.clear(gpu, encoder, color, None, None)?;
+            }
+            if !w.scene_depth {
+                let cmd = self.encoder(encoder)?.cmd(&gpu.device);
+                drop(cmd.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("java post-world depth clear"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &w.depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(d.clamp(0.0, 1.0)),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                }));
+            }
+            return Ok(());
+        }
         if let Some((t, _)) = color_tex
             && !t.format.has_color_aspect()
         {
@@ -1283,9 +1313,13 @@ impl State {
         w: u32,
         h: u32,
         mip: u32,
+        world: bool,
     ) -> OpResult<()> {
         let ct = self.texture(color.0)?;
         let dt = self.texture(depth.0)?;
+        if world && (ct.virtual_main || dt.virtual_main) {
+            return Ok(());
+        }
         region(ct, mip, 0, x, y, w, h)?;
         region(dt, mip, 0, x, y, w, h)?;
         if ct.mip_size(mip) != dt.mip_size(mip)
@@ -1584,7 +1618,7 @@ impl State {
                 let bytes = shadow.bytes();
                 let host_end = (bytes.len() as u64).min(e);
                 if host_end > s {
-                    let mut data = bytes[s as usize..host_end as usize].to_vec();
+                    let mut data = pooled_copy(&bytes[s as usize..host_end as usize]);
                     data.resize((e - s) as usize, 0);
                     writes.push((b.buffer.clone(), s, data));
                 }

@@ -24,7 +24,7 @@ import org.lwjgl.PointerBuffer;
 /** Appends pass commands to an off-heap stream that Rust replays in one downcall when the pass ends. */
 final class McrRenderPass implements RenderPassBackend {
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT_UNALIGNED;
-    private static final int DESC_SLOTS = 1 + 8 * 6 + 7;
+    private static final int DESC_SLOTS = 1 + 8 * 6 + 8;
     private static final int UNIFORM_ALIGNMENT = 256;
     private static final boolean DEBUG_GROUPS = Boolean.getBoolean("mcr.gpu.debugGroups");
 
@@ -33,6 +33,7 @@ final class McrRenderPass implements RenderPassBackend {
     private MemorySegment stream = Arena.ofAuto().allocate(64 << 10, 8);
     private int at;
     private int descCount;
+    private int colorCount;
     private long begun;
 
     /** Render-thread totals for the bench: time from pass creation to its end, and in the native encode call. */
@@ -70,7 +71,22 @@ final class McrRenderPass implements RenderPassBackend {
         desc.setAtIndex(ValueLayout.JAVA_LONG, n++, d.renderArea().y());
         desc.setAtIndex(ValueLayout.JAVA_LONG, n++, d.renderArea().width());
         desc.setAtIndex(ValueLayout.JAVA_LONG, n++, d.renderArea().height());
+        desc.setAtIndex(ValueLayout.JAVA_LONG, n++, 0);
         descCount = n;
+        colorCount = d.colorAttachments().size();
+    }
+
+    /** Ends the wgpu pass here so a slot can cut the frame; the Java pass stays open and continues later. */
+    void cut() {
+        long flags = desc.getAtIndex(ValueLayout.JAVA_LONG, descCount - 1);
+        desc.setAtIndex(ValueLayout.JAVA_LONG, descCount - 1, flags | BridgeAbi.PASS_CONTINUES);
+        GpuNative.check(GpuNative.pass(encoder.handle, desc, descCount, stream, at), "render pass");
+        at = 0;
+        for (int i = 0; i < colorCount; i++) {
+            desc.setAtIndex(ValueLayout.JAVA_LONG, 2 + 6L * i, 0);
+        }
+        desc.setAtIndex(ValueLayout.JAVA_LONG, 1 + 6L * colorCount + 1, 0);
+        desc.setAtIndex(ValueLayout.JAVA_LONG, descCount - 1, BridgeAbi.PASS_RESUMES);
     }
 
     void end() {

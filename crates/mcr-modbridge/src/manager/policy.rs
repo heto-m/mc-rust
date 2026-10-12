@@ -9,6 +9,7 @@ const BUILTIN: &str = include_str!("../../data/mod-policy.json");
 const MAX_BYTES: u64 = 1 << 20;
 const MAX_ENTRIES: usize = 4096;
 const MAX_REASON: usize = 200;
+const MAX_HTTP_HOSTS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyStatus {
@@ -52,12 +53,15 @@ pub enum PolicyError {
     Duplicate(String),
     #[error("policy file is too large")]
     TooLarge,
+    #[error("`http_hosts` must be a list of at most 256 host names")]
+    HttpHosts,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Policy {
     entries: Vec<PolicyEntry>,
     index: HashMap<String, usize>,
+    http_hosts: Vec<String>,
 }
 
 impl Policy {
@@ -96,6 +100,17 @@ impl Policy {
             return Err(PolicyError::TooMany);
         }
         let mut policy = Self::default();
+        if let Some(hosts) = root.get("http_hosts") {
+            policy.http_hosts = hosts
+                .as_array()
+                .filter(|a| a.len() <= MAX_HTTP_HOSTS)
+                .and_then(|a| {
+                    a.iter()
+                        .map(|h| h.as_str().filter(|h| h.len() <= 255).map(str::to_owned))
+                        .collect()
+                })
+                .ok_or(PolicyError::HttpHosts)?;
+        }
         for (i, item) in list.iter().enumerate() {
             let bad = || PolicyError::Entry(i);
             let id = item["id"]
@@ -129,6 +144,11 @@ impl Policy {
 
     pub fn entries(&self) -> &[PolicyEntry] {
         &self.entries
+    }
+
+    /// Hosts mods may reach over HTTP besides Mojang's, through the bridge's proxy.
+    pub fn http_hosts(&self) -> &[String] {
+        &self.http_hosts
     }
 }
 
@@ -180,6 +200,26 @@ mod tests {
             assert_eq!(p.get(id).unwrap().status, PolicyStatus::Partial, "{id}");
         }
         assert!(p.get("fabric-api").is_none());
+    }
+
+    #[test]
+    fn http_hosts_are_optional_and_bounded() {
+        assert!(
+            Policy::parse(r#"{"mods":[]}"#)
+                .unwrap()
+                .http_hosts()
+                .is_empty()
+        );
+        let p = Policy::parse(r#"{"mods":[],"http_hosts":["api.modrinth.com","*.example.org"]}"#);
+        assert_eq!(
+            p.unwrap().http_hosts(),
+            ["api.modrinth.com", "*.example.org"]
+        );
+        let many = format!("[{}]", vec![r#""a.b""#; 257].join(","));
+        for bad in [r#""x""#, "[1]", many.as_str()] {
+            let text = format!(r#"{{"mods":[],"http_hosts":{bad}}}"#);
+            assert_eq!(Policy::parse(&text), Err(PolicyError::HttpHosts), "{bad}");
+        }
     }
 
     #[test]

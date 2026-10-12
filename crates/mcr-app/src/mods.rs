@@ -60,6 +60,7 @@ pub struct BootPlan {
     heap_mib: u32,
     session: SessionStore,
     explicit: bool,
+    http_hosts: Vec<String>,
 }
 
 /// Plans a Java boot only when at least one mod is enabled and resolvable, and the last session did
@@ -92,6 +93,7 @@ pub fn startup(opts: &Options) -> Result<Startup> {
         heap_mib: settings.heap_mib(),
         session,
         explicit: opts.mods.is_some(),
+        http_hosts: manager.policy.http_hosts().to_vec(),
     });
     let app = ModsApp::new(manager, settings, previous, prompt);
     Ok(Startup { boot, app })
@@ -138,6 +140,7 @@ impl ModHost {
             .to_string();
         (config.width, config.height) = renderer.size();
         config.compose = true;
+        config.http_hosts.extend(plan.http_hosts.iter().cloned());
         config.max_heap = format!("{}m", plan.heap_mib);
         let session = &plan.session;
         let tracker = Arc::new(SessionTracker::begin(session.clone()));

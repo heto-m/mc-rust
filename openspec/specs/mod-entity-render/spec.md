@@ -1,4 +1,9 @@
-## ADDED Requirements
+# mod-entity-render Specification
+
+## Purpose
+In mod mode, Java draws entities, block entities, nametags, the hand, outlines and post effects into mcr's world, sharing mcr's camera and depth, while mcr keeps terrain, sky and world effects; Java's web traffic leaves only through a Rust loopback proxy.
+
+## Requirements
 
 ### Requirement: World ownership split
 In mod mode, Java SHALL render entities, block entities, nametags, the first-person hand, glowing outlines, screen post effects and particles of non-`minecraft` types. mcr SHALL render terrain, sky, clouds, weather, world border, block outline, destroy overlay and vanilla particles, and SHALL NOT render entities, block entities or nametags natively.
@@ -41,3 +46,10 @@ Entity renderer and layer changes registered by mods through Fabric API or mixin
 #### Scenario: Test layer
 - **WHEN** the test mod registers an armor-stand feature layer and an armor stand is in view
 - **THEN** the layer's pixels appear on the armor stand
+
+### Requirement: Loopback web proxy
+Java's HTTP and HTTPS requests SHALL go through a loopback proxy owned by Rust that reaches only allow-listed hosts (Mojang's plus the mod policy's `http_hosts`) on global addresses, with a bounded number of connections, request head size and idle time.
+
+#### Scenario: Unlisted host
+- **WHEN** Java asks the proxy for a host that is not on the allow-list
+- **THEN** the proxy answers 403 and opens no upstream connection

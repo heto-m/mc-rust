@@ -4,7 +4,7 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 6;
+    public static final int VERSION = 7;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
     public static final String COMPOSE_PROPERTY = "mcr.compose";
 
@@ -74,6 +74,7 @@ public final class BridgeAbi {
     public static final int FRAME_PROJ = 128;
     public static final int FRAME_SIZE = 192;
     public static final int FRAME_LOCKSTEP = 1;
+    public static final int FRAME_DETACHED = 2;
 
     public static final int FSTATE_DONE = 0;
     public static final int FSTATE_TICKS = 8;
@@ -87,6 +88,10 @@ public final class BridgeAbi {
 
     public static final int SLOT_IMMEDIATE = 0;
     public static final int SLOT_GUI = 1;
+    public static final int SLOT_WORLD_SOLID = 2;
+    public static final int SLOT_WORLD_TRANSLUCENT = 3;
+    public static final int SLOT_WORLD_AFTER = 4;
+    public static final int SLOT_POST_WORLD = 5;
 
     public static final int REPORT_MOD_LOADED = 1;
     public static final int REPORT_INIT = 2;
@@ -226,6 +231,8 @@ public final class BridgeAbi {
     public static final int P_DRAW_INDEXED_INDIRECT = 15;
     public static final int P_DEBUG_PUSH = 16;
     public static final int P_DEBUG_POP = 17;
+    public static final int PASS_CONTINUES = 1;
+    public static final int PASS_RESUMES = 2;
 
     /** Renderpearl enum constants in ordinal order; the backend sends ordinals and checks these names at boot. */
     public static final String[] GPU_FORMATS = {

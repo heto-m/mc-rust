@@ -10,6 +10,7 @@ mod launch;
 pub mod manager;
 pub mod net;
 mod pacer;
+pub mod proxy;
 pub mod sound;
 
 use std::path::PathBuf;
@@ -95,11 +96,12 @@ pub struct Bridge {
     watcher: Option<JoinHandle<()>>,
     vm: VmState,
     frames: Option<ModFrames>,
+    _proxy: proxy::HttpProxy,
     input: ModInput,
 }
 
 impl Bridge {
-    pub fn start(config: BridgeConfig) -> Result<Self, BridgeError> {
+    pub fn start(mut config: BridgeConfig) -> Result<Self, BridgeError> {
         let manifest = LaunchManifest::load(&config.cache_dir)?;
         for jar in [launch::BOOT_JAR, launch::BRIDGE_JAR] {
             let path = config.cache_dir.join(jar);
@@ -113,6 +115,11 @@ impl Bridge {
         launch::prepare_game_dir(&config.game_dir)?;
         let home = HomeSearch::from_env(Some(&config.cache_dir)).locate()?;
         let table = abi::table();
+        let http = proxy::HttpProxy::start(proxy::ProxyConfig {
+            hosts: config.http_hosts.clone(),
+            ..proxy::ProxyConfig::default()
+        })?;
+        config.proxy_port = Some(http.port());
         let plan = launch::plan(&manifest, &config, table.address())?;
 
         let shared = abi::shared()?;
@@ -171,6 +178,7 @@ impl Bridge {
             watcher: Some(watcher),
             vm: VmState::Running,
             frames,
+            _proxy: http,
             input,
         })
     }

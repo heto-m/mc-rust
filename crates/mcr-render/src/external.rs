@@ -9,6 +9,8 @@ pub struct ExternalCtx<'a> {
     pub queue: &'a wgpu::Queue,
     /// The `Rgba8Unorm` scene image the frame renders into (top row first).
     pub scene: &'a wgpu::Texture,
+    /// The scene's reverse-Z `Depth32Float` depth (cleared to 0, `GreaterEqual`).
+    pub depth: &'a wgpu::TextureView,
     pub size: (u32, u32),
     pub camera: &'a Camera,
     /// Camera-relative rotation; translation is `camera.position`.
@@ -24,6 +26,9 @@ pub struct ExternalCtx<'a> {
 pub trait ExternalSubmitter {
     /// Before the frame's own work is recorded.
     fn before_frame(&mut self, ctx: &ExternalCtx<'_>);
+
+    /// After all opaque terrain, before translucent terrain and world effects.
+    fn after_opaque(&mut self, _ctx: &ExternalCtx<'_>) {}
 
     /// After the world and world-space overlays, before UI overlays and the present blit.
     fn after_world(&mut self, ctx: &ExternalCtx<'_>);

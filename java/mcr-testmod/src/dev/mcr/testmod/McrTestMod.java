@@ -49,6 +49,7 @@ public final class McrTestMod implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        MarkerLayer.register();
         PayloadTypeRegistry.serverboundPlay().register(Hello.TYPE, Hello.CODEC);
         KeyMappingHelper.registerKeyMapping(PING);
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {

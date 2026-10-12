@@ -1,8 +1,9 @@
-//! Puts Java's GUI into mcr's frame: the render thread posts one frame to Java, encodes its world,
-//! waits for Java's frame, then submits Java's buffers between its own passes.
+//! Puts Java's frame into mcr's: the render thread posts one frame to Java, encodes its opaque
+//! terrain, waits for Java's frame, then submits Java's buffers between its own passes.
 //!
-//! Java renders bottom-up (GL row order) into its own main target, so composition copies mcr's
-//! scene into that target flipped, submits Java's GUI on top, and copies the result back flipped.
+//! Java's world slots draw straight into mcr's scene with mcr's own projection. Java's GUI renders
+//! bottom-up (GL row order) into its own main target, so composition copies mcr's scene into that
+//! target flipped, submits Java's GUI on top, and copies the result back flipped.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -10,7 +11,7 @@ use std::time::{Duration, Instant};
 use mcr_jvm::PushError;
 use mcr_render::{ExternalCtx, ExternalSubmitter};
 
-use crate::abi::{self, FRAME_LOCKSTEP, FrameBegin, MSG_FRAME, Shared};
+use crate::abi::{self, FRAME_DETACHED, FRAME_LOCKSTEP, FrameBegin, MSG_FRAME, Shared};
 use crate::events::BridgeEvent;
 use crate::frame::{JavaFrame, LinkState, Lockstep, TickBank};
 use crate::gpu::backend::Backend;
@@ -193,6 +194,11 @@ pub struct FrameLink {
     notice: Option<String>,
     size_mismatch_logged: bool,
     stats: ComposeStats,
+    /// The posted frame whose world slots ran at `after_opaque` and whose GUI is composed next.
+    composing: Option<u64>,
+    /// `after_opaque` already spent this frame's wait budget.
+    opaque_waited: bool,
+    detached_camera: bool,
     input: ModInput,
 }
 
@@ -208,8 +214,21 @@ impl FrameLink {
             notice: None,
             size_mismatch_logged: false,
             stats: ComposeStats::default(),
+            composing: None,
+            opaque_waited: false,
+            detached_camera: false,
             input,
         }
+    }
+
+    /// mcr's camera is in third person this frame, so Java draws the local player and no hand.
+    pub fn set_third_person(&mut self, on: bool) {
+        self.detached_camera = on;
+    }
+
+    /// Java draws the world's entities, block entities and hand this frame; mcr's own stay off.
+    pub fn world_active(&self) -> bool {
+        self.gui_active() && self.java().loaded
     }
 
     /// Ticks Rust ran since the last frame and its partial tick; Java runs exactly these once it
@@ -289,7 +308,12 @@ impl FrameLink {
             height: ctx.size.1,
             partial_tick,
             scale: 1.0,
-            flags: FRAME_LOCKSTEP,
+            flags: FRAME_LOCKSTEP
+                | if self.detached_camera {
+                    FRAME_DETACHED
+                } else {
+                    0
+                },
             camera_pos: c.position.to_array(),
             yaw: c.yaw,
             pitch: c.pitch,
@@ -325,6 +349,9 @@ impl FrameLink {
         let Some(backend) = Self::backend() else {
             return;
         };
+        self.composing = None;
+        self.opaque_waited = false;
+        backend.slots.set_scene(ctx.scene, ctx.depth);
         if self.shared.frame.is_gone() && self.lockstep.state() != LinkState::Detached {
             self.detach("Java stopped");
         }
@@ -349,11 +376,54 @@ impl FrameLink {
         self.post(ctx);
     }
 
+    /// Waits for Java's frame and submits its work up to its translucent features, so they land
+    /// before mcr's translucent terrain.
+    fn after_opaque(&mut self, _ctx: &ExternalCtx<'_>) {
+        let Some(backend) = Self::backend() else {
+            return;
+        };
+        let Some(index) = self.lockstep.outstanding() else {
+            return;
+        };
+        if self.lockstep.state() != LinkState::Running {
+            return;
+        }
+        self.opaque_waited = true;
+        if !self.wait(index) {
+            return;
+        }
+        backend.slots.drain_world(backend.gpu);
+        self.composing = Some(index);
+    }
+
+    /// Bounded wait for Java's frame `index`; on time-out it detaches or counts a late frame.
+    fn wait(&mut self, index: u64) -> bool {
+        let start = Instant::now();
+        let loaded = self.java().loaded;
+        let done = match self.lockstep.wait_until(start, loaded) {
+            Some(deadline) => self.shared.frame.wait_done(index + 1, deadline),
+            None => false,
+        };
+        let waited = start.elapsed();
+        let java = self.java();
+        if done {
+            self.lockstep.complete(java.done);
+            push_sample(&mut self.stats.waits_us, waited);
+            push_sample(&mut self.stats.java_us, Duration::from_nanos(java.nanos));
+        }
+        done
+    }
+
     fn after_world(&mut self, ctx: &ExternalCtx<'_>) {
         let Some(backend) = Self::backend() else {
             return;
         };
         let gpu = backend.gpu;
+        if let Some(index) = self.composing.take() {
+            self.compose(ctx, backend, index);
+            self.stats.composed += 1;
+            return;
+        }
         let Some(index) = self.lockstep.outstanding() else {
             if self.lockstep.state() != LinkState::Running {
                 backend.slots.drain_all(gpu, u64::MAX);
@@ -367,7 +437,12 @@ impl FrameLink {
         }
         let start = Instant::now();
         let loaded = self.java().loaded;
-        let done = match self.lockstep.wait_until(start, loaded) {
+        let deadline = if self.opaque_waited {
+            Some(start)
+        } else {
+            self.lockstep.wait_until(start, loaded)
+        };
+        let done = match deadline {
             Some(deadline) => self.shared.frame.wait_done(index + 1, deadline),
             None => false,
         };
@@ -411,6 +486,7 @@ impl FrameLink {
     }
 
     fn compose(&mut self, ctx: &ExternalCtx<'_>, backend: &'static Backend, index: u64) {
+        backend.slots.drain_before_gui(backend.gpu);
         let main = backend
             .slots
             .main_color()
@@ -454,6 +530,10 @@ impl ModFrames {
 impl ExternalSubmitter for ModFrames {
     fn before_frame(&mut self, ctx: &ExternalCtx<'_>) {
         self.lock().before_frame(ctx);
+    }
+
+    fn after_opaque(&mut self, ctx: &ExternalCtx<'_>) {
+        self.lock().after_opaque(ctx);
     }
 
     fn after_world(&mut self, ctx: &ExternalCtx<'_>) {

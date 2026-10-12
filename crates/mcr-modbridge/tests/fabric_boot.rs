@@ -65,7 +65,9 @@ fn tcp_sockets() -> Vec<String> {
         };
         for line in text.lines().skip(1) {
             let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() > 9 && ours.iter().any(|i| i == fields[9]) {
+            let proxy_listener = fields.get(1).is_some_and(|a| a.starts_with("0100007F:"))
+                && fields.get(3) == Some(&"0A");
+            if fields.len() > 9 && !proxy_listener && ours.iter().any(|i| i == fields[9]) {
                 found.push(line.trim().to_owned());
             }
         }

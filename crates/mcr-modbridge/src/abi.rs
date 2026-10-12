@@ -13,7 +13,7 @@ use crate::net::{NetShared, SPILL_LIMIT};
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 6;
+pub const BRIDGE_VERSION: u32 = 7;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -85,6 +85,8 @@ pub const FRAME_PROJ: usize = 128;
 pub const FRAME_SIZE: usize = 192;
 /// Java signals every frame it finishes and tags its GPU work with slots.
 pub const FRAME_LOCKSTEP: u32 = 1;
+/// mcr's camera is in third person: Java renders the local player and no hand.
+pub const FRAME_DETACHED: u32 = 2;
 
 /// Java's side of the lockstep, written by Java and read by the render thread.
 pub const FSTATE_DONE: usize = 0;
@@ -99,6 +101,12 @@ pub const FSTATE_LOADED: u32 = 2;
 
 pub const SLOT_IMMEDIATE: u32 = 0;
 pub const SLOT_GUI: u32 = 1;
+/// World slots draw into mcr's scene color and reverse-Z depth between its own passes.
+pub const SLOT_WORLD_SOLID: u32 = 2;
+pub const SLOT_WORLD_TRANSLUCENT: u32 = 3;
+pub const SLOT_WORLD_AFTER: u32 = 4;
+/// Hand, outline blit and post effects: scene color with a private depth.
+pub const SLOT_POST_WORLD: u32 = 5;
 
 pub const REPORT_MOD_LOADED: i32 = 1;
 pub const REPORT_INIT: i32 = 2;
@@ -596,6 +604,7 @@ mod tests {
             ("FRAME_PROJ", FRAME_PROJ as i64),
             ("FRAME_SIZE", FRAME_SIZE as i64),
             ("FRAME_LOCKSTEP", FRAME_LOCKSTEP.into()),
+            ("FRAME_DETACHED", FRAME_DETACHED.into()),
             ("FSTATE_DONE", FSTATE_DONE as i64),
             ("FSTATE_TICKS", FSTATE_TICKS as i64),
             ("FSTATE_NANOS", FSTATE_NANOS as i64),
@@ -607,6 +616,10 @@ mod tests {
             ("FSTATE_LOADED", FSTATE_LOADED.into()),
             ("SLOT_IMMEDIATE", SLOT_IMMEDIATE.into()),
             ("SLOT_GUI", SLOT_GUI.into()),
+            ("SLOT_WORLD_SOLID", SLOT_WORLD_SOLID.into()),
+            ("SLOT_WORLD_TRANSLUCENT", SLOT_WORLD_TRANSLUCENT.into()),
+            ("SLOT_WORLD_AFTER", SLOT_WORLD_AFTER.into()),
+            ("SLOT_POST_WORLD", SLOT_POST_WORLD.into()),
             ("D_SLOT", ffi::D_SLOT.into()),
             (
                 "GPU_TEXTURE_VIRTUAL",
@@ -742,6 +755,8 @@ mod tests {
             ),
             ("P_DEBUG_PUSH", gpu::pass::P_DEBUG_PUSH.into()),
             ("P_DEBUG_POP", gpu::pass::P_DEBUG_POP.into()),
+            ("PASS_CONTINUES", gpu::pass::PASS_CONTINUES as i64),
+            ("PASS_RESUMES", gpu::pass::PASS_RESUMES as i64),
         ];
         for (name, value) in ints {
             assert_eq!(int_const(&src, name), *value, "{name}");

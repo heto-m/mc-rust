@@ -168,6 +168,7 @@ impl Scene {
             })],
             depth: None,
             area: [0, 0, SIZE, SIZE],
+            flags: 0,
         }
     }
 
@@ -383,6 +384,7 @@ fn clears_cover_whole_textures_and_regions() {
         sc.enc,
         Some((sc.target, [0.0, 0.0, 1.0, 1.0])),
         Some((depth, 0.0)),
+        None,
     )
     .unwrap();
     s.clear_region(
@@ -395,10 +397,11 @@ fn clears_cover_whole_textures_and_regions() {
         2,
         2,
         0,
+        false,
     )
     .unwrap();
     assert!(
-        s.clear(sc.b.gpu, sc.enc, Some((depth, [0.0; 4])), None)
+        s.clear(sc.b.gpu, sc.enc, Some((depth, [0.0; 4])), None, None)
             .is_err()
     );
     assert!(
@@ -411,7 +414,8 @@ fn clears_cover_whole_textures_and_regions() {
             3,
             2,
             2,
-            0
+            0,
+            false
         )
         .is_err()
     );
@@ -456,4 +460,76 @@ fn copies_validate_ranges() {
     s.write_buffer(g, sc.enc, sc.ubo, 0, &[7; 5]).unwrap();
     drop(s);
     sc.read();
+}
+
+#[test]
+fn a_cut_pass_renders_like_the_uncut_one() {
+    use super::pass::{PASS_CONTINUES, PASS_RESUMES};
+    let Some(sc) = scene() else { return };
+    let white =
+        sc.b.create_texture(TEXTURE_RENDER, RGBA8, 1, 1, 1, 1)
+            .unwrap();
+    let white_view = sc.b.create_view(white, 0, 1).unwrap();
+    sc.b.lock()
+        .write_texture(
+            sc.b.gpu,
+            sc.enc,
+            white,
+            &[255, 0, 255, 255],
+            0,
+            0,
+            0,
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+    let mut head = StreamWriter::default();
+    sc.bind(&mut head, sc.fan, 0);
+    head.scissor(0, 0, 2, 4).draw(4, 1, 0, 0);
+    let mut tail = StreamWriter::default();
+    tail.uniform_texture(1, white_view, sc.sampler)
+        .draw(4, 1, 0, 0);
+    let clear = Some([0.0, 0.0, 0.0, 1.0]);
+
+    let mut whole = head.clone();
+    whole.words.extend(&tail.words);
+    sc.pass(&mut sc.b.lock(), &sc.desc(clear), &whole);
+    let uncut = sc.read();
+
+    let green = Some([0.0, 1.0, 0.0, 1.0]);
+    sc.pass(&mut sc.b.lock(), &sc.desc(green), &StreamWriter::default());
+    let mut s = sc.b.lock();
+    let mut first = sc.desc(clear);
+    first.flags = PASS_CONTINUES;
+    sc.pass(&mut s, &first, &head);
+    s.split(sc.b.gpu, &sc.b.stats, &sc.b.slots, sc.enc).unwrap();
+    let mut rest = sc.desc(green);
+    rest.flags = PASS_RESUMES;
+    let report = sc.pass(&mut s, &rest, &tail);
+    drop(s);
+    assert_eq!((report.draws, report.skipped), (1, 0), "{report:?}");
+    let cut = sc.read();
+    assert_eq!(
+        uncut[0],
+        [255, 0, 255, 255],
+        "the second draw lands in the first scissor"
+    );
+    assert_eq!(uncut[3], [0, 0, 0, 255]);
+    assert_eq!(
+        cut, uncut,
+        "pipeline, bindings, vertex buffer and scissor carry over the cut"
+    );
+}
+
+#[test]
+fn a_resume_without_a_cut_starts_from_scratch() {
+    use super::pass::PASS_RESUMES;
+    let Some(sc) = scene() else { return };
+    let mut tail = StreamWriter::default();
+    tail.draw(4, 1, 0, 0);
+    let mut desc = sc.desc(None);
+    desc.flags = PASS_RESUMES;
+    let report = sc.pass(&mut sc.b.lock(), &desc, &tail);
+    assert_eq!((report.draws, report.skipped), (0, 1), "{report:?}");
 }

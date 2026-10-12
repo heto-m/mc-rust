@@ -60,11 +60,12 @@ final class McrCommandEncoder implements CommandEncoderBackend {
         pollCallbacks();
     }
 
-    /** Cuts the recording at a slot change; outside a pass only, as passes are replayed whole. */
+    /** Cuts the recording at a slot change; an open pass is cut too and continues after it. */
     void split() {
-        if (!inPass) {
-            op(BridgeAbi.E_SPLIT, "slot split");
+        if (inPass) {
+            pass.cut();
         }
+        op(BridgeAbi.E_SPLIT, "slot split");
     }
 
     void pollCallbacks() {

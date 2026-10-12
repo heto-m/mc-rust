@@ -33,6 +33,11 @@ pub const P_DRAW_INDEXED_INDIRECT: u32 = 15;
 pub const P_DEBUG_PUSH: u32 = 16;
 pub const P_DEBUG_POP: u32 = 17;
 
+/// Descriptor flags: the pass is cut here and continues in a later call (state is kept), or
+/// this call continues a cut pass (state is restored, attachments load).
+pub const PASS_CONTINUES: u64 = 1;
+pub const PASS_RESUMES: u64 = 2;
+
 /// Uniform slots a pipeline may declare; the push-constant block takes one more.
 pub const MAX_UNIFORMS: usize = 16;
 pub const MAX_COLOR_ATTACHMENTS: usize = 8;
@@ -96,15 +101,17 @@ pub struct PassDesc {
     pub colors: Vec<Option<ColorAttachment>>,
     pub depth: Option<(Handle, Option<f32>)>,
     pub area: [u32; 4],
+    /// [`PASS_CONTINUES`] | [`PASS_RESUMES`].
+    pub flags: u64,
 }
 
 impl PassDesc {
-    /// `[count, count × (view, has_clear, r, g, b, a), depth_view, depth_has_clear, depth, x, y, w, h]`,
-    /// floats as `f32` bits.
+    /// `[count, count × (view, has_clear, r, g, b, a), depth_view, depth_has_clear, depth, x, y, w, h,
+    /// flags]`, floats as `f32` bits.
     pub fn parse(slots: &[u64]) -> OpResult<Self> {
         let bad = || OpError::Invalid("malformed pass descriptor".into());
         let count = *slots.first().ok_or_else(bad)? as usize;
-        if count > MAX_COLOR_ATTACHMENTS || slots.len() != 1 + count * 6 + 7 {
+        if count > MAX_COLOR_ATTACHMENTS || slots.len() != 1 + count * 6 + 8 {
             return Err(bad());
         }
         let f = |v: u64| f32::from_bits(v as u32);
@@ -124,6 +131,7 @@ impl PassDesc {
             colors,
             depth,
             area: [u(t[3]), u(t[4]), u(t[5]), u(t[6])],
+            flags: t[7] & (PASS_CONTINUES | PASS_RESUMES),
         })
     }
 
@@ -146,6 +154,7 @@ impl PassDesc {
             u64::from(dc.unwrap_or(0.0).to_bits()),
         ]);
         out.extend(self.area.map(u64::from));
+        out.push(self.flags);
         out
     }
 }
@@ -288,11 +297,22 @@ enum Bound {
     Fan,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Uniform {
     None,
     Buffer(Handle, u64, u64),
     Texture(Handle, Handle),
+}
+
+/// The recorded state of a pass that was cut, re-applied when it continues.
+#[derive(Debug, Clone)]
+pub struct PassState {
+    pipeline: Handle,
+    uniforms: [Uniform; MAX_UNIFORMS],
+    push: Option<(Handle, u64, u64)>,
+    vertex: [Option<(Handle, u64)>; MAX_VERTEX_SLOTS],
+    index: Option<(Handle, wgpu::IndexFormat)>,
+    scissor: Option<[i32; 4]>,
 }
 
 #[derive(Clone)]
@@ -325,13 +345,41 @@ pub fn encode_pass(
     let enc = encoders
         .get_mut(encoder)
         .ok_or(OpError::Handle(Kind::Encoder, encoder))?;
+    let resumed = if desc.flags & PASS_RESUMES != 0 {
+        enc.resume.take()
+    } else {
+        enc.resume = None;
+        None
+    };
+    let world = backend
+        .slots
+        .world_targets(&gpu.device, backend.slots.current().0);
 
+    // Virtual main targets resolve to mcr's scene (and scene or private depth) in world slots.
     let attachment =
         |h: Handle| -> OpResult<(wgpu::TextureView, wgpu::TextureFormat, u32, u32, bool)> {
             let v = views.get(h).ok_or(OpError::Handle(Kind::View, h))?;
             let t = textures
                 .get(v.texture)
                 .ok_or(OpError::Handle(Kind::Texture, v.texture))?;
+            if let (true, Some(w)) = (t.virtual_main && v.base_mip == 0, world.as_ref()) {
+                let view = if v.format.has_color_aspect() {
+                    if v.format != w.color_texture.format() {
+                        return Err(OpError::Invalid(
+                            "main color format differs from the scene".into(),
+                        ));
+                    }
+                    w.color.clone()
+                } else {
+                    if v.format != w.depth.texture().format() {
+                        return Err(OpError::Invalid(
+                            "main depth format differs from the scene".into(),
+                        ));
+                    }
+                    w.depth.clone()
+                };
+                return Ok((view, v.format, w.size.0, w.size.1, true));
+            }
             let view = v
                 .attachment
                 .clone()
@@ -344,6 +392,7 @@ pub fn encode_pass(
         color_count: desc.colors.len() as u8,
         depth: None,
         unfilterable: 0,
+        flip: false,
     };
     let mut size: Option<(u32, u32)> = None;
     let mut virtual_targets: Vec<Handle> = Vec::new();
@@ -374,11 +423,12 @@ pub fn encode_pass(
         if virtual_main {
             virtual_targets.extend(views.get(c.view).map(|v| v.texture));
         }
-        colors.push(Some((view, c.clear.filter(|_| !virtual_main))));
+        let clear = c.clear.filter(|_| !virtual_main && resumed.is_none());
+        colors.push(Some((view, clear)));
     }
     let depth = match desc.depth {
         Some((h, clear)) => {
-            let (view, format, w, ht, _) = attachment(h)?;
+            let (view, format, w, ht, virtual_main) = attachment(h)?;
             if !format.has_depth_aspect() {
                 return Err(OpError::Invalid(
                     "color view used as a depth attachment".into(),
@@ -386,6 +436,11 @@ pub fn encode_pass(
             }
             same_size(w, ht)?;
             key.depth = Some(format);
+            let scene_depth = virtual_main && world.as_ref().is_some_and(|w| w.scene_depth);
+            if virtual_main && world.is_some() {
+                virtual_targets.extend(views.get(h).map(|v| v.texture));
+            }
+            let clear = clear.filter(|_| !scene_depth && resumed.is_none());
             Some((view, clear, format.has_stencil_aspect()))
         }
         None => None,
@@ -460,16 +515,27 @@ pub fn encode_pass(
     };
 
     let cmd = enc.cmd(&gpu.device);
-    let subst = if virtual_targets.is_empty() {
+    let mut sampled = Vec::new();
+    if let Some(r) = &resumed {
+        sampled.extend(r.uniforms.iter().filter_map(|u| match *u {
+            Uniform::Texture(v, _) => Some(v),
+            _ => None,
+        }));
+    }
+    let subst = if virtual_targets.is_empty() && world.is_none() {
         FxHashMap::default()
     } else {
         feedback_copies(
             gpu,
             cmd,
-            textures,
-            views,
+            &Sources {
+                textures,
+                views,
+                world: world.as_ref(),
+                targets: &virtual_targets,
+            },
             feedback,
-            &virtual_targets,
+            &mut sampled,
             stream,
         )
     };
@@ -492,9 +558,29 @@ pub fn encode_pass(
     let mut push: Option<(Handle, u64, u64)> = None;
     let mut vertex: [Option<(Handle, u64)>; MAX_VERTEX_SLOTS] = [None; MAX_VERTEX_SLOTS];
     let mut index: Option<(Handle, wgpu::IndexFormat)> = None;
+    let mut scissor: Option<[i32; 4]> = None;
     let mut bound_index = Bound::None;
     let mut bound_group: Option<(BindKey, [u32; MAX_UNIFORMS + 1], usize)> = None;
     let mut debug_depth = 0u32;
+    let flip_world = world.is_some();
+    if let Some(r) = resumed {
+        pipeline = backend.pipeline(r.pipeline);
+        pipeline_handle = if pipeline.is_some() { r.pipeline } else { 0 };
+        (uniforms, push, index, scissor) = (r.uniforms, r.push, r.index, r.scissor);
+        for (slot, v) in r.vertex.iter().enumerate() {
+            if let Some((h, off)) = *v
+                && let Some(b) = buffers.get(h)
+                && off <= b.buffer.size()
+            {
+                pass.set_vertex_buffer(slot as u32, b.buffer.slice(off..));
+                vertex[slot] = Some((h, off));
+            }
+        }
+        if let Some([x, y, w, h]) = scissor {
+            let (x, y, w, h) = clamp_rect(i64::from(x), i64::from(y), i64::from(w), i64::from(h));
+            pass.set_scissor_rect(x, y, w, h);
+        }
+    }
 
     // Resolves the pipeline variant and bind group for the next draw.
     macro_rules! prepare {
@@ -588,6 +674,7 @@ pub fn encode_pass(
                 if !same {
                     let mut k = key.clone();
                     k.unfilterable = unfilterable;
+                    k.flip = flip_world && p.uses_projection;
                     let (rp, layout) = p.variant(&gpu.device, &k)?;
                     pass.set_pipeline(&rp);
                     current = Some(Current {
@@ -871,15 +958,20 @@ pub fn encode_pass(
                 P_PUSH => push = Some((r.u64()?, r.u64()?, r.u64()?)),
                 P_SCISSOR => {
                     let s = r.take(4)?;
+                    let s = [s[0] as i32, s[1] as i32, s[2] as i32, s[3] as i32];
                     let (x, y, w, h) = clamp_rect(
-                        i64::from(s[0] as i32),
-                        i64::from(s[1] as i32),
-                        i64::from(s[2] as i32),
-                        i64::from(s[3] as i32),
+                        i64::from(s[0]),
+                        i64::from(s[1]),
+                        i64::from(s[2]),
+                        i64::from(s[3]),
                     );
                     pass.set_scissor_rect(x, y, w, h);
+                    scissor = Some(s);
                 }
-                P_NO_SCISSOR => pass.set_scissor_rect(area.0, area.1, area.2, area.3),
+                P_NO_SCISSOR => {
+                    pass.set_scissor_rect(area.0, area.1, area.2, area.3);
+                    scissor = None;
+                }
                 P_VERTEX => {
                     let (slot, h, off) = (r.u32()? as usize, r.u64()?, r.u64()?);
                     if slot >= MAX_VERTEX_SLOTS || slot >= limits.max_vertex_buffers as usize {
@@ -1027,6 +1119,16 @@ pub fn encode_pass(
         pass.pop_debug_group();
     }
     drop(pass);
+    if desc.flags & PASS_CONTINUES != 0 {
+        enc.resume = Some(PassState {
+            pipeline: pipeline_handle,
+            uniforms,
+            push,
+            vertex,
+            index,
+            scissor,
+        });
+    }
     state.fan = fan_slot;
     let stats = &backend.stats;
     stats.passes.fetch_add(1, Ordering::Relaxed);
@@ -1041,37 +1143,66 @@ pub fn encode_pass(
     result.map(|()| report)
 }
 
-/// Views of `targets` that the pass samples while rendering into them; they read a copy instead,
-/// taken before the pass (wgpu forbids a texture as both attachment and binding).
+struct Sources<'a> {
+    textures: &'a super::slab::Slab<super::resources::Texture>,
+    views: &'a super::slab::Slab<super::resources::View>,
+    world: Option<&'a super::slots::WorldTargets>,
+    /// Textures the pass renders into that it may also sample.
+    targets: &'a [Handle],
+}
+
+/// Substitute views for what the pass samples: in world slots a virtual main target reads mcr's
+/// scene, and a texture the pass also renders into reads a copy taken before the pass (wgpu
+/// forbids a texture as both attachment and binding).
 fn feedback_copies(
     gpu: &super::context::Gpu,
     cmd: &mut wgpu::CommandEncoder,
-    textures: &super::slab::Slab<super::resources::Texture>,
-    views: &super::slab::Slab<super::resources::View>,
+    src: &Sources<'_>,
     scratch: &mut Option<wgpu::Texture>,
-    targets: &[Handle],
+    sampled: &mut Vec<Handle>,
     stream: &[u32],
 ) -> FxHashMap<Handle, wgpu::TextureView> {
-    let mut sampled = Vec::new();
     if sampled_views(stream, |v| sampled.push(v)).is_err() {
         return FxHashMap::default();
     }
     let mut subst = FxHashMap::default();
     let mut copied: Option<Handle> = None;
-    for vh in sampled {
-        let Some(v) = views.get(vh) else { continue };
-        if subst.contains_key(&vh)
-            || !targets.contains(&v.texture)
-            || copied.is_some_and(|c| c != v.texture)
-        {
+    for &vh in sampled.iter() {
+        let Some(v) = src.views.get(vh) else { continue };
+        if subst.contains_key(&vh) {
             continue;
         }
-        let Some(t) = textures.get(v.texture) else {
+        let Some(t) = src.textures.get(v.texture) else {
             continue;
         };
-        let (w, h) = (t.texture.width(), t.texture.height());
+        let rendered = src.targets.contains(&v.texture);
+        let world = src.world.filter(|_| t.virtual_main);
+        if let Some(w) = world
+            && !rendered
+        {
+            let view = if v.format.has_color_aspect() {
+                w.color.clone()
+            } else {
+                w.depth.clone()
+            };
+            subst.insert(vh, view);
+            continue;
+        }
+        if !rendered || copied.is_some_and(|c| c != v.texture) {
+            continue;
+        }
+        let source = match world {
+            Some(w) if v.format.has_color_aspect() => w.color_texture.clone(),
+            Some(w) => w.depth.texture().clone(),
+            None => t.texture.clone(),
+        };
+        if !source.usage().contains(wgpu::TextureUsages::COPY_SRC) {
+            continue;
+        }
+        let (w, h, mips) = (source.width(), source.height(), source.mip_level_count());
         let fits = scratch.as_ref().is_some_and(|s| {
-            (s.width(), s.height(), s.format(), s.mip_level_count()) == (w, h, t.format, t.mips)
+            (s.width(), s.height(), s.format(), s.mip_level_count())
+                == (w, h, source.format(), mips)
         });
         if !fits {
             *scratch = Some(gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -1081,10 +1212,10 @@ fn feedback_copies(
                     height: h,
                     depth_or_array_layers: 1,
                 },
-                mip_level_count: t.mips,
+                mip_level_count: mips,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: t.format,
+                format: source.format(),
                 usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             }));
@@ -1092,7 +1223,7 @@ fn feedback_copies(
         let copy = scratch.as_ref().expect("created above");
         if copied.replace(v.texture).is_none() {
             cmd.copy_texture_to_texture(
-                t.texture.as_image_copy(),
+                source.as_image_copy(),
                 copy.as_image_copy(),
                 wgpu::Extent3d {
                     width: w,

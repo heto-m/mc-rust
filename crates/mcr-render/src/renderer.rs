@@ -1774,11 +1774,13 @@ impl Renderer {
 
         let aspect = w as f32 / h as f32;
         let mut external = self.external.take();
+        let split = external.is_some() && self.scene_texture().is_some();
         if let (Some(ext), Some(scene)) = (external.as_mut(), self.scene_texture()) {
             ext.before_frame(&ExternalCtx {
                 device: &self.device,
                 queue: &self.queue,
                 scene,
+                depth: &self.depth_view,
                 size: self.size,
                 camera: cam,
                 view: cam.view_rotation(),
@@ -1871,7 +1873,7 @@ impl Renderer {
             self.effects.draw_sky(&mut pass);
             pass.set_bind_group(1, &self.geom_bg, &[]);
             self.draw_sections(&mut pass, 0, 0, 0);
-            if !two_phase {
+            if !two_phase && !split {
                 self.draw_late_layers(&mut pass, overlay.as_deref_mut(), trans_n);
             }
         }
@@ -1918,6 +1920,53 @@ impl Renderer {
             pass.set_bind_group(0, &self.globals_bg, &[]);
             pass.set_bind_group(1, &self.geom_bg, &[]);
             self.draw_sections(&mut pass, late_cube, late_model, 8);
+            if !split {
+                self.draw_late_layers(&mut pass, overlay.as_deref_mut(), trans_n);
+            }
+        }
+
+        if let (true, Some(ext), Some(scene)) = (split, external.as_mut(), self.scene_texture()) {
+            self.queue.submit([encoder.finish()]);
+            ext.after_opaque(&ExternalCtx {
+                device: &self.device,
+                queue: &self.queue,
+                scene,
+                depth: &self.depth_view,
+                size: self.size,
+                camera: cam,
+                view: cam.view_rotation(),
+                proj: cam.projection(aspect),
+            });
+            encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("frame after opaque"),
+                });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("terrain translucent"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.globals_bg, &[]);
+            pass.set_bind_group(1, &self.geom_bg, &[]);
             self.draw_late_layers(&mut pass, overlay.as_deref_mut(), trans_n);
         }
 
@@ -1940,6 +1989,7 @@ impl Renderer {
                 device: &self.device,
                 queue: &self.queue,
                 scene,
+                depth: &self.depth_view,
                 size: self.size,
                 camera: cam,
                 view: cam.view_rotation(),

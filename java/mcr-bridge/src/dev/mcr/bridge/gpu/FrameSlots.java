@@ -3,16 +3,44 @@ package dev.mcr.bridge.gpu;
 import dev.mcr.bridge.BridgeAbi;
 import dev.mcr.bridge.McrFrame;
 
-/** Tags Java's GPU work for mcr's compositor: frame work is immediate, `GuiRenderer.render` is the GUI slot. */
+/**
+ * Tags Java's GPU work for mcr's compositor. Frame work is immediate; `LevelRenderer.render` runs in
+ * the world slots, cut at vanilla's phase boundaries; the 3D HUD and post effects are `POST_WORLD`;
+ * `GuiRenderer.render` is the GUI slot.
+ */
 public final class FrameSlots {
     private static long frame;
     private static boolean gui;
+    private static int current = BridgeAbi.SLOT_IMMEDIATE;
     private static int mainTarget;
 
     public static void beginFrame(long index) {
         frame = index;
         gui = false;
         slot(BridgeAbi.SLOT_IMMEDIATE);
+    }
+
+    /** `LevelRenderer.render` starts: Java's main target is mcr's scene until the GUI. */
+    public static void beginWorld() {
+        if (!McrFrame.lockstep() || gui || current != BridgeAbi.SLOT_IMMEDIATE) {
+            return;
+        }
+        split();
+        slot(BridgeAbi.SLOT_WORLD_SOLID);
+    }
+
+    /** Ends the current world slot at a vanilla phase boundary; later slots never go back. */
+    public static void cutTo(int next) {
+        if (!inWorld() || next <= current) {
+            return;
+        }
+        split();
+        slot(next);
+    }
+
+    /** Java draws into mcr's scene with mcr's top-down projection. */
+    public static boolean inWorld() {
+        return current >= BridgeAbi.SLOT_WORLD_SOLID && current <= BridgeAbi.SLOT_POST_WORLD;
     }
 
     public static void beginGui() {
@@ -41,6 +69,7 @@ public final class FrameSlots {
     }
 
     private static void slot(int slot) {
+        current = slot;
         GpuNative.check(GpuNative.device(BridgeAbi.D_SLOT, slot, frame), "frame slot");
     }
 

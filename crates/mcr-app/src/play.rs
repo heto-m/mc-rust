@@ -330,6 +330,8 @@ pub struct Play {
     hud_hidden: bool,
     /// Java's HUD is composed over the world in mod mode, replacing the native one.
     pub java_gui: bool,
+    /// Java draws entities, block entities, nametags and the hand into the world.
+    pub java_world: bool,
     /// A Java screen owns all input; gameplay input stops.
     pub java_screen: bool,
     /// Java's GUI scale in mod mode, which native overlays follow.
@@ -469,6 +471,7 @@ impl Play {
             perspective: Perspective::First,
             hud_hidden: false,
             java_gui: false,
+            java_world: false,
             java_screen: false,
             gui_scale_override: None,
             open_mods: false,
@@ -760,6 +763,10 @@ impl Play {
         if snapped || !player.placed {
             self.prev_eye = self.cur_eye;
         }
+    }
+
+    pub fn third_person(&self) -> bool {
+        self.perspective != Perspective::First
     }
 
     fn scoping(&self) -> bool {
@@ -2207,7 +2214,7 @@ impl Play {
             };
             let max_scale = u32::try_from(self.gui_scale()).unwrap_or(0);
             let mut frame = self.gui.ui.frame_scaled(size.0, size.1, max_scale);
-            if let Some(layer) = &self.entities {
+            if let Some(layer) = self.entities.as_ref().filter(|_| !self.java_world) {
                 let crosshair = match self.target {
                     Some(Target::Entity { id, .. }) => Some(id),
                     _ => None,
@@ -2284,9 +2291,9 @@ impl Play {
             outline: &self.outline,
             ui_renderer: &mut self.gui.ui_renderer,
             ui: &mut self.gui.ui,
-            entities: self.entities.as_ref(),
-            block_entities: self.block_entities.as_ref(),
-            hand: self.hand.as_ref(),
+            entities: self.entities.as_ref().filter(|_| !self.java_world),
+            block_entities: self.block_entities.as_ref().filter(|_| !self.java_world),
+            hand: self.hand.as_ref().filter(|_| !self.java_world),
             preview: self.preview.as_ref(),
             particles: &mut self.effects.particles,
             env: &env,

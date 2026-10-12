@@ -64,7 +64,7 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
 | Input | `ModInput` events ride the control ring as `MSG_INPUT` ahead of each `MSG_FRAME`; `McrInput.deliver` calls `KeyboardHandler.keyPress/textInput/textEditing` and `MouseHandler.onMove/onButton/onScroll/onDrop` with SDL3 values. `InputConstants.isKeyDown/grabMouse/releaseMouse`, `Window.isFocused/selectCursor`, `ClipboardManager`, `TextInputManager`, `SDL_GetModState` sites and `turnPlayer` are redirected | Rust |
 | Network | `Connection.connect` is redirected to a `BridgeChannel` (netty `EmbeddedChannel` confined to the render thread by its own event loop) carrying vanilla codecs, so `ConnectScreen` runs unchanged while Rust connects. Frames travel in two net rings (32 MiB in, 4 MiB out) tagged with phase and session; outbound packets are filtered by (phase, packet class), chat goes to Rust as text | Rust owns socket and state |
 | Player | Rust's local player and camera overwrite `LocalPlayer`/`Camera` every tick and frame. Vanilla gameplay keybinds are suppressed in Java | Rust |
-| World | Java keeps its own `ClientLevel`/`ClientChunkCache`. Terrain compile and draw are disabled (`LevelRenderer.compileSections`, `ChunkSectionsToRender.renderGroup`) | duplicated, see below |
+| World | Java keeps its own `ClientLevel`/`ClientChunkCache`. Sections compile meshless (`RenderSection.compileSync/compileAsync` → `BridgeSectionMesh`, block entities only); terrain uploads and draw groups, sky, weather and world border are off. `Camera.alignWithEntity` takes Rust's eye and rotation; the level projection is Rust's | duplicated, see below |
 | Sound | `SoundEngine` logic kept. `Library.init`/`acquireChannel` and `Channel`/`Listener` methods forward to `mcr-audio` | Rust plays |
 
 ## Frame composition
@@ -75,18 +75,29 @@ mcr's (`compose.rs`, `frame.rs`).
 
 1. **Post.** The render thread posts `FrameBegin` with Rust's ticks, partial tick, size and camera. Java runs
    exactly those ticks through a `DeltaTracker.Timer` override, applies the size to `Window`, and renders.
-2. **Queue.** Java's submits are tagged with a slot (`IMMEDIATE`, or `GUI` around `GuiRenderer.render`, cut out
-   with `E_SPLIT`) and queued rather than submitted.
-3. **Compose.** After its world passes, the render thread waits for Java's `frame_done` (at most 100 ms once
-   loaded). It copies the scene into Java's real `MainTarget` color, flipped because renderpearl targets are
-   bottom-up. It then submits Java's queued buffers in order, so the GUI draws over the world and the menu blur
-   samples it. Finally it copies the result back, flipped.
-4. **Native overlays.** These draw after, then the frame is presented.
+2. **Queue.** Java's submits are tagged with a slot and queued rather than submitted: `IMMEDIATE`;
+   `WORLD_SOLID` from `LevelRenderer.render`, `WORLD_TRANSLUCENT` after `executeSolid`, `WORLD_AFTER` after the
+   translucent features, `POST_WORLD` from `render3dHud` (hand, entity outline blit, post effects); `GUI` around
+   `GuiRenderer.render`. `E_SPLIT` cuts the encoder at each boundary; a render pass open across a cut continues
+   (`PASS_CONTINUES`/`PASS_RESUMES` in the pass descriptor restore pipeline, bindings and scissor).
+3. **World.** `mcr-render` ends its world pass after opaque terrain (`ExternalRenderer::after_opaque`). The render
+   thread waits for Java's frame (bounded) and submits `IMMEDIATE`, `WORLD_SOLID` and `WORLD_TRANSLUCENT` there;
+   then mcr draws translucent terrain and its world effects. In world slots Java's main color and depth are mcr's
+   scene color and reverse-Z depth, and Java's projection is mcr's with Y flipped, so world draws land top-down on
+   mcr's pixels and depth-test against its terrain; pipelines that read `Projection` get a counter-clockwise
+   variant there. `POST_WORLD` gets a private depth, so the hand's depth clear leaves the scene depth alone.
+4. **Compose.** At `after_world` it submits `WORLD_AFTER` and `POST_WORLD`, copies the scene into Java's real
+   `MainTarget` color, flipped because renderpearl targets are bottom-up, submits `GUI` so the menu blur samples
+   the world, and copies the result back, flipped. If the wait at `after_opaque` timed out, it does not wait again.
+5. **Native overlays.** These draw after, then the frame is presented.
 
-Clears of the main target's color are dropped. Java's world rendering (`renderLevel`, post effects, the entity
-outline, `LevelExtractor`) is off until `mod-entity-render-hooks`, which adds world slots. A Java frame that
-misses the 2 s deadline detaches the bridge from rendering: mcr's native HUD returns and a toast says so. In mod
-mode, Rust renders terrain, sky, clouds, weather, water, particles, entities and the hand; Java draws GUI and HUD.
+Clears of the main target's color, and of the scene depth in world slots, are dropped. A Java frame that misses
+the 2 s deadline detaches the bridge from rendering: mcr's native HUD and entities return and a toast says so.
+
+In mod mode Java draws entities, block entities, nametags, the first-person hand, glowing outlines, post effects,
+particles of non-`minecraft` types, GUI and HUD. Rust draws terrain, sky, clouds, weather, world border, water,
+block outline, destroy overlay and vanilla particles. Java culls with a finite perspective built from Rust's field
+of view (Rust's reverse-Z infinite matrix sends vanilla's frustum walk into an endless loop).
 
 ## Input and UI authority
 
@@ -117,8 +128,10 @@ off-heap section arrays (`BitStorage` is an interface), if measurements say it p
 - Mod mode is opt-in (mods folder non-empty and enabled). Without mods, no JVM starts.
 - Java resolves no remote host names (`jdk.net.hosts.file` with only localhost, `ServerNameResolver` returns
   unresolved addresses), and `Connection.connect` outside `ConnectScreen` throws. Rust owns DNS and sockets. Java's
-  HTTP (skins, mod web APIs) is to go through a Rust loopback `CONNECT` proxy with an allow-list (`mod-net-bridge`
-  design; task in `mod-entity-render-hooks`).
+  HTTP (skins, mod web APIs) goes through a Rust loopback proxy (`proxy.rs`: `CONNECT` for https, absolute-form
+  requests for http, forced `Connection: close`) set as `http(s).proxyHost/proxyPort` and as Minecraft's own
+  `Proxy`. It reaches only Mojang's hosts plus the policy's `http_hosts` (`*.example.com` for subdomains), only
+  global addresses, ports 80 and 443, at most 16 connections, 8 KiB of request head, 30 s idle.
   `System.exit` or a crash in Java freezes or parks the VM for good: the bridge detaches, and mcr exits the
   process on shutdown instead of destroying the VM. A detached net bridge copies and forwards nothing; the native
   client keeps playing.

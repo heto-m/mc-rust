@@ -957,9 +957,16 @@ impl Shell {
 
     pub fn frame(&mut self) -> Option<FrameStats> {
         let java_gui = self.java_gui();
+        let third_person = self.play.as_ref().is_some_and(Play::third_person);
+        let java_world = self.mod_frames().is_some_and(|f| {
+            let mut link = f.lock();
+            link.set_third_person(third_person);
+            link.world_active()
+        });
         self.update_route();
         if let Some(play) = &mut self.play {
             play.java_gui = java_gui;
+            play.java_world = java_world;
             return play.frame();
         }
         self.update_menu_size();

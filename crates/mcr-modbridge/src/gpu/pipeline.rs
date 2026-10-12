@@ -74,6 +74,8 @@ pub struct VariantKey {
     pub depth: Option<wgpu::TextureFormat>,
     /// Bit `i`: the texture at uniform `i` cannot be filtered (depth or 32-bit float).
     pub unfilterable: u64,
+    /// Drawn with mcr's top-down projection (world slots): front faces are CCW again.
+    pub flip: bool,
 }
 
 #[derive(Debug)]
@@ -99,6 +101,8 @@ pub struct Pipeline {
     /// Std140 size of each buffer block, the push block last; bindings are never smaller.
     pub block_sizes: Vec<u64>,
     pub fan: bool,
+    /// Reads vanilla's `Projection` block, so a flipped projection flips its winding.
+    pub uses_projection: bool,
     layouts: Mutex<FxHashMap<u64, Arc<Layout>>>,
     variants: Mutex<FxHashMap<VariantKey, wgpu::RenderPipeline>>,
 }
@@ -310,6 +314,11 @@ impl Pipeline {
             },
             conservative: false,
         };
+        let uses_projection = info
+            .uniforms
+            .iter()
+            .zip(&slots)
+            .any(|(u, slot)| u.name == "Projection" && *slot != Slot::Unused);
         Ok(Self {
             name: info.name.clone(),
             vertex,
@@ -322,6 +331,7 @@ impl Pipeline {
             push_constants,
             block_sizes,
             fan: info.topology == enums::TOPOLOGY_TRIANGLE_FAN,
+            uses_projection,
             layouts: Mutex::new(FxHashMap::default()),
             variants: Mutex::new(FxHashMap::default()),
         })
@@ -338,6 +348,7 @@ impl Pipeline {
             color_count: self.targets.len().min(8) as u8,
             depth,
             unfilterable: 0,
+            flip: false,
         }
     }
 
@@ -505,7 +516,14 @@ impl Pipeline {
                     compilation_options: Default::default(),
                     buffers: &buffers,
                 },
-                primitive: self.primitive,
+                primitive: wgpu::PrimitiveState {
+                    front_face: if key.flip {
+                        wgpu::FrontFace::Ccw
+                    } else {
+                        self.primitive.front_face
+                    },
+                    ..self.primitive
+                },
                 depth_stencil,
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {

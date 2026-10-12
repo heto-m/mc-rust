@@ -10,11 +10,48 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use super::context::Gpu;
 use super::slab::Handle;
-use crate::abi::{SLOT_GUI, SLOT_IMMEDIATE};
+use crate::abi::{
+    SLOT_GUI, SLOT_IMMEDIATE, SLOT_POST_WORLD, SLOT_WORLD_AFTER, SLOT_WORLD_SOLID,
+    SLOT_WORLD_TRANSLUCENT,
+};
 
 /// Bounds memory if Java submits while the render thread is not draining (a stalled window).
 pub const MAX_QUEUED: usize = 4096;
 const LOGGED_OVERFLOWS: u64 = 10;
+const POOLED_BUFFERS: usize = 64;
+const POOLED_CAPACITY: usize = 16 << 20;
+
+static BYTE_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+/// A copy of `bytes` in a recycled buffer, so queued submits do not allocate per submit.
+pub(crate) fn pooled_copy(bytes: &[u8]) -> Vec<u8> {
+    let mut v = BYTE_POOL
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .pop()
+        .unwrap_or_default();
+    v.clear();
+    v.extend_from_slice(bytes);
+    v
+}
+
+pub(crate) fn recycle(v: Vec<u8>) {
+    if v.capacity() > POOLED_CAPACITY {
+        return;
+    }
+    let mut pool = BYTE_POOL.lock().unwrap_or_else(PoisonError::into_inner);
+    if pool.len() < POOLED_BUFFERS {
+        pool.push(v);
+    }
+}
+
+/// Whether work tagged `slot` draws into mcr's world (scene color, and scene or private depth).
+pub fn is_world_slot(slot: u32) -> bool {
+    matches!(
+        slot,
+        SLOT_WORLD_SOLID | SLOT_WORLD_TRANSLUCENT | SLOT_WORLD_AFTER | SLOT_POST_WORLD
+    )
+}
 
 pub(crate) const MAP_PENDING: u8 = 0;
 pub(crate) const MAP_OK: u8 = 1;
@@ -54,8 +91,9 @@ impl Submission {
 
     /// Writes, submits and arms the completion and readback callbacks.
     pub fn execute(self, gpu: &Gpu) {
-        for (buffer, offset, data) in &self.writes {
-            gpu.queue.write_buffer(buffer, *offset, data);
+        for (buffer, offset, data) in self.writes {
+            gpu.queue.write_buffer(&buffer, offset, &data);
+            recycle(data);
         }
         let index = gpu.queue.submit(self.cmd);
         let (done, n) = (self.track.done.clone(), self.n);
@@ -104,21 +142,47 @@ impl<T> SlotQueue<T> {
 
     /// The leading run of immediate work: everything that may run before mcr's own frame.
     pub fn pop_immediate(&mut self) -> Option<T> {
+        self.pop_while(|slot| slot == SLOT_IMMEDIATE)
+    }
+
+    /// The next item if its slot passes `keep`; FIFO order is never broken.
+    pub fn pop_while(&mut self, keep: impl Fn(u32) -> bool) -> Option<T> {
         match self.items.front() {
-            Some((SLOT_IMMEDIATE, _, _)) => self.items.pop_front().map(|(_, _, t)| t),
+            Some((slot, _, _)) if keep(*slot) => self.items.pop_front().map(|(_, _, t)| t),
             _ => None,
         }
     }
 
-    /// Everything, in submission order; GUI work of frames before `frame` is stale.
+    /// Everything, in submission order; frame work of frames before `frame` is stale.
     pub fn pop_any(&mut self, frame: u64) -> Option<(T, bool)> {
         self.items
             .pop_front()
-            .map(|(slot, f, t)| (t, slot == SLOT_GUI && f < frame))
+            .map(|(slot, f, t)| (t, slot != SLOT_IMMEDIATE && f < frame))
     }
 }
 
 /// Composition state shared by Java's recording threads and the render thread.
+/// mcr's scene targets, which Java's world slots render into instead of its main target.
+#[derive(Debug, Clone)]
+pub struct SceneTargets {
+    pub color: wgpu::Texture,
+    pub color_view: wgpu::TextureView,
+    pub depth: wgpu::TextureView,
+    /// `POST_WORLD`'s depth, so the hand's depth clear never touches the scene depth.
+    pub private_depth: Option<wgpu::TextureView>,
+}
+
+/// Where a virtual main-target attachment lands for the current slot.
+#[derive(Debug, Clone)]
+pub struct WorldTargets {
+    pub color: wgpu::TextureView,
+    pub color_texture: wgpu::Texture,
+    pub depth: wgpu::TextureView,
+    /// Depth is mcr's scene depth: Java's clears of it are dropped.
+    pub scene_depth: bool,
+    pub size: (u32, u32),
+}
+
 #[derive(Debug, Default)]
 pub struct Slots {
     active: AtomicBool,
@@ -127,6 +191,7 @@ pub struct Slots {
     queue: Mutex<SlotQueue<Submission>>,
     overflows: AtomicU64,
     main_color: Mutex<Option<(Handle, wgpu::Texture)>>,
+    scene: Mutex<Option<SceneTargets>>,
     pub stale: AtomicU64,
     pub submitted: AtomicU64,
 }
@@ -148,7 +213,12 @@ impl Slots {
     }
 
     pub fn set_slot(&self, slot: u32, frame: u64) {
-        self.slot.store(slot.min(SLOT_GUI), Ordering::Release);
+        let slot = if slot > SLOT_POST_WORLD {
+            SLOT_IMMEDIATE
+        } else {
+            slot
+        };
+        self.slot.store(slot, Ordering::Release);
         self.frame.store(frame, Ordering::Release);
     }
 
@@ -188,16 +258,81 @@ impl Slots {
         self.lock().len()
     }
 
-    /// Submits the immediate work queued ahead of any GUI work.
+    /// Submits the immediate work queued ahead of any frame work.
     pub fn drain_immediate(&self, gpu: &Gpu) -> usize {
+        self.drain_while(gpu, |slot| slot == SLOT_IMMEDIATE)
+    }
+
+    /// Submits the leading work up to Java's translucent features, at mcr's `after_opaque`.
+    pub fn drain_world(&self, gpu: &Gpu) -> usize {
+        self.drain_while(gpu, |slot| {
+            matches!(
+                slot,
+                SLOT_IMMEDIATE | SLOT_WORLD_SOLID | SLOT_WORLD_TRANSLUCENT
+            )
+        })
+    }
+
+    /// Submits the leading work that comes before the GUI (late world features, hand, post effects).
+    pub fn drain_before_gui(&self, gpu: &Gpu) -> usize {
+        self.drain_while(gpu, |slot| slot != SLOT_GUI)
+    }
+
+    fn drain_while(&self, gpu: &Gpu, keep: impl Fn(u32) -> bool) -> usize {
         let mut q = self.lock();
         let mut n = 0;
-        while let Some(s) = q.pop_immediate() {
+        while let Some(s) = q.pop_while(&keep) {
             run_scoped(gpu, s);
             n += 1;
         }
         self.submitted.fetch_add(n as u64, Ordering::Relaxed);
         n
+    }
+
+    /// mcr's scene for the frames Java records next; called by the render thread every frame.
+    pub fn set_scene(&self, color: &wgpu::Texture, depth: &wgpu::TextureView) {
+        let mut scene = self.scene.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(s) = scene.as_ref()
+            && s.color == *color
+            && s.depth == *depth
+        {
+            return;
+        }
+        *scene = Some(SceneTargets {
+            color: color.clone(),
+            color_view: color.create_view(&wgpu::TextureViewDescriptor::default()),
+            depth: depth.clone(),
+            private_depth: None,
+        });
+    }
+
+    /// The scene targets for work tagged `slot`, or `None` outside the world slots.
+    pub fn world_targets(&self, device: &wgpu::Device, slot: u32) -> Option<WorldTargets> {
+        if !is_world_slot(slot) || !self.is_active() {
+            return None;
+        }
+        let mut scene = self.scene.lock().unwrap_or_else(PoisonError::into_inner);
+        let s = scene.as_mut()?;
+        let size = (s.color.width(), s.color.height());
+        let depth = if slot == SLOT_POST_WORLD {
+            let fits = s.private_depth.as_ref().is_some_and(|d| {
+                let t = d.texture();
+                (t.width(), t.height()) == size
+            });
+            if !fits {
+                s.private_depth = Some(private_depth(device, size));
+            }
+            s.private_depth.clone().expect("created above")
+        } else {
+            s.depth.clone()
+        };
+        Some(WorldTargets {
+            color: s.color_view.clone(),
+            color_texture: s.color.clone(),
+            depth,
+            scene_depth: slot != SLOT_POST_WORLD,
+            size,
+        })
     }
 
     /// Submits everything queued, in order; `frame` is the one being composed.
@@ -244,6 +379,25 @@ impl Slots {
     }
 }
 
+fn private_depth(device: &wgpu::Device, (width, height): (u32, u32)) -> wgpu::TextureView {
+    device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("mcr-modbridge post-world depth"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
+}
+
 /// Invalid Java buffers must not reach mcr's uncaptured-error handler on the render thread.
 fn run_scoped(gpu: &Gpu, sub: Submission) {
     let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -270,6 +424,55 @@ mod tests {
         assert_eq!(q.pop_any(5), Some(("gui", false)));
         assert_eq!(q.pop_any(5), Some(("end", false)));
         assert!(q.is_empty());
+    }
+
+    #[test]
+    fn world_slots_drain_in_two_steps_around_mcr_translucency() {
+        let mut q = SlotQueue::default();
+        q.push(SLOT_IMMEDIATE, 7, "lightmap");
+        q.push(SLOT_WORLD_SOLID, 7, "solid entities");
+        q.push(SLOT_WORLD_TRANSLUCENT, 7, "translucent entities");
+        q.push(SLOT_WORLD_AFTER, 7, "outlines");
+        q.push(SLOT_POST_WORLD, 7, "hand");
+        q.push(SLOT_GUI, 7, "hud");
+        q.push(SLOT_IMMEDIATE, 7, "tail");
+        let world = |s| {
+            matches!(
+                s,
+                SLOT_IMMEDIATE | SLOT_WORLD_SOLID | SLOT_WORLD_TRANSLUCENT
+            )
+        };
+        let mut order = Vec::new();
+        while let Some(t) = q.pop_while(world) {
+            order.push(t);
+        }
+        assert_eq!(
+            order,
+            ["lightmap", "solid entities", "translucent entities"]
+        );
+        order.clear();
+        while let Some(t) = q.pop_while(|s| s != SLOT_GUI) {
+            order.push(t);
+        }
+        assert_eq!(order, ["outlines", "hand"]);
+        assert_eq!(q.pop_any(7), Some(("hud", false)));
+        assert_eq!(q.pop_any(7), Some(("tail", false)));
+    }
+
+    #[test]
+    fn only_frame_slots_draw_into_the_world() {
+        assert!(!is_world_slot(SLOT_IMMEDIATE));
+        assert!(!is_world_slot(SLOT_GUI));
+        assert!(is_world_slot(SLOT_WORLD_SOLID) && is_world_slot(SLOT_POST_WORLD));
+        assert!(!is_world_slot(99));
+    }
+
+    #[test]
+    fn pooled_copies_reuse_buffers() {
+        let a = pooled_copy(&[1, 2, 3]);
+        recycle(a);
+        let b = pooled_copy(&[4]);
+        assert_eq!(b, [4]);
     }
 
     #[test]

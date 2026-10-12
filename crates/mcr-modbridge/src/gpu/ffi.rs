@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use super::backend::{self, Backend, MAX_TRANSFER, OpError, OpResult};
 use super::pass::{self, PassDesc};
+use super::slots::is_world_slot;
 
 pub const D_INFO: i32 = 1;
 pub const D_BUFFER: i32 = 2;
@@ -51,7 +52,7 @@ pub const MAX_ARGS: usize = 32;
 pub const INFO_SLOTS: usize = 6;
 pub const FEATURE_POLYGON_LINE: u64 = 1;
 pub const FEATURE_FIRST_INSTANCE: u64 = 2;
-const MAX_PASS_DESC: usize = 1 + pass::MAX_COLOR_ATTACHMENTS * 6 + 7;
+const MAX_PASS_DESC: usize = 1 + pass::MAX_COLOR_ATTACHMENTS * 6 + 8;
 const MAX_STREAM_BYTES: usize = 64 << 20;
 const LOGGED_ERRORS: u64 = 20;
 
@@ -288,7 +289,8 @@ pub extern "C" fn gpu_encode(encoder: i64, op: i32, args: i64, count: i32) -> i6
                 let d =
                     (arg(a, 5)? != 0).then(|| f32_arg(a, 6).map(|d| (arg(a, 5).unwrap_or(0), d)));
                 let (c, d) = (c.transpose()?, d.transpose()?);
-                scoped(b, || s.clear(g, e, c, d)).map(|()| 0)
+                let world = b.slots.world_targets(&g.device, b.slots.current().0);
+                scoped(b, || s.clear(g, e, c, d, world.as_ref())).map(|()| 0)
             }
             E_CLEAR_REGION => scoped(b, || {
                 s.clear_region(
@@ -301,6 +303,7 @@ pub extern "C" fn gpu_encode(encoder: i64, op: i32, args: i64, count: i32) -> i6
                     u32_arg(a, 9)?,
                     u32_arg(a, 10)?,
                     u32_arg(a, 11)?,
+                    is_world_slot(b.slots.current().0) && b.slots.is_active(),
                 )
             })
             .map(|()| 0),

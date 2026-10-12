@@ -36,6 +36,7 @@ public final class McrFrame {
     private static long clientTicks;
     private static long frameStart;
     private static boolean announced;
+    private static final McrCamera camera = new McrCamera();
 
     public static long frameIndex() {
         return frameIndex;
@@ -57,6 +58,11 @@ public final class McrFrame {
 
     public static float partialTick() {
         return partialTick;
+    }
+
+    /** mcr's camera for this frame, or null outside the lockstep or when Rust's values are unusable. */
+    public static @org.jspecify.annotations.Nullable McrCamera camera() {
+        return lockstep() && camera.valid() ? camera : null;
     }
 
     /** Ticks this frame runs; anything over vanilla's cap carries to the next frames instead of being lost. */
@@ -142,6 +148,7 @@ public final class McrFrame {
         float partial = p.get(FLOAT, BridgeAbi.FRAME_PARTIAL_TICK);
         partialTick = Float.isFinite(partial) ? Math.clamp(partial, 0.0F, 1.0F) : 0.0F;
         flags = p.get(INT, BridgeAbi.FRAME_FLAGS);
+        camera.read(p, (flags & BridgeAbi.FRAME_DETACHED) != 0);
     }
 
     /** The mcr window's size reaches `Window` and the main target before this frame renders. */

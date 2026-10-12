@@ -105,6 +105,10 @@ pub struct BridgeConfig {
     /// The render thread drives Java's frames and composes its GUI ([`crate::Bridge::frames`]);
     /// needs [`crate::gpu::install`] first.
     pub compose: bool,
+    /// Hosts Java's HTTP may reach through the loopback proxy (`*.example.com` for subdomains).
+    pub http_hosts: Vec<String>,
+    /// The proxy's port; [`crate::Bridge::start`] fills it.
+    pub proxy_port: Option<u16>,
 }
 
 impl BridgeConfig {
@@ -120,6 +124,11 @@ impl BridgeConfig {
             max_heap: "2G".into(),
             extra_jvm: Vec::new(),
             compose: false,
+            http_hosts: crate::proxy::MOJANG_HOSTS
+                .iter()
+                .map(|h| (*h).to_owned())
+                .collect(),
+            proxy_port: None,
         }
     }
 }
@@ -193,6 +202,12 @@ pub fn plan(
     ];
     if config.compose {
         properties.push(format!("-D{COMPOSE_PROPERTY}=true"));
+    }
+    if let Some(port) = config.proxy_port {
+        for scheme in ["http", "https"] {
+            properties.push(format!("-D{scheme}.proxyHost=127.0.0.1"));
+            properties.push(format!("-D{scheme}.proxyPort={port}"));
+        }
     }
     properties.extend(manifest.jvm_args.iter().cloned());
     properties.extend(config.extra_jvm.iter().cloned());
@@ -315,6 +330,16 @@ mod tests {
         cfg.compose = true;
         let p = plan(&m, &cfg, 0x1234_abcd).unwrap();
         assert!(p.properties.contains(&"-Dmcr.compose=true".to_owned()));
+        cfg.proxy_port = Some(4321);
+        let p = plan(&m, &cfg, 0x1234_abcd).unwrap();
+        for prop in [
+            "-Dhttp.proxyHost=127.0.0.1",
+            "-Dhttp.proxyPort=4321",
+            "-Dhttps.proxyHost=127.0.0.1",
+            "-Dhttps.proxyPort=4321",
+        ] {
+            assert!(p.properties.contains(&prop.to_owned()), "{prop}");
+        }
     }
 
     #[test]
