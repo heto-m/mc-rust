@@ -4,7 +4,7 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 9;
+    public static final int VERSION = 10;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
     public static final String COMPOSE_PROPERTY = "mcr.compose";
 
@@ -18,6 +18,7 @@ public final class BridgeAbi {
     public static final int SHARED_FRAME_STATE = 16;
     public static final int SHARED_FRAME_BELL = 17;
     public static final int SHARED_INPUT_STATE = 18;
+    public static final int SHARED_SECTIONS = 19;
 
     public static final int MSG_FRAME = 1;
     public static final int MSG_SHUTDOWN = 2;
@@ -77,9 +78,14 @@ public final class BridgeAbi {
     public static final int FRAME_PROJ = 128;
     public static final int FRAME_RENDER_DISTANCE = 192;
     public static final int FRAME_ENTITY_SCALE = 196;
-    public static final int FRAME_SIZE = 200;
+    public static final int FRAME_RENDER_CAMERA = 200;
+    public static final int FRAME_RENDER_YAW = 224;
+    public static final int FRAME_RENDER_PITCH = 228;
+    public static final int FRAME_SIZE = 232;
     public static final int FRAME_LOCKSTEP = 1;
     public static final int FRAME_DETACHED = 2;
+    public static final int FRAME_CAMERA_HANDOFF = 4;
+    public static final int FRAME_SECTIONS = 8;
 
     public static final int FSTATE_DONE = 0;
     public static final int FSTATE_TICKS = 8;
@@ -88,9 +94,22 @@ public final class BridgeAbi {
     public static final int FSTATE_WIDTH = 28;
     public static final int FSTATE_HEIGHT = 32;
     public static final int FSTATE_FOV_SCALE = 36;
-    public static final int FSTATE_SIZE = 64;
+    public static final int FSTATE_CAMERA = 40;
+    public static final int FSTATE_CAMERA_POS = 48;
+    public static final int FSTATE_CAMERA_YAW = 72;
+    public static final int FSTATE_CAMERA_PITCH = 76;
+    public static final int FSTATE_SIZE = 128;
     public static final int FSTATE_READY = 1;
     public static final int FSTATE_LOADED = 2;
+    public static final int FSTATE_WEATHER = 4;
+    public static final int CAMERA_MOD = 1;
+    public static final int CAMERA_DETACHED = 2;
+    public static final int CAMERA_INPUT = 4;
+    public static final int SEC_SEQ = 0;
+    public static final int SEC_ORIGIN = 8;
+    public static final int SEC_DIMS = 20;
+    public static final int SEC_BITS = 64;
+    public static final int SEC_MAX_BITS = 8388608;
 
     public static final int SLOT_IMMEDIATE = 0;
     public static final int SLOT_GUI = 1;

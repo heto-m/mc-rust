@@ -29,7 +29,7 @@ pub use environment::{
 };
 pub use external::{ExternalCtx, ExternalSubmitter};
 pub use glow::GlowOutline;
-pub use graph::SectionVisibility;
+pub use graph::{ReachedSections, SectionVisibility};
 pub use mesh::SectionMesh;
 pub use mesh::{TINT_KINDS, TINT_TABLE_WORDS, TintTable};
 pub use overlay::{Overlay, OverlayCtx};

@@ -30,8 +30,8 @@ refuses to load it and the Mods screen gives the reason.
 | Chat Heads | 1.3.2 | works | player heads next to chat lines |
 | Durability Tooltip | 1.2.0a | works | durability line on tool tooltips |
 | Continuity | 3.0.1 | partial | policy: terrain is rendered by mcr, so connected textures have no visible effect |
-| Particle Rain | 4.0.2 | partial | policy: weather is drawn by mcr; its particles add to mcr's rain instead of replacing it |
-| Freecam | 1.5.0-alpha.2 | broken | policy unsupported (off by default): the camera is owned by mcr, so toggling does nothing and the player still moves |
+| Particle Rain | 4.0.2 | works | its rain and splash particles replace mcr's rain columns (`mod-camera-weather`) |
+| Freecam | 1.5.0-alpha.2 | works | F4 hands the camera to Freecam: mcr renders from it, the movement keys fly it and the player stands still (`mod-camera-weather`) |
 | Lithium | 0.26.2 | works | boots and joins; was silently excluded before mcr counted the loader's MixinExtras as provided |
 | FerriteCore | 9.0.0 | works | boots and joins (memory savings are Java-side) |
 | EntityCulling | 1.11.3 | works | culls Java's entity draws; config written once Java ran from its game dir |
@@ -49,3 +49,7 @@ Not released for Fabric 26.3 when swept: EMI, WTHIT, ModernFix.
 All 28 mods and 10 libraries together (107 mod ids) boot, join and keep Java's GUI and entities composed after
 the REI/JEI stall. Vanilla `minecraft:*` particles from packets and vanilla ticks are mcr's; particles of mod types, and vanilla ones
 that mod code spawns, are drawn by Java.
+
+Freecam and Particle Rain were re-tested alone with Fabric API (and Cloth Config) at bridge ABI 10 after
+`mod-camera-weather`: Freecam's F4 camera flew 20 blocks while the player stayed put and toggled back, and
+Particle Rain's particles showed in a thunderless rain with mcr's columns hidden. Both left the mod policy.

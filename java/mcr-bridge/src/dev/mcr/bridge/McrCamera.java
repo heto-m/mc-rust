@@ -24,19 +24,44 @@ public final class McrCamera {
     private final float[] scratch = new float[16];
 
     void read(MemorySegment p, boolean detached) {
-        x = p.get(DOUBLE, BridgeAbi.FRAME_CAMERA);
-        y = p.get(DOUBLE, BridgeAbi.FRAME_CAMERA + 8L);
-        z = p.get(DOUBLE, BridgeAbi.FRAME_CAMERA + 16L);
-        float yaw = p.get(FLOAT, BridgeAbi.FRAME_YAW);
-        float pitch = p.get(FLOAT, BridgeAbi.FRAME_PITCH);
-        boolean ok = coord(x) && coord(y) && coord(z) && Float.isFinite(yaw) && Float.isFinite(pitch);
+        boolean ok = pose(p, BridgeAbi.FRAME_CAMERA, BridgeAbi.FRAME_YAW, BridgeAbi.FRAME_PITCH);
         ok &= matrix(p, BridgeAbi.FRAME_VIEW, view);
         ok &= matrix(p, BridgeAbi.FRAME_PROJ, projection);
-        // mcr: yaw 0 looks toward -Z and turns left, pitch up is positive; vanilla's are the reverse.
-        yRot = 180.0F - (float) Math.toDegrees(yaw);
-        xRot = Math.clamp(-(float) Math.toDegrees(pitch), -90.0F, 90.0F);
         this.detached = detached;
         valid = ok;
+    }
+
+    /** The camera mcr renders from instead of the player's, with the frame's matrices left out. */
+    void readRender(MemorySegment p, boolean handoff) {
+        valid = handoff && pose(p, BridgeAbi.FRAME_RENDER_CAMERA, BridgeAbi.FRAME_RENDER_YAW, BridgeAbi.FRAME_RENDER_PITCH);
+    }
+
+    private boolean pose(MemorySegment p, int camera, int yawAt, int pitchAt) {
+        x = p.get(DOUBLE, camera);
+        y = p.get(DOUBLE, camera + 8L);
+        z = p.get(DOUBLE, camera + 16L);
+        float yaw = p.get(FLOAT, yawAt);
+        float pitch = p.get(FLOAT, pitchAt);
+        yRot = toYRot(yaw);
+        xRot = Math.clamp(toXRot(pitch), -90.0F, 90.0F);
+        return coord(x) && coord(y) && coord(z) && Float.isFinite(yaw) && Float.isFinite(pitch);
+    }
+
+    // mcr: yaw 0 looks toward -Z and turns left, pitch up is positive; vanilla's are the reverse.
+    static float toYRot(float yaw) {
+        return 180.0F - (float) Math.toDegrees(yaw);
+    }
+
+    static float toXRot(float pitch) {
+        return -(float) Math.toDegrees(pitch);
+    }
+
+    static float toYaw(float yRot) {
+        return (float) Math.toRadians(180.0F - yRot);
+    }
+
+    static float toPitch(float xRot) {
+        return (float) Math.toRadians(-xRot);
     }
 
     private static boolean coord(double v) {

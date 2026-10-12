@@ -28,6 +28,8 @@ pub struct Rig {
     clock: TickClock,
     last: Instant,
     feed_ticks: bool,
+    /// Sleep each frame up to 60 Hz; off renders as fast as the GPU finishes.
+    pub paced: bool,
 }
 
 impl Rig {
@@ -77,6 +79,7 @@ impl Rig {
             clock: TickClock::default(),
             last: Instant::now(),
             feed_ticks: true,
+            paced: true,
         })
     }
 
@@ -115,8 +118,14 @@ impl Rig {
                 _ => {}
             }
         }
+        if !self.paced {
+            let _ = self.renderer.device().poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_secs(5)),
+            });
+        }
         let spent = now.elapsed();
-        if spent < FRAME {
+        if self.paced && spent < FRAME {
             std::thread::sleep(FRAME - spent);
         }
         if self.feed_ticks { ticks } else { 0 }

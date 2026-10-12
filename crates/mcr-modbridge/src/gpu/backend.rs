@@ -306,6 +306,7 @@ pub struct State {
     clear_shader: Option<wgpu::ShaderModule>,
     /// Copy of a main target a pass samples while rendering into it.
     pub feedback: Option<wgpu::Texture>,
+    flipper: Option<super::flip::Flipper>,
 }
 
 #[derive(Debug)]
@@ -345,6 +346,7 @@ pub fn backend() -> OpResult<&'static Backend> {
             clears: FxHashMap::default(),
             clear_shader: None,
             feedback: None,
+            flipper: None,
         }),
         pipelines: Mutex::new(Slab::new(Kind::Pipeline)),
         stats: Stats::default(),
@@ -1019,6 +1021,37 @@ impl State {
                 copy(cmd, start + u64::from(r) * row, None, y + r, 1);
             }
         }
+        Ok(())
+    }
+
+    /// Before Java copies out of its main color while composing, the scene is flipped into it: Java
+    /// draws into the scene and never into its own main color then.
+    pub fn refresh_main(
+        &mut self,
+        gpu: &Gpu,
+        slots: &super::slots::Slots,
+        encoder: Handle,
+        src: Handle,
+    ) -> OpResult<()> {
+        let t = self.texture(src)?;
+        if !t.virtual_main || !t.format.has_color_aspect() {
+            return Ok(());
+        }
+        let main = t.texture.clone();
+        let Some(scene) = slots.scene_for_main((main.width(), main.height())) else {
+            return Ok(());
+        };
+        if !super::flip::Flipper::fits(&scene, &main) {
+            return Ok(());
+        }
+        let enc = self
+            .encoders
+            .get_mut(encoder)
+            .ok_or(OpError::Handle(Kind::Encoder, encoder))?;
+        let flipper = self
+            .flipper
+            .get_or_insert_with(|| super::flip::Flipper::new(&gpu.device));
+        flipper.record(&gpu.device, enc.cmd(&gpu.device), &scene, &main);
         Ok(())
     }
 

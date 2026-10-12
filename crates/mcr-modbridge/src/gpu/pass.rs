@@ -393,7 +393,9 @@ pub fn encode_pass(
         depth: None,
         unfilterable: 0,
         flip: false,
+        top_down: false,
     };
+    let mut scene_color = false;
     let mut size: Option<(u32, u32)> = None;
     let mut virtual_targets: Vec<Handle> = Vec::new();
     let mut same_size = |w: u32, h: u32| -> OpResult<()> {
@@ -422,6 +424,7 @@ pub fn encode_pass(
         key.colors[i] = Some(format);
         if virtual_main {
             virtual_targets.extend(views.get(c.view).map(|v| v.texture));
+            scene_color |= world.is_some();
         }
         let clear = c.clear.filter(|_| !virtual_main && resumed.is_none());
         colors.push(Some((view, clear)));
@@ -492,13 +495,9 @@ pub fn encode_pass(
         }
     });
 
-    let clamp_rect = |x: i64, y: i64, w: i64, h: i64| -> (u32, u32, u32, u32) {
-        let x0 = x.clamp(0, i64::from(width));
-        let y0 = y.clamp(0, i64::from(height));
-        let x1 = (x + w.max(0)).clamp(x0, i64::from(width));
-        let y1 = (y + h.max(0)).clamp(y0, i64::from(height));
-        (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
-    };
+    let top_down = scene_color && world.as_ref().is_some_and(|w| w.gui);
+    let clamp_rect =
+        |x: i64, y: i64, w: i64, h: i64| target_rect([x, y, w, h], (width, height), top_down);
     let [ax, ay, aw, ah] = desc.area;
     let area = clamp_rect(i64::from(ax), i64::from(ay), i64::from(aw), i64::from(ah));
 
@@ -562,7 +561,7 @@ pub fn encode_pass(
     let mut bound_index = Bound::None;
     let mut bound_group: Option<(BindKey, [u32; MAX_UNIFORMS + 1], usize)> = None;
     let mut debug_depth = 0u32;
-    let flip_world = world.is_some();
+    let flip_world = world.as_ref().is_some_and(|w| !w.gui);
     if let Some(r) = resumed {
         pipeline = backend.pipeline(r.pipeline);
         pipeline_handle = if pipeline.is_some() { r.pipeline } else { 0 };
@@ -675,6 +674,7 @@ pub fn encode_pass(
                     let mut k = key.clone();
                     k.unfilterable = unfilterable;
                     k.flip = flip_world && p.uses_projection;
+                    k.top_down = top_down && p.uses_projection;
                     let (rp, layout) = p.variant(&gpu.device, &k)?;
                     pass.set_pipeline(&rp);
                     current = Some(Current {
@@ -1141,6 +1141,26 @@ pub fn encode_pass(
         .encode_ns
         .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     result.map(|()| report)
+}
+
+/// A Java scissor or render area clamped to the target; Java counts rows from the bottom, so a
+/// top-down target gets the rectangle mirrored.
+pub fn target_rect(
+    [x, y, w, h]: [i64; 4],
+    (width, height): (u32, u32),
+    top_down: bool,
+) -> (u32, u32, u32, u32) {
+    let (w, h) = (w.max(0), h.max(0));
+    let y = if top_down {
+        i64::from(height) - y - h
+    } else {
+        y
+    };
+    let x0 = x.clamp(0, i64::from(width));
+    let y0 = y.clamp(0, i64::from(height));
+    let x1 = (x + w).clamp(x0, i64::from(width));
+    let y1 = (y + h).clamp(y0, i64::from(height));
+    (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
 }
 
 struct Sources<'a> {

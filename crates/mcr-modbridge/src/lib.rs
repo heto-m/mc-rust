@@ -11,6 +11,7 @@ pub mod manager;
 pub mod net;
 mod pacer;
 pub mod proxy;
+mod sections;
 pub mod sound;
 pub mod sync;
 

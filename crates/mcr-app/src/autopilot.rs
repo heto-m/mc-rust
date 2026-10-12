@@ -294,8 +294,12 @@ impl Autopilot {
                         let p = play.feet();
                         let state = &play.world.client.state;
                         let [block, sky] = crate::entities::light_at(&state.chunks, p, 1.62);
+                        let cam = play.camera(play.partial()).position;
+                        let java_cam = play
+                            .java_camera
+                            .map_or("none", |c| if c.input { "captured" } else { "moved" });
                         println!(
-                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?} mod input {:?} fov_scale {:.2}",
+                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?} mod input {:?} fov_scale {:.2} camera {:.2} {:.2} {:.2} java_camera {java_cam} java_weather {}",
                             play.ticks,
                             p[0],
                             p[1],
@@ -316,6 +320,10 @@ impl Autopilot {
                             (state.inventory.cursor.item, state.inventory.cursor.count),
                             sh.mod_authority(),
                             play.java_fov_scale,
+                            cam.x,
+                            cam.y,
+                            cam.z,
+                            play.java_weather,
                         );
                     }
                 }

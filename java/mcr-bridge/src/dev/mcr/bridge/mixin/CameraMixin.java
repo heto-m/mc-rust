@@ -2,6 +2,7 @@ package dev.mcr.bridge.mixin;
 
 import com.mojang.blaze3d.systems.RenderSystem;
 import dev.mcr.bridge.McrCamera;
+import dev.mcr.bridge.McrCameraHandoff;
 import dev.mcr.bridge.McrFrame;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
@@ -9,7 +10,10 @@ import net.minecraft.client.CameraType;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -20,7 +24,29 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /** mcr owns the camera: Java's eye, rotation, perspective and culling projection are Rust's. */
 @Mixin(Camera.class)
-abstract class CameraMixin {
+abstract class CameraMixin implements McrCameraHandoff.Placement {
+    @Shadow
+    private Entity entity;
+
+    @Shadow
+    private Vec3 position;
+
+    @Shadow
+    @org.spongepowered.asm.mixin.Final
+    private Matrix4f cachedViewRotMatrix;
+
+    @Shadow
+    public abstract Matrix4f getViewRotationMatrix(Matrix4f dest);
+
+    @Shadow
+    private Matrix4f createProjectionMatrixForCulling() {
+        throw new AssertionError();
+    }
+
+    @Shadow
+    private void prepareCullFrustum(Matrix4fc modelViewMatrix, Matrix4f projectionMatrixForCulling, Vec3 cameraPos) {
+        throw new AssertionError();
+    }
     @Shadow
     private boolean detached;
 
@@ -53,7 +79,7 @@ abstract class CameraMixin {
     @Inject(method = "alignWithEntity", at = @At("HEAD"), cancellable = true)
     private void mcr$rustCamera(float partialTicks, CallbackInfo ci) {
         McrCamera camera = McrFrame.camera();
-        if (camera == null) {
+        if (camera == null || !McrCameraHandoff.followsRust(entity)) {
             return;
         }
         setRotation(camera.yRot(), camera.xRot());
@@ -64,6 +90,13 @@ abstract class CameraMixin {
             options.setCameraType(detached ? CameraType.THIRD_PERSON_BACK : CameraType.FIRST_PERSON);
         }
         ci.cancel();
+    }
+
+    @Override
+    public void mcr$place(double x, double y, double z, float yRot, float xRot) {
+        setRotation(yRot, xRot);
+        setPosition(x, y, z);
+        prepareCullFrustum(getViewRotationMatrix(cachedViewRotMatrix), createProjectionMatrixForCulling(), position);
     }
 
     @Inject(method = "createProjectionMatrixForCulling", at = @At("HEAD"), cancellable = true)

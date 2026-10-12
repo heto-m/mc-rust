@@ -137,6 +137,8 @@ pub(crate) struct Effects {
     weather: weather::Columns,
     decals: Vec<DestroyDecal>,
     border: Option<(WorldBorderVisual, f64)>,
+    /// Something else draws the rain and snow (a mod replacing vanilla's weather).
+    weather_hidden: bool,
     plan: Plan,
     time: (u64, f32),
 }
@@ -464,6 +466,7 @@ impl Effects {
             },
             decals: Vec::new(),
             border: None,
+            weather_hidden: false,
             plan: Plan::default(),
             time: (0, 0.0),
         }
@@ -598,6 +601,10 @@ impl Effects {
         self.border = border.map(|b| (b, distance));
     }
 
+    pub(crate) fn set_weather_hidden(&mut self, hidden: bool) {
+        self.weather_hidden = hidden;
+    }
+
     pub(crate) fn update_weather(
         &mut self,
         env: &Environment,
@@ -721,7 +728,7 @@ impl Effects {
             }
         }
 
-        if rain_level > 0.0 {
+        if rain_level > 0.0 && !self.weather_hidden {
             self.plan.rain = self.weather.rain_quads;
             self.plan.snow = self.weather.snow_quads;
             uniforms[slot::RAIN] = FxUniform::new(Mat4::IDENTITY, [1.0; 4]);

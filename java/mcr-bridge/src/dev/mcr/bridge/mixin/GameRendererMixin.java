@@ -3,9 +3,11 @@ package dev.mcr.bridge.mixin;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import dev.mcr.bridge.BridgeAbi;
 import dev.mcr.bridge.McrCamera;
+import dev.mcr.bridge.McrCameraHandoff;
 import dev.mcr.bridge.McrFrame;
 import dev.mcr.bridge.McrParticles;
 import dev.mcr.bridge.gpu.FrameSlots;
+import net.minecraft.client.Camera;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.Projection;
 import net.minecraft.client.renderer.ProjectionMatrixBuffer;
@@ -27,6 +29,15 @@ abstract class GameRendererMixin {
     @Shadow
     @Final
     private GameRenderState gameRenderState;
+
+    @Shadow
+    @Final
+    private Camera mainCamera;
+
+    @Inject(method = "extractCamera", at = @At("HEAD"))
+    private void mcr$cameraHandoff(CallbackInfo ci) {
+        McrCameraHandoff.extract(mainCamera);
+    }
 
     @ModifyArg(
             method = "renderLevel",

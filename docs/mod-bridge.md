@@ -65,8 +65,8 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
 | Window | SDL3 `offscreen` video driver (hint set in `RenderSystem.initBackendSystem`), so `Window` works on a fake window. Size and scale are pushed per frame | Rust |
 | Input | `ModInput` events ride the control ring as `MSG_INPUT` ahead of each `MSG_FRAME`; `McrInput.deliver` calls `KeyboardHandler.keyPress/textInput/textEditing` and `MouseHandler.onMove/onButton/onScroll/onDrop` with SDL3 values. `InputConstants.isKeyDown/grabMouse/releaseMouse`, `Window.isFocused/selectCursor`, `ClipboardManager`, `TextInputManager`, `SDL_GetModState` sites and `turnPlayer` are redirected | Rust |
 | Network | `Connection.connect` is redirected to a `BridgeChannel` (netty `EmbeddedChannel` confined to the render thread by its own event loop) carrying vanilla codecs, so `ConnectScreen` runs unchanged while Rust connects. Frames travel in two net rings (32 MiB in, 4 MiB out) tagged with phase and session; outbound packets are filtered by (phase, packet class), chat goes to Rust as text | Rust owns socket and state |
-| Player | Rust's local player and camera overwrite `LocalPlayer`/`Camera` every tick and frame. Vanilla gameplay keybinds are suppressed in Java | Rust |
-| World | Java keeps its own `ClientLevel`/`ClientChunkCache`. Sections compile meshless (`RenderSection.compileSync/compileAsync` → `BridgeSectionMesh`, block entities only); terrain uploads and draw groups, sky, weather and world border are off. `Camera.alignWithEntity` takes Rust's eye and rotation; the level projection is Rust's | duplicated, see below |
+| Player | Rust's local player and camera overwrite `LocalPlayer`/`Camera` every tick and frame, unless a mod moved the camera (see camera handoff). Vanilla gameplay keybinds are suppressed in Java | Rust |
+| World | Java keeps its own `ClientLevel`/`ClientChunkCache`. Sections compile meshless (`RenderSection.compileSync/compileAsync` → `BridgeSectionMesh`, block entities only); terrain uploads and draw groups, sky, weather and world border are off (weather extraction only proves no mod replaced it). `Camera.alignWithEntity` takes Rust's eye and rotation; the level projection is Rust's | duplicated, see below |
 | Sound | `SoundEngine` logic kept. `Library.init`/`acquireChannel` and `Channel`/`Listener` methods forward to `mcr-audio` | Rust plays |
 
 ## Frame composition
@@ -88,9 +88,12 @@ mcr's (`compose.rs`, `frame.rs`).
    scene color and reverse-Z depth, and Java's projection is mcr's with Y flipped, so world draws land top-down on
    mcr's pixels and depth-test against its terrain; pipelines that read `Projection` get a counter-clockwise
    variant there. `POST_WORLD` gets a private depth, so the hand's depth clear leaves the scene depth alone.
-4. **Compose.** At `after_world` it submits `WORLD_AFTER` and `POST_WORLD`, copies the scene into Java's real
-   `MainTarget` color, flipped because renderpearl targets are bottom-up, submits `GUI` so the menu blur samples
-   the world, and copies the result back, flipped. If the wait at `after_opaque` timed out, it does not wait again.
+4. **Compose.** At `after_world` it submits `WORLD_AFTER` and `POST_WORLD`; at `before_ui`, after mcr's post
+   effects, it submits `GUI` straight into the scene. Projected GUI pipelines get a vertex variant without naga's Y
+   flip and scissors and clears are mirrored, so the GUI lands top-down; the menu blur samples the scene through
+   fullscreen passes, which need no flip. Before Java reads its main target (copies, screenshots), the scene is
+   flipped into Java's real `MainTarget` color once, in renderpearl's bottom-up rows; screenshots of the main target
+   wait until the GUI slot ran. If the wait at `after_opaque` timed out, it does not wait again.
 5. **Native overlays.** These draw after, then the frame is presented.
 
 Clears of the main target's color, and of the scene depth in world slots, are dropped. A Java frame that misses
@@ -104,6 +107,28 @@ Java's camera FOV over vanilla's (zoom mods, FOV effects mods add) reaches Rust 
 carries mcr's render distance (the one its fog uses) and entity distance scaling: Java's
 `Options.getEffectiveRenderDistance` returns it while in lockstep, so Java's fog, entity view scale and culling
 match mcr's terrain.
+
+**Camera handoff.** Mods that move Java's camera (Freecam, camera tweaks, `Camera.update` mixins) keep working:
+`alignWithEntity` takes Rust's camera only while the camera entity is the player or the server's spectate target.
+At `GameRenderer.extractCamera` Java compares its final camera with Rust's and, when a mod changed it, reports it
+in the frame state (`FSTATE_CAMERA*`, with whether it shows the player and whether the mod took the player's
+input). The next frame mcr renders terrain from it (bounded to the loaded world, non-finite values ignored), sends
+it back as the render camera with `FRAME_CAMERA_HANDOFF`, and Java places its own camera there, so entities and
+terrain share one camera with one frame of latency. When the mod took the player's input (`player.input` is no
+longer a `KeyboardInput`), mcr's player stops moving and turning, Java's movement keys follow the keyboard and its
+`turnPlayer` runs, so the mod's camera entity flies. Without a mod the reported flags are 0 and nothing changes.
+
+**Weather replacement.** Vanilla's `WeatherEffectRenderer.extractRenderState` runs up to its first statement and
+returns. If the level reached its weather step but that statement never ran (a mod cancelled, redirected or
+overwrote it, as Particle Rain does), Java sets `FSTATE_WEATHER` and mcr hides its rain and snow columns, keeping
+the rain's sky and fog darkening.
+
+**Section visibility.** Java's own visibility graph sees through every bridge section (they have no geometry), so
+mcr shares the sections its graph reached from this frame's camera (`SHARED_SECTIONS`: a box in section
+coordinates and one bit per section, at most 2^23 bits, republished when the search reruns; `FRAME_SECTIONS` says
+it is current). Java skips the block entities of unreached sections and entities whose bounds touch only unreached
+sections (leashed entities, vehicles, the player and the camera entity are always kept). Anything outside the box
+counts as reached.
 
 In mod mode Java draws entities, block entities, nametags, the first-person hand, glowing outlines, post effects,
 particles of non-`minecraft` types, GUI and HUD. Rust draws terrain, sky, clouds, weather, world border, water,

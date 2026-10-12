@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use rustc_hash::FxHashMap;
 use wgpu::naga;
@@ -76,6 +76,8 @@ pub struct VariantKey {
     pub unfilterable: u64,
     /// Drawn with mcr's top-down projection (world slots): front faces are CCW again.
     pub flip: bool,
+    /// Vertex stage without naga's Y flip, so projected geometry lands top-down (GUI into the scene).
+    pub top_down: bool,
 }
 
 #[derive(Debug)]
@@ -103,6 +105,9 @@ pub struct Pipeline {
     pub fan: bool,
     /// Reads vanilla's `Projection` block, so a flipped projection flips its winding.
     pub uses_projection: bool,
+    /// Fixed-up vertex SPIR-V of a projected pipeline, for its top-down variant.
+    vertex_words: Option<Vec<u32>>,
+    top_down_vertex: OnceLock<Result<wgpu::ShaderModule, String>>,
     layouts: Mutex<FxHashMap<u64, Arc<Layout>>>,
     variants: Mutex<FxHashMap<VariantKey, wgpu::RenderPipeline>>,
 }
@@ -235,7 +240,11 @@ impl Pipeline {
         let (slots, push_constants, block_sizes) = reflect(&translated, &info.uniform_kinds())?;
         let mut vertex = None;
         let mut fragment = None;
+        let mut vertex_words = None;
         for t in translated {
+            if t.stage == Stage::Vertex {
+                vertex_words = Some(t.words);
+            }
             let module = checked(device, || {
                 device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(&info.name),
@@ -320,6 +329,8 @@ impl Pipeline {
             .zip(&slots)
             .any(|(u, slot)| u.name == "Projection" && *slot != Slot::Unused);
         Ok(Self {
+            vertex_words: vertex_words.filter(|_| uses_projection),
+            top_down_vertex: OnceLock::new(),
             name: info.name.clone(),
             vertex,
             fragment,
@@ -349,7 +360,28 @@ impl Pipeline {
             depth,
             unfilterable: 0,
             flip: false,
+            top_down: false,
         }
+    }
+
+    /// The vertex module of the top-down variant, translated on first use.
+    fn top_down_vertex(&self, device: &wgpu::Device) -> Result<&wgpu::ShaderModule, PipelineError> {
+        self.top_down_vertex
+            .get_or_init(|| {
+                let words = self
+                    .vertex_words
+                    .clone()
+                    .ok_or_else(|| "no projected vertex stage".to_owned())?;
+                let t = shader::parse(Stage::Vertex, words, false).map_err(|e| e.to_string())?;
+                checked(device, || {
+                    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some(&self.name),
+                        source: wgpu::ShaderSource::Naga(Cow::Owned(t.module)),
+                    })
+                })
+            })
+            .as_ref()
+            .map_err(|e| PipelineError::Wgpu(e.clone()))
     }
 
     pub fn vertex_layouts(&self) -> &[VertexBuffer] {
@@ -506,18 +538,23 @@ impl Pipeline {
                 bias,
             }
         });
+        let vertex = if key.top_down {
+            self.top_down_vertex(device)?
+        } else {
+            &self.vertex
+        };
         let pipeline = checked(device, || {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(&self.name),
                 layout: Some(&layout.pipeline),
                 vertex: wgpu::VertexState {
-                    module: &self.vertex,
+                    module: vertex,
                     entry_point: Some("main"),
                     compilation_options: Default::default(),
                     buffers: &buffers,
                 },
                 primitive: wgpu::PrimitiveState {
-                    front_face: if key.flip {
+                    front_face: if key.flip || key.top_down {
                         wgpu::FrontFace::Ccw
                     } else {
                         self.primitive.front_face

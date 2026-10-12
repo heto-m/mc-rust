@@ -1,6 +1,7 @@
 use glam::Mat4;
 
 use crate::camera::Camera;
+use crate::graph::ReachedSections;
 
 /// The frame state an [`ExternalSubmitter`] sees at each hook point.
 #[derive(Debug)]
@@ -17,6 +18,8 @@ pub struct ExternalCtx<'a> {
     pub view: Mat4,
     /// Reverse-Z infinite projection.
     pub proj: Mat4,
+    /// The sections the visibility graph reached from `camera` this frame, when it ran.
+    pub sections: Option<ReachedSections<'a>>,
 }
 
 /// Work from outside the renderer that must land between its passes on the same queue.

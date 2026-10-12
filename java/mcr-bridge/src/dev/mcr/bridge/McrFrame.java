@@ -37,6 +37,7 @@ public final class McrFrame {
     private static long frameStart;
     private static boolean announced;
     private static final McrCamera camera = new McrCamera();
+    private static final McrCamera renderCamera = new McrCamera();
 
     public static long frameIndex() {
         return frameIndex;
@@ -66,6 +67,11 @@ public final class McrFrame {
     /** mcr's camera for this frame, or null outside the lockstep or when Rust's values are unusable. */
     public static @org.jspecify.annotations.Nullable McrCamera camera() {
         return lockstep() && camera.valid() ? camera : null;
+    }
+
+    /** The mod camera mcr renders this frame instead of {@link #camera()}, or null when it renders that. */
+    public static @org.jspecify.annotations.Nullable McrCamera renderCamera() {
+        return camera() != null && renderCamera.valid() ? renderCamera : null;
     }
 
     /** Ticks this frame runs; anything over vanilla's cap carries to the next frames instead of being lost. */
@@ -156,6 +162,8 @@ public final class McrFrame {
         partialTick = Float.isFinite(partial) ? Math.clamp(partial, 0.0F, 1.0F) : 0.0F;
         flags = p.get(INT, BridgeAbi.FRAME_FLAGS);
         camera.read(p, (flags & BridgeAbi.FRAME_DETACHED) != 0);
+        renderCamera.readRender(p, (flags & BridgeAbi.FRAME_CAMERA_HANDOFF) != 0);
+        McrSections.frame(Bridge.get().sections, (flags & BridgeAbi.FRAME_SECTIONS) != 0);
         McrSync.readView(p);
     }
 
@@ -182,9 +190,11 @@ public final class McrFrame {
         if (!lockstep() || frameIndex < 0) {
             return;
         }
+        FrameSlots.runDeferred();
         boolean loaded = minecraft.isGameLoadFinished() && minecraft.gui.overlay() == null;
         McrInput.publish(minecraft);
-        publish(Bridge.get(), minecraft, BridgeAbi.FSTATE_READY | (loaded ? BridgeAbi.FSTATE_LOADED : 0));
+        int weather = McrWeather.takeReplaced() ? BridgeAbi.FSTATE_WEATHER : 0;
+        publish(Bridge.get(), minecraft, BridgeAbi.FSTATE_READY | (loaded ? BridgeAbi.FSTATE_LOADED : 0) | weather);
     }
 
     private static void publish(Bridge bridge, Minecraft minecraft, int stateFlags) {
@@ -196,6 +206,7 @@ public final class McrFrame {
         STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_WIDTH, main == null ? 0 : main.width);
         STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_HEIGHT, main == null ? 0 : main.height);
         STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_FOV_SCALE, Float.floatToRawIntBits(fovScale));
+        McrCameraHandoff.publish(state);
         if (frameIndex >= 0 && lockstep()) {
             STATE_LONG.setRelease(state, (long) BridgeAbi.FSTATE_DONE, frameIndex + 1);
         }

@@ -20,12 +20,15 @@ pub struct Translated {
     pub stage: Stage,
     pub module: naga::Module,
     pub info: naga::valid::ModuleInfo,
+    /// The fixed-up SPIR-V the module came from.
+    pub words: Vec<u32>,
 }
 
-/// The front end's Y-down clip space becomes wgpu's Y-up one: naga flips `gl_Position.y`.
-pub fn spv_options() -> naga::front::spv::Options {
+/// The front end's Y-down clip space becomes wgpu's Y-up one: naga flips `gl_Position.y`. Without
+/// the flip, geometry lands mirrored, which is top-down in a renderpearl target.
+pub fn spv_options(adjust: bool) -> naga::front::spv::Options {
     naga::front::spv::Options {
-        adjust_coordinate_space: true,
+        adjust_coordinate_space: adjust,
         strict_capabilities: false,
         block_ctx_dump_prefix: None,
     }
@@ -38,29 +41,35 @@ pub fn translate(info: &PipelineInfo) -> Result<Vec<Translated>, ShaderError> {
         let stage = shader.stage;
         let words = spv::fixup(&shader.spirv, &kinds)
             .map_err(|source| ShaderError::Fixup { stage, source })?;
-        let module = naga::front::spv::Frontend::new(words.iter().copied(), &spv_options())
-            .parse()
-            .map_err(|e| ShaderError::Parse {
-                stage,
-                message: e.to_string(),
-            })?;
-        let mut validator = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        );
-        let module_info = validator
-            .validate(&module)
-            .map_err(|e| ShaderError::Validate {
-                stage,
-                message: format!("{:?}", e.into_inner()),
-            })?;
-        out.push(Translated {
-            stage,
-            module,
-            info: module_info,
-        });
+        out.push(parse(stage, words, true)?);
     }
     Ok(out)
+}
+
+/// Parses and validates fixed-up SPIR-V, with or without naga's clip-space Y flip.
+pub fn parse(stage: Stage, words: Vec<u32>, adjust: bool) -> Result<Translated, ShaderError> {
+    let module = naga::front::spv::Frontend::new(words.iter().copied(), &spv_options(adjust))
+        .parse()
+        .map_err(|e| ShaderError::Parse {
+            stage,
+            message: e.to_string(),
+        })?;
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    );
+    let module_info = validator
+        .validate(&module)
+        .map_err(|e| ShaderError::Validate {
+            stage,
+            message: format!("{:?}", e.into_inner()),
+        })?;
+    Ok(Translated {
+        stage,
+        module,
+        info: module_info,
+        words,
+    })
 }
 
 #[cfg(test)]

@@ -195,6 +195,30 @@ fn cloud_and_weather_screenshots() {
 }
 
 #[test]
+fn hidden_weather_keeps_the_rainy_sky() {
+    let Some(mut r) = renderer() else { return };
+    let mut rain = scene("rain_columns", Environment::overworld(6000, 1.0, 0.0));
+    rain.weather = Some(Precipitation::Rain);
+    rain.pitch = 0.0;
+    rain.pos.y = 60.0;
+    let shown = shoot(&mut r, &rain);
+    r.set_weather_hidden(true);
+    rain.name = "rain_hidden";
+    let hidden = shoot(&mut r, &rain);
+    let Some(mut bare) = renderer() else { return };
+    let mut sky = scene("rain_sky_only", Environment::overworld(6000, 1.0, 0.0));
+    sky.pitch = 0.0;
+    sky.pos.y = 60.0;
+    let sky_only = shoot(&mut bare, &sky);
+    let differs = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x.abs_diff(**y) > 8).count();
+    assert!(differs(&shown, &hidden) > 1000, "the rain columns are gone");
+    assert!(
+        differs(&hidden, &sky_only) < 100,
+        "the rainy sky and fog stay as without columns"
+    );
+}
+
+#[test]
 fn destroy_stage_screenshot() {
     let Some(mut r) = renderer() else { return };
     let mut s = scene("destroy_stages", Environment::overworld(6000, 0.0, 0.0));

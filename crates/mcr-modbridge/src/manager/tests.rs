@@ -328,23 +328,23 @@ fn disabling_a_library_cascades_with_a_clear_reason() {
 #[test]
 fn unsupported_policy_mods_need_explicit_enabling() {
     let dir = temp_dir("unsupported");
-    Jar::fabric("freecam", "1.0").write(&dir, "freecam.jar");
+    Jar::fabric("voicechat", "1.0").write(&dir, "voicechat.jar");
     Jar::fabric("continuity", "1.0").write(&dir, "continuity.jar");
     let manager = Manager::new(&dir, &dir);
     let mut settings = ModSettings::default();
     let report = manager.scan(&settings);
-    assert_eq!(status(&report, "freecam"), &ModStatus::Disabled);
+    assert_eq!(status(&report, "voicechat"), &ModStatus::Disabled);
     assert_eq!(status(&report, "continuity"), &ModStatus::Active);
-    settings.set_enabled("freecam", true);
+    settings.set_enabled("voicechat", true);
     let report = manager.scan(&settings);
-    assert_eq!(status(&report, "freecam"), &ModStatus::Active);
-    let freecam = report
+    assert_eq!(status(&report, "voicechat"), &ModStatus::Active);
+    let voicechat = report
         .entries
         .iter()
-        .find(|e| e.info.id == "freecam")
+        .find(|e| e.info.id == "voicechat")
         .unwrap();
     assert_eq!(
-        freecam.policy.as_ref().unwrap().status,
+        voicechat.policy.as_ref().unwrap().status,
         PolicyStatus::Unsupported
     );
     let _ = std::fs::remove_dir_all(&dir);

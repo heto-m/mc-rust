@@ -4,7 +4,10 @@
   "package": "dev.mcr.testmod.mixin",
   "compatibilityLevel": "JAVA_25",
   "client": [
-    "CameraFovMixin"
+    "CameraFovMixin",
+    "CameraNudgeMixin",
+    "EntityTurnMixin",
+    "WeatherReplaceMixin"
   ],
   "injectors": {
     "defaultRequire": 1

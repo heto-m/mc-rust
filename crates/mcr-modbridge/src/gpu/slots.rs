@@ -181,6 +181,9 @@ pub struct WorldTargets {
     /// Depth is mcr's scene depth: Java's clears of it are dropped.
     pub scene_depth: bool,
     pub size: (u32, u32),
+    /// The GUI slot: projected geometry is drawn top-down and scissors flip, as Java's projection
+    /// is not flipped there.
+    pub gui: bool,
 }
 
 #[derive(Debug, Default)]
@@ -306,15 +309,25 @@ impl Slots {
         });
     }
 
-    /// The scene targets for work tagged `slot`, or `None` outside the world slots.
+    /// The scene targets for work tagged `slot`: the world slots, and the GUI slot while Java's main
+    /// target matches the scene's size; `None` otherwise.
     pub fn world_targets(&self, device: &wgpu::Device, slot: u32) -> Option<WorldTargets> {
-        if !is_world_slot(slot) || !self.is_active() {
+        let gui = slot == SLOT_GUI;
+        if !(is_world_slot(slot) || gui) || !self.is_active() {
             return None;
         }
         let mut scene = self.scene.lock().unwrap_or_else(PoisonError::into_inner);
         let s = scene.as_mut()?;
         let size = (s.color.width(), s.color.height());
-        let depth = if slot == SLOT_POST_WORLD {
+        if gui
+            && self
+                .main_color()
+                .is_none_or(|m| (m.width(), m.height()) != size)
+        {
+            return None;
+        }
+        let private = slot == SLOT_POST_WORLD || gui;
+        let depth = if private {
             let fits = s.private_depth.as_ref().is_some_and(|d| {
                 let t = d.texture();
                 (t.width(), t.height()) == size
@@ -330,9 +343,22 @@ impl Slots {
             color: s.color_view.clone(),
             color_texture: s.color.clone(),
             depth,
-            scene_depth: slot != SLOT_POST_WORLD,
+            scene_depth: !private,
             size,
+            gui,
         })
+    }
+
+    /// mcr's scene color when Java's main target of `size` stands for it this frame.
+    pub fn scene_for_main(&self, size: (u32, u32)) -> Option<wgpu::Texture> {
+        if !self.is_active() {
+            return None;
+        }
+        let scene = self.scene.lock().unwrap_or_else(PoisonError::into_inner);
+        scene
+            .as_ref()
+            .map(|s| s.color.clone())
+            .filter(|c| (c.width(), c.height()) == size)
     }
 
     /// Submits everything queued, in order; `frame` is the one being composed.

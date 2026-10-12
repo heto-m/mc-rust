@@ -888,7 +888,7 @@ pub(crate) mod tests {
     fn parse(words: &[u32]) -> naga::Module {
         let module = naga::front::spv::Frontend::new(
             words.iter().copied(),
-            &super::super::shader::spv_options(),
+            &super::super::shader::spv_options(true),
         )
         .parse()
         .expect("naga parses the rewritten module");

@@ -13,7 +13,6 @@
     {"id": "sodium-extra", "status": "blocked", "reason": "requires Sodium"},
     {"id": "reeses-sodium-options", "status": "blocked", "reason": "requires Sodium"},
     {"id": "voicechat", "status": "unsupported", "reason": "own OpenAL playback and capture"},
-    {"id": "freecam", "status": "unsupported", "reason": "camera is owned by mcr"},
     {"id": "litematica", "status": "unsupported", "reason": "schematic rendering uses vanilla terrain meshing"},
     {"id": "dynamic_fps", "status": "unsupported", "reason": "frame pacing and window are owned by mcr"},
     {"id": "continuity", "status": "partial", "reason": "terrain is rendered by mcr; no visible effect"},
@@ -21,7 +20,6 @@
     {"id": "lambdynlights", "status": "partial", "reason": "terrain lighting is mcr's"},
     {"id": "badoptimizations", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
     {"id": "c2me", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
-    {"id": "bobby", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
-    {"id": "particlerain", "status": "partial", "reason": "weather is drawn by mcr; its particles add to mcr's rain instead of replacing it"}
+    {"id": "bobby", "status": "partial", "reason": "optimises or caches paths mcr replaces"}
   ]
 }

@@ -1,6 +1,7 @@
 package dev.mcr.bridge.world;
 
 import dev.mcr.bridge.Bridge;
+import dev.mcr.bridge.McrSections;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.state.level.LevelRenderState;
 
@@ -25,6 +26,8 @@ public final class WorldStats {
                 + " outline_last_frame=" + outline
                 + " scans=" + BridgeSectionMesh.scans()
                 + " scan_us=" + BridgeSectionMesh.scanNanos() / 1000
+                + " culled_entities=" + McrSections.culledEntities()
+                + " culled_sections=" + McrSections.culledSections()
                 + " particles=" + particles());
     }
 

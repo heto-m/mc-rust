@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use super::backend::{self, Backend, MAX_TRANSFER, OpError, OpResult};
 use super::pass::{self, PassDesc};
-use super::slots::is_world_slot;
 
 pub const D_INFO: i32 = 1;
 pub const D_BUFFER: i32 = 2;
@@ -303,7 +302,9 @@ pub extern "C" fn gpu_encode(encoder: i64, op: i32, args: i64, count: i32) -> i6
                     u32_arg(a, 9)?,
                     u32_arg(a, 10)?,
                     u32_arg(a, 11)?,
-                    is_world_slot(b.slots.current().0) && b.slots.is_active(),
+                    b.slots
+                        .world_targets(&g.device, b.slots.current().0)
+                        .is_some(),
                 )
             })
             .map(|()| 0),
@@ -364,6 +365,7 @@ pub extern "C" fn gpu_encode(encoder: i64, op: i32, args: i64, count: i32) -> i6
             })
             .map(|()| 0),
             E_TEXTURE_TO_BUFFER => scoped(b, || {
+                s.refresh_main(g, &b.slots, e, arg(a, 0)?)?;
                 s.copy_texture_to_buffer(
                     g,
                     e,
@@ -380,6 +382,7 @@ pub extern "C" fn gpu_encode(encoder: i64, op: i32, args: i64, count: i32) -> i6
             })
             .map(|()| 0),
             E_TEXTURE_TO_TEXTURE => scoped(b, || {
+                s.refresh_main(g, &b.slots, e, arg(a, 0)?)?;
                 s.copy_texture_to_texture(
                     g,
                     e,

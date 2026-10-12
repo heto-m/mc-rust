@@ -2,7 +2,8 @@
 //! world against a vanilla 26.3 server (`cargo xtask server`), checked with pixel probes.
 //! `MCR_JVM_TESTS=1 MCR_LIVE_ADDR=localhost:25568 MCR_LIVE_CONSOLE=<file the server's stdin tails>
 //!  cargo test -p mcr-app --test entity_scene -- --nocapture --test-threads=1`
-//! `MCR_ENTITY_LOAD=1` adds the Java frame-time run with 0, 100 and 500 entities.
+//! `MCR_ENTITY_LOAD=1` adds the Java frame-time run with 0, 100 and 500 entities, and
+//! `MCR_SECTION_LOAD=1` the one with 500 entities sealed in stone, with and without mcr's sections.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -125,11 +126,26 @@ fn run_client(
     live: &Live,
     dir: &Path,
     script: &str,
+    on_line: impl FnMut(&str) -> Vec<String>,
+) -> Vec<String> {
+    run_client_with(live, dir, script, &[], on_line)
+}
+
+/// [`run_client`] with Java system properties for the embedded JVM.
+fn run_client_with(
+    live: &Live,
+    dir: &Path,
+    script: &str,
+    java_props: &[&str],
     mut on_line: impl FnMut(&str) -> Vec<String>,
 ) -> Vec<String> {
     let script_path = dir.join("script.txt");
     std::fs::write(&script_path, script).unwrap();
-    let mut child: Child = Command::new(env!("CARGO_BIN_EXE_mcr"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mcr"));
+    if !java_props.is_empty() {
+        cmd.env("JAVA_TOOL_OPTIONS", java_props.join(" "));
+    }
+    let mut child: Child = cmd
         .current_dir(repo())
         .args(["--connect", &live.addr, "--name", NAME, "--size"])
         .arg(format!("{WIDTH}x{HEIGHT}"))
@@ -426,7 +442,14 @@ fn report_fov_scales(lines: &[String]) -> Vec<f32> {
     lines
         .iter()
         .filter(|l| l.starts_with("report:"))
-        .filter_map(|l| l.rsplit("fov_scale ").next()?.trim().parse().ok())
+        .filter_map(|l| {
+            l.split("fov_scale ")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        })
         .collect()
 }
 
@@ -538,4 +561,196 @@ fn java_frame_time_with_entity_counts() {
         }
     }
     live.send(&["kill @e[type=!player]".into()]);
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Report {
+    pos: [f64; 3],
+    camera: [f64; 3],
+    java_camera: String,
+    java_weather: bool,
+}
+
+fn reports(lines: &[String]) -> Vec<Report> {
+    let floats = |l: &str, key: &str| -> Option<[f64; 3]> {
+        let mut it = l.split(key).nth(1)?.split_whitespace();
+        let mut v = [0.0; 3];
+        for c in &mut v {
+            *c = it.next()?.parse().ok()?;
+        }
+        Some(v)
+    };
+    let word = |l: &str, key: &str| -> Option<String> {
+        Some(l.split(key).nth(1)?.split_whitespace().next()?.to_owned())
+    };
+    lines
+        .iter()
+        .filter(|l| l.starts_with("report:"))
+        .filter_map(|l| {
+            Some(Report {
+                pos: floats(l, " pos ")?,
+                camera: floats(l, " camera ")?,
+                java_camera: word(l, " java_camera ")?,
+                java_weather: word(l, " java_weather ")? == "true",
+            })
+        })
+        .collect()
+}
+
+/// The test mod's camera key: a camera lifted three blocks, then a free camera flown with the
+/// movement keys while the player stands still, then mcr's own camera again.
+#[test]
+fn mod_cameras_hand_off_to_mcr() {
+    let Some(live) = live() else {
+        return;
+    };
+    let dir = prepare("camera");
+    live.send(&STAGE.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+    let (base, nudged, flown) = (
+        dir.join("base.png"),
+        dir.join("nudged.png"),
+        dir.join("flown.png"),
+    );
+    let script = format!(
+        "wait 200\nreport\nshot {}\ntap j\nwait 20\nreport\nshot {}\ntap j\nwait 10\nreport\nhold w 8\nwait 5\nreport\nshot {}\ntap j\nwait 20\nreport\n",
+        base.display(),
+        nudged.display(),
+        flown.display()
+    );
+    let lines = run_client(&live, &dir, &script, |line| {
+        if line.starts_with("ready:") {
+            join_commands().into_iter().chain(scene()).collect()
+        } else {
+            Vec::new()
+        }
+    });
+    let r = reports(&lines);
+    assert_eq!(r.len(), 5, "five reports: {r:?}");
+    let eye = |r: &Report| [r.pos[0], r.pos[1] + 1.62, r.pos[2]];
+    let near = |a: [f64; 3], b: [f64; 3], tol: f64| (0..3).all(|i| (a[i] - b[i]).abs() < tol);
+    eprintln!("{r:#?}");
+    assert_eq!(r[0].java_camera, "none");
+    assert!(
+        near(r[0].camera, eye(&r[0]), 0.01),
+        "mcr's own camera: {r:?}"
+    );
+    assert_eq!(r[1].java_camera, "moved", "the lifted camera reached mcr");
+    assert!(
+        near(
+            r[1].camera,
+            [r[1].pos[0], r[1].pos[1] + 1.62 + 3.0, r[1].pos[2]],
+            0.05
+        ),
+        "mcr renders from three blocks up: {r:?}"
+    );
+    assert_eq!(
+        r[2].java_camera, "captured",
+        "the free camera took the input"
+    );
+    assert!(
+        r[3].camera[2] > r[2].camera[2] + 3.0,
+        "the movement keys flew the free camera: {r:?}"
+    );
+    assert!(
+        near(r[3].pos, r[2].pos, 0.01),
+        "the player stood still: {r:?}"
+    );
+    assert_eq!(r[4].java_camera, "none");
+    assert!(
+        near(r[4].camera, eye(&r[4]), 0.01),
+        "mcr's camera is back: {r:?}"
+    );
+
+    let (base, nudged) = (Image::load(&base), Image::load(&nudged));
+    let moved = (0..HEIGHT)
+        .step_by(4)
+        .flat_map(|y| (0..WIDTH).step_by(4).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let (a, b) = (base.rgb(x, y), nudged.rgb(x, y));
+            (0..3).any(|c| a[c].abs_diff(b[c]) > 40)
+        })
+        .count();
+    eprintln!("lifted camera: {moved} sampled pixels changed");
+    assert!(moved > 5000, "the terrain did not follow the lifted camera");
+}
+
+/// A mod that cancels vanilla's weather extraction (like Particle Rain) hides mcr's rain and snow.
+#[test]
+fn replaced_weather_hides_mcrs_rain() {
+    let Some(live) = live() else {
+        return;
+    };
+    let mut stage: Vec<String> = STAGE.iter().map(|s| (*s).to_owned()).collect();
+    stage.push("weather rain 100000".into());
+    for (props, replaced) in [
+        (&["-Dmcr.testmod.replaceWeather=true"][..], true),
+        (&[][..], false),
+    ] {
+        let dir = prepare(&format!("weather-{replaced}"));
+        live.send(&stage);
+        let lines = run_client_with(&live, &dir, "wait 200\nreport\n", props, |line| {
+            if line.starts_with("ready:") {
+                join_commands()
+            } else {
+                Vec::new()
+            }
+        });
+        let r = reports(&lines);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].java_weather, replaced, "{props:?}: {r:?}");
+    }
+    live.send(&["weather clear 100000".into()]);
+}
+
+/// Java frame times with 500 zombies sealed in stone in view, with and without mcr's reached
+/// sections culling Java's entities, for the design notes.
+#[test]
+fn java_frame_time_with_sealed_entities() {
+    let Some(live) = live() else {
+        return;
+    };
+    if std::env::var("MCR_SECTION_LOAD").as_deref() != Ok("1") {
+        eprintln!("skipped: set MCR_SECTION_LOAD=1");
+        return;
+    }
+    let mut stage: Vec<String> = STAGE.iter().map(|s| (*s).to_owned()).collect();
+    // The pocket's sections need a shell of solid sections, or the graph still enters them.
+    stage.push("forceload add -32 32 31 79".into());
+    for z in (32..80).step_by(10) {
+        stage.push(format!("fill -32 128 {z} 31 175 {} stone", (z + 9).min(79)));
+    }
+    stage.push("fill -12 152 52 11 156 59 air".into());
+    for i in 0..500 {
+        let (x, z) = ((i % 25) as f64 * 0.9 - 11.5, 52.5 + (i / 25) as f64 * 0.35);
+        stage.push(format!(
+            "summon zombie {x:.1} 152 {z:.2} {{NoAI:1b,Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f],{HELMET}}}"
+        ));
+    }
+    live.send(&stage);
+    for (props, label) in [
+        (&["-Dmcr.sections=false"][..], "java culling"),
+        (&[][..], "mcr sections"),
+    ] {
+        let dir = prepare(&format!("sealed-{}", props.len()));
+        let lines = run_client_with(&live, &dir, "wait 100\nwait 600\n", props, |line| {
+            if line.starts_with("ready:") {
+                join_commands()
+            } else {
+                Vec::new()
+            }
+        });
+        for line in lines
+            .iter()
+            .filter(|l| l.contains("composed") || l.contains("world_render"))
+            .rev()
+            .take(3)
+        {
+            println!("{label}: {line}");
+        }
+    }
+    let mut cleanup = vec!["kill @e[type=!player]".to_owned()];
+    for z in (32..80).step_by(10) {
+        cleanup.push(format!("fill -32 128 {z} 31 175 {} air", (z + 9).min(79)));
+    }
+    live.send(&cleanup);
 }

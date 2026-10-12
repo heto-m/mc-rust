@@ -1,19 +1,21 @@
 //! Puts Java's frame into mcr's: the render thread posts one frame to Java, encodes its opaque
 //! terrain, waits for Java's frame, then submits Java's buffers between its own passes.
 //!
-//! Java's world slots draw straight into mcr's scene with mcr's own projection. Java's GUI renders
-//! bottom-up (GL row order) into its own main target, so composition copies mcr's scene into that
-//! target flipped, submits Java's GUI on top, and copies the result back flipped.
+//! Java's world slots draw straight into mcr's scene with mcr's own projection. Java's GUI slot draws
+//! into the scene too, top-down through vertex variants without naga's Y flip, so nothing is copied.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use mcr_jvm::PushError;
-use mcr_render::{ExternalCtx, ExternalSubmitter};
+use mcr_render::{Camera, ExternalCtx, ExternalSubmitter};
 
-use crate::abi::{self, FRAME_DETACHED, FRAME_LOCKSTEP, FrameBegin, MSG_FRAME, Shared};
+use crate::abi::{
+    self, FRAME_CAMERA_HANDOFF, FRAME_DETACHED, FRAME_LOCKSTEP, FRAME_SECTIONS, FrameBegin,
+    MSG_FRAME, Shared,
+};
 use crate::events::BridgeEvent;
-use crate::frame::{JavaFrame, LinkState, Lockstep, TickBank};
+use crate::frame::{JavaCamera, JavaFrame, LinkState, Lockstep, TickBank};
 use crate::gpu::backend::Backend;
 use crate::input::ModInput;
 use crate::pacer::{self, SharedWriter};
@@ -34,6 +36,8 @@ pub struct ComposeStats {
     pub waits_us: Vec<u32>,
     /// Java's own frame times, one per composed frame.
     pub java_us: Vec<u32>,
+    /// Render-thread CPU time putting Java's GUI into the scene, one per composed frame.
+    pub gui_us: Vec<u32>,
     pub java_size: (u32, u32),
     pub state: Option<LinkState>,
 }
@@ -58,129 +62,30 @@ fn push_sample(v: &mut Vec<u32>, d: Duration) {
     v.push(d.as_micros().min(u128::from(u32::MAX)) as u32);
 }
 
-/// Copies one `Rgba8Unorm` image into another of the same size, upside down.
-#[derive(Debug)]
-struct Flipper {
-    pipeline: wgpu::RenderPipeline,
-    layout: wgpu::BindGroupLayout,
-}
-
-const FLIP_WGSL: &str = r"
-@group(0) @binding(0) var src: texture_2d<f32>;
-@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
-    let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
-    return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
-}
-@fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-    let h = i32(textureDimensions(src).y);
-    return textureLoad(src, vec2i(i32(pos.x), h - 1 - i32(pos.y)), 0);
-}
-";
-
-impl Flipper {
-    fn new(device: &wgpu::Device) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("mcr-modbridge flip"),
-            source: wgpu::ShaderSource::Wgsl(FLIP_WGSL.into()),
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("mcr-modbridge flip"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            }],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("mcr-modbridge flip"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("mcr-modbridge flip"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        Self { pipeline, layout }
+/// Copies `src` into `dst` when both have the same size and format.
+fn copy_same(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Texture, dst: &wgpu::Texture) {
+    if src.size() != dst.size() || src.format() != dst.format() {
+        return;
     }
-
-    fn flip(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        src: &wgpu::Texture,
-        dst: &wgpu::Texture,
-    ) {
-        let view = src.create_view(&wgpu::TextureViewDescriptor::default());
-        let target = dst.create_view(&wgpu::TextureViewDescriptor::default());
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mcr-modbridge flip"),
-            layout: &self.layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            }],
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("mcr-modbridge flip"),
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("mcr-modbridge flip"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        queue.submit([encoder.finish()]);
-    }
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("mcr-modbridge composite copy"),
+    });
+    encoder.copy_texture_to_texture(src.as_image_copy(), dst.as_image_copy(), src.size());
+    queue.submit([encoder.finish()]);
 }
 
-fn composable(scene: &wgpu::Texture, main: &wgpu::Texture) -> bool {
-    scene.size() == main.size()
-        && scene.format() == wgpu::TextureFormat::Rgba8Unorm
-        && main.format() == wgpu::TextureFormat::Rgba8Unorm
-        && main
-            .usage()
-            .contains(wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT)
-        && scene
-            .usage()
-            .contains(wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT)
+/// A texture to hold a copy of `like`.
+fn composite_copy(device: &wgpu::Device, like: &wgpu::Texture) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mcr-modbridge last composite"),
+        size: like.size(),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: like.format(),
+        usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
 }
 
 /// The render thread's end of the lockstep.
@@ -190,8 +95,10 @@ pub struct FrameLink {
     shared: &'static Shared,
     lockstep: Lockstep,
     ticks: TickBank,
-    flipper: Option<Flipper>,
-    shown: Option<wgpu::Texture>,
+    /// Java's GUI reached the scene in a composed frame.
+    shown: bool,
+    /// The last composite while Java loads, shown again when its next frame is late.
+    last: Option<wgpu::Texture>,
     notice: Option<String>,
     size_mismatch_logged: bool,
     stats: ComposeStats,
@@ -206,6 +113,10 @@ pub struct FrameLink {
     pending: Pending,
     render_distance: u32,
     entity_scale: f32,
+    /// The player's camera while mcr renders from a mod's camera instead.
+    player_camera: Option<Camera>,
+    /// The graph search last copied for Java, if it fit.
+    sections: Option<u64>,
 }
 
 impl FrameLink {
@@ -215,8 +126,8 @@ impl FrameLink {
             shared,
             lockstep: Lockstep::new(),
             ticks: TickBank::default(),
-            flipper: None,
-            shown: None,
+            shown: false,
+            last: None,
             notice: None,
             size_mismatch_logged: false,
             stats: ComposeStats::default(),
@@ -228,7 +139,25 @@ impl FrameLink {
             pending: Pending::default(),
             render_distance: 0,
             entity_scale: 0.0,
+            player_camera: None,
+            sections: None,
         }
+    }
+
+    /// mcr renders this frame from a mod's camera (see [`Self::java_camera`]) and `player` is the
+    /// camera vanilla would use; `None` when mcr renders the player camera.
+    pub fn set_camera_handoff(&mut self, player: Option<Camera>) {
+        self.player_camera = player;
+    }
+
+    /// The camera a mod gave Java's last frame, while Java draws the world.
+    pub fn java_camera(&self) -> Option<JavaCamera> {
+        self.world_active().then(|| self.java().camera).flatten()
+    }
+
+    /// A mod replaced vanilla's rain and snow in Java's last frame.
+    pub fn weather_replaced(&self) -> bool {
+        self.world_active() && self.java().weather_replaced
     }
 
     /// mcr's camera is in third person this frame, so Java draws the local player and no hand.
@@ -279,7 +208,7 @@ impl FrameLink {
 
     /// Java's GUI is being composed, so mcr's own HUD and title screen stay hidden.
     pub fn gui_active(&self) -> bool {
-        self.lockstep.state() == LinkState::Running && self.shown.is_some()
+        self.lockstep.state() == LinkState::Running && self.shown
     }
 
     /// A one-time message for the user when Java stopped rendering.
@@ -310,7 +239,8 @@ impl FrameLink {
     /// The lockstep already detached; drops Java's GUI and tells the user.
     fn report_detached(&mut self, reason: &str) {
         self.input.queue().discard();
-        self.shown = None;
+        self.shown = false;
+        self.last = None;
         tracing::error!("mod bridge detached from rendering: {reason}");
         self.notice = Some(format!(
             "Mods stopped drawing ({reason}); showing mcr's own HUD"
@@ -340,7 +270,14 @@ impl FrameLink {
         self.shared.net.flush_spill();
         let index = self.lockstep.post(Instant::now());
         let (ticks_to_do, partial_tick) = self.ticks.take();
-        let c = ctx.camera;
+        let c = self.player_camera.as_ref().unwrap_or(ctx.camera);
+        let r = ctx.camera;
+        let sections = ctx.sections.as_ref().is_some_and(|set| {
+            if self.sections.is_none_or(|g| g != set.generation) {
+                self.sections = self.shared.sections.publish(set).then_some(set.generation);
+            }
+            self.sections == Some(set.generation)
+        });
         let frame = FrameBegin {
             index,
             ticks_to_do,
@@ -353,7 +290,13 @@ impl FrameLink {
                     FRAME_DETACHED
                 } else {
                     0
-                },
+                }
+                | if self.player_camera.is_some() {
+                    FRAME_CAMERA_HANDOFF
+                } else {
+                    0
+                }
+                | if sections { FRAME_SECTIONS } else { 0 },
             camera_pos: c.position.to_array(),
             yaw: c.yaw,
             pitch: c.pitch,
@@ -361,6 +304,9 @@ impl FrameLink {
             proj: ctx.proj.to_cols_array(),
             render_distance: self.render_distance,
             entity_scale: self.entity_scale,
+            render_pos: r.position.to_array(),
+            render_yaw: r.yaw,
+            render_pitch: r.pitch,
         };
         let pushed = {
             let mut writer = pacer::lock(&self.writer);
@@ -527,17 +473,11 @@ impl FrameLink {
             backend.slots.drain_immediate(gpu);
             // Loading screens stay up; in game the live world beats a frozen composite.
             if !java.loaded
-                && let Some(main) = self.shown.clone()
-                && composable(ctx.scene, &main)
+                && let Some(last) = &self.last
             {
-                self.flipper(ctx.device)
-                    .flip(ctx.device, ctx.queue, &main, ctx.scene);
+                copy_same(ctx.device, ctx.queue, last, ctx.scene);
             }
         }
-    }
-
-    fn flipper(&mut self, device: &wgpu::Device) -> &Flipper {
-        self.flipper.get_or_insert_with(|| Flipper::new(device))
     }
 
     fn compose(&mut self, backend: &'static Backend, index: u64) {
@@ -545,15 +485,17 @@ impl FrameLink {
         self.gui_pending = Some(index);
     }
 
+    /// Java's GUI slot draws straight into the scene, top-down, when its main target matches it.
     fn before_ui(&mut self, ctx: &ExternalCtx<'_>) {
         let (Some(index), Some(backend)) = (self.gui_pending.take(), Self::backend()) else {
             return;
         };
-        let main = backend
+        let start = Instant::now();
+        let composed = backend
             .slots
             .main_color()
-            .filter(|m| composable(ctx.scene, m));
-        if main.is_none() && !self.size_mismatch_logged {
+            .is_some_and(|m| m.size() == ctx.scene.size());
+        if !composed && !self.size_mismatch_logged {
             self.size_mismatch_logged = true;
             tracing::warn!(
                 scene = ?ctx.size,
@@ -561,17 +503,22 @@ impl FrameLink {
                 "java main target does not match the scene; its GUI is skipped this frame"
             );
         }
-        if let Some(main) = &main {
-            self.size_mismatch_logged = false;
-            self.flipper(ctx.device)
-                .flip(ctx.device, ctx.queue, ctx.scene, main);
-        }
         backend.slots.drain_all(backend.gpu, index);
-        if let Some(main) = main {
-            self.flipper(ctx.device)
-                .flip(ctx.device, ctx.queue, &main, ctx.scene);
-            self.shown = Some(main);
+        if composed {
+            self.size_mismatch_logged = false;
+            self.shown = true;
+            if self.java().loaded {
+                self.last = None;
+            } else {
+                let last = match self.last.take() {
+                    Some(t) if t.size() == ctx.scene.size() => t,
+                    _ => composite_copy(ctx.device, ctx.scene),
+                };
+                copy_same(ctx.device, ctx.queue, ctx.scene, &last);
+                self.last = Some(last);
+            }
         }
+        push_sample(&mut self.stats.gui_us, start.elapsed());
     }
 }
 

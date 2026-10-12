@@ -533,3 +533,49 @@ fn a_resume_without_a_cut_starts_from_scratch() {
     let report = sc.pass(&mut sc.b.lock(), &desc, &tail);
     assert_eq!((report.draws, report.skipped), (0, 1), "{report:?}");
 }
+
+#[test]
+fn rectangles_mirror_for_top_down_targets() {
+    use super::pass::target_rect;
+    let max = i64::from(i32::MAX);
+    assert_eq!(
+        target_rect([10, 0, 20, 5], (100, 50), false),
+        (10, 0, 20, 5)
+    );
+    assert_eq!(
+        target_rect([10, 0, 20, 5], (100, 50), true),
+        (10, 45, 20, 5)
+    );
+    assert_eq!(
+        target_rect([0, 40, 100, 20], (100, 50), true),
+        (0, 0, 100, 10),
+        "a rectangle past the top keeps its visible rows"
+    );
+    assert_eq!(
+        target_rect([-5, -5, max, max], (100, 50), true),
+        (0, 0, 100, 50)
+    );
+    assert_eq!(target_rect([0, 0, -3, 7], (100, 50), true), (0, 43, 0, 7));
+}
+
+#[test]
+fn projected_pipelines_get_a_top_down_variant() {
+    use super::pipeline::Pipeline;
+    let Some(b) = gpu() else { return };
+    let mut projected = info(TOPOLOGY_TRIANGLES, false);
+    projected.uniforms[0].name = "Projection".into();
+    let p = Pipeline::create(&b.gpu.device, &projected, false).unwrap();
+    assert!(p.uses_projection);
+    let mut key = p.declared_key(None);
+    p.variant(&b.gpu.device, &key).unwrap();
+    key.top_down = true;
+    p.variant(&b.gpu.device, &key).unwrap();
+    assert_eq!(p.variant_count(), 2);
+
+    let plain = Pipeline::create(&b.gpu.device, &info(TOPOLOGY_TRIANGLES, false), false).unwrap();
+    assert!(!plain.uses_projection);
+    assert!(
+        plain.variant(&b.gpu.device, &key).is_err(),
+        "only projected pipelines have a top-down vertex stage"
+    );
+}

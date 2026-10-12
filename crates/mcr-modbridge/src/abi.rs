@@ -10,10 +10,11 @@ use crate::events::BridgeEvent;
 use crate::frame::FrameShared;
 use crate::input::{self, InputShared};
 use crate::net::{NetShared, SPILL_LIMIT};
+use crate::sections::SectionShared;
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 9;
+pub const BRIDGE_VERSION: u32 = 10;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -28,6 +29,8 @@ pub const SHARED_SOUND_CONTROL: i32 = 6;
 pub const SHARED_FRAME_STATE: i32 = 16;
 pub const SHARED_FRAME_BELL: i32 = 17;
 pub const SHARED_INPUT_STATE: i32 = 18;
+/// mcr's reached-section bitset for Java's culling.
+pub const SHARED_SECTIONS: i32 = 19;
 
 pub const MSG_FRAME: u16 = 1;
 pub const MSG_SHUTDOWN: u16 = 2;
@@ -90,11 +93,20 @@ pub const FRAME_VIEW: usize = 64;
 pub const FRAME_PROJ: usize = 128;
 pub const FRAME_RENDER_DISTANCE: usize = 192;
 pub const FRAME_ENTITY_SCALE: usize = 196;
-pub const FRAME_SIZE: usize = 200;
+/// The camera mcr renders this frame when it is not the player camera (`FRAME_CAMERA_HANDOFF`).
+pub const FRAME_RENDER_CAMERA: usize = 200;
+pub const FRAME_RENDER_YAW: usize = 224;
+pub const FRAME_RENDER_PITCH: usize = 228;
+pub const FRAME_SIZE: usize = 232;
 /// Java signals every frame it finishes and tags its GPU work with slots.
 pub const FRAME_LOCKSTEP: u32 = 1;
 /// mcr's camera is in third person: Java renders the local player and no hand.
 pub const FRAME_DETACHED: u32 = 2;
+/// mcr renders from the camera Java reported last frame: `view`, `proj` and the render camera
+/// fields are that camera's, while the camera fields stay the player's.
+pub const FRAME_CAMERA_HANDOFF: u32 = 4;
+/// The shared section block holds the sections mcr's graph reached from this frame's camera.
+pub const FRAME_SECTIONS: u32 = 8;
 
 /// Java's side of the lockstep, written by Java and read by the render thread.
 pub const FSTATE_DONE: usize = 0;
@@ -105,9 +117,31 @@ pub const FSTATE_WIDTH: usize = 28;
 pub const FSTATE_HEIGHT: usize = 32;
 /// Java's field of view over vanilla's for the same state (an `f32`): what FOV mods changed.
 pub const FSTATE_FOV_SCALE: usize = 36;
-pub const FSTATE_SIZE: usize = 64;
+/// `CAMERA_*` flags; the camera fields after it count only with `CAMERA_MOD`.
+pub const FSTATE_CAMERA: usize = 40;
+pub const FSTATE_CAMERA_POS: usize = 48;
+/// Radians in mcr's convention, like `FrameBegin`'s yaw and pitch.
+pub const FSTATE_CAMERA_YAW: usize = 72;
+pub const FSTATE_CAMERA_PITCH: usize = 76;
+pub const FSTATE_SIZE: usize = 128;
 pub const FSTATE_READY: u32 = 1;
 pub const FSTATE_LOADED: u32 = 2;
+/// A mod cancelled or redirected vanilla's weather extraction this frame.
+pub const FSTATE_WEATHER: u32 = 4;
+/// A mod moved Java's camera or made another entity the camera entity.
+pub const CAMERA_MOD: u32 = 1;
+/// The camera shows the local player: third person, or a camera entity other than the player.
+pub const CAMERA_DETACHED: u32 = 2;
+/// The mod took the player's movement input.
+pub const CAMERA_INPUT: u32 = 4;
+
+/// The shared section block: a sequence number, the box in section coordinates, then one bit per
+/// section at `x + z * dx + y * dx * dz`.
+pub const SEC_SEQ: usize = 0;
+pub const SEC_ORIGIN: usize = 8;
+pub const SEC_DIMS: usize = 20;
+pub const SEC_BITS: usize = 64;
+pub const SEC_MAX_BITS: usize = 1 << 23;
 
 pub const SLOT_IMMEDIATE: u32 = 0;
 pub const SLOT_GUI: u32 = 1;
@@ -295,6 +329,10 @@ pub struct FrameBegin {
     pub render_distance: u32,
     /// mcr's entity distance scaling; 0 leaves Java's own.
     pub entity_scale: f32,
+    /// With `FRAME_CAMERA_HANDOFF`, the camera mcr renders from (Java's last reported one).
+    pub render_pos: [f64; 3],
+    pub render_yaw: f32,
+    pub render_pitch: f32,
 }
 
 impl Default for FrameBegin {
@@ -314,6 +352,9 @@ impl Default for FrameBegin {
             proj: IDENTITY,
             render_distance: 0,
             entity_scale: 0.0,
+            render_pos: [0.0; 3],
+            render_yaw: 0.0,
+            render_pitch: 0.0,
         }
     }
 }
@@ -360,6 +401,15 @@ impl FrameBegin {
             FRAME_ENTITY_SCALE,
             &self.entity_scale.to_ne_bytes(),
         );
+        for (i, v) in self.render_pos.iter().enumerate() {
+            put(&mut out, FRAME_RENDER_CAMERA + i * 8, &v.to_ne_bytes());
+        }
+        put(&mut out, FRAME_RENDER_YAW, &self.render_yaw.to_ne_bytes());
+        put(
+            &mut out,
+            FRAME_RENDER_PITCH,
+            &self.render_pitch.to_ne_bytes(),
+        );
         out
     }
 }
@@ -376,6 +426,7 @@ pub(crate) struct Shared {
     pub frame: FrameShared,
     pub sound: Arc<SoundShared>,
     pub input: InputShared,
+    pub sections: SectionShared,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -398,6 +449,7 @@ pub(crate) fn shared() -> Result<&'static Shared, RingError> {
         frame: FrameShared::new(),
         sound,
         input: InputShared::new(),
+        sections: SectionShared::new(),
     }))
 }
 
@@ -461,6 +513,7 @@ extern "C" fn shared_address(id: i32) -> i64 {
         SHARED_SOUND_STATES => shared.sound.states_addr(),
         SHARED_SOUND_CONTROL => shared.sound.control_addr(),
         SHARED_INPUT_STATE => shared.input.state_addr(),
+        SHARED_SECTIONS => shared.sections.addr(),
         _ => 0,
     }
 }
@@ -577,6 +630,7 @@ mod tests {
             ("SHARED_SOUND_STATES", SHARED_SOUND_STATES.into()),
             ("SHARED_SOUND_CONTROL", SHARED_SOUND_CONTROL.into()),
             ("SHARED_INPUT_STATE", SHARED_INPUT_STATE.into()),
+            ("SHARED_SECTIONS", SHARED_SECTIONS.into()),
             ("MSG_FRAME", MSG_FRAME.into()),
             ("MSG_SHUTDOWN", MSG_SHUTDOWN.into()),
             ("MSG_INPUT", MSG_INPUT.into()),
@@ -636,9 +690,14 @@ mod tests {
             ("FRAME_PROJ", FRAME_PROJ as i64),
             ("FRAME_RENDER_DISTANCE", FRAME_RENDER_DISTANCE as i64),
             ("FRAME_ENTITY_SCALE", FRAME_ENTITY_SCALE as i64),
+            ("FRAME_RENDER_CAMERA", FRAME_RENDER_CAMERA as i64),
+            ("FRAME_RENDER_YAW", FRAME_RENDER_YAW as i64),
+            ("FRAME_RENDER_PITCH", FRAME_RENDER_PITCH as i64),
             ("FRAME_SIZE", FRAME_SIZE as i64),
             ("FRAME_LOCKSTEP", FRAME_LOCKSTEP.into()),
             ("FRAME_DETACHED", FRAME_DETACHED.into()),
+            ("FRAME_CAMERA_HANDOFF", FRAME_CAMERA_HANDOFF.into()),
+            ("FRAME_SECTIONS", FRAME_SECTIONS.into()),
             ("FSTATE_DONE", FSTATE_DONE as i64),
             ("FSTATE_TICKS", FSTATE_TICKS as i64),
             ("FSTATE_NANOS", FSTATE_NANOS as i64),
@@ -646,9 +705,22 @@ mod tests {
             ("FSTATE_WIDTH", FSTATE_WIDTH as i64),
             ("FSTATE_HEIGHT", FSTATE_HEIGHT as i64),
             ("FSTATE_FOV_SCALE", FSTATE_FOV_SCALE as i64),
+            ("FSTATE_CAMERA", FSTATE_CAMERA as i64),
+            ("FSTATE_CAMERA_POS", FSTATE_CAMERA_POS as i64),
+            ("FSTATE_CAMERA_YAW", FSTATE_CAMERA_YAW as i64),
+            ("FSTATE_CAMERA_PITCH", FSTATE_CAMERA_PITCH as i64),
             ("FSTATE_SIZE", FSTATE_SIZE as i64),
             ("FSTATE_READY", FSTATE_READY.into()),
             ("FSTATE_LOADED", FSTATE_LOADED.into()),
+            ("FSTATE_WEATHER", FSTATE_WEATHER.into()),
+            ("CAMERA_MOD", CAMERA_MOD.into()),
+            ("CAMERA_DETACHED", CAMERA_DETACHED.into()),
+            ("CAMERA_INPUT", CAMERA_INPUT.into()),
+            ("SEC_SEQ", SEC_SEQ as i64),
+            ("SEC_ORIGIN", SEC_ORIGIN as i64),
+            ("SEC_DIMS", SEC_DIMS as i64),
+            ("SEC_BITS", SEC_BITS as i64),
+            ("SEC_MAX_BITS", SEC_MAX_BITS as i64),
             ("SLOT_IMMEDIATE", SLOT_IMMEDIATE.into()),
             ("SLOT_GUI", SLOT_GUI.into()),
             ("SLOT_WORLD_SOLID", SLOT_WORLD_SOLID.into()),
@@ -821,6 +893,9 @@ mod tests {
             proj,
             render_distance: 7,
             entity_scale: 1.5,
+            render_pos: [-2.5, 70.25, 3e6],
+            render_yaw: 1.25,
+            render_pitch: -0.5,
         };
         let b = f.encode();
         let u32_at = |o: usize| u32::from_ne_bytes(b[o..o + 4].try_into().unwrap());
@@ -848,7 +923,17 @@ mod tests {
         assert_eq!(f32::from_bits(u32_at(FRAME_PROJ)), -3.0);
         assert_eq!(u32_at(FRAME_RENDER_DISTANCE), 7);
         assert_eq!(f32::from_bits(u32_at(FRAME_ENTITY_SCALE)), 1.5);
-        assert_eq!(FRAME_ENTITY_SCALE + 4, FRAME_SIZE);
+        assert_eq!(
+            [
+                f64_at(FRAME_RENDER_CAMERA),
+                f64_at(FRAME_RENDER_CAMERA + 8),
+                f64_at(FRAME_RENDER_CAMERA + 16)
+            ],
+            [-2.5, 70.25, 3e6]
+        );
+        assert_eq!(f32::from_bits(u32_at(FRAME_RENDER_YAW)), 1.25);
+        assert_eq!(f32::from_bits(u32_at(FRAME_RENDER_PITCH)), -0.5);
+        assert_eq!(FRAME_RENDER_PITCH + 4, FRAME_SIZE);
     }
 
     #[test]
@@ -878,6 +963,7 @@ mod tests {
         assert_ne!(shared_address(SHARED_SOUND_STATES), 0);
         assert_ne!(shared_address(SHARED_SOUND_CONTROL), 0);
         assert_ne!(shared_address(SHARED_INPUT_STATE), 0);
+        assert_ne!(shared_address(SHARED_SECTIONS), 0);
         *shared().unwrap().events.lock().unwrap() = None;
     }
 }

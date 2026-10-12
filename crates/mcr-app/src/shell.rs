@@ -1062,11 +1062,20 @@ impl Shell {
         let third_person = self.play.as_ref().is_some_and(Play::third_person);
         let mut fov_scale = 1.0;
         let (distance, entity_scale) = self.java_view();
+        let mut java_camera = None;
+        let mut java_weather = false;
         let java_world = self.mod_frames().is_some_and(|f| {
             let mut link = f.lock();
             link.set_third_person(third_person);
             link.set_view(distance, entity_scale);
             fov_scale = link.java().fov_scale;
+            java_camera = link.java_camera();
+            java_weather = link.weather_replaced();
+            link.set_camera_handoff(
+                java_camera
+                    .and(self.play.as_ref())
+                    .map(|play| play.player_camera(play.partial())),
+            );
             link.world_active()
         });
         self.update_route();
@@ -1074,6 +1083,8 @@ impl Shell {
             play.java_gui = java_gui;
             play.java_world = java_world;
             play.java_fov_scale = if java_world { fov_scale } else { 1.0 };
+            play.java_camera = java_camera;
+            play.java_weather = java_weather;
             return play.frame();
         }
         self.update_menu_size();

@@ -29,11 +29,20 @@ public final class McrTestMod implements ClientModInitializer {
     /** `-Dmcr.testmod.stallMillis=M`: with {@code hangAfterTicks}, the block lasts M ms, once, instead. */
     private static final long STALL_MILLIS = Long.getLong("mcr.testmod.stallMillis", -1L);
 
+    /** `-Dmcr.testmod.replaceWeather=true`: vanilla's rain and snow are replaced, like Particle Rain does. */
+    public static final boolean REPLACE_WEATHER = Boolean.getBoolean("mcr.testmod.replaceWeather");
+
+    private static final KeyMapping.Category CATEGORY =
+            KeyMapping.Category.register(Identifier.fromNamespaceAndPath("mcr_testmod", "test"));
+
+    private static final KeyMapping CAMERA = new KeyMapping(
+            "key.mcr_testmod.camera", InputConstants.Type.KEYBOARD, InputConstants.KEY_J, CATEGORY);
+
     private static final KeyMapping PING = new KeyMapping(
             "key.mcr_testmod.ping",
             InputConstants.Type.KEYBOARD,
             InputConstants.KEY_K,
-            KeyMapping.Category.register(Identifier.fromNamespaceAndPath("mcr_testmod", "test")));
+            CATEGORY);
 
     private static int commandIn;
     private static int pings;
@@ -58,6 +67,7 @@ public final class McrTestMod implements ClientModInitializer {
         MarkerParticle.register();
         PayloadTypeRegistry.serverboundPlay().register(Hello.TYPE, Hello.CODEC);
         KeyMappingHelper.registerKeyMapping(PING);
+        KeyMappingHelper.registerKeyMapping(CAMERA);
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
             sender.sendPacket(new Hello(MESSAGE));
             commandIn = COMMAND_DELAY_TICKS;
@@ -66,6 +76,10 @@ public final class McrTestMod implements ClientModInitializer {
             GuiCapture.tick(client);
             MarkerParticle.tick(client);
             SyncProbe.tick(client);
+            while (CAMERA.consumeClick()) {
+                TestCamera.cycle(client);
+            }
+            TestCamera.tick(client);
             while (PING.consumeClick()) {
                 Bridge.info("testmod_key", ++pings);
                 MarkerParticle.start();

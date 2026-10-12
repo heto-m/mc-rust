@@ -48,6 +48,7 @@ use crate::render_system::{PipelineStats, RenderSystem};
 use crate::settings::{OptionsScreen, SharedSettings};
 use crate::target::{BlockHit, EntityPicker, Target, pick, reach, third_person_distance};
 use crate::view::{StateView, SuggestEngine};
+use mcr_modbridge::frame::JavaCamera;
 use mcr_modbridge::sound::{SoundOwner, event_owner};
 
 pub const TICK_SECONDS: f32 = 0.05;
@@ -364,6 +365,10 @@ pub struct Play {
     pub java_world: bool,
     /// What Java's FOV mods (zoom) do to the field of view; 1 without them.
     pub java_fov_scale: f32,
+    /// The camera a Java mod (Freecam, camera tweaks) set last frame; mcr renders from it.
+    pub java_camera: Option<JavaCamera>,
+    /// A Java mod replaced vanilla's rain and snow, so mcr draws none.
+    pub java_weather: bool,
     /// A Java screen owns all input; gameplay input stops.
     pub java_screen: bool,
     /// Java's GUI scale in mod mode, which native overlays follow.
@@ -524,6 +529,8 @@ impl Play {
             java_gui: false,
             java_world: false,
             java_fov_scale: 1.0,
+            java_camera: None,
+            java_weather: false,
             java_screen: false,
             gui_scale_override: None,
             open_mods: false,
@@ -673,9 +680,15 @@ impl Play {
             .contains(&i)
     }
 
+    /// The mod camera moves with the movement keys, so the player stands still.
+    fn input_captured(&self) -> bool {
+        self.java_camera.is_some_and(|c| c.input)
+    }
+
     fn player_input(&self) -> PlayerInput {
         let k = &self.keys;
-        let on = |i: usize| !self.busy() && self.held.is_active(i);
+        let moves = !self.busy() && !self.input_captured();
+        let on = |i: usize| moves && self.held.is_active(i);
         PlayerInput {
             forward: on(k.forward),
             backward: on(k.back),
@@ -1503,7 +1516,7 @@ impl Play {
     }
 
     pub fn mouse_motion(&mut self, dx: f64, dy: f64) {
-        if self.busy() || self.closed.is_some() {
+        if self.busy() || self.closed.is_some() || self.input_captured() {
             return;
         }
         let k = degrees_per_pixel(self.options.mouse_sensitivity) * self.java_fov_scale.min(1.0);
@@ -2250,7 +2263,30 @@ impl Play {
         roll
     }
 
+    /// The camera mcr renders: a Java mod's while one set it, else the player's.
     pub fn camera(&self, partial: f32) -> Camera {
+        let player = self.player_camera(partial);
+        let Some(java) = self.java_camera else {
+            return player;
+        };
+        let chunks = self.world.client.state.chunks.config();
+        let min_y = f64::from(chunks.min_y());
+        let reach = f64::from((self.render_distance().max(2) + 2) * 16);
+        let java = java.bounded(
+            lerp3(self.prev_eye, self.cur_eye, f64::from(partial)),
+            reach,
+            min_y - 64.0..=min_y + f64::from(chunks.height()) + 64.0,
+        );
+        Camera {
+            position: DVec3::from(java.pos),
+            yaw: java.yaw,
+            pitch: java.pitch,
+            ..player
+        }
+    }
+
+    /// The camera vanilla derives from the player (eye, perspective, spectated entity).
+    pub fn player_camera(&self, partial: f32) -> Camera {
         let t = f64::from(partial);
         let eye = lerp3(self.prev_eye, self.cur_eye, t);
         let fov_mod = self.prev_fov_mod + (self.fov_mod - self.prev_fov_mod) * partial;
@@ -2620,7 +2656,8 @@ impl Play {
         self.render
             .renderer
             .set_cloud_settings(effects::cloud_settings(&self.options));
-        if env.rain_level > 0.0 {
+        self.render.renderer.set_weather_hidden(self.java_weather);
+        if env.rain_level > 0.0 && !self.java_weather {
             let radius = self.options.weather_radius.clamp(3, 10) as u32;
             let source = self.effects.weather(state);
             self.render.renderer.update_weather(camera, radius, &source);

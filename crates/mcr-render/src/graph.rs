@@ -81,6 +81,34 @@ pub(crate) struct VisibilityGraph {
     grid_box: Option<Bounds>,
     exits: Vec<u8>,
     reachable: Vec<u32>,
+    /// One bit per section of `grid_box` that the last search entered, at `x + z * dx + y * dx * dz`.
+    reached: Vec<u64>,
+    generation: u64,
+}
+
+/// The sections the last graph search reached, over a box in section coordinates.
+#[derive(Debug, Clone, Copy)]
+pub struct ReachedSections<'a> {
+    pub origin: [i32; 3],
+    pub dims: [u32; 3],
+    /// Bit `x + z * dx + y * dx * dz` of the box, relative to `origin`.
+    pub bits: &'a [u64],
+    /// Changes whenever the search ran again.
+    pub generation: u64,
+}
+
+impl ReachedSections<'_> {
+    pub fn contains(&self, section: [i32; 3]) -> bool {
+        let rel = [0, 1, 2].map(|a| i64::from(section[a]) - i64::from(self.origin[a]));
+        if (0..3).any(|a| rel[a] < 0 || rel[a] >= i64::from(self.dims[a])) {
+            return true;
+        }
+        let [dx, _, dz] = self.dims.map(u64::from);
+        let i = rel[0] as u64 + rel[2] as u64 * dx + rel[1] as u64 * dx * dz;
+        self.bits
+            .get((i / 64) as usize)
+            .is_none_or(|w| w >> (i % 64) & 1 != 0)
+    }
 }
 
 impl VisibilityGraph {
@@ -158,6 +186,17 @@ impl VisibilityGraph {
             .is_some_and(|w| w >> (slot % 32) & 1 != 0)
     }
 
+    /// From the last [`Self::update`]; `None` before the first search.
+    pub(crate) fn reached(&self) -> Option<ReachedSections<'_>> {
+        let (lo, hi) = self.grid_box?;
+        Some(ReachedSections {
+            origin: lo,
+            dims: [0, 1, 2].map(|a| (hi[a] - lo[a] + 1) as u32),
+            bits: &self.reached,
+            generation: self.generation,
+        })
+    }
+
     pub(crate) fn needs_update(&self, camera: [i32; 3]) -> bool {
         self.dirty || self.origin != Some(camera)
     }
@@ -213,6 +252,9 @@ impl VisibilityGraph {
         self.exits.resize(volume, 0);
         self.reachable.clear();
         self.reachable.resize(slot_count.div_ceil(32) as usize, 0);
+        self.reached.clear();
+        self.reached.resize(volume.div_ceil(64), 0);
+        self.generation += 1;
 
         let c = [0, 1, 2].map(|a| (camera[a] - lo[a]) as usize);
         let start = c[0] + c[1] * stride[1] + c[2] * stride[2];
@@ -252,6 +294,8 @@ impl VisibilityGraph {
                             self.vis[at].exits(entered)
                         };
                         self.exits[at] = exits;
+                        // The dense index is x + z * dx + y * dx * dz, the shared layout.
+                        self.reached[at / 64] |= 1 << (at % 64);
                         let slot = self.slots[at];
                         if slot < slot_count {
                             self.reachable[(slot / 32) as usize] |= 1 << (slot % 32);
@@ -294,6 +338,28 @@ mod tests {
         all.connect_all(0x3f);
         assert_eq!(all, SectionVisibility::ALL);
         assert_eq!(SectionVisibility::default(), SectionVisibility::ALL);
+    }
+
+    #[test]
+    fn reached_sections_match_the_search() {
+        let mut g = VisibilityGraph::default();
+        assert!(g.reached().is_none());
+        for y in -3..=3 {
+            for z in -3..=3 {
+                g.set([2, y, z], SectionVisibility::NONE);
+            }
+        }
+        g.set_slot([3, 0, 0], Some(0));
+        g.set_slot([-4, 0, 0], Some(1));
+        g.update([0, 0, 0], 2);
+        let r = g.reached().unwrap();
+        let generation = r.generation;
+        assert!(r.contains([0, 0, 0]) && r.contains([1, 0, 0]) && r.contains([-4, 0, 0]));
+        assert!(r.contains([2, 0, 0]), "the wall itself is entered");
+        assert!(!r.contains([3, 0, 0]), "nothing behind the wall is");
+        assert!(r.contains([99, 0, 0]), "outside the box counts as reached");
+        g.update([0, 0, 0], 2);
+        assert_ne!(g.reached().unwrap().generation, generation);
     }
 
     #[test]

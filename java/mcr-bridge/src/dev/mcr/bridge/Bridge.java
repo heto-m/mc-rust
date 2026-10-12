@@ -31,6 +31,7 @@ public final class Bridge {
     final MemorySegment frameState;
     final Doorbell frameBell;
     final MemorySegment inputState;
+    final MemorySegment sections;
 
     private Bridge(NativeTable table) {
         this.table = table;
@@ -49,6 +50,8 @@ public final class Bridge {
         this.frameState = MemorySegment.ofAddress(shared(BridgeAbi.SHARED_FRAME_STATE)).reinterpret(BridgeAbi.FSTATE_SIZE);
         this.frameBell = new Doorbell(shared(BridgeAbi.SHARED_FRAME_BELL));
         this.inputState = MemorySegment.ofAddress(shared(BridgeAbi.SHARED_INPUT_STATE)).reinterpret(BridgeAbi.ISTATE_SIZE);
+        this.sections = MemorySegment.ofAddress(shared(BridgeAbi.SHARED_SECTIONS))
+                .reinterpret(BridgeAbi.SEC_BITS + BridgeAbi.SEC_MAX_BITS / 8);
     }
 
     private static MethodHandle downcall(NativeTable table, BridgeAbi.Entry entry) {

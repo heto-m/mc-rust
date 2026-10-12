@@ -29,7 +29,7 @@ Java command buffers SHALL be tagged with a slot and submitted on the render thr
 - **THEN** the upload is submitted before the GUI draw
 
 ### Requirement: Virtual main target
-Textures created for Java's main render target SHALL be marked virtual. Before the GUI slot runs, Java's main color SHALL hold mcr's `Rgba8Unorm` scene, after mcr's world passes and in Java's row order. Afterwards, the result SHALL be copied back into mcr's scene. Java's main depth SHALL stay private to Java. Java clears of the virtual color target SHALL be ignored.
+Textures created for Java's main render target SHALL be marked virtual. In the GUI slot, a pass into Java's main color SHALL draw into mcr's `Rgba8Unorm` scene after mcr's world passes, with a private depth. Java clears of the virtual color target SHALL be ignored.
 
 #### Scenario: HUD over world
 - **WHEN** Java draws its HUD while joined to a server
@@ -38,6 +38,13 @@ Textures created for Java's main render target SHALL be marked virtual. Before t
 #### Scenario: Menu blur
 - **WHEN** Java opens a screen that blurs the background
 - **THEN** the blur samples mcr's rendered world
+
+### Requirement: Top-down GUI composition
+In the GUI slot, projected geometry SHALL land top-down and scissor rectangles SHALL be flipped to match, so no copy of the scene is made. A copy that Java reads from its main color SHALL see the current scene in Java's row order.
+
+#### Scenario: No flip copies
+- **WHEN** a mod-mode frame composes Java's GUI in game
+- **THEN** the compositor records no fullscreen copy of the scene
 
 ### Requirement: Size follows the window
 Window size changes SHALL reach Java's `Window` and trigger its display resize before the next Java frame renders.

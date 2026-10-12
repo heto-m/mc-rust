@@ -1147,6 +1147,14 @@ impl Renderer {
         self.use_graph
     }
 
+    /// The sections the visibility graph reached from the last frame's camera; `None` while the
+    /// graph is off or skipped (camera inside an opaque block).
+    pub fn reached_sections(&self) -> Option<crate::graph::ReachedSections<'_>> {
+        (self.use_graph && !self.camera_in_opaque)
+            .then(|| self.graph.reached())
+            .flatten()
+    }
+
     /// A camera inside an opaque block (spectator) sees through walls the graph would treat as
     /// closed, so the graph search is skipped like vanilla does.
     pub fn set_camera_in_opaque_block(&mut self, inside: bool) {
@@ -1216,6 +1224,11 @@ impl Renderer {
     /// Blocks currently being broken (own or other players'); replaces the previous list.
     pub fn set_destroy_decals(&mut self, decals: &[DestroyDecal]) {
         self.effects.set_decals(decals);
+    }
+
+    /// Hides the rain and snow columns while the rain level still darkens sky and fog.
+    pub fn set_weather_hidden(&mut self, hidden: bool) {
+        self.effects.set_weather_hidden(hidden);
     }
 
     /// The world border walls, drawn when the camera is within `distance` blocks of one.
@@ -1846,6 +1859,7 @@ impl Renderer {
                 camera: cam,
                 view: cam.view_rotation(),
                 proj: cam.projection(aspect),
+                sections: self.reached_sections(),
             });
         }
         let mut encoder = self
@@ -1997,6 +2011,7 @@ impl Renderer {
                 camera: cam,
                 view: cam.view_rotation(),
                 proj: cam.projection(aspect),
+                sections: self.reached_sections(),
             });
             encoder = self
                 .device
@@ -2055,6 +2070,7 @@ impl Renderer {
                 camera: cam,
                 view: cam.view_rotation(),
                 proj: cam.projection(aspect),
+                sections: self.reached_sections(),
             });
             encoder = self
                 .device
@@ -2097,6 +2113,7 @@ impl Renderer {
                 camera: cam,
                 view: cam.view_rotation(),
                 proj: cam.projection(aspect),
+                sections: self.reached_sections(),
             });
         }
         self.external = external;

@@ -336,7 +336,7 @@ mod tests {
         let dir = temp("rows");
         write_jar(&dir, "a.jar", &manifest("alpha", ""));
         write_jar(&dir, "s.jar", &manifest("sodium", ""));
-        write_jar(&dir, "f.jar", &manifest("freecam", ""));
+        write_jar(&dir, "v.jar", &manifest("voicechat", ""));
         write_jar(
             &dir,
             "n.jar",
@@ -355,9 +355,9 @@ mod tests {
             ("Blocked", ModTone::Bad)
         );
         assert!(sodium.reason.contains("OpenGL") && !sodium.toggleable && !sodium.enabled);
-        let freecam = by("freecam");
-        assert_eq!(freecam.badge, "Unsupported");
-        assert!(!freecam.enabled && freecam.toggleable && !freecam.reason.is_empty());
+        let voicechat = by("voicechat");
+        assert_eq!(voicechat.badge, "Unsupported");
+        assert!(!voicechat.enabled && voicechat.toggleable && !voicechat.reason.is_empty());
         let needy = by("needy");
         assert_eq!(needy.badge, "Not loaded");
         assert_eq!(needy.reason, "missing dependency `foo`");

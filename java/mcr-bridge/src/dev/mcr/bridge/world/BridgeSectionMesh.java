@@ -2,6 +2,7 @@ package dev.mcr.bridge.world;
 
 import java.util.ArrayList;
 import java.util.List;
+import dev.mcr.bridge.McrSections;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.blockentity.BlockEntityRenderDispatcher;
@@ -18,14 +19,16 @@ import net.minecraft.world.level.chunk.status.ChunkStatus;
  * culling, mcr's depth hides what is behind terrain).
  */
 public final class BridgeSectionMesh implements SectionMesh {
-    public static final BridgeSectionMesh EMPTY = new BridgeSectionMesh(List.of());
+    public static final BridgeSectionMesh EMPTY = new BridgeSectionMesh(0L, List.of());
 
     private static long scans;
     private static long scanNanos;
 
+    private final long sectionNode;
     private final List<BlockEntity> blockEntities;
 
-    private BridgeSectionMesh(List<BlockEntity> blockEntities) {
+    private BridgeSectionMesh(long sectionNode, List<BlockEntity> blockEntities) {
+        this.sectionNode = sectionNode;
         this.blockEntities = blockEntities;
     }
 
@@ -36,7 +39,10 @@ public final class BridgeSectionMesh implements SectionMesh {
 
     @Override
     public List<BlockEntity> getRenderableBlockEntities() {
-        return blockEntities;
+        if (blockEntities.isEmpty() || McrSections.blockEntitySectionVisible(sectionNode)) {
+            return blockEntities;
+        }
+        return List.of();
     }
 
     /** The section's block entities that have a renderer; one walk of the chunk's block entity map. */
@@ -62,7 +68,7 @@ public final class BridgeSectionMesh implements SectionMesh {
                 }
             }
             if (found != null) {
-                mesh = new BridgeSectionMesh(List.copyOf(found));
+                mesh = new BridgeSectionMesh(sectionNode, List.copyOf(found));
             }
         }
         scans++;
