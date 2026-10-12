@@ -4,6 +4,7 @@ mod blocks;
 mod book;
 mod chat_screen;
 mod clicks;
+mod conduct_screen;
 mod container;
 mod creative;
 mod credits;
@@ -36,6 +37,7 @@ pub use chat_screen::{
     ChatScreen, CommandSuggester, NoSuggestions, SharedChat, Suggestion, SuggestionSet,
 };
 pub use clicks::click_event_actions;
+pub use conduct_screen::ConductScreen;
 pub use container::*;
 pub use creative::{CreativeScreen, HotbarStore, TabKind, creative_tabs};
 pub use credits::{

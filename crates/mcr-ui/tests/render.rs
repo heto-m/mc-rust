@@ -81,6 +81,14 @@ fn debug_overlay_renders() {
             "Vulkan 1.3 (wgpu)".into(),
             "§aGreen §rand §lbold§r §nunder§r §mstrike§r §oitalic".into(),
         ],
+        charts: vec![mcr_ui::DebugChart {
+            title: "Frame time".into(),
+            unit: "ms",
+            samples: (0..120).map(|i| 8.0 + (i % 30) as f32).collect(),
+            scale: 50.0,
+            warn: 16.7,
+            bad: 33.4,
+        }],
     };
     {
         let mut f = ui.frame(SIZE.0, SIZE.1);

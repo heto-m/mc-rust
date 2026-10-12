@@ -75,6 +75,8 @@ pub(crate) fn builder(name: &str) -> Option<BuildFn> {
     }
     Some(match n {
         "item" => item_entity,
+        "ominous_item_spawner" => ominous_item_spawner,
+        "cushion" => cushion,
         "item_frame" | "glow_item_frame" => item_frame,
         "painting" => painting,
         "falling_block" => falling_block,
@@ -154,6 +156,78 @@ fn item_entity(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
             post: Mat4::IDENTITY,
         });
     }
+}
+
+/// `OminousItemSpawnerRenderer`: the item cluster grows over 50 ticks while spinning 40 degrees a tick, fully lit.
+fn ominous_item_spawner(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+    plan.skip_rotation = true;
+    plan.bright = true;
+    let Some(stack) = v.stack(idx::ITEM_STACK) else {
+        return;
+    };
+    let scale = (v.age_ticks.clamp(0.0, 50.0) / 50.0).max(0.0);
+    let spin = (v.age_ticks * 40.0).rem_euclid(360.0).to_radians();
+    for i in 0..clone_count(stack.count) {
+        let off = if i == 0 {
+            Vec3::ZERO
+        } else {
+            Vec3::new(
+                (hash01(v.id, i as u32 * 3) * 2.0 - 1.0) * 0.15,
+                (hash01(v.id, i as u32 * 3 + 1) * 2.0 - 1.0) * 0.15,
+                (hash01(v.id, i as u32 * 3 + 2) * 2.0 - 1.0) * 0.15,
+            )
+        };
+        plan.free_items.push(FreeItem {
+            source: ItemSource::Data(idx::ITEM_STACK),
+            context: ItemContext::Ground,
+            local: Mat4::from_scale(Vec3::splat(scale))
+                * Mat4::from_rotation_y(spin)
+                * Mat4::from_translation(off),
+            ground_lift: true,
+            billboard: false,
+            post: Mat4::IDENTITY,
+        });
+    }
+}
+
+const DYE_NAMES: [&str; 16] = [
+    "white",
+    "orange",
+    "magenta",
+    "light_blue",
+    "yellow",
+    "lime",
+    "pink",
+    "gray",
+    "light_gray",
+    "cyan",
+    "purple",
+    "blue",
+    "brown",
+    "green",
+    "red",
+    "black",
+];
+
+/// `CushionRenderer`: the model turned to the cushion's facing, flipped over and lowered a quarter block.
+fn cushion(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+    plan.skip_rotation = true;
+    plan.unflipped(1.0);
+    let color = match v.raw(idx::CUSHION_COLOR) {
+        Some(EntityDataValue::DyeColor(c)) => *c as usize,
+        _ => 0,
+    };
+    let facing = ((v.yaw / 90.0 + 0.5).floor() as i32).rem_euclid(4) as f32 * 90.0;
+    plan.post_rot = Mat4::from_rotation_y((180.0 - facing).to_radians())
+        * Mat4::from_rotation_x(std::f32::consts::PI);
+    plan.extra_offset = Vec3::new(0.0, -0.25, 0.0);
+    plan.push(Part::new(
+        "minecraft:cushion#main",
+        format!(
+            "entity/cushion/{}_cushion",
+            DYE_NAMES[color.min(DYE_NAMES.len() - 1)]
+        ),
+    ));
 }
 
 /// `ThrownItemRenderer`: the ground-context item turned to the camera, one copy, no bob or spin.
@@ -502,13 +576,41 @@ fn minecart_contents(name: &str, v: &EntityView<'_>) -> Option<(i32, i32)> {
     (block != 0).then_some((block, offset.clamp(-64, 64)))
 }
 
+/// `DisplayRenderer.calculateOrientation`: which of entity and camera angles turn the display.
+fn display_orientation(camera: (f32, f32), v: &EntityView<'_>) -> Mat4 {
+    orientation_for(v.byte(15).unwrap_or(0) as u8, camera, (v.yaw, v.pitch))
+}
+
+fn orientation_for(mode: u8, camera: (f32, f32), entity: (f32, f32)) -> Mat4 {
+    let (cam_y, cam_x) = (-(camera.0 - 180.0), -camera.1);
+    let (yaw, pitch) = match mode {
+        1 => (cam_y, entity.1),
+        2 => (-entity.0, cam_x),
+        3 => (cam_y, cam_x),
+        _ => (-entity.0, entity.1),
+    };
+    Mat4::from_quat(Quat::from_euler(
+        glam::EulerRot::YXZ,
+        yaw.to_radians(),
+        pitch.to_radians(),
+        0.0,
+    ))
+}
+
 fn display_transform(v: &EntityView<'_>) -> Mat4 {
     let vec = |i: u8, d: Vec3| match v.raw(i) {
         Some(EntityDataValue::Vector3(x)) => Vec3::new(x.x, x.y, x.z),
         _ => d,
     };
     let quat = |i: u8| match v.raw(i) {
-        Some(EntityDataValue::Quaternion(q)) => Quat::from_xyzw(q[0], q[1], q[2], q[3]).normalize(),
+        Some(EntityDataValue::Quaternion(q)) => {
+            let q = Quat::from_xyzw(q[0], q[1], q[2], q[3]);
+            if q.length_squared() > 1e-12 && q.is_finite() {
+                q.normalize()
+            } else {
+                Quat::IDENTITY
+            }
+        }
         _ => Quat::IDENTITY,
     };
     let t = vec(11, Vec3::ZERO).clamp(Vec3::splat(-64.0), Vec3::splat(64.0));
@@ -519,17 +621,17 @@ fn display_transform(v: &EntityView<'_>) -> Mat4 {
         * Mat4::from_quat(quat(14))
 }
 
-fn block_display(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+fn block_display(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     plan.skip_rotation = true;
     if let Some(EntityDataValue::BlockState(s)) = v.raw(23) {
         plan.free_geo.push(FreeGeo::Block {
             state: *s,
-            local: display_transform(v),
+            local: display_orientation(cx.camera_angles, v) * display_transform(v),
         });
     }
 }
 
-fn item_display(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
+fn item_display(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     plan.skip_rotation = true;
     let context = match v.byte(24).unwrap_or(0) {
         5 => ItemContext::Head,
@@ -539,7 +641,7 @@ fn item_display(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     plan.free_items.push(FreeItem {
         source: ItemSource::Data(23),
         context,
-        local: display_transform(v),
+        local: display_orientation(cx.camera_angles, v) * display_transform(v),
         ground_lift: false,
         billboard: false,
         post: Mat4::IDENTITY,
@@ -689,6 +791,15 @@ fn trident(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         "minecraft:trident#main",
         "entity/trident/trident",
     ));
+    if v.boolean(idx::THROWN_TRIDENT_FOIL) {
+        let mut glint = Part::new("minecraft:trident#main", "misc/enchanted_glint_item")
+            .pipeline(Pipeline::Additive)
+            .no_hurt();
+        glint.tint = [160, 100, 255, 150];
+        glint.fullbright = true;
+        glint.uv_offset = crate::scene::glint_scroll(v.age_ticks);
+        plan.push(glint);
+    }
 }
 
 /// `WitherSkullRenderer`: the skull model turned by the projectile's yaw and pitch, full block light.
@@ -721,6 +832,37 @@ mod tests {
             let up = m.transform_vector3(Vec3::Y);
             assert!(up.dot(forward).abs() < 1e-5 && up.y >= 0.0, "{up}");
         }
+    }
+
+    #[test]
+    fn display_billboard_modes_pick_their_angles() {
+        let camera = (35.0, -20.0);
+        let entity = (120.0, 15.0);
+        let near = |a: Mat4, b: Mat4| a.abs_diff_eq(b, 1e-5);
+        assert!(near(
+            orientation_for(3, camera, entity),
+            camera_orientation(camera.0, camera.1)
+        ));
+        assert!(near(
+            orientation_for(0, camera, entity),
+            orientation_for(0, (200.0, 50.0), entity)
+        ));
+        assert!(!near(
+            orientation_for(0, camera, entity),
+            orientation_for(0, camera, (10.0, 15.0))
+        ));
+        assert!(near(
+            orientation_for(1, camera, entity),
+            orientation_for(1, camera, (999.0, 15.0))
+        ));
+        assert!(near(
+            orientation_for(2, camera, entity),
+            orientation_for(2, (-80.0, -20.0), entity)
+        ));
+        assert!(!near(
+            orientation_for(2, camera, entity),
+            orientation_for(2, (-80.0, 40.0), entity)
+        ));
     }
 
     #[test]

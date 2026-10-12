@@ -96,6 +96,16 @@ fn gui_sprites_load_with_mcmeta_scaling() {
     assert!(sprites.len() > 400);
     let hotbar = *sprites.info(sprites.id("hud/hotbar").unwrap());
     assert_eq!((hotbar.width, hotbar.height), (182, 22));
+    for name in [
+        "hud/locator_bar_background",
+        "hud/locator_bar_arrow_up",
+        "hud/locator_bar_arrow_down",
+        "hud/locator_bar_dot/default_0",
+        "hud/locator_bar_dot/default_3",
+        "hud/locator_bar_dot/bowtie",
+    ] {
+        assert!(sprites.id(name).is_some(), "{name}");
+    }
     let button = *sprites.info(sprites.id("widget/button").unwrap());
     assert!(matches!(
         button.scaling,

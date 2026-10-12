@@ -28,6 +28,22 @@ pub struct Completion {
     pub ask_server: bool,
 }
 
+/// Plain-chat completions: the server's custom entries that continue the word before the cursor
+/// (character indices), with the index where that word starts.
+pub fn complete_chat(entries: &[String], text: &str, cursor: usize) -> (usize, Vec<String>) {
+    let before: Vec<char> = text.chars().take(cursor).collect();
+    let start = before.iter().rposition(|c| *c == ' ').map_or(0, |i| i + 1);
+    let prefix: String = before[start..].iter().collect::<String>().to_lowercase();
+    let mut out: Vec<String> = entries
+        .iter()
+        .filter(|e| e.to_lowercase().starts_with(&prefix))
+        .take(256)
+        .cloned()
+        .collect();
+    out.sort_by_key(|e| e.to_lowercase());
+    (start, out)
+}
+
 /// Names the tree cannot know by itself.
 pub trait SuggestSource {
     fn players(&self) -> Vec<String>;

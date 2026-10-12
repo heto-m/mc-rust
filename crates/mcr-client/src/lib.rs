@@ -6,6 +6,7 @@ mod audit_tests;
 mod batch;
 mod client;
 pub mod commands;
+mod conduct;
 mod config;
 mod dialogs;
 mod digging;
@@ -28,6 +29,7 @@ pub mod hashing;
 mod hashing_tests;
 mod interaction;
 mod inventory;
+pub mod locator;
 mod menu;
 #[cfg(test)]
 mod menu_layout_tests;
@@ -51,13 +53,16 @@ mod use_item_tests;
 pub use actions::Digging;
 pub use batch::ChunkBatchSizeCalculator;
 pub use client::{Client, Phase};
-pub use commands::{CommandTree, Completion, SuggestSource};
+pub use commands::{CommandTree, Completion, SuggestSource, complete_chat};
+pub use conduct::{
+    ConductEnd, ConductLink, ConductReply, ConductRequest, conduct_channel, conduct_hash,
+};
 pub use config::{ClientConfig, OnlineAuth, ResourcePackPolicy, TransferTarget};
 pub use dialogs::{
     DIALOG_REGISTRY, DialogEnd, DialogLink, DialogReply, DialogRequest, dialog_channel,
     resolve_dialog,
 };
-pub use entity::{AttributeState, Entities, Entity, MobEffect, SimShape};
+pub use entity::{AttributeState, Entities, Entity, FlightHistory, MobEffect, SimShape};
 pub use error::{ClientError, Result};
 pub use events::{
     BlockEditor, ChatKind, ClientEvent, DamageEffects, DisconnectReason, sanitize_for_log,
@@ -83,8 +88,8 @@ pub use social::{
     boss_bars_ordered, format_score, tab_name, team_named_color,
 };
 pub use state::{
-    ClientState, CommandReply, Outbox, ServerInfo, SpawnPoint, WorldBorder, WorldInfo,
-    is_trusted_url,
+    ClientState, CommandReply, Outbox, ServerInfo, SpawnPoint, TransientBlock, WorldBorder,
+    WorldInfo, is_trusted_url,
 };
 pub use toast::{ToastEvent, first_stack};
 pub use use_item::{UseKind, UseResult, UseTarget, UsingItem};

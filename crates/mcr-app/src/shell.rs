@@ -13,8 +13,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use mcr_client::{
-    Client, ClientConfig, ClientError, DialogEnd, DialogReply, DialogRequest, TransferTarget,
-    dialog_channel, sanitize_for_log,
+    Client, ClientConfig, ClientError, ConductEnd, ConductReply, DialogEnd, DialogReply,
+    DialogRequest, TransferTarget, conduct_channel, dialog_channel, sanitize_for_log,
 };
 use mcr_modbridge::ModFrames;
 use mcr_nbt::Value;
@@ -22,9 +22,9 @@ use mcr_protocol::types::text::Component;
 use mcr_render::{Camera, FrameInputs, FrameStats, Renderer};
 use mcr_settings::InputKey;
 use mcr_ui::{
-    Clipboard, ConfirmScreen, ConnectingScreen, Dialog, DialogScreen, DisconnectedScreen, Env,
-    Modifiers, NoView, RenderCx, Screen, ScreenAction, ScreenStack, SharedServers, TitleScreen,
-    UiInput, vanilla_resources,
+    Clipboard, ConductScreen, ConfirmScreen, ConnectingScreen, Dialog, DialogScreen,
+    DisconnectedScreen, Env, Modifiers, NoView, RenderCx, Screen, ScreenAction, ScreenStack,
+    SharedServers, TitleScreen, UiInput, vanilla_resources,
 };
 
 use crate::assets::Assets;
@@ -85,6 +85,7 @@ pub struct Shell {
     prompt_open: bool,
     current_address: String,
     dialogs: Option<DialogEnd>,
+    conduct: Option<ConductEnd>,
     route: route::Route,
 }
 
@@ -172,6 +173,7 @@ impl Shell {
             prompt_open: false,
             current_address: String::new(),
             dialogs: None,
+            conduct: None,
             route: route::Route::new(cfg.mod_net.as_ref().and_then(|n| n.input.clone())),
             cfg,
         };
@@ -214,6 +216,41 @@ impl Shell {
         }
         let actions = self.packs.end_session();
         self.pack_actions(actions);
+    }
+
+    fn poll_conduct(&mut self) {
+        let answers = self
+            .play
+            .as_mut()
+            .map(Play::take_conduct_answers)
+            .unwrap_or_default();
+        for (accept, remember, hash) in answers {
+            self.conduct_answer(accept, remember, hash);
+        }
+        let Some(end) = &self.conduct else { return };
+        let Ok(request) = end.requests.try_recv() else {
+            return;
+        };
+        let screen = Box::new(ConductScreen::new(&request.text, request.hash));
+        match &mut self.play {
+            Some(play) => play.show_screen(screen),
+            None => self.push(screen),
+        }
+    }
+
+    fn conduct_answer(&mut self, accept: bool, remember: bool, hash: i32) {
+        if let Some(end) = &self.conduct {
+            end.reply(if accept {
+                ConductReply::Accept
+            } else {
+                ConductReply::Decline
+            });
+        }
+        if remember {
+            self.servers
+                .borrow_mut()
+                .set_accepted_conduct_for(&self.current_address, hash);
+        }
     }
 
     fn poll_dialogs(&mut self) {
@@ -511,6 +548,10 @@ impl Shell {
         let (dialog_link, dialog_end) = dialog_channel();
         config.dialog_link = Some(dialog_link);
         self.dialogs = Some(dialog_end);
+        let (conduct_link, conduct_end) = conduct_channel();
+        config.conduct_link = Some(conduct_link);
+        config.accepted_conduct = self.servers.borrow().accepted_conduct_for(address);
+        self.conduct = Some(conduct_end);
         self.current_address = address.to_owned();
         let hooks = self
             .cfg
@@ -606,6 +647,12 @@ impl Shell {
         self.poll_mod_connects();
         self.poll_packs();
         self.poll_dialogs();
+        self.poll_conduct();
+        if let Some(icon) = self.play.as_mut().and_then(Play::take_server_icon) {
+            self.servers
+                .borrow_mut()
+                .set_icon_for(&self.current_address, &icon);
+        }
         // Java must finish loading before it mirrors a connection.
         if self.mods_settled()
             && let Some(addr) = self.cfg.connect.take()
@@ -762,6 +809,11 @@ impl Shell {
                     self.end_pack_session();
                 }
                 ScreenAction::ResourcePackAnswer(accepted) => self.pack_answer(accepted),
+                ScreenAction::ConductAnswer {
+                    accept,
+                    remember,
+                    hash,
+                } => self.conduct_answer(accept, remember, hash),
                 ScreenAction::ShowDialog(reference) => {
                     if let Some(end) = &self.dialogs {
                         end.reply(DialogReply::Open(reference));

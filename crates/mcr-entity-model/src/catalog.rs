@@ -11,6 +11,8 @@ pub struct PlanCx<'a> {
     pub reg: &'a dyn Registries,
     pub assets: &'a SceneAssets,
     pub tex: &'a mut TextureCache,
+    /// Camera yaw and pitch in degrees (vanilla convention), for billboarded entities.
+    pub camera_angles: (f32, f32),
 }
 
 impl std::fmt::Debug for PlanCx<'_> {
@@ -159,6 +161,9 @@ impl Catalog {
         }
         if self.kf.get(index).copied().unwrap_or(false) {
             crate::kf::drive(cx, v, plan);
+        }
+        if let Some(progress) = v.ghost {
+            crate::extras::ghost_pose(cx.camera_angles, progress, plan);
         }
     }
 

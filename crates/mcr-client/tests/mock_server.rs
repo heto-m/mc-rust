@@ -300,3 +300,106 @@ fn transfer_closes_the_session_and_carries_cookies() {
     assert_eq!(next.host, "game.example");
     server.join().unwrap();
 }
+
+fn conduct_login(peer: &mut Peer) {
+    peer.recv_until(ProtocolState::Handshake, "intention");
+    peer.recv_until(ProtocolState::Login, "hello");
+    peer.login(LoginClientbound::LoginFinished(LoginFinished {
+        profile: GameProfile {
+            id: Uuid::nil(),
+            name: "Bot".into(),
+            properties: vec![],
+        },
+        session_id: Uuid::nil(),
+    }));
+    peer.recv_until(ProtocolState::Login, "login_acknowledged");
+    peer.config(ConfigClientbound::CodeOfConduct(
+        mcr_protocol::configuration::CodeOfConduct {
+            text: "be kind".into(),
+        },
+    ));
+}
+
+fn serve_conduct(listener: TcpListener) {
+    let (stream, _) = listener.accept().unwrap();
+    let mut peer = Peer::new(stream);
+    conduct_login(&mut peer);
+    peer.recv_until(ProtocolState::Configuration, "accept_code_of_conduct");
+    registries(&mut peer);
+    enter_play(&mut peer);
+    peer.recv_until(ProtocolState::Play, "accept_teleportation");
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+fn conduct_config(port: u16) -> ClientConfig {
+    let mut cfg = ClientConfig::default();
+    cfg.host = "127.0.0.1".into();
+    cfg.port = port;
+    cfg
+}
+
+fn settle(client: &mut Client) {
+    for _ in 0..30 {
+        let _ = client.tick(&PlayerInput::default());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn conduct_waits_for_the_app_then_accepts() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || serve_conduct(listener));
+    let (link, end) = mcr_client::conduct_channel();
+    let answer = std::thread::spawn(move || {
+        let request = end.requests.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(request.text, "be kind");
+        assert_eq!(request.hash, mcr_client::conduct_hash("be kind"));
+        end.reply(mcr_client::ConductReply::Accept);
+    });
+    let mut cfg = conduct_config(port);
+    cfg.conduct_link = Some(link);
+    let mut client = Client::connect(cfg).expect("join after accepting");
+    assert_eq!(client.phase(), Phase::Play);
+    settle(&mut client);
+    answer.join().unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn remembered_conduct_is_accepted_silently() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || serve_conduct(listener));
+    let (link, end) = mcr_client::conduct_channel();
+    let mut cfg = conduct_config(port);
+    cfg.conduct_link = Some(link);
+    cfg.accepted_conduct = Some(mcr_client::conduct_hash("be kind"));
+    let mut client = Client::connect(cfg).expect("join");
+    assert_eq!(client.phase(), Phase::Play);
+    settle(&mut client);
+    assert!(end.requests.try_recv().is_err());
+    server.join().unwrap();
+}
+
+#[test]
+fn declined_conduct_disconnects() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut peer = Peer::new(stream);
+        conduct_login(&mut peer);
+        std::thread::sleep(Duration::from_millis(300));
+    });
+    let (link, end) = mcr_client::conduct_channel();
+    let answer = std::thread::spawn(move || {
+        end.requests.recv_timeout(Duration::from_secs(10)).unwrap();
+        end.reply(mcr_client::ConductReply::Decline);
+    });
+    let mut cfg = conduct_config(port);
+    cfg.conduct_link = Some(link);
+    assert!(Client::connect(cfg).is_err());
+    answer.join().unwrap();
+    server.join().unwrap();
+}

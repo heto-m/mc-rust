@@ -78,6 +78,8 @@ pub struct PlayerInfo {
     pub list_order: i32,
     pub show_hat: bool,
     pub has_chat_session: bool,
+    /// The profile's `textures` property value, as sent.
+    pub textures: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -135,6 +137,13 @@ impl PlayerList {
                         list_order: 0,
                         show_hat: false,
                         has_chat_session: false,
+                        textures: entry
+                            .profile
+                            .properties
+                            .0
+                            .iter()
+                            .find(|p| p.name == "textures" && p.value.len() <= MAX_TEXTURES_BYTES)
+                            .map(|p| p.value.clone()),
                     },
                 );
             }
@@ -165,6 +174,8 @@ impl PlayerList {
         }
     }
 }
+
+const MAX_TEXTURES_BYTES: usize = 16 * 1024;
 
 pub const MAX_TAB_ENTRIES: usize = 80;
 

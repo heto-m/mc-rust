@@ -6,6 +6,8 @@ use rustc_hash::FxHashMap;
 
 use crate::entity::{AttributeState, MobEffect};
 
+const XP_DISPLAY_TICKS: u32 = 100;
+
 pub const SPRINT_MODIFIER_ID: &str = "minecraft:sprinting";
 
 #[derive(Debug, Clone)]
@@ -20,6 +22,9 @@ pub struct LocalPlayer {
     pub xp_progress: f32,
     pub xp_level: i32,
     pub xp_total: i32,
+    /// Ticks left that the experience bar outranks the locator bar (vanilla's 100-tick display window).
+    pub xp_show_ticks: u32,
+    xp_display_armed: bool,
     pub invulnerable: bool,
     pub instabuild: bool,
     pub walking_speed: f32,
@@ -63,6 +68,8 @@ impl Default for LocalPlayer {
             xp_progress: 0.0,
             xp_level: 0,
             xp_total: 0,
+            xp_show_ticks: 0,
+            xp_display_armed: false,
             invulnerable: false,
             instabuild: false,
             walking_speed: 0.1,
@@ -131,7 +138,21 @@ impl LocalPlayer {
         self.health = new_health;
     }
 
+    /// `setExperienceValues`: a progress change opens the display window, except the first one.
+    pub fn set_experience(&mut self, progress: f32, total: i32, level: i32) {
+        if progress != self.xp_progress {
+            if self.xp_display_armed {
+                self.xp_show_ticks = XP_DISPLAY_TICKS;
+            }
+            self.xp_display_armed = true;
+        }
+        self.xp_progress = progress;
+        self.xp_total = total;
+        self.xp_level = level;
+    }
+
     pub fn tick_hurt(&mut self) {
+        self.xp_show_ticks = self.xp_show_ticks.saturating_sub(1);
         self.hurt_time = (self.hurt_time - 1).max(0);
         self.damage_cooldown = (self.damage_cooldown - 1).max(0);
     }

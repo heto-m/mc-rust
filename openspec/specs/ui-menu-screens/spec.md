@@ -57,3 +57,10 @@ The system SHALL show the title logo over a plain background with Multiplayer, O
 #### Scenario: Multiplayer
 - **WHEN** Multiplayer is clicked
 - **THEN** the server list screen is pushed
+
+### Requirement: Code of conduct screen
+The code of conduct screen SHALL show the title, the scrollable text, a "do not notify again" toggle, an acknowledge button and a disconnect button; Escape SHALL decline.
+
+#### Scenario: Remember and accept
+- **WHEN** the toggle is on and acknowledge is pressed
+- **THEN** the answer is accept with remember set

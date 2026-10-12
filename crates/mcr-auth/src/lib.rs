@@ -8,6 +8,7 @@ pub mod msa;
 pub mod offline;
 pub mod secret;
 pub mod session;
+pub mod textures;
 pub mod xbox;
 
 pub use account::{Account, Authenticator};

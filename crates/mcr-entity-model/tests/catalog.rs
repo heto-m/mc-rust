@@ -15,6 +15,7 @@ fn build(ty: &str, data: &Data, equipment: Option<&[ItemStack; 8]>) -> Option<Pl
         reg: &reg,
         assets: &assets,
         tex: &mut tex,
+        camera_angles: (0.0, 0.0),
     };
     let mut view = EntityView::named(ty, &data.0);
     view.equipment = equipment;
@@ -37,6 +38,7 @@ fn every_entity_type_resolves_and_unmapped_ones_use_the_hitbox() {
             reg: &reg,
             assets: &assets,
             tex: &mut tex,
+            camera_angles: (0.0, 0.0),
         };
         let view = EntityView::new(id as i32, &NoData);
         let mut plan = Plan::default();
@@ -171,6 +173,7 @@ fn build_with(ty: &str, data: &Data, set: impl FnOnce(&mut EntityView<'_>)) -> O
         reg: &reg,
         assets: &assets,
         tex: &mut tex,
+        camera_angles: (0.0, 0.0),
     };
     let mut view = EntityView::named(ty, &data.0);
     set(&mut view);
@@ -452,6 +455,7 @@ fn creeper_flashes_white_on_alternate_tenths_of_the_swell() {
             reg: &reg,
             assets: &assets,
             tex: &mut tex,
+            camera_angles: (0.0, 0.0),
         };
         let mut view = EntityView::named("minecraft:creeper", &data.0);
         view.swelling = swelling;
@@ -465,4 +469,52 @@ fn creeper_flashes_white_on_alternate_tenths_of_the_swell() {
     assert!(!plan_at(0.25).flash_parts);
     let full = plan_at(0.95);
     assert!(full.flash_parts && full.extra_scale.x > 1.3 && full.extra_scale.y > 1.05);
+}
+
+#[test]
+fn foil_trident_gets_an_additive_glint_layer() {
+    use mcr_entity_model::Pipeline;
+    use mcr_protocol::types::entity_data::EntityDataValue;
+    let plain = Data::default();
+    let Some(bare) = build_with("minecraft:trident", &plain, |_| {}) else {
+        return;
+    };
+    assert_eq!(bare.parts.len(), 1);
+    let foil = Data::default().with(12, EntityDataValue::Boolean(true));
+    let glint = build_with("minecraft:trident", &foil, |_| {}).unwrap();
+    assert_eq!(glint.parts.len(), 2);
+    assert_eq!(glint.parts[1].pipeline, Pipeline::Additive);
+    assert_eq!(glint.parts[1].texture, "misc/enchanted_glint_item");
+}
+
+#[test]
+fn cushion_uses_its_dye_colour_texture() {
+    use mcr_protocol::types::entity_data::{DyeColor, EntityDataValue};
+    let data = Data::default().with(8, EntityDataValue::DyeColor(DyeColor::LightBlue));
+    let Some(plan) = build_with("minecraft:cushion", &data, |_| {}) else {
+        return;
+    };
+    assert_eq!(plan.parts.len(), 1);
+    assert_eq!(plan.parts[0].texture, "entity/cushion/light_blue_cushion");
+    assert_eq!(plan.extra_offset.y, -0.25);
+}
+
+#[test]
+fn ominous_item_spawner_draws_its_item_growing_over_fifty_ticks() {
+    use mcr_protocol::types::entity_data::EntityDataValue;
+    let data = Data::default().with(8, EntityDataValue::ItemStack(item("minecraft:diamond")));
+    let Some(young) = build_with("minecraft:ominous_item_spawner", &data, |v| {
+        v.age_ticks = 25.0
+    }) else {
+        return;
+    };
+    assert_eq!(young.free_items.len(), 1);
+    assert!(young.bright);
+    let scale = young.free_items[0].local.x_axis.length();
+    assert!((scale - 0.5).abs() < 1e-4, "{scale}");
+    let grown = build_with("minecraft:ominous_item_spawner", &data, |v| {
+        v.age_ticks = 500.0
+    })
+    .unwrap();
+    assert!((grown.free_items[0].local.x_axis.length() - 1.0).abs() < 1e-4);
 }

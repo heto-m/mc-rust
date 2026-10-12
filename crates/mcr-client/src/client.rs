@@ -55,6 +55,7 @@ pub struct Client {
     pub(crate) sequence: i32,
     transfer: Option<(String, u16)>,
     joined: bool,
+    conduct_pending: bool,
     pub ticks: u64,
     pub view: (f32, f32),
     pub(crate) digging: Option<crate::actions::Digging>,
@@ -144,6 +145,7 @@ impl Client {
             sequence: 0,
             transfer: None,
             joined: false,
+            conduct_pending: false,
             ticks: 0,
             view: (0.0, 0.0),
             digging: None,
@@ -179,6 +181,7 @@ impl Client {
             }
             self.flush_pack_replies()?;
             self.flush_dialog_replies()?;
+            self.flush_conduct_reply()?;
             self.flush_relay()?;
             match self.conn.recv_timeout(Duration::from_millis(50)) {
                 Some(Event::Frame(f)) => self.handle_frame(f)?,
@@ -499,10 +502,18 @@ impl Client {
                     let _ = link.requests.send(crate::DialogRequest::Clear);
                 }
             }
-            ConfigClientbound::CodeOfConduct(_) => {
-                self.send_config(&ConfigServerbound::AcceptCodeOfConduct(
-                    cfg::AcceptCodeOfConduct,
-                ))?;
+            ConfigClientbound::CodeOfConduct(p) => {
+                let hash = crate::conduct::conduct_hash(p.text.as_str());
+                match &self.config.conduct_link {
+                    Some(link) if self.config.accepted_conduct != Some(hash) => {
+                        let _ = link.requests.send(crate::conduct::ConductRequest {
+                            text: crate::conduct::sanitize_conduct(p.text.as_str()),
+                            hash,
+                        });
+                        self.conduct_pending = true;
+                    }
+                    _ => self.accept_conduct()?,
+                }
             }
             _ => {}
         }
@@ -607,6 +618,40 @@ impl Client {
         }
     }
 
+    fn accept_conduct(&mut self) -> Result<()> {
+        self.send_config(&ConfigServerbound::AcceptCodeOfConduct(
+            cfg::AcceptCodeOfConduct,
+        ))
+    }
+
+    fn flush_conduct_reply(&mut self) -> Result<()> {
+        use crate::conduct::ConductReply;
+        if !self.conduct_pending {
+            return Ok(());
+        }
+        let Some(reply) = self
+            .config
+            .conduct_link
+            .as_ref()
+            .and_then(|l| l.next_reply())
+        else {
+            return Ok(());
+        };
+        self.conduct_pending = false;
+        match reply {
+            ConductReply::Accept => self.accept_conduct(),
+            ConductReply::Decline => {
+                let reason = Component::translatable("disconnect.closed", Vec::new());
+                self.set_phase(Phase::Closed);
+                self.events
+                    .push_back(ClientEvent::Disconnected(DisconnectReason::Server(
+                        reason.clone(),
+                    )));
+                Err(ClientError::Disconnected(Box::new(reason)))
+            }
+        }
+    }
+
     fn flush_dialog_replies(&mut self) -> Result<()> {
         use crate::{DialogReply, DialogRequest};
         loop {
@@ -690,6 +735,7 @@ impl Client {
     fn pump(&mut self) -> Result<()> {
         self.flush_pack_replies()?;
         self.flush_dialog_replies()?;
+        self.flush_conduct_reply()?;
         self.flush_relay()?;
         for _ in 0..MAX_FRAMES_PER_PUMP {
             match self.conn.try_recv() {
@@ -774,7 +820,15 @@ impl Client {
                 ..PlayerInput::default()
             };
         }
+        if self.state.camera_entity.is_some() {
+            keys = PlayerInput {
+                yaw: keys.yaw,
+                pitch: keys.pitch,
+                ..PlayerInput::default()
+            };
+        }
         self.view = (keys.yaw, keys.pitch);
+        let player = &mut self.state.player;
         if let Some(vehicle) = player.vehicle {
             return self.ride_tick(&keys, vehicle);
         }

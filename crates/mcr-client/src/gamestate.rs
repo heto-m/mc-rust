@@ -287,7 +287,15 @@ impl Waypoints {
             WaypointOperation::Untrack => {
                 self.tracked.remove(&key);
             }
-            _ => {
+            WaypointOperation::Update => {
+                if let Some(existing) = self.tracked.get_mut(&key)
+                    && std::mem::discriminant(&existing.data)
+                        == std::mem::discriminant(&p.waypoint.data)
+                {
+                    existing.data = p.waypoint.data;
+                }
+            }
+            WaypointOperation::Track => {
                 insert_bounded(&mut self.tracked, MAX_WAYPOINTS, key, p.waypoint);
             }
         }

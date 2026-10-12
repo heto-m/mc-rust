@@ -5,6 +5,7 @@ use mcr_protocol::types::entity_data::EntityDataValue;
 
 use crate::catalog::wrap_degrees;
 use crate::equipment::component;
+use crate::gpu::Pipeline;
 use crate::hands::{HandFamily, hand_attach};
 use crate::idx;
 use crate::misc::state_by_name;
@@ -419,6 +420,10 @@ pub fn decorate(deco: Deco, name: &str, v: &EntityView<'_>, plan: &mut Plan) {
             plan.rig = Rig::Dragon;
             plan.anim.flap = age * 0.06;
             plan.body_yaw_offset = 180.0;
+            if let Some((yaw, lean)) = v.flight {
+                plan.body_yaw_offset += yaw - v.body_yaw;
+                plan.post_rot = Mat4::from_rotation_x(lean.to_radians());
+            }
             plan.extra_offset = Vec3::new(0.0, 0.0, 1.0);
         }
         Deco::EndCrystal => {
@@ -569,5 +574,50 @@ pub fn deco_for(name: &str) -> Deco {
         "goat" => Deco::Goat,
         "sheep" => Deco::Sheep,
         _ => Deco::None,
+    }
+}
+
+const GHOST_SCALE: f32 = 0.425_531_92;
+
+/// `ElderGuardianParticleGroup`: the bare model swung in front of the camera, fading in and out.
+pub fn ghost_pose(camera: (f32, f32), progress: f32, plan: &mut Plan) {
+    plan.skip_rotation = true;
+    plan.bright = true;
+    plan.scale = 1.0;
+    plan.pre_offset = Vec3::ZERO;
+    plan.extra_offset = Vec3::new(0.0, -0.56 * GHOST_SCALE, 3.5 * GHOST_SCALE);
+    plan.extra_scale = Vec3::new(-GHOST_SCALE, GHOST_SCALE, -GHOST_SCALE);
+    plan.model_y = 0.0;
+    plan.tilt = 0.0;
+    plan.spin = 0.0;
+    plan.free_items.clear();
+    plan.free_geo.clear();
+    plan.attachments.clear();
+    plan.post_rot = crate::scene::camera_orientation(camera.0, camera.1)
+        * Mat4::from_rotation_x((60.0 - 150.0 * progress).to_radians());
+    let alpha = 0.05 + 0.5 * (progress * std::f32::consts::PI).sin();
+    for part in &mut plan.parts {
+        part.pipeline = Pipeline::Translucent;
+        part.tint = [255, 255, 255, (alpha.clamp(0.0, 1.0) * 255.0) as u8];
+        part.hurt = false;
+    }
+}
+
+#[cfg(test)]
+mod ghost_tests {
+    use super::*;
+
+    #[test]
+    fn ghost_fades_in_and_out_and_hovers_in_front_of_the_camera() {
+        let mut mid = Plan::default();
+        mid.push(Part::new("minecraft:elder_guardian#main", "t"));
+        ghost_pose((0.0, 0.0), 0.5, &mut mid);
+        assert_eq!(mid.parts[0].tint[3], 140);
+        assert!((mid.extra_offset.z - 1.4894).abs() < 1e-3);
+        let mut start = Plan::default();
+        start.push(Part::new("minecraft:elder_guardian#main", "t"));
+        ghost_pose((0.0, 0.0), 0.0, &mut start);
+        assert_eq!(start.parts[0].tint[3], 12);
+        assert_eq!(start.parts[0].pipeline, Pipeline::Translucent);
     }
 }

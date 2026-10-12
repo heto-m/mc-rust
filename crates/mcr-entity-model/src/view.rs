@@ -170,6 +170,12 @@ pub struct EntityView<'a> {
     /// `Creeper.getSwelling` with the partial tick applied; 0 for everything else.
     pub swelling: f32,
     pub tether: Option<[f64; 3]>,
+    /// Absolute start and end of the lead rope when this entity is leashed.
+    pub leash: Option<([f64; 3], [f64; 3])>,
+    /// Ender dragon flight history: delayed yaw and pitch lean in degrees.
+    pub flight: Option<(f32, f32)>,
+    /// Elder guardian curse progress: draws the model as a translucent ghost in front of the camera.
+    pub ghost: Option<f32>,
     pub data: &'a dyn EntityData,
     pub equipment: Option<&'a [ItemStack; 8]>,
     pub object_data: i32,
@@ -219,6 +225,9 @@ impl<'a> EntityView<'a> {
             fuse: None,
             swelling: 0.0,
             tether: None,
+            leash: None,
+            flight: None,
+            ghost: None,
             data,
             equipment: None,
             object_data: 0,

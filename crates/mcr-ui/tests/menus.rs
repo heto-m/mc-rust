@@ -6,10 +6,10 @@ use std::rc::Rc;
 use common::harness::{Harness, SIZE, TestView, send, typed};
 use mcr_protocol::types::text::{Arg, ClickEvent, Color, Component, Style};
 use mcr_ui::{
-    ChatHud, ChatOptions, ChatScreen, CommandSuggester, ConnectingScreen, DeathScreen,
-    DirectConnectScreen, DisconnectedScreen, EditServerScreen, MemoryServerStore, NoView,
-    OnlineStatus, PauseScreen, Screen, ServerEntry, ServerListScreen, ServerStatus, SharedChat,
-    Suggestion, SuggestionSet, TitleScreen, UiInput,
+    ChatHud, ChatOptions, ChatScreen, CommandSuggester, ConductScreen, ConnectingScreen,
+    DeathScreen, DirectConnectScreen, DisconnectedScreen, EditServerScreen, MemoryServerStore,
+    NoView, OnlineStatus, PauseScreen, Screen, ServerEntry, ServerListScreen, ServerStatus,
+    SharedChat, Suggestion, SuggestionSet, TitleScreen, UiInput,
 };
 
 struct Canned(Option<SuggestionSet>);
@@ -288,4 +288,38 @@ fn chat_scrolls_and_clamps() {
         &NoView,
         (30.0, 30.0),
     );
+}
+
+#[test]
+fn conduct_screen_answers() {
+    use mcr_ui::{Key, MouseButton, ScreenAction};
+    let text = "Be kind.\n".repeat(80);
+    let mut screen = ConductScreen::new(&text, 42);
+    screen.init(427, 240);
+    let click = |x, y| {
+        [
+            UiInput::press(x, y, MouseButton::Left),
+            UiInput::release(x, y, MouseButton::Left),
+        ]
+    };
+    send(&mut screen, &NoView, &click(200.0, 198.0));
+    assert!(screen.remember());
+    let out = send(&mut screen, &NoView, &click(80.0, 222.0));
+    assert!(out.iter().any(|a| matches!(
+        a,
+        ScreenAction::ConductAnswer {
+            accept: true,
+            remember: true,
+            hash: 42
+        }
+    )));
+    let out = send(&mut screen, &NoView, &[UiInput::key(Key::Escape)]);
+    assert!(out.iter().any(|a| matches!(
+        a,
+        ScreenAction::ConductAnswer {
+            accept: false,
+            remember: false,
+            ..
+        }
+    )));
 }

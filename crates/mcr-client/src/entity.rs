@@ -35,6 +35,7 @@ pub struct SimKinds {
     by_type: FxHashMap<i32, SimShape>,
     pub player_type: i32,
     pub creeper_type: Option<i32>,
+    pub dragon_type: Option<i32>,
 }
 
 impl SimKinds {
@@ -72,10 +73,14 @@ impl SimKinds {
         let creeper_type = data
             .entity_type_by_name("minecraft:creeper")
             .map(|id| id as i32);
+        let dragon_type = data
+            .entity_type_by_name("minecraft:ender_dragon")
+            .map(|id| id as i32);
         Self {
             by_type,
             player_type,
             creeper_type,
+            dragon_type,
         }
     }
 
@@ -94,6 +99,7 @@ pub(crate) struct SimContext<'a, W: CollisionWorld + ?Sized> {
     /// Set while the world is frozen: only entities of this type (players) and mounts keep ticking.
     pub frozen_except: Option<i32>,
     pub creeper_type: Option<i32>,
+    pub dragon_type: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +141,55 @@ impl AttributeState {
     }
 }
 
+/// `DragonFlightHistory`: the last 64 ticks of the dragon's height and yaw.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlightHistory {
+    samples: [(f64, f32); 64],
+    head: Option<usize>,
+}
+
+impl Default for FlightHistory {
+    fn default() -> Self {
+        Self {
+            samples: [(0.0, 0.0); 64],
+            head: None,
+        }
+    }
+}
+
+impl FlightHistory {
+    pub fn record(&mut self, y: f64, yaw: f32) {
+        if self.head.is_none() {
+            self.samples = [(y, yaw); 64];
+        }
+        let head = self.head.map_or(0, |h| (h + 1) & 63);
+        self.samples[head] = (y, yaw);
+        self.head = Some(head);
+    }
+
+    fn at(&self, delay: usize) -> (f64, f32) {
+        let head = self.head.unwrap_or(0);
+        self.samples[head.wrapping_sub(delay) & 63]
+    }
+
+    /// `get(delay, partial)`: between the sample `delay + 1` ticks back and `delay` ticks back.
+    pub fn get(&self, delay: usize, partial: f32) -> (f64, f32) {
+        let (y, yaw) = self.at(delay);
+        let (old_y, old_yaw) = self.at(delay + 1);
+        let t = f64::from(partial.clamp(0.0, 1.0));
+        (
+            old_y + (y - old_y) * t,
+            lerp_degrees(old_yaw, yaw, t as f32),
+        )
+    }
+
+    /// Yaw and the pitch lean (degrees) of `EnderDragonRenderer.submit`.
+    pub fn lean(&self, partial: f32) -> (f32, f32) {
+        let rot2 = (self.get(5, partial).0 - self.get(10, partial).0) as f32;
+        (self.get(7, partial).1, (rot2 * 10.0).clamp(-90.0, 90.0))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entity {
     pub id: i32,
@@ -149,6 +204,8 @@ pub struct Entity {
     pub target_yaw: f32,
     pub target_pitch: f32,
     pub head_yaw: f32,
+    head_target: f32,
+    head_steps: u8,
     pub velocity: [f64; 3],
     pub on_ground: bool,
     pub object_data: i32,
@@ -164,6 +221,8 @@ pub struct Entity {
     pub fuse: i32,
     /// `Creeper.swell` and `oldSwell`: client-side, driven by the synched fuse direction and ignite flag.
     pub swell: (i32, i32),
+    /// `EnderDragon.flightHistory`, kept only for dragons.
+    pub flight: Option<Box<FlightHistory>>,
     sim_ticks: u32,
     interpolation_left: u8,
 }
@@ -181,6 +240,8 @@ impl Entity {
             target_yaw: 0.0,
             target_pitch: 0.0,
             head_yaw: 0.0,
+            head_target: 0.0,
+            head_steps: 0,
             velocity: [0.0; 3],
             on_ground: false,
             object_data: 0,
@@ -194,6 +255,7 @@ impl Entity {
             sim: None,
             fuse: -1,
             swell: (0, 0),
+            flight: None,
             sim_ticks: 0,
             interpolation_left: 0,
         }
@@ -270,6 +332,30 @@ impl Entity {
     pub fn set_equipment(&mut self, slot: EquipmentSlot, item: ItemStack) {
         let index = slot as usize % self.equipment.len();
         self.equipment[index] = item;
+    }
+
+    /// `lerpHeadTo`: the head turns over the next three ticks instead of snapping.
+    pub fn lerp_head_to(&mut self, yaw: f32) {
+        self.head_target = yaw;
+        self.head_steps = HEAD_STEPS;
+    }
+
+    pub fn snap_head(&mut self, yaw: f32) {
+        self.head_yaw = yaw;
+        self.head_target = yaw;
+        self.head_steps = 0;
+    }
+
+    fn tick_head(&mut self) {
+        if self.head_steps == 0 {
+            return;
+        }
+        self.head_yaw = lerp_degrees(
+            self.head_yaw,
+            self.head_target,
+            1.0 / f32::from(self.head_steps),
+        );
+        self.head_steps -= 1;
     }
 
     pub fn is_interpolating(&self) -> bool {
@@ -375,6 +461,8 @@ impl Entity {
         }
     }
 }
+
+const HEAD_STEPS: u8 = 3;
 
 fn lerp_degrees(from: f32, to: f32, t: f32) -> f32 {
     let diff = (to - from + 180.0).rem_euclid(360.0) - 180.0;
@@ -485,6 +573,7 @@ impl Entities {
                 continue;
             }
             entity.tick_fuse();
+            entity.tick_head();
             if cx.creeper_type == Some(entity.kind) {
                 entity.tick_swell();
             }
@@ -494,7 +583,16 @@ impl Entities {
                     simulated += 1;
                     entity.tick_sim(shape, cx);
                 }
-                None => entity.tick_interpolation(),
+                None => {
+                    entity.tick_interpolation();
+                    if cx.dragon_type == Some(entity.kind) {
+                        let (y, yaw) = (entity.pos[1], entity.yaw);
+                        entity
+                            .flight
+                            .get_or_insert_with(Default::default)
+                            .record(y, yaw);
+                    }
+                }
             }
         }
     }
@@ -553,6 +651,38 @@ mod tests {
         e.rotate_or_interpolate_to(90.0, 10.0);
         assert_eq!(e.pos, [2.0, 1.0, 0.0]);
         assert_eq!((e.yaw, e.pitch), (90.0, 10.0));
+    }
+
+    #[test]
+    fn dragon_leans_into_climbs() {
+        let mut f = FlightHistory::default();
+        for t in 0..20 {
+            f.record(f64::from(t) * 0.1, 30.0);
+        }
+        let (yaw, lean) = f.lean(0.0);
+        assert!((yaw - 30.0).abs() < 1e-3);
+        assert!((lean - 5.0).abs() < 1e-2, "{lean}");
+        let flat = {
+            let mut g = FlightHistory::default();
+            for _ in 0..20 {
+                g.record(70.0, 0.0);
+            }
+            g.lean(0.5).1
+        };
+        assert_eq!(flat, 0.0);
+    }
+
+    #[test]
+    fn head_turns_over_three_ticks() {
+        let mut e = Entity::new(1, Uuid::nil(), 0, [0.0; 3]);
+        e.lerp_head_to(90.0);
+        e.tick_head();
+        assert!((e.head_yaw - 30.0).abs() < 1e-4);
+        e.tick_head();
+        e.tick_head();
+        assert!((e.head_yaw - 90.0).abs() < 1e-4);
+        e.tick_head();
+        assert!((e.head_yaw - 90.0).abs() < 1e-4);
     }
 
     #[test]

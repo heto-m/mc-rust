@@ -778,3 +778,96 @@ fn cooldown_overlay_shrinks_within_a_tick() {
     }
     assert_eq!(s.cooldown_percent(&stack, 0.0), 0.0);
 }
+
+#[test]
+fn set_camera_follows_a_known_entity_until_it_goes_away() {
+    use mcr_protocol::play::clientbound::entity::RemoveEntities;
+    use mcr_protocol::play::clientbound::world::SetCamera;
+    let mut s = state();
+    s.entities.insert(Entity::new(30, Uuid::nil(), 0, [0.0; 3]));
+    run(&mut s, P::SetCamera(SetCamera { camera_id: 99 }));
+    assert_eq!(s.camera_entity, None);
+    run(&mut s, P::SetCamera(SetCamera { camera_id: 30 }));
+    assert_eq!(s.camera_entity, Some(30));
+    run(&mut s, P::SetCamera(SetCamera { camera_id: PLAYER }));
+    assert_eq!(s.camera_entity, None);
+    run(&mut s, P::SetCamera(SetCamera { camera_id: 30 }));
+    run(
+        &mut s,
+        P::RemoveEntities(RemoveEntities {
+            entity_ids: vec![30],
+        }),
+    );
+    assert_eq!(s.camera_entity, None);
+}
+
+#[test]
+fn custom_chat_completions_add_remove_set_and_complete() {
+    use mcr_protocol::play::clientbound::player::{CompletionAction, CustomChatCompletions};
+    let mut s = state();
+    let send = |s: &mut ClientState, action, names: &[&str]| {
+        run(
+            s,
+            P::CustomChatCompletions(CustomChatCompletions {
+                action,
+                entries: names.iter().map(|n| (*n).to_owned()).collect(),
+            }),
+        );
+    };
+    send(
+        &mut s,
+        CompletionAction::Add,
+        &["Alpha", "alpine", "Beta", "Alpha"],
+    );
+    assert_eq!(s.chat_completions.len(), 3);
+    send(&mut s, CompletionAction::Remove, &["Beta"]);
+    assert_eq!(s.chat_completions, ["Alpha", "alpine"]);
+    let (start, found) = crate::complete_chat(&s.chat_completions, "hello al", 8);
+    assert_eq!(
+        (start, found),
+        (6, vec!["Alpha".to_owned(), "alpine".to_owned()])
+    );
+    send(&mut s, CompletionAction::Set, &["Zed"]);
+    assert_eq!(s.chat_completions, ["Zed"]);
+    let flood: Vec<String> = (0..5000).map(|i| format!("n{i}")).collect();
+    run(
+        &mut s,
+        P::CustomChatCompletions(CustomChatCompletions {
+            action: CompletionAction::Set,
+            entries: flood,
+        }),
+    );
+    assert!(s.chat_completions.len() <= crate::state::MAX_CHAT_COMPLETIONS);
+}
+
+#[test]
+fn transient_blocks_live_for_a_second_and_replace_by_position() {
+    use mcr_buf::BlockPos;
+    use mcr_protocol::play::clientbound::world::AddTransientBlock;
+    let mut s = state();
+    let add = |s: &mut ClientState, x, state| {
+        run(
+            s,
+            P::AddTransientBlock(AddTransientBlock {
+                pos: BlockPos { x, y: 64, z: 0 },
+                block_state: state,
+            }),
+        );
+    };
+    add(&mut s, 1, 10);
+    add(&mut s, 1, 11);
+    add(&mut s, 2, 12);
+    assert_eq!(s.transient_blocks.len(), 2);
+    assert!(s.transient_blocks.iter().any(|b| b.state == 11));
+    assert!(!s.transient_blocks.iter().any(|b| b.state == 10));
+    for _ in 0..19 {
+        s.tick();
+    }
+    assert_eq!(s.transient_blocks.len(), 2);
+    s.tick();
+    assert!(s.transient_blocks.is_empty());
+    for x in 0..1000 {
+        add(&mut s, x, 1);
+    }
+    assert!(s.transient_blocks.len() <= crate::state::MAX_TRANSIENT_BLOCKS);
+}

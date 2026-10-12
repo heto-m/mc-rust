@@ -254,6 +254,15 @@ impl Overlay for FrameOverlay<'_> {
     }
 }
 
+fn push_sample(history: &mut Vec<f32>, value: f32) {
+    if history.len() >= mcr_ui::CHART_SAMPLES {
+        history.remove(0);
+    }
+    history.push(value);
+}
+
+const GHOST_TICKS: u32 = 30;
+
 fn lerp3(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
 }
@@ -307,6 +316,7 @@ pub struct Play {
     pub transfer: Option<mcr_client::TransferTarget>,
     sky_factor: f32,
     pack_answers: Vec<bool>,
+    conduct_answers: Vec<(bool, bool, i32)>,
     dialog_replies: Vec<mcr_client::DialogReply>,
     test_status: mcr_ui::SharedTestStatus,
     chat_depth: Option<usize>,
@@ -352,6 +362,13 @@ pub struct Play {
     ambience: Ambience,
     loops: EntityLoops,
     entity_events: crate::entity_events::EntityEvents,
+    skins: crate::skins::SkinStore,
+    boss_darkening: (f32, f32),
+    spectate_view: Option<(f32, f32)>,
+    ghost_age: Option<u32>,
+    frame_history: Vec<f32>,
+    tick_history: Vec<f32>,
+    ping_history: Vec<f32>,
     movement: MovementSounds,
     placed_seen: bool,
     started: Instant,
@@ -390,7 +407,10 @@ impl Play {
             .render_distance
             .unwrap_or(options.render_distance)
             .clamp(2, 64);
-        let hud = Hud::new(&gui.ui, data);
+        let hud = Hud::new(&gui.ui, data).with_style_reader(Box::new({
+            let assets = assets.clone();
+            move |path| assets.read(path)
+        }));
         let hotbar_path = cfg.game_dir.join("hotbar.txt");
         let hotbars = Rc::new(RefCell::new(
             std::fs::read_to_string(&hotbar_path)
@@ -416,6 +436,7 @@ impl Play {
         };
         let overlay_assets = assets.clone();
         let data_assets = assets.clone();
+        let skin_assets = assets.clone();
         let render = RenderSystem::new(renderer, assets, &world);
         let now = Instant::now();
         Self {
@@ -449,6 +470,7 @@ impl Play {
             leave: false,
             quit: false,
             pack_answers: Vec::new(),
+            conduct_answers: Vec::new(),
             dialog_replies: Vec::new(),
             test_status: mcr_ui::SharedTestStatus::default(),
             chat_depth: None,
@@ -491,6 +513,13 @@ impl Play {
             ambience: Ambience::new(data, Box::new(move |path| data_assets.read(path))),
             loops: EntityLoops::new(data),
             entity_events: Default::default(),
+            boss_darkening: (0.0, 0.0),
+            spectate_view: None,
+            ghost_age: None,
+            frame_history: Vec::new(),
+            tick_history: Vec::new(),
+            ping_history: Vec::new(),
+            skins: crate::skins::SkinStore::new(Box::new(move |path| skin_assets.read(path))),
             movement: MovementSounds::new(data),
             placed_seen: false,
             started: now,
@@ -629,6 +658,23 @@ impl Play {
         if self.closed.is_some() || self.transfer.is_some() {
             return;
         }
+        let started = Instant::now();
+        self.tick_inner();
+        let ping = self
+            .world
+            .client
+            .state
+            .players
+            .get(self.world.client.state.uuid)
+            .map_or(0, |p| p.latency);
+        push_sample(
+            &mut self.tick_history,
+            started.elapsed().as_secs_f32() * 1000.0,
+        );
+        push_sample(&mut self.ping_history, ping.max(0) as f32);
+    }
+
+    fn tick_inner(&mut self) {
         self.ticks += 1;
         self.sync_settings();
         let input = self.player_input();
@@ -638,11 +684,27 @@ impl Play {
             self.fail(&e);
         }
         self.update_eye();
+        if self.spectate_view.is_some() && input.sneak {
+            self.world.client.state.camera_entity = None;
+        }
         self.update_fov();
         for event in self.world.take_events() {
             self.on_event(event);
         }
         self.tick_visuals();
+        self.skins.update(&self.world.client.state.players);
+        self.ghost_age = self.ghost_age.map(|a| a + 1).filter(|a| *a < GHOST_TICKS);
+        let darken = self
+            .world
+            .client
+            .state
+            .boss_bars
+            .values()
+            .any(|b| b.flags.darken_screen);
+        self.boss_darkening = (
+            self.boss_darkening.1,
+            effects::tick_boss_darkening(self.boss_darkening.1, darken),
+        );
         if self.world.client.state.player.loaded && self.closed.is_none() {
             self.target = self.pick_from(self.cur_eye);
             self.gameplay();
@@ -751,11 +813,18 @@ impl Play {
     }
 
     fn update_eye(&mut self) {
-        let player = &self.world.client.state.player;
+        let state = &self.world.client.state;
+        let player = &state.player;
         let target = player.physics.pose.eye_height();
         self.eye_height += (target - self.eye_height) * 0.5;
         let [x, y, z] = player.pos();
         self.cur_eye = [x, y + f64::from(self.eye_height), z];
+        self.spectate_view = None;
+        if let Some(e) = state.camera_entity.and_then(|id| state.entities.get(id)) {
+            self.cur_eye = crate::entities::eye_position(self.data, e);
+            let yaw = if e.sim.is_some() { e.yaw } else { e.head_yaw };
+            self.spectate_view = Some((yaw, e.pitch));
+        }
         let snapped = player.placed && !self.placed_seen;
         if snapped {
             self.placed_seen = true;
@@ -947,6 +1016,7 @@ impl Play {
                     self.closed = Some(reason.to_log_string());
                 }
             }
+            ClientEvent::ElderGuardianGhost => self.ghost_age = Some(0),
             ClientEvent::Died { message } => {
                 println!("died");
                 self.death_message = message;
@@ -1496,6 +1566,14 @@ impl Play {
         self.stack.pop();
     }
 
+    pub fn take_server_icon(&mut self) -> Option<Vec<u8>> {
+        self.world.client.state.server.icon.take()
+    }
+
+    pub fn take_conduct_answers(&mut self) -> Vec<(bool, bool, i32)> {
+        std::mem::take(&mut self.conduct_answers)
+    }
+
     pub fn take_pack_answers(&mut self) -> Vec<bool> {
         std::mem::take(&mut self.pack_answers)
     }
@@ -1956,6 +2034,11 @@ impl Play {
                 ScreenAction::Quit => self.quit = true,
                 ScreenAction::OpenMods => self.open_mods = true,
                 ScreenAction::ResourcePackAnswer(accepted) => self.pack_answers.push(accepted),
+                ScreenAction::ConductAnswer {
+                    accept,
+                    remember,
+                    hash,
+                } => self.conduct_answers.push((accept, remember, hash)),
                 _ => {}
             }
         }
@@ -2101,16 +2184,17 @@ impl Play {
         let eye = lerp3(self.prev_eye, self.cur_eye, t);
         let fov_mod = self.prev_fov_mod + (self.fov_mod - self.prev_fov_mod) * partial;
         let fov = (self.options.fov.0 as f32 * fov_mod).clamp(1.0, 170.0);
+        let (look_yaw, look_pitch) = self.spectate_view.unwrap_or((self.yaw, self.pitch));
         let mut camera = Camera {
             position: DVec3::from(eye),
-            yaw: std::f32::consts::PI - self.yaw.to_radians(),
-            pitch: -self.pitch.to_radians(),
+            yaw: std::f32::consts::PI - look_yaw.to_radians(),
+            pitch: -look_pitch.to_radians(),
             fov_y: fov.to_radians(),
             near: 0.05,
             roll: self.view_roll(partial),
         };
         if self.perspective != Perspective::First {
-            let forward = view_direction(self.yaw, self.pitch);
+            let forward = view_direction(look_yaw, look_pitch);
             let sign = if self.perspective == Perspective::ThirdBack {
                 -1.0
             } else {
@@ -2133,12 +2217,29 @@ impl Play {
         camera
     }
 
+    fn debug_charts(&self) -> Vec<mcr_ui::DebugChart> {
+        let chart = |title: &str, unit, samples: &[f32], scale, warn, bad| mcr_ui::DebugChart {
+            title: title.to_owned(),
+            unit,
+            samples: samples.to_vec(),
+            scale,
+            warn,
+            bad,
+        };
+        vec![
+            chart("Frame time", "ms", &self.frame_history, 50.0, 16.7, 33.4),
+            chart("Tick time", "ms", &self.tick_history, 50.0, 25.0, 50.0),
+            chart("Ping", "ms", &self.ping_history, 500.0, 150.0, 300.0),
+        ]
+    }
+
     pub fn frame(&mut self) -> Option<FrameStats> {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32().max(1.0e-6);
         self.last_frame = now;
         self.fps += (1.0 / dt - self.fps) * 0.05;
         self.frame_ms += (dt * 1000.0 - self.frame_ms) * 0.05;
+        push_sample(&mut self.frame_history, dt * 1000.0);
 
         self.world.camera = self.camera(self.partial());
         self.world.camera.fov_y = self.world.camera.fov_y.max(0.1);
@@ -2171,6 +2272,18 @@ impl Play {
             )[1];
             effects::apply_underwater(&mut env, self.water_ticks, f32::from(sky));
         }
+        env.boss_darkening =
+            self.boss_darkening.0 + (self.boss_darkening.1 - self.boss_darkening.0) * partial;
+        if self
+            .world
+            .client
+            .state
+            .boss_bars
+            .values()
+            .any(|b| b.flags.create_world_fog)
+        {
+            effects::apply_boss_fog(&mut env);
+        }
         self.sky_factor = env.sky_factor;
         self.prepare_visuals(&camera, partial, aspect, &env);
 
@@ -2179,7 +2292,7 @@ impl Play {
         let hidden = self.hud_hidden || self.java_gui;
         let chat_open = self.chat_open();
         let debug = self.debug_on.then(|| {
-            debug::build(&DebugInput {
+            let mut overlay = debug::build(&DebugInput {
                 state: &self.world.client.state,
                 data: self.data,
                 feet: self.feet(),
@@ -2194,7 +2307,9 @@ impl Play {
                 size,
                 memory_mb: debug::resident_mb(),
                 meshed_columns: self.world.loaded_count(),
-            })
+            });
+            overlay.charts = self.debug_charts();
+            overlay
         });
         let input = HudInput {
             state: &self.world.client.state,
@@ -2205,6 +2320,15 @@ impl Play {
             tab_held: self.tab_held,
             chat_open,
             debug: debug.as_ref(),
+            skins: &self.skins,
+            camera: mcr_client::locator::Camera {
+                pos: camera.position.to_array(),
+                yaw: self.yaw,
+                pitch: self.pitch,
+                fov_y_degrees: camera.fov_y.to_degrees(),
+            },
+            eye_of: &|e| crate::entities::eye_position(self.data, e),
+            show_heads: self.world.client.config.online.is_some(),
             millis: self.started.elapsed().as_millis() as u64,
         };
         {
@@ -2324,10 +2448,16 @@ impl Play {
                 state,
                 partial,
                 cull: &cull,
-                show_local: self.perspective != Perspective::First,
+                show_local: self.perspective != Perspective::First || self.spectate_view.is_some(),
+                hide_entity: self.world.client.state.camera_entity,
+                eye: camera.position.to_array(),
+                ghost: self
+                    .ghost_age
+                    .map(|a| (a as f32 + partial) / GHOST_TICKS as f32),
                 local_swing: swing,
                 local_using: self.using_item,
                 events: &self.entity_events,
+                skins: &self.skins,
             });
             let params = layer.frame_params(camera, aspect, env);
             layer.scene.prepare(&params);
@@ -2354,6 +2484,7 @@ impl Play {
                 lightmap: &env.lightmap(1.0),
                 light: crate::entities::light_at(&state.chunks, eye, 0.0),
                 invisible: false,
+                skin: self.skins.get(state.uuid),
             };
             let visible = self.perspective == Perspective::First
                 && !self.hud_hidden

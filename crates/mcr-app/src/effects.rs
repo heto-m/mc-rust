@@ -963,9 +963,56 @@ pub fn environment(
     env
 }
 
+/// Boss events with the fog flag pull the environmental fog in to 10..96 blocks.
+pub fn apply_boss_fog(env: &mut Environment) {
+    env.fog_start = env.fog_start.min(10.0);
+    env.fog_end = env.fog_end.min(96.0);
+    env.sky_fog_end = env.fog_end;
+}
+
+/// One tick of `GameRenderer.bossOverlayWorldDarkening`: up by 0.05 while a boss darkens, down by 0.0125.
+pub fn tick_boss_darkening(current: f32, darken: bool) -> f32 {
+    if darken {
+        (current + 0.05).min(1.0)
+    } else {
+        (current - 0.0125).max(0.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boss_darkening_ramps_fast_and_fades_slow() {
+        let mut d = 0.0;
+        for _ in 0..30 {
+            d = tick_boss_darkening(d, true);
+        }
+        assert_eq!(d, 1.0);
+        for _ in 0..40 {
+            d = tick_boss_darkening(d, false);
+        }
+        assert!((d - 0.5).abs() < 1e-4);
+        for _ in 0..100 {
+            d = tick_boss_darkening(d, false);
+        }
+        assert_eq!(d, 0.0);
+    }
+
+    #[test]
+    fn boss_fog_only_tightens() {
+        let mut env = Environment {
+            fog_start: 0.0,
+            fog_end: 1024.0,
+            ..Environment::default()
+        };
+        apply_boss_fog(&mut env);
+        assert_eq!(
+            (env.fog_start, env.fog_end, env.sky_fog_end),
+            (0.0, 96.0, 96.0)
+        );
+    }
 
     #[test]
     fn block_particles_spawn_with_real_assets() {

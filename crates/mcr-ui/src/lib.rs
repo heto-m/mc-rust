@@ -22,7 +22,8 @@ pub use items::{IconStats, ItemIcons, ItemView, StackView, durability_bar};
 pub use lang::{DEFAULT_LANGUAGE, LanguageInfo, available_languages};
 pub use renderer::{UiRenderer, UiStats};
 pub use screens::{
-    ChatHud, ChatOptions, DebugOverlay, HeartKind, HudItems, HudSprites, HudState, fade_alpha,
+    CHART_SAMPLES, ChatHud, ChatOptions, DebugChart, DebugOverlay, HeartKind, HudItems, HudSprites,
+    HudState, fade_alpha,
 };
 pub use sprites::{Scaling, SpriteId, SpriteInfo, SpriteQuad, Sprites};
 pub use style::{Cell, Flags, FontId, Style};

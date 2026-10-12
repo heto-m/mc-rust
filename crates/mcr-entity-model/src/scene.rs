@@ -179,6 +179,10 @@ fn eval_job(
 }
 const MAX_BOLTS: usize = 64;
 
+const LEASH_STEPS: usize = 24;
+const LEASH_WIDTH: f32 = 0.05;
+const LEASH_MAX_SQ: f32 = 64.0 * 64.0;
+
 pub struct EntityScene {
     pub(crate) gpu: EntityRenderer,
     pub(crate) assets: Arc<SceneAssets>,
@@ -191,6 +195,7 @@ pub struct EntityScene {
     pub(crate) items: ItemGeometry,
     jobs: Vec<Job>,
     camera: [f64; 3],
+    camera_angles: (f32, f32),
     billboard: Mat4,
     flash: bool,
     sprite_models: FxHashMap<[u32; 4], ModelId>,
@@ -233,6 +238,7 @@ impl EntityScene {
             textures,
             jobs: Vec::new(),
             camera: [0.0; 3],
+            camera_angles: (0.0, 0.0),
             billboard: Mat4::IDENTITY,
             flash: false,
             sprite_models: FxHashMap::default(),
@@ -248,6 +254,7 @@ impl EntityScene {
     /// Camera used for sprite entities and fishing lines; `yaw` and `pitch` in degrees (vanilla convention).
     pub fn set_camera(&mut self, position: [f64; 3], yaw: f32, pitch: f32) {
         self.camera = position;
+        self.camera_angles = (yaw, pitch);
         self.billboard = camera_orientation(yaw, pitch);
     }
 
@@ -396,6 +403,7 @@ impl EntityScene {
                 reg: registries,
                 assets: &self.assets,
                 tex: &mut self.textures,
+                camera_angles: self.camera_angles,
             };
             self.catalog.build(&mut cx, v, plan);
         }
@@ -632,6 +640,9 @@ impl EntityScene {
                 crate::equipment::has_glint(stack),
             );
         }
+        if let Some((start, end)) = v.leash {
+            self.push_leash(v, start, end);
+        }
         for g in &plan.free_geo {
             match g {
                 crate::plan::FreeGeo::Block { state, local } => {
@@ -727,6 +738,56 @@ impl EntityScene {
             }
         }
         self.flash = false;
+    }
+
+    fn push_leash(&mut self, v: &EntityView<'_>, start: [f64; 3], end: [f64; 3]) {
+        const STEPS: usize = LEASH_STEPS;
+        let rel = |p: [f64; 3]| {
+            Vec3::new(
+                (p[0] - v.pos[0]) as f32,
+                (p[1] - v.pos[1]) as f32,
+                (p[2] - v.pos[2]) as f32,
+            )
+        };
+        let (a, b) = (rel(start), rel(end));
+        let d = b - a;
+        if !d.is_finite() || d.length_squared() > LEASH_MAX_SQ {
+            return;
+        }
+        let eye = Vec3::new(
+            (v.pos[0] - self.camera[0]) as f32,
+            (v.pos[1] - self.camera[1]) as f32,
+            (v.pos[2] - self.camera[2]) as f32,
+        );
+        for k in 0..STEPS {
+            let p0 = a + d * (k as f32 / STEPS as f32);
+            let p1 = a + d * ((k + 1) as f32 / STEPS as f32);
+            let mid = (p0 + p1) * 0.5;
+            let view = (eye + mid).normalize_or_zero();
+            let along = p1 - p0;
+            let side = along.cross(view).normalize_or_zero() * LEASH_WIDTH;
+            let m = Mat4::from_cols(
+                side.extend(0.0),
+                along.extend(0.0),
+                view.extend(0.0),
+                mid.extend(1.0),
+            );
+            let shade = if k % 2 == 0 { 1.0 } else { 0.7 };
+            let tint = [
+                (127.5 * shade) as u8,
+                (102.0 * shade) as u8,
+                (76.5 * shade) as u8,
+                255,
+            ];
+            self.push_sprite(
+                "dyn:white",
+                [0.0, 0.0, 1.0, 1.0],
+                m,
+                tint,
+                crate::gpu::Pipeline::Cutout,
+                v,
+            );
+        }
     }
 
     fn push_sprite(
@@ -1010,6 +1071,6 @@ impl std::fmt::Debug for EntityScene {
     }
 }
 
-fn glint_scroll(age: f32) -> [f32; 2] {
+pub(crate) fn glint_scroll(age: f32) -> [f32; 2] {
     [(age * 0.01).fract(), (age * 0.007).fract()]
 }

@@ -73,3 +73,38 @@ fn non_living_models_sit_where_vanilla_puts_them() {
         );
     }
 }
+
+fn render_with_leash(h: &mut Harness, leash: Option<([f64; 3], [f64; 3])>) -> Vec<u8> {
+    let data = Data::default();
+    let mut v = EntityView::named("minecraft:leash_knot", &data.0);
+    v.pos = [0.0, 10.0, 0.0];
+    v.age_ticks = 40.0;
+    v.leash = leash;
+    h.scene.set_shadows(false);
+    h.scene.set_camera([0.0, 10.0, DISTANCE], 180.0, 0.0);
+    h.scene
+        .update(&TestRegistries::vanilla(), std::iter::once(v));
+    let cam = Camera {
+        position: DVec3::new(0.0, 10.0, DISTANCE),
+        target: Vec3::new(0.0, 10.0, 0.0),
+        fov_deg: FOV,
+    };
+    h.render(&cam.frame(SIZE, SIZE), SIZE, SIZE).pixels
+}
+
+#[test]
+fn leash_rope_is_drawn_between_its_ends() {
+    let Some(mut h) = Harness::new() else { return };
+    let bare = render_with_leash(&mut h, None);
+    let roped = render_with_leash(&mut h, Some(([0.0, 10.3, 0.0], [1.5, 10.3, 0.0])));
+    let changed = bare
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(roped.as_chunks::<4>().0)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(changed > 100, "only {changed} pixels changed");
+    let far = render_with_leash(&mut h, Some(([0.0, 10.3, 0.0], [5000.0, 10.3, 0.0])));
+    assert_eq!(far, bare, "absurdly long ropes are dropped");
+}

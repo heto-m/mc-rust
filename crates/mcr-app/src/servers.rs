@@ -82,6 +82,34 @@ impl FileServers {
         }
     }
 
+    /// Stores the icon a server sent while joined, if it is a valid 64x64 PNG.
+    pub fn set_icon_for(&mut self, address: &str, png: &[u8]) {
+        use base64::Engine;
+        if status::decode_png64(png).is_none() {
+            return;
+        }
+        if let Some(s) = self.list.servers.iter_mut().find(|s| s.ip == address) {
+            s.icon = Some(base64::engine::general_purpose::STANDARD.encode(png));
+            self.write();
+        }
+    }
+
+    pub fn accepted_conduct_for(&self, address: &str) -> Option<i32> {
+        self.list
+            .servers
+            .iter()
+            .find(|s| s.ip == address)
+            .map(|s| s.accepted_code_of_conduct)
+            .filter(|h| *h != 0)
+    }
+
+    pub fn set_accepted_conduct_for(&mut self, address: &str, hash: i32) {
+        if let Some(s) = self.list.servers.iter_mut().find(|s| s.ip == address) {
+            s.accepted_code_of_conduct = hash;
+            self.write();
+        }
+    }
+
     fn save(&mut self) {
         let old = std::mem::take(&mut self.list.servers);
         self.list.servers = self
@@ -260,5 +288,46 @@ mod tests {
         let names: Vec<_> = again.servers().iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["B", "A"]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn png(size: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, size, size);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut w = enc.write_header().unwrap();
+        w.write_image_data(&vec![200u8; (size * size * 4) as usize])
+            .unwrap();
+        drop(w);
+        out
+    }
+
+    #[test]
+    fn server_sent_icons_are_saved_only_when_valid() {
+        let dir = std::env::temp_dir().join(format!("mcr-icons-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let list = ServerList {
+            servers: vec![mcr_settings::ServerEntry {
+                name: "x".into(),
+                ip: "host:1".into(),
+                ..Default::default()
+            }],
+        };
+        std::fs::write(dir.join("servers.dat"), list.to_bytes().unwrap()).unwrap();
+        let mut servers = FileServers::load(&dir);
+        servers.set_icon_for("host:1", &png(32));
+        servers.set_icon_for("host:1", b"not a png");
+        let saved = ServerList::parse(&std::fs::read(dir.join("servers.dat")).unwrap()).unwrap();
+        assert_eq!(saved.servers[0].icon, None);
+        servers.set_icon_for("other:1", &png(64));
+        servers.set_icon_for("host:1", &png(64));
+        let saved = ServerList::parse(&std::fs::read(dir.join("servers.dat")).unwrap()).unwrap();
+        assert!(
+            saved.servers[0]
+                .icon
+                .as_deref()
+                .is_some_and(|i| i.len() > 20)
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

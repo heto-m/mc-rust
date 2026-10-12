@@ -38,6 +38,7 @@ mod seats;
 mod servers;
 mod settings;
 mod shell;
+mod skins;
 mod source;
 mod stats;
 mod status;

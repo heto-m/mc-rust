@@ -322,8 +322,7 @@ pub(crate) fn builder_for(name: &str) -> Builder {
         "minecraft:area_effect_cloud"
         | "minecraft:interaction"
         | "minecraft:marker"
-        | "minecraft:text_display"
-        | "minecraft:ominous_item_spawner" => Builder::Skip,
+        | "minecraft:text_display" => Builder::Skip,
         "minecraft:pig" => Builder::Func(pig),
         "minecraft:cow" => Builder::Func(cow),
         "minecraft:mooshroom" => Builder::Func(mooshroom),
@@ -359,7 +358,6 @@ pub(crate) fn builder_for(name: &str) -> Builder {
         "minecraft:ender_dragon" => Builder::Func(dragon),
         "minecraft:zombie_nautilus" => Builder::Func(zombie_nautilus),
         "minecraft:sulfur_cube" => Builder::Func(sulfur_cube),
-        "minecraft:cushion" => Builder::Skip,
         _ => Builder::Hitbox,
     }
 }

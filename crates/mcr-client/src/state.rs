@@ -22,6 +22,20 @@ use crate::player::{LocalPlayer, SPRINT_MODIFIER_ID};
 use crate::registry::{BIOME, DIMENSION_TYPE, Dimension, Registries, dimension_shape};
 use crate::social::{BossBar, ChatState, PlayerList, Scoreboard, TabList, Titles};
 
+pub const MAX_CHAT_COMPLETIONS: usize = 1024;
+pub const MAX_COMPLETION_CHARS: usize = 256;
+
+/// `TransientBlock.DEFAULT_TIME_TO_LIVE`: one second.
+pub const TRANSIENT_BLOCK_TICKS: u8 = 20;
+pub const MAX_TRANSIENT_BLOCKS: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransientBlock {
+    pub pos: [i32; 3],
+    pub state: i32,
+    pub ticks: u8,
+}
+
 pub const MAX_COOKIES: usize = 64;
 pub const MAX_COOKIE_BYTES: usize = 5120;
 pub const MAX_SERVER_LINKS: usize = 64;
@@ -266,6 +280,8 @@ impl WorldInfo {
 pub struct ServerInfo {
     pub brand: Option<String>,
     pub motd: Option<Component>,
+    /// PNG bytes of the server icon sent by `server_data`, until the app takes them.
+    pub icon: Option<Vec<u8>>,
     pub links: Vec<ServerLink>,
     pub cookies: FxHashMap<String, Vec<u8>>,
     pub game_rules: FxHashMap<String, String>,
@@ -368,6 +384,8 @@ pub struct ClientState {
     pub block_entities: FxHashMap<BlockPos, (i32, Compound)>,
     pub entities: Entities,
     pub pickups: Vec<Pickup>,
+    /// Blocks the server asked us to draw briefly while the chunk update catches up.
+    pub transient_blocks: Vec<TransientBlock>,
     pub player: LocalPlayer,
     pub inventory: Inventory,
     pub world: WorldInfo,
@@ -381,12 +399,16 @@ pub struct ClientState {
     pub last_command_suggestions: Option<(i32, Vec<String>)>,
     pub commands: crate::commands::CommandTree,
     pub command_reply: Option<CommandReply>,
+    /// Server-provided plain-chat completions (`custom_chat_completions`).
+    pub chat_completions: Vec<String>,
     pub block_ack_sequence: i32,
     pub predictions: crate::digging::BlockPredictions,
     pub cooldowns: FxHashMap<String, Cooldown>,
     pub gameplay: crate::gamestate::GameplayState,
     pub game_ticks: u64,
     pub controlled_vehicle: Option<i32>,
+    /// The entity the view follows after `set_camera`; `None` when the player's own eyes are used.
+    pub camera_entity: Option<i32>,
     pub vehicle_corrections: u32,
     pub chunk_batches: ChunkBatchSizeCalculator,
     pub chunks_received: u64,
@@ -470,6 +492,7 @@ impl ClientState {
             block_entities: FxHashMap::default(),
             entities: Entities::default(),
             pickups: Vec::new(),
+            transient_blocks: Vec::new(),
             player: LocalPlayer::default(),
             inventory: Inventory::default(),
             world: WorldInfo::default(),
@@ -483,12 +506,14 @@ impl ClientState {
             last_command_suggestions: None,
             commands: crate::commands::CommandTree::default(),
             command_reply: None,
+            chat_completions: Vec::new(),
             block_ack_sequence: 0,
             predictions: crate::digging::BlockPredictions::default(),
             cooldowns: FxHashMap::default(),
             gameplay: crate::gamestate::GameplayState::default(),
             game_ticks: 0,
             controlled_vehicle: None,
+            camera_entity: None,
             vehicle_corrections: 0,
             chunk_batches: ChunkBatchSizeCalculator::default(),
             chunks_received: 0,
@@ -514,6 +539,7 @@ impl ClientState {
         self.block_entities.clear();
         self.entities.clear();
         self.pickups.clear();
+        self.transient_blocks.clear();
         self.dimension = Dimension {
             min_y,
             height: height as i32,
@@ -557,10 +583,15 @@ impl ClientState {
             follow: Some([pos[0], pos[1] + eye / 2.0, pos[2]]),
             frozen_except: frozen.then_some(self.sim_kinds.player_type),
             creeper_type: self.sim_kinds.creeper_type,
+            dragon_type: self.sim_kinds.dragon_type,
         };
         self.entities.tick(&mut cx);
         if !frozen {
             self.tick_pickups();
+            self.transient_blocks.retain_mut(|b| {
+                b.ticks -= 1;
+                b.ticks > 0
+            });
         }
         self.player.tick_hurt();
     }
@@ -677,6 +708,7 @@ impl ClientState {
         self.block_entities.clear();
         self.entities.clear();
         self.pickups.clear();
+        self.transient_blocks.clear();
         self.boss_bars.clear();
         self.inventory.open = None;
         self.player.loaded = false;

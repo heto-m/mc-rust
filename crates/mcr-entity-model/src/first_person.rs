@@ -39,6 +39,7 @@ impl EntityScene {
                 reg: registries,
                 assets: &self.assets,
                 tex: &mut self.textures,
+                camera_angles: (0.0, 0.0),
             };
             self.catalog.build(&mut cx, view, &mut plan);
         }

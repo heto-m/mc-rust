@@ -264,6 +264,8 @@ pub enum ClientEvent {
     PlayerRotated,
     HealthChanged,
     ExperienceChanged,
+    /// The elder guardian curse: its ghost swims across the screen.
+    ElderGuardianGhost,
     GameModeChanged,
     AbilitiesChanged,
     Died {

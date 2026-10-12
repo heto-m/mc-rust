@@ -31,6 +31,10 @@ pub struct ClientConfig {
     pub pack_link: Option<crate::PackLink>,
     /// When set, server dialogs go to the app, which answers through the same link.
     pub dialog_link: Option<crate::DialogLink>,
+    /// When set, an unaccepted code of conduct goes to the app, which answers through the same link.
+    pub conduct_link: Option<crate::ConductLink>,
+    /// Hash of the code of conduct this server's entry already accepted.
+    pub accepted_conduct: Option<i32>,
     pub online: Option<OnlineAuth>,
     /// Handshake with the transfer intent (set when following a transfer packet).
     pub transfer: bool,
@@ -57,6 +61,8 @@ impl Default for ClientConfig {
             resource_packs: ResourcePackPolicy::Decline,
             pack_link: None,
             dialog_link: None,
+            conduct_link: None,
+            accepted_conduct: None,
             online: None,
             transfer: false,
             cookies: FxHashMap::default(),

@@ -117,3 +117,9 @@ pub const TNT_FUSE: u8 = 8;
 pub const TNT_BLOCK: u8 = 9;
 pub const MINECART_FURNACE_FUEL: u8 = 13;
 pub const BOAT_HURT: u8 = 8;
+
+/// `ThrownTrident.ID_FOIL`, after `AbstractArrow`'s three fields and the loyalty byte.
+pub const THROWN_TRIDENT_FOIL: u8 = 12;
+
+/// `Cushion.DATA_COLOR`, the first field after `Entity`'s.
+pub const CUSHION_COLOR: u8 = 8;

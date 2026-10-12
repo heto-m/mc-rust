@@ -35,6 +35,8 @@ pub struct HudState {
     pub hunger_effect: bool,
     pub xp_progress: f32,
     pub xp_level: i32,
+    /// False while the locator bar replaces the experience bar; the level number stays.
+    pub xp_bar: bool,
 }
 
 impl Default for HudState {
@@ -56,6 +58,7 @@ impl Default for HudState {
             hunger_effect: false,
             xp_progress: 0.0,
             xp_level: 0,
+            xp_bar: true,
         }
     }
 }
@@ -180,10 +183,10 @@ impl HudSprites {
         let (gui_w, gui_h) = frame.gui_size();
         let (x, y) = ((gui_w - 182) / 2, gui_h - 24 - 5);
         let progress = (state.xp_progress * 183.0) as i32;
-        if let Some(bg) = self.xp_background {
+        if let (true, Some(bg)) = (state.xp_bar, self.xp_background) {
             frame.sprite(bg, x, y, 182, 5);
         }
-        if let (Some(fg), true) = (self.xp_progress, progress > 0) {
+        if let (Some(fg), true, true) = (self.xp_progress, progress > 0, state.xp_bar) {
             frame.sprite_region(fg, (0, 0), (x, y, progress.min(182), 5));
         }
         if state.xp_level > 0 {

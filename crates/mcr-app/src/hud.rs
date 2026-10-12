@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::time::Instant;
 
 use mcr_client::{ClientState, ScoreStyle, boss_bars_ordered, tab_name};
@@ -11,7 +12,11 @@ use mcr_ui::{
     ChatOptions, DebugOverlay, HeartKind, HudItems, HudSprites, HudState, ItemIcons, SharedChat,
     SpriteId, StackView, Ui, UiFrame,
 };
+use rustc_hash::FxHashMap;
 
+use crate::skins::{HEAD_SIZE, SkinStore};
+
+const MAX_HEAD_SPRITES: usize = 256;
 const MAX_AIR: i32 = 300;
 const AIR_DATA_INDEX: u8 = 1;
 const ABSORPTION_DATA_INDEX: u8 = 17;
@@ -24,6 +29,50 @@ const TAB_BACKGROUND: u32 = 0x8000_0000;
 const TAB_SLOT: u32 = 0x20FF_FFFF;
 const TAB_COLUMN_GAP: i32 = 5;
 
+#[derive(Debug, Clone)]
+struct WaypointStyle {
+    near: f32,
+    far: f32,
+    sprites: Vec<String>,
+}
+
+impl WaypointStyle {
+    fn fallback() -> Self {
+        Self {
+            near: 128.0,
+            far: 332.0,
+            sprites: (0..4).map(|i| format!("default_{i}")).collect(),
+        }
+    }
+
+    fn parse(json: &[u8]) -> Option<Self> {
+        let v: serde_json::Value = serde_json::from_slice(json).ok()?;
+        let num = |k: &str, d: f64| v.get(k).and_then(|n| n.as_f64()).unwrap_or(d);
+        let sprites: Vec<String> = v
+            .get("sprites")?
+            .as_array()?
+            .iter()
+            .take(16)
+            .filter_map(|s| {
+                let s = s.as_str()?;
+                let name = s.strip_prefix("minecraft:").unwrap_or(s);
+                name.bytes()
+                    .all(|b| {
+                        b.is_ascii_lowercase()
+                            || b.is_ascii_digit()
+                            || matches!(b, b'_' | b'/' | b'-')
+                    })
+                    .then(|| name.to_owned())
+            })
+            .collect();
+        let (near, far) = (
+            num("near_distance", 128.0) as f32,
+            num("far_distance", 332.0) as f32,
+        );
+        (!sprites.is_empty() && near > 0.0 && near < far).then_some(Self { near, far, sprites })
+    }
+}
+
 #[derive(Debug)]
 struct Sprites {
     crosshair: Option<SpriteId>,
@@ -33,6 +82,9 @@ struct Sprites {
     selection: Option<SpriteId>,
     offhand: Option<SpriteId>,
     ping: [Option<SpriteId>; 6],
+    locator_bg: Option<SpriteId>,
+    arrow_up: Option<SpriteId>,
+    arrow_down: Option<SpriteId>,
 }
 
 pub struct HudInput<'a> {
@@ -44,12 +96,19 @@ pub struct HudInput<'a> {
     pub tab_held: bool,
     pub chat_open: bool,
     pub debug: Option<&'a DebugOverlay>,
+    pub skins: &'a SkinStore,
+    pub camera: mcr_client::locator::Camera,
+    pub eye_of: &'a dyn Fn(&mcr_client::Entity) -> [f64; 3],
+    pub show_heads: bool,
     pub millis: u64,
 }
 
 pub struct Hud {
     sprites: HudSprites,
     own: Sprites,
+    heads: RefCell<FxHashMap<String, Option<SpriteId>>>,
+    waypoint_styles: RefCell<FxHashMap<String, WaypointStyle>>,
+    style_reader: Option<crate::skins::AssetReader>,
     pub chat: SharedChat,
     max_health_attr: Option<i32>,
     armor_attr: Option<i32>,
@@ -100,6 +159,81 @@ impl Hud {
         let fresh = Self::new(ui, data);
         self.sprites = fresh.sprites;
         self.own = fresh.own;
+        self.heads.get_mut().clear();
+    }
+
+    pub fn with_style_reader(mut self, read: crate::skins::AssetReader) -> Self {
+        self.style_reader = Some(read);
+        self
+    }
+
+    fn waypoint_style(&self, id: &str) -> WaypointStyle {
+        if let Some(s) = self.waypoint_styles.borrow().get(id) {
+            return s.clone();
+        }
+        let (ns, path) = id.split_once(':').unwrap_or(("minecraft", id));
+        let valid = |t: &str| {
+            !t.is_empty()
+                && t.bytes().all(|b| {
+                    b.is_ascii_lowercase()
+                        || b.is_ascii_digit()
+                        || matches!(b, b'_' | b'.' | b'-' | b'/')
+                })
+                && !t.contains("..")
+        };
+        let style = (valid(ns) && valid(path))
+            .then(|| {
+                self.style_reader.as_ref()?(&format!("assets/{ns}/waypoint_style/{path}.json"))
+            })
+            .flatten()
+            .and_then(|b| WaypointStyle::parse(&b))
+            .unwrap_or_else(WaypointStyle::fallback);
+        let mut styles = self.waypoint_styles.borrow_mut();
+        if styles.len() < 64 {
+            styles.insert(id.to_owned(), style.clone());
+        }
+        style
+    }
+
+    fn draw_locator(&self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
+        let (gui_w, gui_h) = frame.gui_size();
+        let (left, top) = ((gui_w - 182) / 2, gui_h - 24 - 5);
+        if let Some(bg) = self.own.locator_bg {
+            frame.sprite(bg, left, top, 182, 5);
+        }
+        let marks = mcr_client::locator::marks(
+            input.state.gameplay.waypoints.tracked.values(),
+            &input.camera,
+            input.state.uuid,
+            &input.state.entities,
+            input.eye_of,
+        );
+        let middle = ((gui_w - 9) as f32 / 2.0).ceil() as i32;
+        for m in marks {
+            let style = self.waypoint_style(&m.style);
+            let index = mcr_client::locator::sprite_index(
+                style.sprites.len(),
+                style.near,
+                style.far,
+                m.distance,
+            );
+            let name = format!(
+                "hud/locator_bar_dot/{}",
+                style.sprites[index.min(style.sprites.len() - 1)]
+            );
+            let x = middle + m.offset;
+            if let Some(dot) = frame.ui().sprite_id(&name) {
+                frame.sprite_tinted(dot, x, top - 2, 9, 9, m.color);
+            }
+            let (arrow, y) = match m.pitch {
+                mcr_client::locator::Pitch::None => continue,
+                mcr_client::locator::Pitch::Down => (self.own.arrow_down, top + 6),
+                mcr_client::locator::Pitch::Up => (self.own.arrow_up, top - 6),
+            };
+            if let Some(a) = arrow {
+                frame.sprite(a, x + 1, y, 7, 5);
+            }
+        }
     }
 
     pub fn new(ui: &Ui, data: &'static Version) -> Self {
@@ -125,6 +259,9 @@ impl Hud {
                 hotbar: id("hud/hotbar"),
                 selection: id("hud/hotbar_selection"),
                 offhand: id("hud/hotbar_offhand_left"),
+                locator_bg: id("hud/locator_bar_background"),
+                arrow_up: id("hud/locator_bar_arrow_up"),
+                arrow_down: id("hud/locator_bar_arrow_down"),
                 ping: [
                     id("icon/ping_unknown"),
                     id("icon/ping_1"),
@@ -134,6 +271,9 @@ impl Hud {
                     id("icon/ping_5"),
                 ],
             },
+            heads: RefCell::default(),
+            waypoint_styles: RefCell::default(),
+            style_reader: None,
             chat: SharedChat::default(),
             max_health_attr: attribute("minecraft:max_health"),
             armor_attr: attribute("minecraft:armor"),
@@ -183,7 +323,7 @@ impl Hud {
         self.draw_sidebar(frame, state);
         self.draw_titles(frame, input);
         if input.tab_held {
-            self.draw_tab_list(frame, state);
+            self.draw_tab_list(frame, input);
         }
         if !input.chat_open {
             let opts = chat_options(input.options, false);
@@ -214,6 +354,8 @@ impl Hud {
             offhand: offhand.as_ref().map(|s| s.view(cooldown(offhand_stack))),
         };
         let survival = matches!(player.game_mode, GameType::Survival | GameType::Adventure);
+        let locator =
+            !state.gameplay.waypoints.tracked.is_empty() && !(survival && player.xp_show_ticks > 0);
         if survival {
             let max_health = self
                 .attribute(state, self.max_health_attr)
@@ -278,6 +420,7 @@ impl Hud {
                 food: player.food.clamp(0, 20),
                 xp_progress: player.xp_progress.clamp(0.0, 1.0),
                 xp_level: player.xp_level.max(0),
+                xp_bar: !locator,
                 ..HudState::default()
             };
             self.sprites.draw(frame, &hud);
@@ -286,6 +429,9 @@ impl Hud {
             self.draw_hotbar(frame, player.held_slot, offhand.is_some());
         }
         self.sprites.draw_items(frame, icons, &items);
+        if locator {
+            self.draw_locator(frame, input);
+        }
     }
 
     fn draw_hotbar(&self, frame: &mut UiFrame<'_>, selected: u8, offhand: bool) {
@@ -493,7 +639,32 @@ impl Hud {
         }
     }
 
-    fn draw_tab_list(&self, frame: &mut UiFrame<'_>, state: &ClientState) {
+    fn head_sprite(
+        &self,
+        frame: &mut UiFrame<'_>,
+        skins: &SkinStore,
+        player: &mcr_client::PlayerInfo,
+    ) -> Option<SpriteId> {
+        let (key, pixels) = skins.head(player.uuid, player.show_hat)?;
+        let mut heads = self.heads.borrow_mut();
+        if let Some(id) = heads.get(&key) {
+            return *id;
+        }
+        let id = if heads.len() < MAX_HEAD_SPRITES {
+            frame
+                .ui()
+                .sprites_mut()
+                .add_raw(HEAD_SIZE, HEAD_SIZE, &pixels)
+        } else {
+            None
+        };
+        heads.insert(key, id);
+        id
+    }
+
+    fn draw_tab_list(&self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
+        let state = input.state;
+        let head_w = if input.show_heads { 9 } else { 0 };
         let board = &state.scoreboard;
         let players = state.players.tab_order(board);
         let objective = board
@@ -539,7 +710,7 @@ impl Hud {
             None => 0,
         };
         let cols = columns as i32;
-        let slot_w = ((max_name_w + width_for_score + 13) * cols).min(gui_w - 50) / cols;
+        let slot_w = ((head_w + max_name_w + width_for_score + 13) * cols).min(gui_w - 50) / cols;
         let mut max_line_w = slot_w * cols + (cols - 1) * TAB_COLUMN_GAP;
         let left = gui_w / 2 - max_line_w / 2;
         let lines = |frame: &mut UiFrame<'_>, c: &Component| {
@@ -592,11 +763,17 @@ impl Hud {
             } else {
                 0xFFFF_FFFF
             };
+            if input.show_heads
+                && let Some(head) = self.head_sprite(frame, input.skins, players[i])
+            {
+                frame.sprite(head, x, ry, HEAD_SIZE as i32, HEAD_SIZE as i32);
+            }
+            let name_x = x + head_w;
             frame.push_scissor(x, ry, x + slot_w - 11, ry + 9);
-            frame.cells(name, x as f32, ry as f32, color, true);
+            frame.cells(name, name_x as f32, ry as f32, color, true);
             frame.pop_scissor();
             if objective.is_some() && !spectator && !hearts {
-                let score_left = x + max_name_w + 1;
+                let score_left = name_x + max_name_w + 1;
                 let score_right = score_left + width_for_score;
                 if score_right - score_left > 5 {
                     frame.cells(
@@ -635,5 +812,28 @@ impl Hud {
                 y += 9;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WaypointStyle;
+
+    #[test]
+    fn style_json_is_bounded_and_validated() {
+        let s = WaypointStyle::parse(
+            br#"{"near_distance":64,"sprites":["minecraft:bowtie","minecraft:default_0"]}"#,
+        )
+        .unwrap();
+        assert_eq!((s.near, s.far), (64.0, 332.0));
+        assert_eq!(s.sprites, ["bowtie", "default_0"]);
+        assert!(WaypointStyle::parse(br#"{"sprites":[]}"#).is_none());
+        assert!(WaypointStyle::parse(br#"{"near_distance":400,"sprites":["a"]}"#).is_none());
+        let many = format!(r#"{{"sprites":[{}]}}"#, vec![r#""a""#; 100].join(","));
+        assert_eq!(
+            WaypointStyle::parse(many.as_bytes()).unwrap().sprites.len(),
+            16
+        );
+        assert!(WaypointStyle::parse(br#"{"sprites":["../x"]}"#).is_none());
     }
 }

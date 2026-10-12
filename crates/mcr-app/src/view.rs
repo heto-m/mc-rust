@@ -254,7 +254,21 @@ impl SuggestEngine {
         };
         self.waiting = None;
         if !text.starts_with('/') {
-            self.bridge.borrow_mut().result = Some(SuggestionSet::default());
+            let (start, matches) =
+                mcr_client::complete_chat(&client.state.chat_completions, &text, cursor);
+            let suggestions = matches
+                .into_iter()
+                .map(|text| Suggestion {
+                    start,
+                    end: cursor,
+                    text,
+                    tooltip: None,
+                })
+                .collect();
+            self.bridge.borrow_mut().result = Some(SuggestionSet {
+                suggestions,
+                usage: Vec::new(),
+            });
             return;
         }
         let completion = client

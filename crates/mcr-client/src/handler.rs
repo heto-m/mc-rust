@@ -58,6 +58,8 @@ fn sane3(v: [f64; 3]) -> bool {
     v.iter().copied().all(sane)
 }
 
+const MAX_SERVER_ICON_BYTES: usize = 64 * 1024;
+
 impl ClientState {
     pub fn handle_play(&mut self, packet: P<'_>, out: &mut Outbox, now: Instant) -> Result<()> {
         match packet {
@@ -103,7 +105,12 @@ impl ClientState {
                 self.server.report_details = crate::state::bounded_report_details(p.details.0)
             }
             P::LowDiskSpaceWarning(_) => out.event(ClientEvent::Toast(ToastEvent::LowDiskSpace)),
-            P::ServerData(p) => self.server.motd = Some(p.motd),
+            P::ServerData(p) => {
+                self.server.motd = Some(p.motd);
+                if let Some(icon) = p.icon.filter(|i| i.len() <= MAX_SERVER_ICON_BYTES) {
+                    self.server.icon = Some(icon);
+                }
+            }
             P::GameRuleValues(p) => {
                 for (k, v) in p.values.0.into_iter().take(1024) {
                     self.server.game_rules.insert(k.as_str().to_owned(), v);
@@ -164,6 +171,17 @@ impl ClientState {
             P::SetChunkCacheRadius(p) => self.world.view_distance = p.radius.clamp(0, 64),
             P::SetSimulationDistance(p) => {
                 self.world.simulation_distance = p.simulation_distance.clamp(0, 64)
+            }
+            P::AddTransientBlock(p) => {
+                let pos = [p.pos.x, p.pos.y, p.pos.z];
+                self.transient_blocks.retain(|b| b.pos != pos);
+                if self.transient_blocks.len() < crate::state::MAX_TRANSIENT_BLOCKS {
+                    self.transient_blocks.push(crate::state::TransientBlock {
+                        pos,
+                        state: p.block_state,
+                        ticks: crate::state::TRANSIENT_BLOCK_TICKS,
+                    });
+                }
             }
             P::BlockUpdate(p) => self.set_block(p.pos, p.block_state.max(0) as u32, out),
             P::SectionBlocksUpdate(p) => {
@@ -327,7 +345,7 @@ impl ClientState {
                     e.pitch = p.x_rot.degrees();
                     e.target_yaw = e.yaw;
                     e.target_pitch = e.pitch;
-                    e.head_yaw = p.y_head_rot.degrees();
+                    e.snap_head(p.y_head_rot.degrees());
                     e.velocity = clamp_motion(v3(&p.velocity.0));
                     e.object_data = p.data;
                     e.sim = self.sim_kinds.get(p.entity_type);
@@ -336,10 +354,18 @@ impl ClientState {
                     }
                 }
             }
+            P::SetCamera(p) => {
+                self.camera_entity = (p.camera_id != self.player.entity_id
+                    && self.entities.get(p.camera_id).is_some())
+                .then_some(p.camera_id);
+            }
             P::RemoveEntities(p) => {
                 for id in p.entity_ids.iter().take(1 << 16) {
                     if self.entities.remove(*id).is_some() {
                         out.event(ClientEvent::EntityRemoved(*id));
+                    }
+                    if self.camera_entity == Some(*id) {
+                        self.camera_entity = None;
                     }
                 }
             }
@@ -397,7 +423,7 @@ impl ClientState {
             P::EntityPositionSync(p) => self.position_sync(&p, out),
             P::RotateHead(p) => {
                 if let Some(e) = self.entities.get_mut(p.entity_id) {
-                    e.head_yaw = p.y_head_rot.degrees();
+                    e.lerp_head_to(p.y_head_rot.degrees());
                 }
             }
             P::SetEntityMotion(p) => {
@@ -585,9 +611,7 @@ impl ClientState {
                 }
             }
             P::SetExperience(p) => {
-                self.player.xp_progress = p.progress;
-                self.player.xp_level = p.level;
-                self.player.xp_total = p.total;
+                self.player.set_experience(p.progress, p.total, p.level);
                 out.event(ClientEvent::ExperienceChanged);
             }
             P::SetHeldSlot(p) => {
@@ -715,6 +739,7 @@ impl ClientState {
                 let shown = self.format_chat(&p.chat_type, p.message);
                 self.push_chat(ChatKind::Disguised, None, shown, None, None, out);
             }
+            P::CustomChatCompletions(p) => self.apply_chat_completions(p.action, p.entries),
             P::DeleteChat(p) => self.chat.delete(&p.message_signature),
             P::PlayerInfoUpdate(p) => {
                 self.players.apply(&p);
@@ -947,8 +972,46 @@ impl ClientState {
         Ok(())
     }
 
+    fn apply_chat_completions(
+        &mut self,
+        action: mcr_protocol::play::clientbound::player::CompletionAction,
+        entries: Vec<String>,
+    ) {
+        use mcr_protocol::play::clientbound::player::CompletionAction as A;
+        let entries = entries
+            .into_iter()
+            .take(crate::state::MAX_CHAT_COMPLETIONS)
+            .map(|e| {
+                e.chars()
+                    .filter(|c| !c.is_control())
+                    .take(crate::state::MAX_COMPLETION_CHARS)
+                    .collect::<String>()
+            })
+            .filter(|e| !e.is_empty());
+        let list = &mut self.chat_completions;
+        match action {
+            A::Set => {
+                list.clear();
+                list.extend(entries);
+            }
+            A::Add => {
+                for e in entries {
+                    if list.len() < crate::state::MAX_CHAT_COMPLETIONS && !list.contains(&e) {
+                        list.push(e);
+                    }
+                }
+            }
+            A::Remove => {
+                let drop: Vec<String> = entries.collect();
+                list.retain(|e| !drop.contains(e));
+            }
+        }
+        list.truncate(crate::state::MAX_CHAT_COMPLETIONS);
+    }
+
     fn on_respawn(&mut self, info: &CommonPlayerSpawnInfo, out: &mut Outbox) -> Result<()> {
         let changed = info.dimension != self.dimension.name;
+        self.camera_entity = None;
         self.apply_spawn_world(info, changed)?;
         self.inventory.open = None;
         self.inventory.cursor = ItemStack::default();
@@ -1029,13 +1092,18 @@ impl ClientState {
                 pitch: 1.0,
                 source: SoundSource::Neutral,
             }),
-            10 if int == 1 => out.event(ClientEvent::LocalSound {
-                sound: "entity.elder_guardian.curse",
-                pos: self.player.physics.pos,
-                volume: 1.0,
-                pitch: 1.0,
-                source: SoundSource::Hostile,
-            }),
+            10 => {
+                out.event(ClientEvent::ElderGuardianGhost);
+                if int == 1 {
+                    out.event(ClientEvent::LocalSound {
+                        sound: "entity.elder_guardian.curse",
+                        pos: self.player.physics.pos,
+                        volume: 1.0,
+                        pitch: 1.0,
+                        source: SoundSource::Hostile,
+                    });
+                }
+            }
             7 if param.is_finite() => {
                 self.world.rain_level = param.clamp(0.0, 1.0);
                 out.event(ClientEvent::WeatherChanged);

@@ -229,11 +229,21 @@ pub fn decode_favicon(data_uri: &str) -> Option<Vec<u8>> {
 
 /// Decodes a PNG that must be exactly 64x64 into RGBA.
 pub fn decode_png64(png_bytes: &[u8]) -> Option<Vec<u8>> {
+    let (_, _, rgba) = decode_png_rgba(png_bytes, |w, h| w == FAVICON_SIZE && h == FAVICON_SIZE)?;
+    (rgba.len() == MAX_FAVICON_PX).then_some(rgba)
+}
+
+/// Decodes a PNG into RGBA, checking the size before anything is allocated for the pixels.
+pub fn decode_png_rgba(
+    png_bytes: &[u8],
+    size_ok: impl Fn(u32, u32) -> bool,
+) -> Option<(u32, u32, Vec<u8>)> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
     let info = reader.info();
-    if info.width != FAVICON_SIZE || info.height != FAVICON_SIZE {
+    let (width, height) = (info.width, info.height);
+    if !size_ok(width, height) {
         return None;
     }
     let mut buf = vec![0u8; reader.output_buffer_size()?];
@@ -256,7 +266,7 @@ pub fn decode_png64(png_bytes: &[u8]) -> Option<Vec<u8>> {
             .collect(),
         png::ColorType::Indexed => return None,
     };
-    (rgba.len() == MAX_FAVICON_PX).then_some(rgba)
+    Some((width, height, rgba))
 }
 
 #[cfg(test)]

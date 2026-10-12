@@ -148,7 +148,11 @@ pub fn build(input: &DebugInput<'_>) -> DebugOverlay {
         }
         None => {}
     }
-    DebugOverlay { left, right }
+    DebugOverlay {
+        left,
+        right,
+        charts: Vec::new(),
+    }
 }
 
 fn wrap_yaw(yaw: f32) -> f32 {

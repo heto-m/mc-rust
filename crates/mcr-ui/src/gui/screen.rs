@@ -90,6 +90,12 @@ pub enum ScreenAction {
     Quit,
     /// The answer to the server resource pack prompt.
     ResourcePackAnswer(bool),
+    /// The player's answer to the server's code of conduct; `hash` identifies the text.
+    ConductAnswer {
+        accept: bool,
+        remember: bool,
+        hash: i32,
+    },
     CreativeSetCarried(mcr_protocol::types::item::ItemStack),
     CreativeClick(ContainerClick),
     CreativeSetSlot {
@@ -139,6 +145,13 @@ impl std::fmt::Debug for ScreenAction {
                 .field("secondary", secondary)
                 .finish(),
             Self::ResourcePackAnswer(b) => f.debug_tuple("ResourcePackAnswer").field(b).finish(),
+            Self::ConductAnswer {
+                accept, remember, ..
+            } => f
+                .debug_struct("ConductAnswer")
+                .field("accept", accept)
+                .field("remember", remember)
+                .finish(),
             Self::Respawn => f.write_str("Respawn"),
             Self::Disconnect => f.write_str("Disconnect"),
             Self::Connect(a) => f.debug_tuple("Connect").field(a).finish(),

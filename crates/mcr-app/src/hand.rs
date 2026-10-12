@@ -168,6 +168,7 @@ pub struct HandFrame<'a> {
     pub lightmap: &'a [[f32; 4]],
     pub light: [u8; 2],
     pub invisible: bool,
+    pub skin: Option<&'a mcr_entity_model::Skin>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -614,6 +615,10 @@ impl Hand {
         let mut view = EntityView::named("minecraft:player", &data);
         view.uuid = f.state.uuid;
         view.light = f.light;
+        view.player = mcr_entity_model::PlayerView {
+            skin: f.skin,
+            ..Default::default()
+        };
         self.scene.emit_arm(
             &SyncedRegistries(&f.state.registries),
             &view,

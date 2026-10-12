@@ -9,8 +9,8 @@ use mcr_entity_model::mcr_protocol::types::ItemStack;
 use mcr_entity_model::mcr_protocol::types::entity_data::{EntityDataValue, Pose as DataPose};
 use mcr_entity_model::wgpu;
 use mcr_entity_model::{
-    EntityData, EntityScene, EntityView, FrameParams, Glide, LightInfo, PlayerView, Registries,
-    SceneAssets, TargetFormats, hidden_while_fresh, slot,
+    EntityData, EntityScene, EntityView, FrameParams, Glide, LightInfo, NoData, PlayerView,
+    Registries, SceneAssets, TargetFormats, hidden_while_fresh, slot,
 };
 use mcr_physics::Pose as PhysPose;
 use mcr_render::{Camera, Frustum};
@@ -342,9 +342,14 @@ pub struct FrameCtx<'a> {
     pub partial: f32,
     pub cull: &'a Cull,
     pub show_local: bool,
+    pub hide_entity: Option<i32>,
+    /// Elder guardian curse progress in 0..1, drawn in front of the camera.
+    pub ghost: Option<f32>,
+    pub eye: [f64; 3],
     pub local_swing: f32,
     pub local_using: bool,
     pub events: &'a crate::entity_events::EntityEvents,
+    pub skins: &'a crate::skins::SkinStore,
 }
 
 impl EntityLayer {
@@ -529,6 +534,7 @@ impl EntityLayer {
                 crouching: cx.state.player.physics.crouching,
                 swimming: cx.state.player.physics.swimming,
                 using_item: cx.local_using,
+                skin: cx.skins.get(cx.state.uuid),
                 ..PlayerView::default()
             };
             v.light = light_at(&cx.state.chunks, v.pos, eye_height(data, *player_type));
@@ -540,6 +546,9 @@ impl EntityLayer {
         let views = tracks
             .iter()
             .filter_map(|(id, t)| {
+                if cx.hide_entity == Some(*id) {
+                    return None;
+                }
                 let e = cx.state.entities.get(*id)?;
                 let name = data.entity_type_name(e.kind as u32).unwrap_or("");
                 if t.age < 2
@@ -587,6 +596,8 @@ impl EntityLayer {
                 view.on_ground = e.on_ground || (t.pos[1] - t.prev_pos[1]).abs() < 1.0e-3;
                 view.object_data = e.object_data;
                 view.equipment = Some(&e.equipment);
+                view.flight = e.flight.as_ref().map(|f| f.lean(cx.partial));
+                view.leash = leash_line(cx, tracks, data, e, &view, scale);
                 view.fuse = e.fuse_remaining(cx.partial);
                 view.swelling = e.swelling(cx.partial);
                 apply_events(&mut view, cx.events.view(e.id, cx.partial));
@@ -595,6 +606,7 @@ impl EntityLayer {
                         crouching: view.pose() == DataPose::Crouching,
                         swimming: view.pose() == DataPose::Swimming,
                         using_item: view.living_flag(0),
+                        skin: cx.skins.get(e.uuid),
                         ..PlayerView::default()
                     };
                 }
@@ -605,6 +617,28 @@ impl EntityLayer {
                 Some(view)
             })
             .chain(local_view)
+            .chain(cx.ghost.map(|progress| {
+                let mut view = EntityView::named("minecraft:elder_guardian", &NoData);
+                view.pos = cx.eye;
+                view.ghost = Some(progress.clamp(0.0, 1.0));
+                view.light = [15, 15];
+                view
+            }))
+            .chain(cx.state.transient_blocks.iter().filter_map(|b| {
+                let pos = [
+                    f64::from(b.pos[0]) + 0.5,
+                    f64::from(b.pos[1]),
+                    f64::from(b.pos[2]) + 0.5,
+                ];
+                if !in_view(cx.cull, pos, 1.0, 1.0) {
+                    return None;
+                }
+                let mut view = EntityView::named("minecraft:falling_block", &NoData);
+                view.pos = pos;
+                view.object_data = b.state;
+                view.light = light_at(&cx.state.chunks, pos, 0.5);
+                Some(view)
+            }))
             .chain(cx.state.pickups.iter().filter_map(|p| {
                 let e = &p.entity;
                 let (w, h) = type_size(data, e.kind);
@@ -707,6 +741,59 @@ fn health(e: &Entity) -> Option<f32> {
         Some(EntityDataValue::Float(h)) => Some(*h),
         _ => None,
     }
+}
+
+fn leash_line(
+    cx: &FrameCtx<'_>,
+    tracks: &FxHashMap<i32, Track>,
+    data: &'static mcr_data::Version,
+    e: &mcr_client::Entity,
+    view: &EntityView<'_>,
+    scale: f32,
+) -> Option<([f64; 3], [f64; 3])> {
+    let holder_id = e.leash_holder?;
+    let holder = cx.state.entities.get(holder_id);
+    let holder_pos = if holder_id == cx.state.player.entity_id {
+        cx.state.player.pos()
+    } else {
+        let h = holder?;
+        tracks
+            .get(&holder_id)
+            .map_or(h.pos, |t| lerp3(t.prev_pos, t.pos, f64::from(cx.partial)))
+    };
+    let knot = holder
+        .is_some_and(|h| data.entity_type_name(h.kind as u32) == Some("minecraft:leash_knot"));
+    let holder_eye = holder.map_or(1.62, |h| eye_height(data, h.kind));
+    let end_lift = if knot {
+        0.2
+    } else {
+        f64::from(holder_eye) * 0.7
+    };
+    let (width, _) = type_size(data, e.kind);
+    let offset = [
+        0.0,
+        f64::from(eye_height(data, e.kind) * scale),
+        f64::from(width * scale * 0.4),
+    ];
+    let yaw = -f64::from(view.body_yaw).to_radians();
+    let (sin, cos) = yaw.sin_cos();
+    let start = [
+        view.pos[0] + offset[0] * cos + offset[2] * sin,
+        view.pos[1] + offset[1],
+        view.pos[2] + offset[2] * cos - offset[0] * sin,
+    ];
+    Some((
+        start,
+        [holder_pos[0], holder_pos[1] + end_lift, holder_pos[2]],
+    ))
+}
+
+pub fn eye_position(data: &'static mcr_data::Version, e: &mcr_client::Entity) -> [f64; 3] {
+    [
+        e.pos[0],
+        e.pos[1] + f64::from(eye_height(data, e.kind)),
+        e.pos[2],
+    ]
 }
 
 fn eye_height(data: &'static mcr_data::Version, kind: i32) -> f32 {
