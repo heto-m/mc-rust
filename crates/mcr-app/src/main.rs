@@ -1,4 +1,5 @@
 mod ambience;
+mod animate;
 mod assets;
 mod audio;
 mod autopilot;

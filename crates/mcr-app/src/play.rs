@@ -26,6 +26,7 @@ use crate::assets::Assets;
 use mcr_audio::SoundSource;
 
 use crate::ambience::Ambience;
+use crate::animate::BlockAnimation;
 use crate::audio::{Audio, BlockSound, MusicEvent, wire_category, world_audio};
 use crate::block_entities::BlockEntities;
 use crate::debug::{self, DebugInput};
@@ -381,6 +382,7 @@ pub struct Play {
     using_item: bool,
     target: Option<Target>,
     ambience: Ambience,
+    block_animation: BlockAnimation,
     loops: EntityLoops,
     entity_events: crate::entity_events::EntityEvents,
     skins: crate::skins::SkinStore,
@@ -462,6 +464,7 @@ impl Play {
         };
         let overlay_assets = assets.clone();
         let data_assets = assets.clone();
+        let animate_assets = assets.clone();
         let skin_assets = assets.clone();
         let render = RenderSystem::new(renderer, assets, &world);
         let now = Instant::now();
@@ -538,6 +541,7 @@ impl Play {
             using_item: false,
             target: None,
             ambience: Ambience::new(data, Box::new(move |path| data_assets.read(path))),
+            block_animation: BlockAnimation::new(data, animate_assets),
             loops: EntityLoops::new(data),
             entity_events: Default::default(),
             boss_darkening: (0.0, 0.0),
@@ -808,6 +812,17 @@ impl Play {
         } else {
             None
         };
+        if running {
+            let sky_darken = ((1.0 - self.sky_factor.clamp(0.0, 1.0)) * 15.0).round() as u8;
+            let mut campfires = self.block_entities.iter().flat_map(|b| b.campfires());
+            self.block_animation.tick(
+                state,
+                &mut self.effects,
+                world_audio(&mut self.audio),
+                &mut campfires,
+                sky_darken,
+            );
+        }
         for s in std::mem::take(&mut self.effects.sounds) {
             if let Some(audio) = world_audio(&mut self.audio) {
                 audio.play(s.name, Some(s.pos), s.volume, s.pitch, SoundSource::Ambient);
@@ -1672,6 +1687,7 @@ impl Play {
         }
         self.effects = WorldEffects::new(assets.clone());
         self.effects.set_options(&self.options);
+        self.block_animation = BlockAnimation::new(self.data, assets.clone());
         let renderer = &mut self.render.renderer;
         renderer.set_effect_assets(&effects::effect_assets(&assets));
         renderer.set_post_overrides(crate::post_effects::pack_overrides(&assets.resources));

@@ -202,6 +202,13 @@ impl BlockEntities {
         BlockEntityData::Beacon(BeaconData { sections })
     }
 
+    pub fn campfires(&self) -> impl Iterator<Item = Pos> + '_ {
+        self.entries
+            .iter()
+            .filter(|(_, (kind, _))| *kind == BlockEntityKind::Campfire)
+            .map(|(pos, _)| *pos)
+    }
+
     pub fn load_chunk(&mut self, state: &ClientState, pos: ChunkPos) {
         let Some(column) = state.chunks.column(pos) else {
             return;

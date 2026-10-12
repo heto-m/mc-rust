@@ -36,7 +36,7 @@ The client SHALL play enter and exit sounds when the local player's physics eye-
 - **THEN** the enter sound plays once and no exit sound plays, including while the eye passes the top ninth of fully submerged blocks
 
 ### Requirement: Block and fluid ambience
-Each tick the client SHALL sample random positions within 16 and 32 blocks of the player and play the vanilla ambient cue of the block or fluid found: lit campfires, furnaces, blast furnaces, smokers and candles, fire, nether portals, charged respawn anchors, bubble columns, open eyeblossoms, dried ghasts, firefly bushes, potent sulfur, pale hanging moss, flowing water and lava with air above.
+The block and fluid ambient sounds SHALL come from the shared `animateTick` scan of the `block-animate-ticks` capability: lit campfires, furnaces, blast furnaces, smokers and candles, fire, nether portals, charged respawn anchors, bubble columns, open eyeblossoms, dried ghasts, firefly bushes, potent sulfur, pale hanging moss, poplar leaves, desert sand, dead bushes and dry grass, flowing water and lava with air above, each with the vanilla probability.
 
 #### Scenario: Lit furnace
 - **WHEN** a lit furnace is sampled
@@ -45,6 +45,10 @@ Each tick the client SHALL sample random positions within 16 and 32 blocks of th
 #### Scenario: Unlit furnace
 - **WHEN** an unlit furnace is sampled
 - **THEN** nothing plays
+
+#### Scenario: Java owns audio
+- **WHEN** the mod bridge owns world sounds
+- **THEN** the scan spawns particles only
 
 ### Requirement: Weather sounds
 The client SHALL play the rain sound at the rain ticker's cue position, using the quiet above variant when the position is more than one block above the camera and the camera is covered.

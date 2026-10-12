@@ -215,10 +215,32 @@ impl ParticleWorld for ClientParticleWorld<'_> {
     }
 }
 
+/// Per biome `(has_precipitation, temperature)` from the synced registry.
+pub(crate) fn precipitation_table(registry: &mcr_client::Registry) -> Vec<(bool, f32)> {
+    registry
+        .entries
+        .iter()
+        .map(|e| {
+            let data = e.data.as_ref();
+            (
+                data.and_then(|d| d.get_bool("has_precipitation"))
+                    .unwrap_or(true),
+                data.and_then(|d| d.get_f32("temperature")).unwrap_or(0.5),
+            )
+        })
+        .collect()
+}
+
 /// Precipitation from the synced biome registry and the client's heightmaps.
 pub struct ClientWeather<'a> {
     state: &'a ClientState,
     biomes: &'a [(bool, f32)],
+}
+
+impl<'a> ClientWeather<'a> {
+    pub(crate) fn new(state: &'a ClientState, biomes: &'a [(bool, f32)]) -> Self {
+        Self { state, biomes }
+    }
 }
 
 impl WeatherSource for ClientWeather<'_> {
@@ -346,18 +368,7 @@ impl WorldEffects {
             return;
         }
         self.biome_count = registry.len();
-        self.biomes = registry
-            .entries
-            .iter()
-            .map(|e| {
-                let data = e.data.as_ref();
-                (
-                    data.and_then(|d| d.get_bool("has_precipitation"))
-                        .unwrap_or(true),
-                    data.and_then(|d| d.get_f32("temperature")).unwrap_or(0.5),
-                )
-            })
-            .collect();
+        self.biomes = precipitation_table(registry);
     }
 
     pub fn weather<'a>(&'a mut self, state: &'a ClientState) -> ClientWeather<'a> {
@@ -473,6 +484,29 @@ impl WorldEffects {
             ParticleStatus::Minimal => false,
         };
         if shown {
+            self.particles.add_particle(particle, pos, vel);
+        }
+    }
+
+    /// Vanilla `ClientLevel.addParticle` with `alwaysShow`: the particle level is re-rolled per particle, and
+    /// limiter-overriding types skip both the level and the distance check.
+    pub fn add_particle_vanilla(
+        &mut self,
+        particle: &Particle,
+        pos: [f64; 3],
+        vel: [f64; 3],
+        always: bool,
+    ) {
+        let mut level = self.status;
+        if always && level == ParticleStatus::Minimal && self.random_unit() < 0.1 {
+            level = ParticleStatus::Decreased;
+        }
+        if level == ParticleStatus::Decreased && self.random_unit() < 1.0 / 3.0 {
+            level = ParticleStatus::Minimal;
+        }
+        if mcr_animate::overrides_limiter(particle) {
+            self.particles.add_particle_unlimited(particle, pos, vel);
+        } else if level != ParticleStatus::Minimal {
             self.particles.add_particle(particle, pos, vel);
         }
     }

@@ -250,6 +250,11 @@ impl ParticleEngine {
         self.emit_inner(particle, pos, vel, [1.0; 3], 0, false);
     }
 
+    /// Vanilla `level.addParticle` for particle types that override the limiter: shown at any distance.
+    pub fn add_particle_unlimited(&mut self, particle: &Particle, pos: [f64; 3], vel: [f64; 3]) {
+        self.emit_inner(particle, pos, vel, [1.0; 3], 0, true);
+    }
+
     /// A firework explosion spark; colours are `0xRRGGBB`.
     pub fn firework_spark(&mut self, pos: [f64; 3], vel: [f64; 3], spark: Spark) {
         let (pos, vel) = (DVec3::from_array(pos), DVec3::from_array(vel));

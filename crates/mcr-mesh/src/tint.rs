@@ -294,6 +294,17 @@ impl BiomeColors {
         Self::from_climates(&climates, maps)
     }
 
+    /// The unblended foliage colour of a biome as `0xRRGGBB`.
+    pub fn foliage_rgb(&self, biome: usize) -> u32 {
+        let c = self
+            .foliage
+            .get(biome)
+            .or(self.foliage.first())
+            .copied()
+            .unwrap_or(0x48b518);
+        (c & 255) << 16 | (c >> 8 & 255) << 8 | (c >> 16 & 255)
+    }
+
     pub fn len(&self) -> usize {
         self.grass.len()
     }

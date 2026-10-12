@@ -1566,6 +1566,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
+name = "mcr-animate"
+version = "0.1.0"
+dependencies = [
+ "criterion 0.5.1",
+ "mcr-audio",
+ "mcr-data",
+ "mcr-mesh",
+ "mcr-nbt",
+ "mcr-particles",
+ "mcr-protocol",
+]
+
+[[package]]
 name = "mcr-anvil"
 version = "0.1.0"
 dependencies = [
@@ -1588,6 +1601,7 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "bytemuck",
+ "mcr-animate",
  "mcr-anvil",
  "mcr-assets",
  "mcr-audio",

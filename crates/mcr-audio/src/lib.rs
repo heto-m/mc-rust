@@ -1,6 +1,5 @@
 mod ambient;
 mod attributes;
-mod block_ambience;
 mod block_sounds;
 mod category;
 mod decode;
@@ -22,8 +21,8 @@ pub use ambient::{
 };
 pub use attributes::{
     Additions, AmbientSounds, AudioAttributes, BackgroundMusic, MAX_MUSIC_DELAY, Mood, Music,
+    registry_json,
 };
-pub use block_ambience::{AmbientBlock, AmbientFluid, AmbientProbe, Cue, block_cue, fluid_cue};
 pub use block_sounds::SoundType;
 pub use category::SoundSource;
 pub use decode::{Pcm, PcmProducer, StreamSource, decode_ogg, open_stream, pushed_stream};

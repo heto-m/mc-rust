@@ -196,11 +196,7 @@ impl AudioAttributes {
 
     /// A JSON file of the vanilla data (`worldgen/biome`, `dimension_type`) with an `attributes` object.
     pub fn from_json(bytes: &[u8]) -> Option<Self> {
-        let json: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-        match json_to_nbt(&json, 0)? {
-            Value::Compound(c) => Some(Self::from_registry_entry(&c)),
-            _ => None,
-        }
+        registry_json(bytes).map(|c| Self::from_registry_entry(&c))
     }
 
     /// The biome's value wins attribute by attribute over the dimension's (the `override` modifier).
@@ -221,6 +217,15 @@ impl AudioAttributes {
 }
 
 const MAX_JSON_DEPTH: u32 = 12;
+
+/// A data pack JSON file (`worldgen/biome`, `dimension_type`) as the registry entry compound a server would send.
+pub fn registry_json(bytes: &[u8]) -> Option<Compound> {
+    let json: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    match json_to_nbt(&json, 0)? {
+        Value::Compound(c) => Some(c),
+        _ => None,
+    }
+}
 
 fn json_to_nbt(json: &serde_json::Value, depth: u32) -> Option<Value> {
     use serde_json::Value as J;
