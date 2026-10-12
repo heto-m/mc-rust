@@ -186,6 +186,9 @@ pub struct Sprites {
     atlas: Atlas,
     infos: Vec<SpriteInfo>,
     names: FxHashMap<String, SpriteId>,
+    loaded: u32,
+    freed: FxHashMap<(u32, u32), Vec<SpriteId>>,
+    freed_ids: rustc_hash::FxHashSet<u32>,
 }
 
 impl Sprites {
@@ -234,8 +237,11 @@ impl Sprites {
         }
         Ok(Self {
             atlas,
+            loaded: infos.len() as u32,
             infos,
             names,
+            freed: FxHashMap::default(),
+            freed_ids: Default::default(),
         })
     }
 
@@ -267,6 +273,11 @@ impl Sprites {
 
     /// Adds an unnamed straight-alpha RGBA image at runtime; `None` when it exceeds an atlas page.
     pub fn add_raw(&mut self, width: u32, height: u32, rgba: &[u8]) -> Option<SpriteId> {
+        if let Some(id) = self.freed.get_mut(&(width, height)).and_then(Vec::pop) {
+            self.freed_ids.remove(&id.0);
+            self.rewrite(id, rgba);
+            return Some(id);
+        }
         let slot = self.atlas.alloc(width, height)?;
         self.atlas.write(slot, width, height, rgba);
         let id = SpriteId(self.infos.len() as u32);
@@ -279,6 +290,19 @@ impl Sprites {
             scaling: Scaling::Stretch,
         });
         Some(id)
+    }
+
+    /// Releases a sprite from [`Sprites::add_raw`]; the next `add_raw` of the same size reuses its slot.
+    /// The caller must stop drawing `id`. Loaded sprites and repeated frees are ignored.
+    pub fn free_raw(&mut self, id: SpriteId) {
+        if id.0 < self.loaded || id.0 as usize >= self.infos.len() || !self.freed_ids.insert(id.0) {
+            return;
+        }
+        let info = self.infos[id.0 as usize];
+        self.freed
+            .entry((info.width, info.height))
+            .or_default()
+            .push(id);
     }
 
     /// Overwrites the pixels of a sprite from [`Sprites::add_raw`] with an image of the same size.
@@ -445,5 +469,46 @@ mod tests {
         let q = info(Scaling::Stretch, 182, 5).region(1000, (0, 0), (10, 20, 91, 5));
         assert_eq!(q.dst, [10.0, 20.0, 101.0, 25.0]);
         assert!((q.uv[2] - 0.191).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod raw_tests {
+    use super::*;
+
+    fn empty() -> Sprites {
+        Sprites {
+            atlas: Atlas::new(64),
+            infos: Vec::new(),
+            names: FxHashMap::default(),
+            loaded: 0,
+            freed: FxHashMap::default(),
+            freed_ids: Default::default(),
+        }
+    }
+
+    #[test]
+    fn freed_slots_are_reused_so_pages_stay_bounded() {
+        let mut sprites = empty();
+        let pixels = vec![255u8; 16 * 16 * 4];
+        for _ in 0..10_000 {
+            let id = sprites.add_raw(16, 16, &pixels).expect("fits");
+            sprites.free_raw(id);
+            sprites.free_raw(id);
+        }
+        assert_eq!(sprites.atlas().pages().len(), 1);
+        assert_eq!(sprites.len(), 1);
+    }
+
+    #[test]
+    fn double_free_does_not_hand_one_slot_to_two_sprites() {
+        let mut sprites = empty();
+        let pixels = vec![0u8; 8 * 8 * 4];
+        let id = sprites.add_raw(8, 8, &pixels).expect("fits");
+        sprites.free_raw(id);
+        sprites.free_raw(id);
+        let a = sprites.add_raw(8, 8, &pixels).expect("fits");
+        let b = sprites.add_raw(8, 8, &pixels).expect("fits");
+        assert_ne!(a, b);
     }
 }

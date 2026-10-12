@@ -163,9 +163,15 @@ impl ParticleEngine {
         let data = match particle {
             Particle::BlockState { kind, state } => {
                 let key = *state as u32 as u64;
+                let marker_key = (3u64 << 40) | key;
                 match kind {
                     BlockParticleKind::Block | BlockParticleKind::BlockCrumble => self
                         .rect(key, |a| a.block_texture(*state))
+                        .map_or(Data::None, |(rect, tint)| Data::Rect { rect, tint }),
+                    BlockParticleKind::BlockMarker => self
+                        .rect(marker_key, |a| {
+                            a.block_texture(*state).map(|(img, _)| (img, [1.0; 3]))
+                        })
                         .map_or(Data::None, |(rect, tint)| Data::Rect { rect, tint }),
                     _ => Data::None,
                 }

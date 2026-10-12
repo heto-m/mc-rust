@@ -3,23 +3,30 @@
 
 use std::sync::Arc;
 
-use mcr_animate::{AnimateWorld, Animator, Cue, Height, Sink, Visual, tag};
+use mcr_animate::{
+    AnimateWorld, Animator, ConduitTarget, Cue, Height, MAX_PARTICLES_PER_TICK,
+    MAX_SOUNDS_PER_TICK, Sink, VaultPlayer, Visual, tag,
+};
 use mcr_audio::registry_json;
 use mcr_client::{ClientState, RegistryItem};
 use mcr_mesh::BiomeColors;
 use mcr_protocol::types::Particle;
+use mcr_protocol::types::game::GameType;
 use mcr_render::{Precipitation, WeatherSource};
 use mcr_world::{ChunkPos, HeightmapKind};
+
+use uuid::Uuid;
 
 use crate::ambience::biome_at;
 use crate::assets::Assets;
 use crate::audio::Audio;
+use crate::block_entities::Ticker;
 use crate::effects::{ClientWeather, WorldEffects, light_at, precipitation_table};
 
 const BIOME: &str = "minecraft:worldgen/biome";
 const DIMENSION_TYPE: &str = "minecraft:dimension_type";
 const BLOCK_REGISTRY: &str = "minecraft:block";
-const MAX_CAMPFIRES: usize = 256;
+const MAX_TICKERS: usize = 1024;
 const DAY_PERIOD: i64 = 24_000;
 const CREAKING_ACTIVE_FROM: i64 = 12_600;
 const CREAKING_ACTIVE_UNTIL: i64 = 23_401;
@@ -31,6 +38,17 @@ const MISSING_HEIGHT: i32 = i32::MIN / 2;
 /// The `gameplay/creaking_active` keyframes of the overworld day timeline.
 fn creaking_active_at(day_time: i64) -> bool {
     (CREAKING_ACTIVE_FROM..CREAKING_ACTIVE_UNTIL).contains(&day_time.rem_euclid(DAY_PERIOD))
+}
+
+const MARKER_ITEMS: [&str; 2] = ["minecraft:barrier", "minecraft:light"];
+
+/// `ClientLevel.getMarkerParticleTarget`: creative mode holding a barrier or light shows that block.
+fn marker_target(creative: bool, held: Option<&str>) -> Option<&'static str> {
+    let held = held?;
+    MARKER_ITEMS
+        .iter()
+        .copied()
+        .find(|m| creative && *m == held)
 }
 
 pub struct BlockAnimation {
@@ -68,6 +86,39 @@ impl Sink for Out<'_> {
     fn sound(&mut self, cue: &Cue) {
         if let Some(audio) = self.audio.as_deref_mut() {
             audio.play(cue.event, cue.pos, cue.volume, cue.pitch, cue.source);
+        }
+    }
+}
+
+/// One particle and sound budget for everything a tick emits, whichever scan produced it.
+struct Capped<'a> {
+    inner: &'a mut dyn Sink,
+    particles: u32,
+    sounds: u32,
+}
+
+impl<'a> Capped<'a> {
+    fn new(inner: &'a mut dyn Sink) -> Self {
+        Self {
+            inner,
+            particles: 0,
+            sounds: 0,
+        }
+    }
+}
+
+impl Sink for Capped<'_> {
+    fn particle(&mut self, particle: &Particle, pos: [f64; 3], vel: [f64; 3], always: bool) {
+        if self.particles < MAX_PARTICLES_PER_TICK {
+            self.particles += 1;
+            self.inner.particle(particle, pos, vel, always);
+        }
+    }
+
+    fn sound(&mut self, cue: &Cue) {
+        if self.sounds < MAX_SOUNDS_PER_TICK {
+            self.sounds += 1;
+            self.inner.sound(cue);
         }
     }
 }
@@ -267,7 +318,7 @@ impl BlockAnimation {
         state: &ClientState,
         effects: &mut WorldEffects,
         audio: Option<&mut Audio>,
-        campfires: &mut dyn Iterator<Item = [i32; 3]>,
+        tickers: &mut dyn Iterator<Item = Ticker<'_>>,
         sky_darken: u8,
     ) {
         if !state.player.loaded {
@@ -284,24 +335,229 @@ impl BlockAnimation {
             any_ambient: self.any_ambient,
             sky_darken,
         };
+        let held = state.held_stack();
+        let held_name = (held.count > 0)
+            .then(|| u32::try_from(held.item).ok())
+            .flatten()
+            .and_then(|id| self.animator.data().item_name(id));
+        let creative = state.player.game_mode == GameType::Creative;
+        let marker = marker_target(creative, held_name).and_then(|name| {
+            let data = self.animator.data();
+            data.block_by_name(name).and_then(|b| u16::try_from(b).ok())
+        });
+        self.animator.set_marker(marker);
         let sounds = audio.is_some();
-        let mut out = Out { effects, audio };
+        let mut sink = Out { effects, audio };
+        let mut out = Capped::new(&mut sink);
         let center = state.player.pos().map(|v| v.floor() as i32);
         self.animator.tick(center, &view, &mut out, sounds);
-        for pos in campfires.take(MAX_CAMPFIRES) {
-            let Some(block) = state.chunks.block(pos[0], pos[1], pos[2]) else {
-                continue;
-            };
-            if let Some(signal) = self.animator.table().campfire(block.0) {
-                self.animator.campfire_tick(pos, signal, &view, &mut out);
-            }
+        for ticker in tickers.take(MAX_TICKERS) {
+            tick_block_entity(&mut self.animator, state, &ticker, &view, &mut out, sounds);
         }
     }
+}
+
+fn tick_block_entity(
+    animator: &mut Animator,
+    state: &ClientState,
+    ticker: &Ticker<'_>,
+    view: &View<'_>,
+    out: &mut dyn Sink,
+    sounds: bool,
+) {
+    let block_at = |pos: [i32; 3]| state.chunks.block(pos[0], pos[1], pos[2]).map(|b| b.0);
+    match *ticker {
+        Ticker::Campfire { pos, slots } => {
+            let Some(block) = block_at(pos) else { return };
+            let table = animator.table();
+            if let (Some(signal), Some(rotation)) =
+                (table.campfire(block), table.campfire_rotation(block))
+            {
+                animator.campfire_tick(pos, signal, view, out);
+                animator.campfire_food_tick(pos, rotation, slots, view, out);
+            }
+        }
+        Ticker::Spawner {
+            pos,
+            range,
+            has_entity,
+        } => {
+            if has_entity && player_within(state, pos, f64::from(range)) {
+                animator.spawner_tick(pos, view, out);
+            }
+        }
+        Ticker::TrialSpawner { pos } => {
+            let Some(block) = block_at(pos) else { return };
+            if let Some((trial, ominous)) = animator.table().trial_spawner(block) {
+                animator.trial_spawner_tick(pos, trial, ominous, view, out, sounds);
+            }
+        }
+        Ticker::Vault {
+            pos,
+            has_item,
+            connected,
+            range_tenths,
+        } => {
+            let Some(block) = block_at(pos) else { return };
+            if let Some((facing, ominous)) = animator.table().vault(block) {
+                let players: Vec<VaultPlayer> = connected
+                    .iter()
+                    .filter_map(|uuid| vault_player(state, *uuid))
+                    .collect();
+                animator.vault_tick(
+                    pos,
+                    facing,
+                    ominous,
+                    has_item,
+                    &players,
+                    f32::from(range_tenths) / 10.0,
+                    view,
+                    out,
+                    sounds,
+                );
+            }
+        }
+        Ticker::Conduit {
+            pos,
+            ticks,
+            frame,
+            target,
+        } => {
+            let target = target.and_then(|uuid| conduit_target(state, uuid));
+            animator.conduit_tick(pos, ticks, frame, target, view, out);
+        }
+    }
+}
+
+const PLAYER_HEIGHT: f64 = 1.8;
+
+/// `Level.hasNearbyAlivePlayer` over the local player and the player entities we know of.
+fn player_within(state: &ClientState, pos: [i32; 3], range: f64) -> bool {
+    let at = pos.map(|c| f64::from(c) + 0.5);
+    let near = |p: [f64; 3]| (0..3).map(|i| (p[i] - at[i]).powi(2)).sum::<f64>() < range * range;
+    if !state.player.dead && near(state.player.pos()) {
+        return true;
+    }
+    let data = mcr_data::v26_3();
+    let Some(player) = data.entity_type_by_name("minecraft:player") else {
+        return false;
+    };
+    state
+        .entities
+        .iter()
+        .any(|e| e.kind == player as i32 && near(e.pos))
+}
+
+fn vault_player(state: &ClientState, uuid: Uuid) -> Option<VaultPlayer> {
+    let (pos, height) = if uuid == state.uuid {
+        (state.player.pos(), PLAYER_HEIGHT)
+    } else {
+        let e = state.entities.by_uuid(uuid)?;
+        let (_, h) = entity_size(e.kind);
+        (e.pos, f64::from(h))
+    };
+    Some(VaultPlayer {
+        block: pos.map(|c| c.floor() as i32),
+        center: [pos[0], pos[1] + height / 2.0, pos[2]],
+    })
+}
+
+fn conduit_target(state: &ClientState, uuid: Uuid) -> Option<ConduitTarget> {
+    let e = state.entities.by_uuid(uuid)?;
+    let info = u32::try_from(e.kind)
+        .ok()
+        .and_then(|k| mcr_data::v26_3().entity_type_info(k))?;
+    Some(ConduitTarget {
+        eye: [e.pos[0], e.pos[1] + f64::from(info.eye_height), e.pos[2]],
+        width: info.width,
+        height: info.height,
+    })
+}
+
+fn entity_size(kind: i32) -> (f32, f32) {
+    u32::try_from(kind)
+        .ok()
+        .and_then(|k| mcr_data::v26_3().entity_type_info(k))
+        .map_or((0.6, 1.8), |i| (i.width, i.height))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct Count(u32, u32);
+
+    impl Sink for Count {
+        fn particle(&mut self, _: &Particle, _: [f64; 3], _: [f64; 3], _: bool) {
+            self.0 += 1;
+        }
+
+        fn sound(&mut self, _: &Cue) {
+            self.1 += 1;
+        }
+    }
+
+    struct Void;
+
+    impl AnimateWorld for Void {
+        fn state(&self, _: i32, _: i32, _: i32) -> Option<u16> {
+            None
+        }
+    }
+
+    #[test]
+    fn one_budget_covers_the_scan_and_hundreds_of_campfires() {
+        let data = mcr_data::v26_3();
+        let mut animator = Animator::new(data, 1);
+        let mut count = Count::default();
+        let mut out = Capped::new(&mut count);
+        for i in 0..5000 {
+            animator.campfire_tick([i, 0, 0], true, &Void, &mut out);
+            animator.campfire_food_tick([i, 0, 0], 0, [true; 4], &Void, &mut out);
+        }
+        for _ in 0..200 {
+            out.sound(&Cue {
+                event: "x",
+                pos: None,
+                volume: 1.0,
+                pitch: 1.0,
+                source: mcr_audio::SoundSource::Blocks,
+            });
+        }
+        assert!(count.0 <= MAX_PARTICLES_PER_TICK && count.0 > 0);
+        assert_eq!(count.1, MAX_SOUNDS_PER_TICK);
+    }
+
+    #[test]
+    fn extreme_coordinates_are_ignored_not_overflowed() {
+        let mut animator = Animator::new(mcr_data::v26_3(), 1);
+        let mut count = Count::default();
+        for x in [i32::MIN, i32::MAX, 30_000_001] {
+            let p = [x, x, x];
+            animator.tick(p, &Void, &mut count, true);
+            animator.campfire_tick(p, false, &Void, &mut count);
+            animator.campfire_food_tick(p, 3, [true; 4], &Void, &mut count);
+            animator.spawner_tick(p, &Void, &mut count);
+            animator.conduit_tick([0; 3], 0, &[p; 4], None, &Void, &mut count);
+        }
+        assert_eq!(count.0, 0);
+    }
+
+    #[test]
+    fn markers_need_creative_mode_and_a_barrier_or_light() {
+        assert_eq!(
+            marker_target(true, Some("minecraft:barrier")),
+            Some("minecraft:barrier")
+        );
+        assert_eq!(
+            marker_target(true, Some("minecraft:light")),
+            Some("minecraft:light")
+        );
+        assert_eq!(marker_target(false, Some("minecraft:barrier")), None);
+        assert_eq!(marker_target(true, Some("minecraft:stone")), None);
+        assert_eq!(marker_target(true, None), None);
+    }
 
     #[test]
     fn creaking_is_active_from_dusk_until_just_before_dawn() {

@@ -5,6 +5,8 @@ use crate::place::Dir;
 
 pub const BELL_TICKS: i32 = 50;
 pub const MAX_CATCH_UP_TICKS: i64 = 40;
+/// `BaseSpawner` default `minSpawnDelay`, which the spawn block event resets the delay to.
+const SPAWNER_MIN_DELAY: i32 = 200;
 
 fn lerp(t: f32, a: f32, b: f32) -> f32 {
     a + t * (b - a)
@@ -77,8 +79,29 @@ impl Anim {
                 self.wobble_style = Some(b1);
             }
             K::EndGateway if b0 == 1 => self.cooldown = 40,
+            K::Spawner if b0 == 1 => self.delay = SPAWNER_MIN_DELAY,
             _ => {}
         }
+    }
+
+    /// `BaseSpawner.clientTick`: the cage spins only with a player in range and a mob to show.
+    pub fn tick_spawner(&mut self, active: bool) {
+        self.o_spin = self.spin;
+        if active {
+            self.delay = (self.delay - 1).max(0);
+            self.spin = (self.spin + 1000.0 / (self.delay as f32 + 200.0)) % 360.0;
+        }
+    }
+
+    /// `TrialSpawner.tickClient`: the display mob spins only in the states with a spin speed.
+    pub fn tick_trial_spawner(&mut self, state: &str, spawn_delay: i64) {
+        let speed = match state {
+            "waiting_for_players" => 200.0,
+            "active" => 1000.0,
+            _ => return,
+        };
+        self.o_spin = self.spin;
+        self.spin = (self.spin + speed / (spawn_delay.max(0) as f32 + 200.0)) % 360.0;
     }
 
     pub fn tick(&mut self, kind: BlockEntityKind, powered: bool, player_near: Option<f32>) {
@@ -100,15 +123,6 @@ impl Anim {
                         self.bell_ticks = 0;
                     }
                 }
-            }
-            K::Spawner | K::TrialSpawner => {
-                self.o_spin = self.spin;
-                if self.delay > 0 {
-                    self.delay -= 1;
-                } else {
-                    self.delay = 400;
-                }
-                self.spin = (self.spin + 1000.0 / (self.delay as f32 + 200.0)) % 360.0;
             }
             K::Vault => {
                 self.o_spin = self.spin;
@@ -178,6 +192,34 @@ impl Book {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawner_spins_only_with_a_player_and_a_mob_and_counts_down_to_zero() {
+        let mut a = Anim::default();
+        a.event(BlockEntityKind::Spawner, 1, 0, 0);
+        assert_eq!(a.delay, 200);
+        a.tick_spawner(false);
+        assert_eq!(a.spin, 0.0);
+        assert_eq!(a.delay, 200);
+        a.tick_spawner(true);
+        assert_eq!(a.delay, 199);
+        assert!((a.spin - 1000.0 / 399.0).abs() < 1e-4);
+        for _ in 0..400 {
+            a.tick_spawner(true);
+        }
+        assert_eq!(a.delay, 0);
+    }
+
+    #[test]
+    fn trial_spawner_spins_by_state() {
+        let mut a = Anim::default();
+        a.tick_trial_spawner("cooldown", 0);
+        assert_eq!(a.spin, 0.0);
+        a.tick_trial_spawner("waiting_for_players", 0);
+        assert!((a.spin - 1.0).abs() < 1e-5);
+        a.tick_trial_spawner("active", -5);
+        assert!((a.spin - 1.0 - 5.0).abs() < 1e-4);
+    }
 
     #[test]
     fn chest_lid_opens_and_closes_in_ten_ticks() {

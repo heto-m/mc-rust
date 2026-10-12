@@ -361,6 +361,7 @@ fn furniture() {
         BlockEntityData::Conduit(ConduitData {
             active: false,
             hunting: false,
+            target: None,
         }),
     );
     s.set(
@@ -370,6 +371,7 @@ fn furniture() {
         BlockEntityData::Conduit(ConduitData {
             active: true,
             hunting: true,
+            target: None,
         }),
     );
     s.set(
@@ -462,6 +464,7 @@ fn effects() {
         BlockEntityData::Spawner(SpawnerData {
             entity_id: Some("minecraft:pig".into()),
             delay: 20,
+            ..Default::default()
         }),
     );
     s.set(
@@ -473,6 +476,7 @@ fn effects() {
                 id: "minecraft:diamond".into(),
                 count: 1,
             }),
+            ..Default::default()
         }),
     );
     h.decor_blocks(&[

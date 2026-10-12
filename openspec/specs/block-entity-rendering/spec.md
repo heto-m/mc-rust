@@ -53,3 +53,10 @@ The system SHALL batch entries so that thousands of block entities cost a bounde
 #### Scenario: Five thousand entries
 - **WHEN** 5000 chests are prepared and drawn
 - **THEN** the draw call count is bounded by the number of distinct model and texture batches
+
+### Requirement: Block entity texture reuse
+The skull skin cache SHALL free the layer of a replaced skin, drop skins unused for 1800 frames and hold at most 128 skins.
+
+#### Scenario: Replaced skin
+- **WHEN** the skin for a URL is set twice
+- **THEN** the first layer is freed

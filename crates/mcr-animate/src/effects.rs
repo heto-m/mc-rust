@@ -1,15 +1,16 @@
 use mcr_audio::{FastRandom, SoundSource};
 use mcr_data::Version;
 use mcr_mesh::{OffsetSpec, block_offset};
-use mcr_protocol::types::particle::Particle;
+use mcr_protocol::types::particle::{BlockParticleKind, Particle};
 
 use crate::ids::{REDSTONE_DUST, SCULK_TO_REDSTONE, falling_dust, tinted_leaves};
 use crate::table::{
-    DIRS, HORIZONTAL, Info, Kind, LEAVES, LeafParticle, Table, flag, fluid, opposite, tag,
+    DIRS, HORIZONTAL, Info, Kind, LEAVES, LeafParticle, Table, TrialState, flag, fluid, opposite,
+    tag,
 };
 use crate::{
-    AnimateWorld, Animator, Cue, Height, Ids, MAX_PARTICLES_PER_TICK, MAX_SOUNDS_PER_TICK, Sink,
-    Stats,
+    AnimateWorld, Animator, ConduitTarget, Cue, Height, Ids, MAX_PARTICLES_PER_TICK,
+    MAX_SOUNDS_PER_TICK, Sink, Stats, VaultPlayer,
 };
 
 const ZERO: [f64; 3] = [0.0; 3];
@@ -75,8 +76,15 @@ pub(crate) struct Scan<'a> {
     wither_rose: OffsetSpec,
     dripstone: OffsetSpec,
     sounds: bool,
+    marker: u16,
     stats: Stats,
 }
+
+const MAX_VAULT_PLAYERS: usize = 16;
+const MAX_CONDUIT_BLOCKS: usize = 42;
+
+/// Horizontal steps (x, z) by `Direction.get2DDataValue`: south, west, north, east.
+const FACING_STEP: [[i32; 2]; 4] = [[0, 1], [-1, 0], [0, -1], [1, 0]];
 
 impl<'a> Scan<'a> {
     pub(crate) fn new(
@@ -95,6 +103,7 @@ impl<'a> Scan<'a> {
             wither_rose: animator.wither_rose,
             dripstone: animator.dripstone,
             sounds,
+            marker: animator.marker,
             stats: Stats::default(),
         }
     }
@@ -190,6 +199,13 @@ impl<'a> Scan<'a> {
         if info.fluid != fluid::NONE {
             self.fluid(p, info);
         }
+        if self.marker != u16::MAX && info.block == self.marker {
+            let marker = Particle::BlockState {
+                kind: BlockParticleKind::BlockMarker,
+                state: i32::from(state),
+            };
+            self.particle(&marker, p.map(|c| f64::from(c) + 0.5), ZERO);
+        }
         if !info.has(flag::FULL_COLLISION) && self.world.has_ambient_particles() {
             self.ambient(p);
         }
@@ -213,7 +229,7 @@ impl<'a> Scan<'a> {
         let ids = self.ids;
         let [x, y, z] = p.map(f64::from);
         match info.kind {
-            Kind::None => {}
+            Kind::None | Kind::Vault | Kind::TrialSpawner => {}
             Kind::Torch => {
                 let at = [x + 0.5, y + 0.7, z + 0.5];
                 self.particle(&ids.smoke, at, ZERO);
@@ -1320,6 +1336,194 @@ impl<'a> Scan<'a> {
         let x = lerp(self.d(), x1, x2);
         let z = lerp(self.d(), z1, z2);
         self.particle(drip, [x, y, z], ZERO);
+    }
+
+    pub(crate) fn spawner_cage(&mut self, p: [i32; 3]) {
+        let ids = self.ids;
+        let at = [
+            f64::from(p[0]) + self.d(),
+            f64::from(p[1]) + self.d(),
+            f64::from(p[2]) + self.d(),
+        ];
+        self.particle(&ids.smoke, at, ZERO);
+        self.particle(&ids.flame, at, ZERO);
+    }
+
+    fn jitter(&mut self, center: [f64; 3], spread: f64) -> [f64; 3] {
+        center.map(|c| c + (self.f() - 0.5) * spread)
+    }
+
+    pub(crate) fn trial_spawner(&mut self, p: [i32; 3], state: TrialState, ominous: bool) {
+        let ids = self.ids;
+        let center = p.map(|c| f64::from(c) + 0.5);
+        match state {
+            TrialState::WaitingForPlayers
+            | TrialState::WaitingForRewardEjection
+            | TrialState::EjectingReward => {
+                if self.chance(2) {
+                    let at = self.jitter(center, 0.9);
+                    let flame = if ominous {
+                        &ids.soul_fire_flame
+                    } else {
+                        &ids.small_flame
+                    };
+                    self.particle(flame, at, ZERO);
+                }
+            }
+            TrialState::Active => {
+                let at = self.jitter(center, 1.0);
+                self.particle(&ids.smoke, at, ZERO);
+                let flame = if ominous {
+                    &ids.soul_fire_flame
+                } else {
+                    &ids.flame
+                };
+                self.particle(flame, at, ZERO);
+            }
+            TrialState::Cooldown => {
+                let at = self.jitter(center, 0.9);
+                if self.chance(3) {
+                    self.particle(&ids.smoke, at, ZERO);
+                }
+                if self.world.game_time().rem_euclid(20) == 0 {
+                    let top = [center[0], center[1] + 0.5, center[2]];
+                    for _ in 0..20 + self.rng.below(4) {
+                        self.particle(&ids.smoke, top, ZERO);
+                    }
+                }
+            }
+            TrialState::Inactive => {}
+        }
+        if state.can_spawn() && self.f() <= 0.02 {
+            let event = if ominous {
+                "block.trial_spawner.ambient_ominous"
+            } else {
+                "block.trial_spawner.ambient"
+            };
+            let (volume, pitch) = (self.f() as f32 * 0.25 + 0.75, self.f() as f32 + 0.5);
+            self.sound(event, Some(center), volume, pitch, SoundSource::Blocks);
+        }
+    }
+
+    pub(crate) fn vault(
+        &mut self,
+        p: [i32; 3],
+        facing: usize,
+        ominous: bool,
+        has_item: bool,
+        players: &[VaultPlayer],
+        range: f32,
+    ) {
+        let ids = self.ids;
+        if self.world.game_time().rem_euclid(20) == 0 {
+            let step = DIRS[facing.min(5)];
+            let keyhole = [
+                f64::from(p[0]) + 0.5 + f64::from(step[0]) * 0.5,
+                f64::from(p[1]) + 1.75,
+                f64::from(p[2]) + 0.5 + f64::from(step[2]) * 0.5,
+            ];
+            let reach = f64::from(range) * f64::from(range);
+            for player in players.iter().take(MAX_VAULT_PLAYERS) {
+                if !crate::in_world(player.block) {
+                    continue;
+                }
+                let d: f64 = (0..3)
+                    .map(|i| f64::from(player.block[i] - p[i]).powi(2))
+                    .sum();
+                if d > reach {
+                    continue;
+                }
+                let dir = [0, 1, 2].map(|i| player.center[i] - keyhole[i]);
+                for _ in 0..2 + self.rng.below(4) {
+                    let vel = self.jitter(dir, 1.0);
+                    self.particle(&ids.vault_connection, keyhole, vel);
+                }
+            }
+        }
+        if self.f() <= 0.5 {
+            let at = [
+                f64::from(p[0]) + 0.1 + self.d() * 0.8,
+                f64::from(p[1]) + 0.25 + self.d() * 0.5,
+                f64::from(p[2]) + 0.1 + self.d() * 0.8,
+            ];
+            self.particle(&ids.smoke, at, ZERO);
+            if has_item {
+                let flame = if ominous {
+                    &ids.soul_fire_flame
+                } else {
+                    &ids.small_flame
+                };
+                self.particle(flame, at, ZERO);
+            }
+        }
+        if has_item && self.f() <= 0.02 {
+            let (volume, pitch) = (self.f() as f32 * 0.25 + 0.75, self.f() as f32 + 0.5);
+            let center = p.map(|c| f64::from(c) + 0.5);
+            self.sound(
+                "block.vault.ambient",
+                Some(center),
+                volume,
+                pitch,
+                SoundSource::Blocks,
+            );
+        }
+    }
+
+    pub(crate) fn conduit(
+        &mut self,
+        p: [i32; 3],
+        tick_count: u32,
+        effect_blocks: &[[i32; 3]],
+        target: Option<ConduitTarget>,
+    ) {
+        let ids = self.ids;
+        let mut hh = f64::from(((tick_count as f32 + 35.0) * 0.1).sin()) / 2.0 + 0.5;
+        hh = (hh * hh + hh) * f64::from(0.3f32);
+        let end = [
+            f64::from(p[0]) + 0.5,
+            f64::from(p[1]) + 1.5 + hh,
+            f64::from(p[2]) + 0.5,
+        ];
+        for block in effect_blocks.iter().take(MAX_CONDUIT_BLOCKS) {
+            if crate::in_world(*block) && self.chance(50) {
+                let vel = [
+                    -0.5 + self.f() + f64::from(block[0] - p[0]),
+                    -2.0 + self.f() + f64::from(block[1] - p[1]),
+                    -0.5 + self.f() + f64::from(block[2] - p[2]),
+                ];
+                self.particle(&ids.nautilus, end, vel);
+            }
+        }
+        if let Some(t) = target {
+            let w = f64::from(t.width.clamp(0.0, 16.0));
+            let h = f64::from(t.height.clamp(0.0, 16.0));
+            let vel = [
+                (-0.5 + self.f()) * (3.0 + w),
+                -1.0 + self.f() * h,
+                (-0.5 + self.f()) * (3.0 + w),
+            ];
+            self.particle(&ids.nautilus, t.eye, vel);
+        }
+    }
+
+    pub(crate) fn campfire_food(&mut self, p: [i32; 3], rotation: u8, slots: [bool; 4]) {
+        let ids = self.ids;
+        for (slot, filled) in slots.into_iter().enumerate() {
+            if !filled || self.rng.f32() >= 0.2 {
+                continue;
+            }
+            let [fx, fz] = FACING_STEP[(slot + usize::from(rotation & 3)) % 4];
+            let [cx, cz] = [-fz, fx];
+            let x = f64::from(p[0]) + 0.5 - f64::from(fx) * 0.3125 + f64::from(cx) * 0.3125;
+            let z = f64::from(p[2]) + 0.5 - f64::from(fz) * 0.3125 + f64::from(cz) * 0.3125;
+            for _ in 0..4 {
+                self.particle(
+                    &ids.smoke,
+                    [x, f64::from(p[1]) + 0.5, z],
+                    [0.0, 5.0e-4, 0.0],
+                );
+            }
+        }
     }
 
     pub(crate) fn campfire_smoke(&mut self, p: [i32; 3], signal: bool) {

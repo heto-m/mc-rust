@@ -279,3 +279,68 @@ fn firework_flash_grows_and_fades_over_four_ticks() {
     }
     assert_eq!(e.count(), 0);
 }
+
+#[test]
+fn block_markers_are_still_half_block_quads_that_last_80_ticks() {
+    let mut e = engine();
+    e.emit(
+        &Particle::BlockState {
+            kind: BlockParticleKind::BlockMarker,
+            state: 3,
+        },
+        [1.0, 2.0, 3.0],
+        [0.0; 3],
+        0.0,
+        0,
+    );
+    let p = &e.pools[Pool::Terrain as usize][0];
+    assert_eq!((p.size, p.life, p.vel), (0.5, 80, DVec3::ZERO));
+    for _ in 0..80 {
+        e.tick(&Floor);
+    }
+    assert_eq!(e.count(), 1);
+    e.tick(&Floor);
+    assert_eq!(e.count(), 0);
+}
+
+#[test]
+fn block_markers_need_a_texture() {
+    let mut e = ParticleEngine::new(ParticleAtlas::pack(vec![], vec![]), Box::new(NoAssets));
+    e.emit(
+        &Particle::BlockState {
+            kind: BlockParticleKind::BlockMarker,
+            state: 3,
+        },
+        [0.0; 3],
+        [0.0; 3],
+        0.0,
+        0,
+    );
+    assert_eq!(e.count(), 0);
+}
+
+#[test]
+fn enchant_particles_fly_from_the_offset_back_to_the_spawn_point() {
+    let mut e = engine();
+    e.add_particle(
+        &Particle::Simple(i32::from(sim::type_id("enchant"))),
+        [10.0, 20.0, 30.0],
+        [2.0, 0.0, -1.0],
+    );
+    let p = &e.pools[Pool::Opaque as usize][0];
+    assert_eq!(p.pos, DVec3::new(12.0, 20.0, 29.0));
+    let life = p.life;
+    assert!((30..40).contains(&life));
+    let mut last = f64::MAX;
+    for _ in 0..life - 1 {
+        e.tick(&Floor);
+        let p = &e.pools[Pool::Opaque as usize][0];
+        assert!(p.pos.x < last && p.pos.x > 10.0);
+        last = p.pos.x;
+    }
+    e.tick(&Floor);
+    let p = &e.pools[Pool::Opaque as usize][0];
+    assert!((p.pos.x - 10.0).abs() < 1e-9 && (p.pos.y - 18.8).abs() < 1e-6);
+    e.tick(&Floor);
+    assert_eq!(e.count(), 0);
+}

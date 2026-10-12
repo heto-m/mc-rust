@@ -110,6 +110,7 @@ pub struct Ui {
     batch: Batch,
     placed_scratch: Vec<Placed>,
     rng: u32,
+    frames: u64,
 }
 
 impl Ui {
@@ -123,6 +124,7 @@ impl Ui {
             sprites: Sprites::load(resources)?,
             lang: Lang::load(resources, DEFAULT_LANGUAGE)?,
             batch: Batch::default(),
+            frames: 0,
             placed_scratch: Vec::new(),
             rng: 0x2545_F491,
         })
@@ -191,6 +193,7 @@ impl Ui {
     /// `max_scale` of 0 means unlimited, like vanilla's "Auto" GUI scale option.
     pub fn frame_scaled(&mut self, width: u32, height: u32, max_scale: u32) -> UiFrame<'_> {
         let scale = gui_scale(width, height, max_scale);
+        self.frames += 1;
         self.batch.vertices.clear();
         self.batch.cmds.clear();
         self.batch.scale = scale;
@@ -245,6 +248,11 @@ impl UiFrame<'_> {
 
     pub fn scale(&self) -> u32 {
         self.scale
+    }
+
+    /// Number of UI frames started so far.
+    pub fn number(&self) -> u64 {
+        self.ui.frames
     }
 
     pub fn ui(&mut self) -> &mut Ui {

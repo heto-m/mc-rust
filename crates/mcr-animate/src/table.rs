@@ -52,6 +52,50 @@ pub enum Kind {
     SporeBlossom,
     WetSponge,
     WitherRose,
+    Vault,
+    TrialSpawner,
+}
+
+/// `TrialSpawnerState`, which decides the client particles and whether the mob spins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TrialState {
+    Inactive,
+    WaitingForPlayers,
+    Active,
+    WaitingForRewardEjection,
+    EjectingReward,
+    Cooldown,
+}
+
+impl TrialState {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "inactive" => Self::Inactive,
+            "waiting_for_players" => Self::WaitingForPlayers,
+            "active" => Self::Active,
+            "waiting_for_reward_ejection" => Self::WaitingForRewardEjection,
+            "ejecting_reward" => Self::EjectingReward,
+            "cooldown" => Self::Cooldown,
+            _ => return None,
+        })
+    }
+
+    fn from_index(i: u16) -> Self {
+        match i {
+            1 => Self::WaitingForPlayers,
+            2 => Self::Active,
+            3 => Self::WaitingForRewardEjection,
+            4 => Self::EjectingReward,
+            5 => Self::Cooldown,
+            _ => Self::Inactive,
+        }
+    }
+
+    /// `isCapableOfSpawning`.
+    pub fn can_spawn(self) -> bool {
+        matches!(self, Self::WaitingForPlayers | Self::Active)
+    }
 }
 
 pub mod flag {
@@ -448,6 +492,21 @@ impl Props {
     }
 }
 
+fn trial_state(name: Option<&str>) -> TrialState {
+    TrialState::from_name(name.unwrap_or("inactive")).unwrap_or(TrialState::Inactive)
+}
+
+/// Bit 0 is the signal fire, bits 1 and 2 `Direction.get2DDataValue` of the facing.
+fn campfire_aux(p: &Props) -> u16 {
+    let facing = match p.get("facing") {
+        Some("west") => 1,
+        Some("north") => 2,
+        Some("east") => 3,
+        _ => 0,
+    };
+    u16::from(p.is("signal_fire", "true")) | facing << 1
+}
+
 fn classify(name: &str, p: &Props) -> (Kind, u8, u16) {
     let lit = p.is("lit", "true");
     match name {
@@ -464,8 +523,18 @@ fn classify(name: &str, p: &Props) -> (Kind, u8, u16) {
             let count = p.get("candles").and_then(|c| c.parse().ok()).unwrap_or(1);
             (Kind::Candle, count, 0)
         }
-        "campfire" if lit => (Kind::Campfire, 1, u16::from(p.is("signal_fire", "true"))),
-        "soul_campfire" if lit => (Kind::Campfire, 0, u16::from(p.is("signal_fire", "true"))),
+        "vault" => (
+            Kind::Vault,
+            u8::from(p.is("ominous", "true")),
+            p.dir("facing") as u16,
+        ),
+        "trial_spawner" => (
+            Kind::TrialSpawner,
+            u8::from(p.is("ominous", "true")),
+            trial_state(p.get("trial_spawner_state")) as u16,
+        ),
+        "campfire" if lit => (Kind::Campfire, 1, campfire_aux(p)),
+        "soul_campfire" if lit => (Kind::Campfire, 0, campfire_aux(p)),
         "fire" => (Kind::Fire, 0, 0),
         "soul_fire" => (Kind::SoulFire, 0, 0),
         "furnace" if lit => (Kind::Furnace, 0, p.dir("facing") as u16),
@@ -698,6 +767,24 @@ impl Table {
     pub fn campfire(&self, state: u16) -> Option<bool> {
         let info = self.info(state);
         (info.kind == Kind::Campfire).then_some(info.aux & 1 != 0)
+    }
+
+    /// `Direction.get2DDataValue` (south 0, west 1, north 2, east 3) of a lit campfire's facing.
+    pub fn campfire_rotation(&self, state: u16) -> Option<u8> {
+        let info = self.info(state);
+        (info.kind == Kind::Campfire).then_some((info.aux >> 1 & 3) as u8)
+    }
+
+    /// A vault state's keyhole direction (an index into [`DIRS`]) and whether it is ominous.
+    pub fn vault(&self, state: u16) -> Option<(usize, bool)> {
+        let info = self.info(state);
+        (info.kind == Kind::Vault).then_some((usize::from(info.aux), info.arg != 0))
+    }
+
+    /// A trial spawner state's `trial_spawner_state` and whether it is ominous.
+    pub fn trial_spawner(&self, state: u16) -> Option<(TrialState, bool)> {
+        let info = self.info(state);
+        (info.kind == Kind::TrialSpawner).then(|| (TrialState::from_index(info.aux), info.arg != 0))
     }
 
     pub fn states(&self) -> usize {

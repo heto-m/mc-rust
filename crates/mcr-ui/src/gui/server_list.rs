@@ -31,6 +31,7 @@ pub struct Favicon {
 }
 
 pub const FAVICON_SIZE: u32 = 64;
+const MAX_FAVICONS: usize = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct OnlineStatus {
@@ -188,7 +189,7 @@ pub struct ServerListScreen {
     selected: Option<usize>,
     list: ScrollList,
     mouse: (f32, f32),
-    favicons: RefCell<std::collections::HashMap<u64, Option<crate::SpriteId>>>,
+    favicons: RefCell<std::collections::HashMap<u64, (Option<crate::SpriteId>, u64)>>,
 }
 
 impl std::fmt::Debug for ServerListScreen {
@@ -359,12 +360,27 @@ impl ServerListScreen {
         let status = self.servers.borrow_mut().status(index);
         let icon = match &status {
             ServerStatus::Online(o) => o.favicon.as_ref().and_then(|f| {
-                *self.favicons.borrow_mut().entry(f.id).or_insert_with(|| {
-                    cx.frame
-                        .ui()
-                        .sprites_mut()
-                        .add_raw(FAVICON_SIZE, FAVICON_SIZE, &f.rgba)
-                })
+                let now = cx.frame.number();
+                let mut cache = self.favicons.borrow_mut();
+                if !cache.contains_key(&f.id) && cache.len() >= MAX_FAVICONS {
+                    cache.retain(|_, (id, used)| {
+                        let keep = *used >= now;
+                        if let (false, Some(id)) = (keep, id) {
+                            cx.frame.ui().sprites_mut().free_raw(*id);
+                        }
+                        keep
+                    });
+                }
+                let (id, used) = cache.entry(f.id).or_insert_with(|| {
+                    let id =
+                        cx.frame
+                            .ui()
+                            .sprites_mut()
+                            .add_raw(FAVICON_SIZE, FAVICON_SIZE, &f.rgba);
+                    (id, now)
+                });
+                *used = now;
+                *id
             }),
             _ => None,
         };

@@ -56,6 +56,9 @@ pub(crate) enum Kind {
     Spell,
     Town,
     Terrain,
+    Marker,
+    FlyTowards,
+    VaultConnection,
     Skip,
 }
 
@@ -174,13 +177,16 @@ pub(crate) fn kind_of(name: &str) -> (Kind, Pool) {
         "falling_dripstone_water" => opaque(Fall(DripWater)),
         "dripping_dripstone_lava" => opaque(Hang(DripLava)),
         "falling_dripstone_lava" => opaque(Fall(DripLava)),
+        "enchant" | "nautilus" => opaque(FlyTowards),
+        "vault_connection" => trans(VaultConnection),
         "cloud" | "sneeze" => trans(Cloud),
         "campfire_cosy_smoke" | "campfire_signal_smoke" => trans(Campfire),
         "sweep_attack" => opaque(Sweep),
         "totem_of_undying" | "end_rod" | "firework" => trans(Animated),
         "witch" | "effect" | "instant_effect" | "entity_effect" => trans(Spell),
         "flash" => trans(Flash),
-        "block_marker" | "elder_guardian" | "vibration" | "trail" | "shriek" => opaque(Skip),
+        "block_marker" => (Marker, Pool::Terrain),
+        "elder_guardian" | "vibration" | "trail" | "shriek" => opaque(Skip),
         _ => opaque(Generic),
     }
 }
@@ -267,7 +273,7 @@ fn set_from_age(p: &mut P, atlas: &ParticleAtlas) {
 pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut Rng) -> Option<P> {
     let (pos, aux) = (s.pos, s.aux);
     let set = atlas.set(usize::from(s.type_id));
-    if set.is_empty() && !matches!(kind, Kind::Terrain | Kind::Seed) {
+    if set.is_empty() && !matches!(kind, Kind::Terrain | Kind::Marker | Kind::Seed) {
         return None;
     }
     let mut p = match kind {
@@ -405,6 +411,26 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             p.life = (rng.f32() * 10.0) as i32 + 40;
             p.physics = false;
             p.light_mode = Light::Emission;
+            p
+        }
+        Kind::FlyTowards | Kind::VaultConnection => {
+            let mut p = base(pos, rng);
+            p.vel = aux;
+            p.pos = pos + aux;
+            p.prev = p.pos;
+            p.size = 0.1 * (rng.f32() * 0.5 + 0.2);
+            let br = rng.f32() * 0.6 + 0.4;
+            p.color = [br * 0.9, br * 0.9, br, 1.0];
+            p.life = (rng.f32() * 10.0) as i32 + 30;
+            p.physics = false;
+            if kind == Kind::VaultConnection {
+                p.size *= 1.5;
+                p.light_mode = Light::BlockMax;
+                p.color[3] = 0.0;
+            } else {
+                p.light_mode = Light::Emission;
+            }
+            p.sprite = set[rng.below(set.len() as u32) as usize];
             p
         }
         Kind::Dust | Kind::Transition => {
@@ -656,6 +682,18 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             p.sub = [rng.f32() * 3.0, rng.f32() * 3.0];
             p
         }
+        Kind::Marker => {
+            let Data::Rect { rect, .. } = s.data else {
+                return None;
+            };
+            let mut p = base(pos, rng);
+            p.life = 80;
+            p.size = 0.5;
+            p.physics = false;
+            p.rect = rect;
+            p.sub = [0.0; 2];
+            p
+        }
         Kind::Flash => {
             let mut p = base(pos, rng);
             p.life = 4;
@@ -676,7 +714,10 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
     p.kind = kind;
     p.type_id = s.type_id;
     p.life = p.life.max(1);
-    if !matches!(kind, Kind::Terrain | Kind::Seed) {
+    if !matches!(
+        kind,
+        Kind::Terrain | Kind::Marker | Kind::Seed | Kind::FlyTowards | Kind::VaultConnection
+    ) {
         p.sprite = set[0];
         set_from_age(&mut p, atlas);
     }
@@ -863,6 +904,24 @@ pub(crate) fn tick(p: &mut P, t: &mut Tick) -> bool {
                 start.x + p.vel.x * f64::from(s),
                 start.y + p.vel.y * f64::from(s) + f64::from(1.0 - a),
                 start.z + p.vel.z * f64::from(s),
+            );
+            return true;
+        }
+        Kind::FlyTowards | Kind::VaultConnection => {
+            let expired = p.age >= p.life;
+            p.age += 1;
+            if expired {
+                return false;
+            }
+            let pos = 1.0 - p.age as f32 / p.life as f32;
+            let mut pp = 1.0 - pos;
+            pp *= pp;
+            pp *= pp;
+            let start = p.start;
+            p.pos = DVec3::new(
+                start.x + p.vel.x * f64::from(pos),
+                start.y + p.vel.y * f64::from(pos) - f64::from(pp * 1.2),
+                start.z + p.vel.z * f64::from(pos),
             );
             return true;
         }
@@ -1150,6 +1209,9 @@ fn twinkle_visible(p: &P) -> bool {
 pub(crate) fn alpha(p: &P, partial: f32) -> f32 {
     if p.kind == Kind::Flash {
         0.6 - (p.age as f32 + partial - 1.0) * 0.25 * 0.5
+    } else if p.kind == Kind::VaultConnection {
+        let t = (p.age as f32 + partial) / p.life.max(1) as f32;
+        0.6 * ((t - 0.25) / 0.75).clamp(0.0, 1.0)
     } else {
         p.color[3]
     }
@@ -1157,7 +1219,7 @@ pub(crate) fn alpha(p: &P, partial: f32) -> f32 {
 
 pub(crate) fn emission(p: &P, partial: f32) -> f32 {
     let a = ((p.age as f32 + partial) / p.life.max(1) as f32).clamp(0.0, 1.0);
-    if p.kind == Kind::Portal {
+    if matches!(p.kind, Kind::Portal | Kind::FlyTowards) {
         a * a * a * a
     } else {
         a

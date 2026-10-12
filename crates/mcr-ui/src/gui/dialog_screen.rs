@@ -17,7 +17,9 @@ use super::menus::ConfirmScreen;
 use super::multiline::MultiLineEdit;
 use super::screen::{Screen, ScreenAction};
 use super::tooltip::TooltipLines;
-use super::widgets::{Button, CycleButton, Slider, WidgetEvent, WidgetEventKind, WidgetSet};
+use super::widgets::{
+    Button, CHECKBOX_SIZE, Checkbox, CycleButton, Slider, WidgetEvent, WidgetEventKind, WidgetSet,
+};
 use crate::style::Cell;
 use crate::text::{ClickSpan, click_at, flatten_events};
 
@@ -26,7 +28,6 @@ const HEADER: i32 = 33;
 const FOOTER: i32 = 33;
 const SPACING: i32 = 10;
 const SCROLL_STEP: i32 = 12;
-const CHECKBOX: i32 = 17;
 
 const WARNING: u32 = 1;
 const BODY_ID: u32 = 1000;
@@ -48,7 +49,6 @@ enum Content {
     Label(String),
     Widget(u32),
     Multi(usize),
-    Check(usize),
 }
 
 struct Placed {
@@ -69,18 +69,10 @@ struct Multi {
     edit: MultiLineEdit,
 }
 
-struct Check {
-    label: String,
-    on: bool,
-    on_true: String,
-    on_false: String,
-    rect: [i32; 4],
-}
-
 enum Getter {
     Text(u32),
     Multi(usize),
-    Check(usize),
+    Check(u32, String, String),
     Option(u32, Vec<String>),
     Number(u32, NumberSpec),
 }
@@ -147,7 +139,6 @@ pub struct DialogScreen {
     actions: Vec<(u32, Option<Action>)>,
     getters: Vec<(String, Getter)>,
     multis: Vec<Multi>,
-    checks: Vec<Check>,
     numbers: Vec<(u32, String, String, NumberSpec)>,
     labels: Vec<(u32, Component)>,
     focus_multi: Option<usize>,
@@ -179,7 +170,6 @@ impl DialogScreen {
             actions: Vec::new(),
             getters: Vec::new(),
             multis: Vec::new(),
-            checks: Vec::new(),
             numbers: Vec::new(),
             labels: Vec::new(),
             focus_multi: None,
@@ -280,15 +270,15 @@ impl DialogScreen {
                 let text = self.multis.get(*i)?.edit.value();
                 (escape_without_quotes(&text), Value::String(text))
             }
-            Getter::Check(i) => {
-                let c = self.checks.get(*i)?;
+            Getter::Check(id, on_true, on_false) => {
+                let on = self.body.checkbox_mut(*id)?.selected();
                 (
-                    if c.on {
-                        c.on_true.clone()
+                    if on {
+                        on_true.clone()
                     } else {
-                        c.on_false.clone()
+                        on_false.clone()
                     },
-                    Value::Byte(i8::from(c.on)),
+                    Value::Byte(i8::from(on)),
                 )
             }
             Getter::Option(id, ids) => {
@@ -584,27 +574,15 @@ impl DialogScreen {
                 on_false,
             } => {
                 let (text, lw) = label_part(cx, label);
-                self.checks.push(Check {
-                    label: text,
-                    on: *initial,
-                    on_true: on_true.clone(),
-                    on_false: on_false.clone(),
-                    rect: [0; 4],
-                });
-                let index = self.checks.len() - 1;
-                self.getters.push((key.to_owned(), Getter::Check(index)));
-                let w = CHECKBOX + 4 + lw;
-                Row {
-                    w,
-                    h: CHECKBOX,
-                    parts: vec![Placed {
-                        dx: 0,
-                        dy: 0,
-                        w,
-                        h: CHECKBOX,
-                        content: Content::Check(index),
-                    }],
-                }
+                let mut check = Checkbox::new(id, 0, 0, text, *initial);
+                check.fit_width(lw);
+                let w = check.rect[2];
+                self.body.add(check);
+                self.getters.push((
+                    key.to_owned(),
+                    Getter::Check(id, on_true.clone(), on_false.clone()),
+                ));
+                Self::single(id, w, CHECKBOX_SIZE)
             }
             Control::SingleOption {
                 width,
@@ -752,7 +730,6 @@ impl Screen for DialogScreen {
         self.actions.clear();
         self.getters.clear();
         self.multis.clear();
-        self.checks.clear();
         self.numbers.clear();
         self.labels.clear();
         self.focus_multi = None;
@@ -842,11 +819,6 @@ impl Screen for DialogScreen {
                         self.multis[i].edit.click(x, y, env.now_ms, mods.shift);
                         return true;
                     }
-                    if let Some(i) = self.checks.iter().position(|c| contains(c.rect, x, y)) {
-                        self.checks[i].on = !self.checks[i].on;
-                        out.push(ScreenAction::ClickSound);
-                        return true;
-                    }
                     if let Some(event) = self.text_click(x, y) {
                         let after = self.dialog.after_action;
                         self.run(Some(event), after, out);
@@ -897,6 +869,7 @@ impl DialogScreen {
                     out.push(ScreenAction::ClickSound);
                     self.press(id, out);
                 }
+                WidgetEventKind::Toggled(_) => out.push(ScreenAction::ClickSound),
                 _ => {}
             }
         }
@@ -965,7 +938,6 @@ impl DialogScreen {
                         }
                     }
                     Content::Multi(i) => self.multis[*i].edit.rect = rect,
-                    Content::Check(i) => self.checks[*i].rect = rect,
                     _ => {}
                 }
             }
@@ -1083,24 +1055,6 @@ impl DialogScreen {
                         cx.sprite("widget/text_field", x, y, part.w, part.h);
                         let focused = self.focus_multi == Some(*i);
                         m.edit.render(cx, focused);
-                    }
-                    Content::Check(i) => {
-                        let c = &self.checks[*i];
-                        let hovered = contains(c.rect, cx.mouse.0, cx.mouse.1);
-                        let name = match (c.on, hovered) {
-                            (false, false) => "widget/checkbox",
-                            (false, true) => "widget/checkbox_highlighted",
-                            (true, false) => "widget/checkbox_selected",
-                            (true, true) => "widget/checkbox_selected_highlighted",
-                        };
-                        cx.sprite(name, x, y, CHECKBOX, CHECKBOX);
-                        cx.text(
-                            &c.label,
-                            x + CHECKBOX + 4,
-                            y + (CHECKBOX - 8) / 2,
-                            WHITE,
-                            true,
-                        );
                     }
                     Content::Widget(_) => {}
                 }

@@ -40,7 +40,7 @@ pub use data::{
     AnimationDef, AnimationSet, ChannelDef, CubeDef, Interp, KeyframeDef, LayerDef, LayerSet,
     PartDef, RendererInfo, RendererSet, Target,
 };
-pub use display::{DisplaySample, DisplayTrack};
+pub use display::{DisplaySample, DisplayTrack, PoseLerp, teleport_duration};
 pub use gpu::{
     Bone34, CLASS_SIZES, EntityRenderer, LightInfo, MAX_BONES, MAX_INSTANCES, ModelId,
     OUTLINE_COLOR_FORMAT, OUTLINE_DEPTH_FORMAT, PartInstance, Pipeline, TargetFormats, TexId,

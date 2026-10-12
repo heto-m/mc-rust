@@ -814,12 +814,12 @@ impl Play {
         };
         if running {
             let sky_darken = ((1.0 - self.sky_factor.clamp(0.0, 1.0)) * 15.0).round() as u8;
-            let mut campfires = self.block_entities.iter().flat_map(|b| b.campfires());
+            let mut tickers = self.block_entities.iter().flat_map(|b| b.tickers());
             self.block_animation.tick(
                 state,
                 &mut self.effects,
                 world_audio(&mut self.audio),
-                &mut campfires,
+                &mut tickers,
                 sky_darken,
             );
         }

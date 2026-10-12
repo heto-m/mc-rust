@@ -305,7 +305,9 @@ pub(crate) fn build_instances(
                 .get((sky as usize).min(15) * 16 + (block as usize).min(15))
                 .copied()
                 .unwrap_or([1.0; 4]);
-            let uv = if pool == Pool::Terrain as usize {
+            let uv = if p.kind == sim::Kind::Marker {
+                p.rect
+            } else if pool == Pool::Terrain as usize {
                 Uv {
                     u0: p.rect.u0 + (p.rect.u1 - p.rect.u0) * p.sub[0] / 4.0,
                     v0: p.rect.v0 + (p.rect.v1 - p.rect.v0) * p.sub[1] / 4.0,

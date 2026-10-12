@@ -18,6 +18,7 @@ fn extras() {
         BlockEntityData::Spawner(SpawnerData {
             entity_id: Some("minecraft:zombie".into()),
             delay: 20,
+            ..Default::default()
         }),
     );
     s.set(
@@ -29,6 +30,7 @@ fn extras() {
                 id: "minecraft:emerald".into(),
                 count: 1,
             }),
+            ..Default::default()
         }),
     );
     let mut shelf = ShelfData::default();

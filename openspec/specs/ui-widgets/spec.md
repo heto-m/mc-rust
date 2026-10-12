@@ -64,3 +64,10 @@ The checkbox widget SHALL draw a 17 by 17 box from the `widget/checkbox` sprites
 #### Scenario: Toggle
 - **WHEN** an unchecked checkbox is clicked
 - **THEN** it reports `Toggled(true)` and draws the selected sprite
+
+### Requirement: Dialog checkboxes
+Boolean inputs of server dialogs SHALL be `Checkbox` widgets, toggled by click, Enter or Space with the click sound, and submit the `on_true` or `on_false` value for their state.
+
+#### Scenario: Keyboard toggle
+- **WHEN** the checkbox of a dialog is focused and Space is pressed
+- **THEN** it toggles and the click sound plays

@@ -34,6 +34,8 @@ particles! {
     soul_fire_flame = "soul_fire_flame",
     copper_fire_flame = "copper_fire_flame",
     small_flame = "small_flame",
+    nautilus = "nautilus",
+    vault_connection = "vault_connection",
     lava = "lava",
     dripping_water = "dripping_water",
     dripping_lava = "dripping_lava",

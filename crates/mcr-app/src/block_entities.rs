@@ -14,6 +14,7 @@ use mcr_render::Camera;
 use mcr_ui::Ui;
 use mcr_world::{ChunkPos, ChunkStore};
 use rustc_hash::FxHashMap;
+use uuid::Uuid;
 
 const MAX_PER_CHUNK: usize = 4096;
 const MAX_TOTAL: usize = 1 << 16;
@@ -31,6 +32,7 @@ type Pos = [i32; 3];
 pub struct BlockEntities {
     pub scene: BlockEntityScene,
     entries: FxHashMap<Pos, (BlockEntityKind, BlockEntityData)>,
+    conduit_frames: FxHashMap<Pos, Vec<Pos>>,
 }
 
 impl std::fmt::Debug for BlockEntities {
@@ -110,7 +112,9 @@ fn beam_block(state: u32) -> BeamBlock {
     }
 }
 
-fn conduit_active(chunks: &ChunkStore, at: Pos) -> bool {
+/// `ConduitBlockEntity.updateShape`: the frame blocks around a conduit that sits in water, empty
+/// when the 3x3x3 cube around it is not all water.
+fn conduit_frame(chunks: &ChunkStore, at: Pos) -> Vec<Pos> {
     let name_at = |d: [i32; 3]| {
         offset(at, d)
             .and_then(|p| state_at(chunks, p))
@@ -120,12 +124,12 @@ fn conduit_active(chunks: &ChunkStore, at: Pos) -> bool {
         for y in -1..=1 {
             for z in -1..=1 {
                 if !matches!(name_at([x, y, z]), "water" | "conduit") {
-                    return false;
+                    return Vec::new();
                 }
             }
         }
     }
-    let mut frame = 0;
+    let mut frame = Vec::new();
     for x in -2i32..=2 {
         for y in -2i32..=2 {
             for z in -2i32..=2 {
@@ -135,12 +139,41 @@ fn conduit_active(chunks: &ChunkStore, at: Pos) -> bool {
                     || (y == 0 && (ax == 2 || az == 2))
                     || (z == 0 && (ax == 2 || ay == 2));
                 if outside && line && CONDUIT_FRAME.contains(&name_at([x, y, z])) {
-                    frame += 1;
+                    frame.extend(offset(at, [x, y, z]));
                 }
             }
         }
     }
-    frame >= 16
+    frame
+}
+
+/// A block entity the client ticks for particles and sounds.
+#[derive(Debug)]
+pub enum Ticker<'a> {
+    Campfire {
+        pos: Pos,
+        slots: [bool; 4],
+    },
+    Spawner {
+        pos: Pos,
+        range: i16,
+        has_entity: bool,
+    },
+    TrialSpawner {
+        pos: Pos,
+    },
+    Vault {
+        pos: Pos,
+        has_item: bool,
+        connected: &'a [Uuid],
+        range_tenths: u16,
+    },
+    Conduit {
+        pos: Pos,
+        ticks: u32,
+        frame: &'a [Pos],
+        target: Option<Uuid>,
+    },
 }
 
 impl BlockEntities {
@@ -162,11 +195,13 @@ impl BlockEntities {
         Some(Self {
             scene,
             entries: FxHashMap::default(),
+            conduit_frames: FxHashMap::default(),
         })
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.conduit_frames.clear();
         self.scene.clear();
     }
 
@@ -186,7 +221,9 @@ impl BlockEntities {
         match (kind, &mut data) {
             (BlockEntityKind::Beacon, d) => *d = Self::beacon_data(&state.chunks, pos),
             (BlockEntityKind::Conduit, BlockEntityData::Conduit(c)) => {
-                c.active = conduit_active(&state.chunks, pos);
+                let frame = conduit_frame(&state.chunks, pos);
+                c.active = frame.len() >= 16;
+                self.conduit_frames.insert(pos, frame);
             }
             _ => {}
         }
@@ -202,11 +239,35 @@ impl BlockEntities {
         BlockEntityData::Beacon(BeaconData { sections })
     }
 
-    pub fn campfires(&self) -> impl Iterator<Item = Pos> + '_ {
-        self.entries
-            .iter()
-            .filter(|(_, (kind, _))| *kind == BlockEntityKind::Campfire)
-            .map(|(pos, _)| *pos)
+    /// Block entities with client-side particles and sounds.
+    pub fn tickers(&self) -> impl Iterator<Item = Ticker<'_>> + '_ {
+        self.entries.iter().filter_map(|(&pos, (kind, data))| {
+            Some(match (kind, data) {
+                (BlockEntityKind::Campfire, BlockEntityData::Campfire(c)) => Ticker::Campfire {
+                    pos,
+                    slots: c.items.each_ref().map(Option::is_some),
+                },
+                (BlockEntityKind::Spawner, BlockEntityData::Spawner(s)) => Ticker::Spawner {
+                    pos,
+                    range: s.range,
+                    has_entity: s.entity_id.is_some(),
+                },
+                (BlockEntityKind::TrialSpawner, _) => Ticker::TrialSpawner { pos },
+                (BlockEntityKind::Vault, BlockEntityData::Vault(v)) => Ticker::Vault {
+                    pos,
+                    has_item: v.display_item.is_some(),
+                    connected: &v.connected,
+                    range_tenths: v.connection_range_tenths,
+                },
+                (BlockEntityKind::Conduit, BlockEntityData::Conduit(c)) => Ticker::Conduit {
+                    pos,
+                    ticks: self.scene.conduit_ticks(pos),
+                    frame: self.conduit_frames.get(&pos).map_or(&[], Vec::as_slice),
+                    target: c.target,
+                },
+                _ => return None,
+            })
+        })
     }
 
     pub fn load_chunk(&mut self, state: &ClientState, pos: ChunkPos) {
@@ -226,6 +287,7 @@ impl BlockEntities {
     }
 
     fn remove(&mut self, pos: Pos) {
+        self.conduit_frames.remove(&pos);
         if self.entries.remove(&pos).is_some() {
             self.scene.remove(pos);
         }

@@ -47,6 +47,8 @@ struct Globals {
 struct Group {
     kind: FlatKind,
     bind: FlatBind,
+    /// Back-to-front rank of a text display; its draws sort by this before the bind.
+    seq: u32,
     vertices: Vec<FlatVertex>,
 }
 
@@ -475,19 +477,32 @@ impl FlatRenderer {
     }
 
     pub fn push_quad(&mut self, kind: FlatKind, bind: FlatBind, quad: [FlatVertex; 4]) {
+        self.push_quad_ranked(kind, bind, 0, quad);
+    }
+
+    /// Like `push_quad`; display text of both kinds draws in ascending `seq`, so callers number
+    /// the displays from the farthest to the nearest.
+    pub fn push_quad_ranked(
+        &mut self,
+        kind: FlatKind,
+        bind: FlatBind,
+        seq: u32,
+        quad: [FlatVertex; 4],
+    ) {
         if self.quad_count() >= MAX_QUADS {
             return;
         }
         let group = match self
             .groups
             .iter()
-            .position(|g| g.kind == kind && g.bind == bind)
+            .position(|g| g.kind == kind && g.bind == bind && g.seq == seq)
         {
             Some(i) => i,
             None => {
                 self.groups.push(Group {
                     kind,
                     bind,
+                    seq,
                     vertices: Vec::new(),
                 });
                 self.groups.len() - 1
@@ -506,7 +521,15 @@ impl FlatRenderer {
         let mut order: Vec<usize> = (0..self.groups.len())
             .filter(|&i| !self.groups[i].vertices.is_empty())
             .collect();
-        order.sort_by_key(|&i| (self.groups[i].kind, self.groups[i].bind));
+        order.sort_by_key(|&i| {
+            let g = &self.groups[i];
+            match g.kind {
+                FlatKind::DisplayText | FlatKind::DisplayTextSeeThrough => {
+                    (FlatKind::DisplayText, g.seq, g.bind)
+                }
+                kind => (kind, 0, g.bind),
+            }
+        });
         let total: usize = order.iter().map(|&i| self.groups[i].vertices.len()).sum();
         if total > self.vertex_capacity {
             self.vertex_capacity = total.next_power_of_two();

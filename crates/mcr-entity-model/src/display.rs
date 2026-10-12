@@ -135,6 +135,75 @@ pub struct DisplaySample {
     pub text_rev: u64,
 }
 
+/// Longest `teleport_duration` vanilla accepts.
+pub const MAX_TELEPORT_DURATION: i32 = 59;
+
+/// `teleport_duration` from the synced data, clamped like `Display.setPosRotInterpolationDuration`.
+pub fn teleport_duration(data: &dyn EntityData) -> u32 {
+    match data.get(idx::DISPLAY_TELEPORT_DURATION) {
+        Some(EntityDataValue::Int(v)) => (*v).clamp(0, MAX_TELEPORT_DURATION) as u32,
+        _ => 0,
+    }
+}
+
+/// `LinearInterpolationHandler`: a display moves from where it is toward the last position and
+/// rotation the server sent over `teleport_duration` ticks, each tick covering `1 / remaining` of
+/// the way left.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PoseLerp {
+    pose: Option<([f64; 3], f32, f32)>,
+    goal: Option<([f64; 3], f32, f32)>,
+    remaining: u32,
+}
+
+fn rot_lerp(alpha: f32, from: f32, to: f32) -> f32 {
+    let d = (to - from).rem_euclid(360.0);
+    from + alpha * if d >= 180.0 { d - 360.0 } else { d }
+}
+
+impl PoseLerp {
+    /// One client tick; `steps` is [`teleport_duration`]. Returns the position, yaw and pitch
+    /// of the entity after the tick.
+    pub fn step(
+        &mut self,
+        steps: u32,
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+    ) -> ([f64; 3], f32, f32) {
+        let goal = (pos, yaw, pitch);
+        let Some(mut now) = self.pose else {
+            self.pose = Some(goal);
+            self.goal = Some(goal);
+            return goal;
+        };
+        if steps == 0 {
+            self.remaining = 0;
+            self.goal = Some(goal);
+            self.pose = Some(goal);
+            return goal;
+        }
+        if self.goal != Some(goal) {
+            self.goal = Some(goal);
+            self.remaining = steps;
+        }
+        if self.remaining > 0 {
+            let alpha = 1.0 / f64::from(self.remaining);
+            for (c, g) in now.0.iter_mut().zip(pos) {
+                *c += (g - *c) * alpha;
+            }
+            now.1 = rot_lerp(alpha as f32, now.1, yaw);
+            now.2 += (pitch - now.2) * alpha as f32;
+            self.remaining -= 1;
+            if self.remaining == 0 {
+                now = goal;
+            }
+        }
+        self.pose = Some(now);
+        now
+    }
+}
+
 /// Client-side `Display` state: change detection, interpolation start and duration.
 #[derive(Debug, Clone)]
 pub struct DisplayTrack {
@@ -284,6 +353,38 @@ mod tests {
     use rustc_hash::FxHashMap;
 
     use super::*;
+
+    #[test]
+    fn pose_lerp_reaches_the_goal_in_the_configured_steps() {
+        let mut p = PoseLerp::default();
+        assert_eq!(p.step(4, [0.0; 3], 0.0, 0.0).0, [0.0; 3]);
+        let goal = [8.0, 0.0, 0.0];
+        let xs: Vec<f64> = (0..5).map(|_| p.step(4, goal, 90.0, 0.0).0[0]).collect();
+        assert_eq!(xs, vec![2.0, 4.0, 6.0, 8.0, 8.0]);
+    }
+
+    #[test]
+    fn pose_lerp_snaps_without_a_duration_and_wraps_rotation() {
+        let mut p = PoseLerp::default();
+        p.step(0, [0.0; 3], 350.0, 0.0);
+        assert_eq!(p.step(0, [3.0, 0.0, 0.0], 10.0, 0.0).0[0], 3.0);
+        let mut p = PoseLerp::default();
+        p.step(2, [0.0; 3], 350.0, 0.0);
+        let (_, yaw, _) = p.step(2, [0.0; 3], 10.0, 0.0);
+        assert!((yaw - 360.0).abs() < 1.0e-3, "took the short way: {yaw}");
+    }
+
+    #[test]
+    fn hostile_teleport_duration_is_clamped() {
+        let mut data = Data::default();
+        data.insert(
+            idx::DISPLAY_TELEPORT_DURATION,
+            EntityDataValue::Int(i32::MAX),
+        );
+        assert_eq!(teleport_duration(&data), 59);
+        data.insert(idx::DISPLAY_TELEPORT_DURATION, EntityDataValue::Int(-5));
+        assert_eq!(teleport_duration(&data), 0);
+    }
 
     type Data = FxHashMap<u8, EntityDataValue>;
 

@@ -1296,3 +1296,276 @@ fn limiter_overrides_match_vanilla_types() {
     assert!(!overrides_limiter(&simple("smoke")));
     assert!(!overrides_limiter(&ids::REDSTONE_DUST));
 }
+
+#[test]
+fn marker_target_spawns_block_markers_only_for_that_block() {
+    let barrier = state("barrier", &[]);
+    let mut world = World::new();
+    world.set([2, 3, 4], barrier);
+    world.set([5, 3, 4], state("stone", &[]));
+    let mut animator = Animator::new(data(), 7);
+    let mut rec = Rec::default();
+    animator.sample_at([2, 3, 4], &world, &mut rec, false);
+    let markers = |rec: &Rec| {
+        rec.particles
+            .iter()
+            .filter(|(p, _)| matches!(p, Particle::BlockState { .. }))
+            .count()
+    };
+    assert_eq!(markers(&rec), 0);
+    animator.set_marker(Some(block_id("barrier")));
+    animator.sample_at([2, 3, 4], &world, &mut rec, false);
+    animator.sample_at([5, 3, 4], &world, &mut rec, false);
+    assert_eq!(markers(&rec), 1);
+    let (particle, (pos, vel, _)) = rec
+        .particles
+        .iter()
+        .find(|(p, _)| matches!(p, Particle::BlockState { .. }))
+        .unwrap();
+    assert_eq!(
+        *particle,
+        Particle::BlockState {
+            kind: mcr_protocol::types::particle::BlockParticleKind::BlockMarker,
+            state: i32::from(barrier),
+        }
+    );
+    assert_eq!((*pos, *vel), ([2.5, 3.5, 4.5], [0.0; 3]));
+}
+
+#[test]
+fn campfire_food_smokes_over_filled_slots_only() {
+    let mut a = animator();
+    let w = World::new();
+    let mut rec = Rec::default();
+    for _ in 0..2000 {
+        a.campfire_food_tick(AT, 2, [true, false, false, false], &w, &mut rec);
+    }
+    let smoke = rec.only("smoke");
+    assert!(
+        smoke.len() > 2000 / 5 * 4 / 2 && smoke.len() % 4 == 0,
+        "{}",
+        smoke.len()
+    );
+    let (x, z) = (f64::from(AT[0]) + 0.8125, f64::from(AT[2]) + 0.8125);
+    assert!(smoke.iter().all(|(pos, vel, always)| {
+        (pos[0] - x).abs() < 1e-9
+            && (pos[1] - (f64::from(AT[1]) + 0.5)).abs() < 1e-9
+            && (pos[2] - z).abs() < 1e-9
+            && *vel == [0.0, 5.0e-4, 0.0]
+            && !always
+    }));
+    let mut none = Rec::default();
+    for _ in 0..200 {
+        a.campfire_food_tick(AT, 0, [false; 4], &w, &mut none);
+    }
+    assert!(none.particles.is_empty());
+}
+
+#[test]
+fn campfire_states_know_their_facing() {
+    let table = Table::build(data());
+    let facing = |f: &str| {
+        table
+            .campfire_rotation(state("campfire", &[("lit", "true"), ("facing", f)]))
+            .unwrap()
+    };
+    assert_eq!(
+        [
+            facing("south"),
+            facing("west"),
+            facing("north"),
+            facing("east")
+        ],
+        [0, 1, 2, 3]
+    );
+    assert_eq!(
+        table.campfire_rotation(state("campfire", &[("lit", "false")])),
+        None
+    );
+}
+
+struct Timed(i64);
+
+impl AnimateWorld for Timed {
+    fn state(&self, _: i32, _: i32, _: i32) -> Option<u16> {
+        None
+    }
+
+    fn game_time(&self) -> i64 {
+        self.0
+    }
+}
+
+#[test]
+fn spawner_cage_smokes_and_flames_at_one_point_inside_the_block() {
+    let mut a = animator();
+    let mut rec = Rec::default();
+    for _ in 0..50 {
+        a.spawner_tick(AT, &Timed(0), &mut rec);
+    }
+    let (smoke, flame) = (rec.only("smoke"), rec.only("flame"));
+    assert_eq!((smoke.len(), flame.len()), (50, 50));
+    for (s, f) in smoke.iter().zip(&flame) {
+        assert_eq!(s.0, f.0);
+        for (c, base) in s.0.iter().zip(AT) {
+            assert!((0.0..1.0).contains(&(c - f64::from(base))));
+        }
+    }
+}
+
+#[test]
+fn trial_spawner_particles_follow_the_state() {
+    let mut a = animator();
+    let run = |a: &mut Animator, state, ominous, time| {
+        let mut rec = Rec::default();
+        for _ in 0..400 {
+            a.trial_spawner_tick(AT, state, ominous, &Timed(time), &mut rec, true);
+        }
+        rec
+    };
+    let inactive = run(&mut a, TrialState::Inactive, false, 1);
+    assert!(inactive.particles.is_empty() && inactive.cues.is_empty());
+
+    let waiting = run(&mut a, TrialState::WaitingForPlayers, false, 1);
+    let n = waiting.count("small_flame");
+    assert!(n > 120 && n < 280 && waiting.count("smoke") == 0, "{n}");
+    assert!(waiting.sounds("block.trial_spawner.ambient") > 0);
+
+    let active = run(&mut a, TrialState::Active, true, 1);
+    assert_eq!(active.count("smoke"), 400);
+    assert_eq!(active.count("soul_fire_flame"), 400);
+    assert!(active.sounds("block.trial_spawner.ambient_ominous") > 0);
+
+    let cooldown = run(&mut a, TrialState::Cooldown, false, 1);
+    assert!(cooldown.count("smoke") < 200 && cooldown.cues.is_empty());
+    let mut burst = Rec::default();
+    a.trial_spawner_tick(
+        AT,
+        TrialState::Cooldown,
+        false,
+        &Timed(40),
+        &mut burst,
+        true,
+    );
+    assert!(burst.count("smoke") >= 20);
+}
+
+#[test]
+fn vault_links_players_at_the_keyhole_once_a_second() {
+    let mut a = animator();
+    let players = [
+        VaultPlayer {
+            block: [AT[0] + 2, AT[1], AT[2]],
+            center: [
+                f64::from(AT[0]) + 2.5,
+                f64::from(AT[1]) + 1.0,
+                f64::from(AT[2]) + 0.5,
+            ],
+        },
+        VaultPlayer {
+            block: [AT[0] + 20, AT[1], AT[2]],
+            center: [f64::from(AT[0]) + 20.5, f64::from(AT[1]), f64::from(AT[2])],
+        },
+    ];
+    let mut rec = Rec::default();
+    a.vault_tick(
+        AT,
+        2,
+        false,
+        true,
+        &players,
+        4.5,
+        &Timed(200),
+        &mut rec,
+        true,
+    );
+    let links = rec.only("vault_connection");
+    assert!((2..=5).contains(&links.len()), "{}", links.len());
+    for (pos, vel, _) in &links {
+        assert_eq!(
+            *pos,
+            [
+                f64::from(AT[0]) + 0.5,
+                f64::from(AT[1]) + 1.75,
+                f64::from(AT[2])
+            ]
+        );
+        assert!(vel[0] > 1.0 && vel[0] < 3.0);
+    }
+    let mut quiet = Rec::default();
+    a.vault_tick(
+        AT,
+        2,
+        false,
+        true,
+        &players,
+        4.5,
+        &Timed(201),
+        &mut quiet,
+        true,
+    );
+    assert_eq!(quiet.count("vault_connection"), 0);
+}
+
+#[test]
+fn vault_idles_with_smoke_and_flames_only_when_it_shows_an_item() {
+    let mut a = animator();
+    let idle = |a: &mut Animator, item: bool, ominous: bool| {
+        let mut rec = Rec::default();
+        for _ in 0..400 {
+            a.vault_tick(AT, 2, ominous, item, &[], 4.5, &Timed(1), &mut rec, true);
+        }
+        rec
+    };
+    let empty = idle(&mut a, false, false);
+    assert!(empty.count("smoke") > 120 && empty.count("small_flame") == 0);
+    assert!(empty.cues.is_empty());
+    let shown = idle(&mut a, true, true);
+    assert_eq!(shown.count("soul_fire_flame"), shown.count("smoke"));
+    assert!(shown.sounds("block.vault.ambient") > 0);
+}
+
+#[test]
+fn conduit_sends_nautilus_particles_from_above_the_block_and_at_the_target() {
+    let mut a = animator();
+    let frame: Vec<[i32; 3]> = (0..42)
+        .map(|i| [AT[0] + 2, AT[1] + i % 3 - 1, AT[2] + i])
+        .collect();
+    let target = ConduitTarget {
+        eye: [1.0, 2.0, 3.0],
+        width: 0.6,
+        height: 1.95,
+    };
+    let mut rec = Rec::default();
+    for t in 0..500 {
+        a.conduit_tick(AT, t, &frame, Some(target), &Timed(0), &mut rec);
+    }
+    let n = rec.only("nautilus");
+    let at_target = n.iter().filter(|p| p.0 == target.eye).count();
+    assert_eq!(at_target, 500);
+    let from_frame = n.len() - at_target;
+    assert!(from_frame > 200 && from_frame < 600, "{from_frame}");
+    for (pos, _, _) in n.iter().filter(|p| p.0 != target.eye) {
+        assert!((pos[0] - (f64::from(AT[0]) + 0.5)).abs() < 1e-9);
+        assert!(pos[1] >= f64::from(AT[1]) + 1.5 && pos[1] <= f64::from(AT[1]) + 2.1 + 1e-9);
+    }
+    let mut none = Rec::default();
+    a.conduit_tick(AT, 0, &[], None, &Timed(0), &mut none);
+    assert!(none.particles.is_empty());
+}
+
+#[test]
+fn trial_spawner_and_vault_states_expose_their_block_properties() {
+    let table = Table::build(data());
+    let trial = state(
+        "trial_spawner",
+        &[("trial_spawner_state", "cooldown"), ("ominous", "true")],
+    );
+    assert_eq!(
+        table.trial_spawner(trial),
+        Some((TrialState::Cooldown, true))
+    );
+    let vault = state("vault", &[("facing", "east"), ("ominous", "false")]);
+    assert_eq!(table.vault(vault), Some((5, false)));
+    assert_eq!(table.vault(trial), None);
+}

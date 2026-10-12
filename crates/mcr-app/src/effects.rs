@@ -129,16 +129,19 @@ impl ParticleAssets for AppParticleAssets {
         let (face_layer, tinted) = match model.cube.iter().find(|f| f.layer != mcr_mesh::LAYER_NONE)
         {
             Some(face) => (face.layer, face.tint != mcr_mesh::TINT_NONE),
-            None => {
-                let q = quads.iter().find(|q| q.normal == 0).or(quads.first())?;
-                (q.layer, q.tint != 0)
-            }
+            None => match quads.iter().find(|q| q.normal == 0).or(quads.first()) {
+                Some(q) => (q.layer, q.tint != 0),
+                None => (mcr_mesh::LAYER_NONE, false),
+            },
         };
         let layer = if model.particle == mcr_mesh::LAYER_NONE {
             face_layer
         } else {
             model.particle
         };
+        if layer == mcr_mesh::LAYER_NONE {
+            return None;
+        }
         let block = mcr_data::v26_3().state_block_name(u32::try_from(state).ok()?);
         let tinted = tinted && block != Some("minecraft:grass_block");
         let group = cache.textures.groups.get(usize::from(layer >> 14))?;
@@ -1016,6 +1019,22 @@ pub fn tick_boss_darkening(current: f32, darken: bool) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn barrier_and_light_blocks_have_a_particle_texture() {
+        let jar = std::path::Path::new("../../.cache/versions/26.3/client.jar");
+        if !jar.exists() {
+            return;
+        }
+        let assets = AppParticleAssets::new(Arc::new(Assets::load(jar).unwrap()));
+        let data = mcr_data::v26_3();
+        for block in ["minecraft:barrier", "minecraft:light"] {
+            let id = data.block_by_name(block).unwrap();
+            let (first, _) = data.block_info(id).unwrap().states;
+            let (image, tint) = assets.block_texture(first as i32).expect(block);
+            assert_eq!((image.width, tint), (16, [1.0; 3]), "{block}");
+        }
+    }
 
     #[test]
     fn boss_darkening_ramps_fast_and_fades_slow() {

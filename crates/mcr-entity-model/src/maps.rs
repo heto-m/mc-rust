@@ -32,13 +32,44 @@ pub(crate) type MapTable = FxHashMap<i32, Vec<MapDecoration>>;
 impl EntityScene {
     /// Registers or replaces the 128x128 image and markers of map `id`.
     pub fn set_map(&mut self, id: i32, image: ImageRgba, mut decorations: Vec<MapDecoration>) {
-        if !self.maps.contains_key(&id) && self.maps.len() >= MAX_MAPS {
+        if !self.maps.contains_key(&id) && self.maps.len() >= MAX_MAPS && !self.evict_oldest_map() {
             return;
         }
         decorations.truncate(MAX_DECORATIONS);
         self.maps.insert(id, decorations);
         self.set_dynamic_texture(&format!("dyn:map/{id}"), image);
         self.flush_textures();
+    }
+
+    /// Frees the map least recently drawn; `false` when every map was drawn this frame.
+    fn evict_oldest_map(&mut self) -> bool {
+        let frame = self.gpu.frame();
+        let oldest = self
+            .maps
+            .keys()
+            .map(|&id| {
+                (
+                    self.textures
+                        .last_used(&format!("dyn:map/{id}"))
+                        .unwrap_or(0),
+                    id,
+                )
+            })
+            .min();
+        let Some((used, id)) = oldest else {
+            return false;
+        };
+        if used >= frame && used != 0 {
+            return false;
+        }
+        self.remove_map(id);
+        true
+    }
+
+    pub fn remove_map(&mut self, id: i32) {
+        self.maps.remove(&id);
+        self.textures
+            .remove(&format!("dyn:map/{id}"), &mut self.gpu);
     }
 
     pub fn has_map(&self, id: i32) -> bool {

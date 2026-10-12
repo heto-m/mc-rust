@@ -106,7 +106,7 @@ pub struct HudInput<'a> {
 pub struct Hud {
     sprites: HudSprites,
     own: Sprites,
-    heads: RefCell<FxHashMap<String, Option<SpriteId>>>,
+    heads: RefCell<FxHashMap<String, (Option<SpriteId>, u64)>>,
     waypoint_styles: RefCell<FxHashMap<String, WaypointStyle>>,
     style_reader: Option<crate::skins::AssetReader>,
     pub chat: SharedChat,
@@ -647,8 +647,19 @@ impl Hud {
     ) -> Option<SpriteId> {
         let (key, pixels) = skins.head(player.uuid, player.show_hat)?;
         let mut heads = self.heads.borrow_mut();
-        if let Some(id) = heads.get(&key) {
+        let now = frame.number();
+        if let Some((id, used)) = heads.get_mut(&key) {
+            *used = now;
             return *id;
+        }
+        if heads.len() >= MAX_HEAD_SPRITES {
+            heads.retain(|_, (id, used)| {
+                let keep = *used >= now;
+                if let (false, Some(id)) = (keep, id) {
+                    frame.ui().sprites_mut().free_raw(*id);
+                }
+                keep
+            });
         }
         let id = if heads.len() < MAX_HEAD_SPRITES {
             frame
@@ -658,7 +669,7 @@ impl Hud {
         } else {
             None
         };
-        heads.insert(key, id);
+        heads.insert(key, (id, now));
         id
     }
 

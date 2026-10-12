@@ -10,8 +10,8 @@ use mcr_entity_model::mcr_protocol::types::entity_data::{EntityDataValue, Pose a
 use mcr_entity_model::wgpu;
 use mcr_entity_model::{
     DisplayTrack, EntityData, EntityScene, EntityView, FrameParams, Glide, LightInfo, NoData,
-    PlayerView, Registries, SceneAssets, TargetFormats, display_local, hidden_while_fresh, idx,
-    slot,
+    PlayerView, PoseLerp, Registries, SceneAssets, TargetFormats, display_local,
+    hidden_while_fresh, idx, slot, teleport_duration,
 };
 use mcr_physics::Pose as PhysPose;
 use mcr_render::{Camera, Frustum};
@@ -117,6 +117,7 @@ pub struct Track {
     glide: GlideTrack,
     display: DisplayTrack,
     display_kind: DisplayKind,
+    pose_lerp: PoseLerp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +238,7 @@ impl Track {
             glide: GlideTrack::default(),
             display: DisplayTrack::default(),
             display_kind: DisplayKind::None,
+            pose_lerp: PoseLerp::default(),
         }
     }
 
@@ -482,8 +484,14 @@ impl EntityLayer {
                 .entry(e.id)
                 .or_insert_with(|| Track::new(e.pos, e.yaw, e.head_yaw, e.pitch, living));
             t.seen = tick;
-            t.advance(e.pos, e.yaw, e.head_yaw, e.pitch, dead);
             t.display_kind = display_kind;
+            let (pos, yaw, pitch) = if display_kind == DisplayKind::None {
+                (e.pos, e.yaw, e.pitch)
+            } else {
+                t.pose_lerp
+                    .step(teleport_duration(&e.data), e.pos, e.yaw, e.pitch)
+            };
+            t.advance(pos, yaw, e.head_yaw, pitch, dead);
             if display_kind != DisplayKind::None {
                 t.display.tick(&e.data);
             }

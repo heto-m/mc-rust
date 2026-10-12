@@ -39,7 +39,11 @@ impl std::fmt::Debug for ItemView<'_> {
 struct Icon {
     sprite: Option<SpriteId>,
     glint_step: u64,
+    used: u64,
 }
+
+const MAX_ICONS: usize = 1024;
+const ICON_EVICT_SLACK: usize = 128;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct IconStats {
@@ -213,7 +217,11 @@ impl ItemIcons {
     ) {
         let scale = frame.scale();
         if scale != self.icon_scale {
-            self.icons.clear();
+            for icon in std::mem::take(&mut self.icons).into_values() {
+                if let Some(id) = icon.sprite {
+                    frame.ui().sprites_mut().free_raw(id);
+                }
+            }
             self.icon_scale = scale;
         }
         let layers = self.layers(view.item, view.props);
@@ -223,6 +231,12 @@ impl ItemIcons {
         let key = Self::key(&layers, view.glint, scale);
         let size = SLOT as usize * scale as usize;
         let step = self.millis / GLINT_STEP_MS;
+        let now = frame.number();
+        if let Some(icon) = self.icons.get_mut(&key) {
+            icon.used = now;
+        } else if self.icons.len() >= MAX_ICONS {
+            self.evict_icons(frame, now);
+        }
         match self.icons.get(&key) {
             Some(icon) if !view.glint || icon.glint_step == step => self.stats.cached += 1,
             Some(_) => {
@@ -245,6 +259,7 @@ impl ItemIcons {
                     Icon {
                         sprite,
                         glint_step: step,
+                        used: now,
                     },
                 );
                 self.stats.rasterized += 1;
@@ -252,6 +267,24 @@ impl ItemIcons {
         }
         if let Some(id) = self.icons[&key].sprite {
             frame.sprite(id, x, y, w, h);
+        }
+    }
+
+    fn evict_icons(&mut self, frame: &mut UiFrame<'_>, now: u64) {
+        let mut idle: Vec<(u64, u64)> = self
+            .icons
+            .iter()
+            .filter(|(_, icon)| icon.used < now)
+            .map(|(&key, icon)| (icon.used, key))
+            .collect();
+        idle.sort_unstable();
+        let excess = (self.icons.len() + ICON_EVICT_SLACK).saturating_sub(MAX_ICONS);
+        for (_, key) in idle.into_iter().take(excess) {
+            if let Some(icon) = self.icons.remove(&key)
+                && let Some(id) = icon.sprite
+            {
+                frame.ui().sprites_mut().free_raw(id);
+            }
         }
     }
 

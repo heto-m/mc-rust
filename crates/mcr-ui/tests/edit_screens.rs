@@ -188,6 +188,20 @@ fn dialog_shots_and_actions() {
         no:{label:"Decline",action:{type:"minecraft:dynamic/custom",id:"srv:decline",additions:{x:1b}}}}"#,
     );
     h.shot("dialog_confirmation.png", SIZE, &mut s, &NoView, (0.0, 0.0));
+    let toggled = send(
+        &mut s,
+        &NoView,
+        &[
+            UiInput::key(Key::Tab),
+            UiInput::key(Key::Tab),
+            UiInput::key(Key::Space),
+        ],
+    );
+    assert!(
+        toggled
+            .iter()
+            .any(|a| matches!(a, ScreenAction::ClickSound))
+    );
     let mut s = dialog(
         r#"{type:"minecraft:multi_action",title:"Menu",columns:2,pause:0b,after_action:"wait_for_response",
         body:{type:"minecraft:item",item:{id:"minecraft:diamond",count:3},description:{contents:"A shiny item",width:100}},

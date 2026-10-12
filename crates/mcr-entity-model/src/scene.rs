@@ -345,6 +345,7 @@ impl EntityScene {
     ) {
         self.gpu.begin_frame();
         self.items.begin_frame();
+        self.textures.sweep(&mut self.gpu);
         for id in self.items.take_evicted() {
             self.gpu.free_model(id);
         }

@@ -147,11 +147,21 @@ pub struct PotData {
 pub struct SpawnerData {
     pub entity_id: Option<String>,
     pub delay: i16,
+    /// `RequiredPlayerRange`: the distance within which the cage animates and smokes.
+    pub range: i16,
+    /// Trial spawner `next_mob_spawns_at`, synced only while the spawner is active.
+    pub next_mob_spawns_at: i64,
 }
+
+pub const MAX_VAULT_CONNECTIONS: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VaultData {
     pub display_item: Option<ItemRef>,
+    /// Players linked to the vault's keyhole, at most [`MAX_VAULT_CONNECTIONS`].
+    pub connected: Vec<Uuid>,
+    /// Tenths of a block: linked players within this distance get connection particles.
+    pub connection_range_tenths: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -180,6 +190,8 @@ pub struct GatewayData {
 pub struct ConduitData {
     pub active: bool,
     pub hunting: bool,
+    /// The entity the conduit is attacking (`Target`).
+    pub target: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,6 +330,9 @@ fn parse_banner(tag: &Compound) -> BannerData {
     BannerData { layers }
 }
 
+/// `VaultConfig.DEFAULT.deactivationRange`.
+const VAULT_DEFAULT_RANGE: f64 = 4.5;
+
 fn uuid_from_ints(ints: &[i32]) -> Option<Uuid> {
     let [a, b, c, d] = <[i32; 4]>::try_from(ints).ok()?;
     let hi = (u64::from(a as u32) << 32) | u64::from(b as u32);
@@ -431,13 +446,31 @@ impl BlockEntityData {
             K::Spawner | K::TrialSpawner => Self::Spawner(SpawnerData {
                 entity_id: spawn_entity_id(tag),
                 delay: int(tag, "Delay").unwrap_or(20).clamp(0, 2000) as i16,
+                range: int(tag, "RequiredPlayerRange").unwrap_or(16).clamp(0, 256) as i16,
+                next_mob_spawns_at: int(tag, "next_mob_spawns_at").unwrap_or(0),
             }),
-            K::Vault => Self::Vault(VaultData {
-                display_item: tag
-                    .get_compound("shared_data")
-                    .and_then(|s| s.get_compound("display_item"))
-                    .and_then(item_ref),
-            }),
+            K::Vault => {
+                let shared = tag.get_compound("shared_data");
+                let connected = match shared.and_then(|s| s.get_list("connected_players")) {
+                    Some(List::IntArray(list)) => list
+                        .iter()
+                        .take(MAX_VAULT_CONNECTIONS)
+                        .filter_map(|ints| uuid_from_ints(ints))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let range = shared
+                    .and_then(|s| s.get_f64("connected_particles_range"))
+                    .filter(|r| r.is_finite())
+                    .unwrap_or(VAULT_DEFAULT_RANGE);
+                Self::Vault(VaultData {
+                    display_item: shared
+                        .and_then(|s| s.get_compound("display_item"))
+                        .and_then(item_ref),
+                    connected,
+                    connection_range_tenths: (range.clamp(0.0, 128.0) * 10.0) as u16,
+                })
+            }
             K::Campfire => {
                 let mut data = CampfireData::default();
                 parse_items(tag, "Items", &mut data.items);
@@ -463,6 +496,7 @@ impl BlockEntityData {
             K::Conduit => Self::Conduit(ConduitData {
                 active: false,
                 hunting: tag.contains_key("Target"),
+                target: tag.get_int_array("Target").and_then(uuid_from_ints),
             }),
             K::Piston => Self::Piston(PistonData {
                 moved_state: tag.get_compound("blockState").map_or(0, state_from_nbt),
@@ -714,6 +748,59 @@ mod tests {
             panic!("not a spawner");
         };
         assert_eq!(s.entity_id.as_deref(), Some("minecraft:pig"));
+    }
+
+    #[test]
+    fn spawner_range_and_trial_spawner_timing() {
+        let mut tag = Compound::new();
+        tag.insert("RequiredPlayerRange", Value::Short(i16::MAX));
+        tag.insert("next_mob_spawns_at", Value::Long(1234));
+        let BlockEntityData::Spawner(s) =
+            BlockEntityData::parse(BlockEntityKind::TrialSpawner, &tag)
+        else {
+            panic!("not a spawner");
+        };
+        assert_eq!((s.range, s.next_mob_spawns_at), (256, 1234));
+        let BlockEntityData::Spawner(d) =
+            BlockEntityData::parse(BlockEntityKind::Spawner, &Compound::new())
+        else {
+            panic!("not a spawner");
+        };
+        assert_eq!(d.range, 16);
+    }
+
+    #[test]
+    fn vault_links_are_bounded_and_default_to_four_and_a_half_blocks() {
+        let links: Vec<Vec<i32>> = (0..100).map(|i| vec![0, 0, 0, i]).collect();
+        let mut shared = Compound::new();
+        shared.insert("connected_players", Value::List(List::IntArray(links)));
+        let mut tag = Compound::new();
+        tag.insert("shared_data", Value::Compound(shared));
+        let BlockEntityData::Vault(v) = BlockEntityData::parse(BlockEntityKind::Vault, &tag) else {
+            panic!("not a vault");
+        };
+        assert_eq!(v.connected.len(), MAX_VAULT_CONNECTIONS);
+        assert_eq!(v.connection_range_tenths, 45);
+        let mut shared = Compound::new();
+        shared.insert("connected_particles_range", Value::Double(f64::NAN));
+        let mut tag = Compound::new();
+        tag.insert("shared_data", Value::Compound(shared));
+        let BlockEntityData::Vault(v) = BlockEntityData::parse(BlockEntityKind::Vault, &tag) else {
+            panic!("not a vault");
+        };
+        assert_eq!(v.connection_range_tenths, 45);
+    }
+
+    #[test]
+    fn conduit_target_is_a_uuid() {
+        let mut tag = Compound::new();
+        tag.insert("Target", Value::IntArray(vec![0, 1, 0, 2]));
+        let BlockEntityData::Conduit(c) = BlockEntityData::parse(BlockEntityKind::Conduit, &tag)
+        else {
+            panic!("not a conduit");
+        };
+        assert_eq!(c.target, Some(Uuid::from_u64_pair(1, 2)));
+        assert!(c.hunting);
     }
 
     #[test]

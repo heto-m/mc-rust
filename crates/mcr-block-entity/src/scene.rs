@@ -25,6 +25,9 @@ use crate::text::{DisplayLayout, SideLayout, TextQuad, layout_side};
 
 const WHITE: [u8; 4] = [255; 4];
 const OUTLINE_DISTANCE: f64 = 16.0;
+const MAX_SKINS: usize = 128;
+const MAX_WANTED_SKINS: usize = 64;
+const SKIN_IDLE_FRAMES: u64 = 1800;
 
 /// Per-frame inputs. `camera_rotation` is the camera-to-world orientation (used by the conduit eye).
 #[derive(Debug, Clone, Copy)]
@@ -163,7 +166,7 @@ pub struct BlockEntityScene {
     layers: Vec<Layer>,
     textures: FxHashMap<String, TexId>,
     missing: Option<TexId>,
-    skins: FxHashMap<String, TexId>,
+    skins: FxHashMap<String, (TexId, u64)>,
     wanted_skins: Vec<String>,
     entries: FxHashMap<[i32; 3], Entry>,
     last_tick: Option<i64>,
@@ -273,6 +276,23 @@ impl BlockEntityScene {
         self.entries.clear();
     }
 
+    /// Texture-array layers in use in size class `class`, for leak checks.
+    pub fn live_texture_layers(&self, class: usize) -> u32 {
+        self.gpu.live_layers(class)
+    }
+
+    /// Skins currently held for player heads.
+    pub fn skin_count(&self) -> usize {
+        self.skins.len()
+    }
+
+    /// Client ticks the conduit at `pos` has run, which drives the bob of its particle origin.
+    pub fn conduit_ticks(&self, pos: [i32; 3]) -> u32 {
+        self.entries
+            .get(&pos)
+            .map_or(0, |e| e.anim.ticks.max(0) as u32)
+    }
+
     pub fn block_event(&mut self, pos: [i32; 3], b0: u8, b1: u8, game_time: i64) {
         if let Some(e) = self.entries.get_mut(&pos) {
             e.anim.event(e.kind, b0, b1, game_time);
@@ -281,10 +301,42 @@ impl BlockEntityScene {
 
     /// Registers a 64x64 RGBA skin for a profile texture URL reported by `pending_skins`.
     pub fn set_skin(&mut self, url: &str, image: &ImageRgba) {
+        self.evict_skins(1);
         if let Some(id) = self.gpu.add_texture(image) {
-            self.skins.insert(url.to_owned(), id);
+            let frame = self.gpu.frame();
+            if let Some((old, _)) = self.skins.insert(url.to_owned(), (id, frame)) {
+                self.gpu.free_texture(old);
+            }
         }
         self.wanted_skins.retain(|u| u != url);
+    }
+
+    fn evict_skins(&mut self, room: usize) {
+        let frame = self.gpu.frame();
+        let mut dropped = Vec::new();
+        self.skins.retain(|_, (id, used)| {
+            let keep = frame.saturating_sub(*used) < SKIN_IDLE_FRAMES;
+            if !keep {
+                dropped.push(*id);
+            }
+            keep
+        });
+        while self.skins.len() + room > MAX_SKINS {
+            let Some(oldest) = self
+                .skins
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(url, _)| url.clone())
+            else {
+                break;
+            };
+            if let Some((id, _)) = self.skins.remove(&oldest) {
+                dropped.push(id);
+            }
+        }
+        for id in dropped {
+            self.gpu.free_texture(id);
+        }
     }
 
     /// Skin URLs of player heads that have no registered texture yet.
@@ -392,7 +444,7 @@ impl BlockEntityScene {
     fn tick_all(&mut self, frame: &BlockEntityFrame) {
         let now = frame.game_time;
         let steps = match self.last_tick {
-            Some(last) => (now - last).clamp(0, MAX_CATCH_UP_TICKS),
+            Some(last) => now.saturating_sub(last).clamp(0, MAX_CATCH_UP_TICKS),
             None => 0,
         };
         self.last_tick = Some(now);
@@ -407,7 +459,23 @@ impl BlockEntityScene {
                     }
                     _ => None,
                 };
-                e.anim.tick(e.kind, e.place.powered, near);
+                match (e.kind, &e.data) {
+                    (BlockEntityKind::TrialSpawner, BlockEntityData::Spawner(s)) => {
+                        e.anim.tick_trial_spawner(
+                            &e.place.pose,
+                            s.next_mob_spawns_at.saturating_sub(now),
+                        )
+                    }
+                    (BlockEntityKind::Spawner, BlockEntityData::Spawner(s)) => {
+                        let reach = f64::from(s.range);
+                        let near = frame.player.is_some_and(|p| {
+                            let d = |i: usize| p[i] - (f64::from(pos[i]) + 0.5);
+                            d(0) * d(0) + d(1) * d(1) + d(2) * d(2) <= reach * reach
+                        });
+                        e.anim.tick_spawner(near && s.entity_id.is_some());
+                    }
+                    _ => e.anim.tick(e.kind, e.place.powered, near),
+                }
             }
         }
     }
@@ -423,6 +491,9 @@ impl BlockEntityScene {
         self.gpu.begin_frame();
         self.flat.begin_frame();
         self.wanted_skins.clear();
+        if self.gpu.frame().is_multiple_of(64) {
+            self.evict_skins(0);
+        }
         self.time = (frame.game_time.rem_euclid(24000) as f32 + frame.partial_ticks) / 24000.0;
         self.has_gateway = false;
         let m = frame.params.view_proj.transpose();
@@ -684,10 +755,14 @@ impl BlockEntityScene {
             "player" => {
                 let profile = data.profile.as_ref();
                 if let Some(url) = profile.and_then(|p| p.skin_url.as_deref()) {
-                    if let Some(id) = self.skins.get(url) {
+                    let frame = self.gpu.frame();
+                    if let Some((id, used)) = self.skins.get_mut(url) {
+                        *used = frame;
                         return *id;
                     }
-                    if !self.wanted_skins.iter().any(|u| u == url) {
+                    if self.wanted_skins.len() < MAX_WANTED_SKINS
+                        && !self.wanted_skins.iter().any(|u| u == url)
+                    {
                         self.wanted_skins.push(url.to_owned());
                     }
                 }
@@ -804,8 +879,8 @@ impl BlockEntityScene {
         let phase = ((i64::from(pos[0]) * 7
             + i64::from(pos[1]) * 9
             + i64::from(pos[2]) * 13
-            + ctx.frame.game_time)
-            .rem_euclid(100) as f32
+            + ctx.frame.game_time.rem_euclid(100))
+        .rem_euclid(100) as f32
             + ctx.frame.partial_ticks)
             / 100.0;
         let wave = (-0.0125 + 0.01 * (2.0 * PI * phase).cos()) * PI;
@@ -973,7 +1048,7 @@ impl BlockEntityScene {
         let mut xf = around(ry(180.0 - p.facing.yrot()), Vec3::splat(0.5));
         if let Some(style) = anim.wobble_style {
             let duration = if style == 0 { 7.0 } else { 10.0 };
-            let progress = ((ctx.frame.game_time - anim.wobble_start) as f32
+            let progress = (ctx.frame.game_time.saturating_sub(anim.wobble_start) as f32
                 + ctx.frame.partial_ticks)
                 / duration;
             if (0.0..=1.0).contains(&progress) {
@@ -1227,7 +1302,7 @@ impl BlockEntityScene {
                 0.2 * scale,
                 0.25 * scale,
             );
-            start += s.height;
+            start = start.saturating_add(s.height);
         }
     }
 
@@ -1249,7 +1324,7 @@ impl BlockEntityScene {
         let ox = (f64::from(pos[0]) + 0.5 - cam[0]) as f32;
         let oy = (f64::from(pos[1]) - cam[1]) as f32;
         let oz = (f64::from(pos[2]) + 0.5 - cam[2]) as f32;
-        let end = start + height;
+        let end = start.saturating_add(height);
         let scroll = if height < 0 { anim_time } else { -anim_time };
         let v_off = frac(scroll * 0.2 - (scroll * 0.1).floor());
         let bind = if gateway {
@@ -1508,25 +1583,31 @@ impl BlockEntityScene {
 
     fn emit_text_displays(&mut self, ctx: &Ctx<'_>) {
         let cam = ctx.frame.params.camera;
-        for d in std::mem::take(&mut self.queued_text) {
-            let layout = &*d.layout;
-            if layout.height <= 0 {
-                continue;
-            }
-            let rel = Vec3::new(
-                (d.origin[0] - cam[0]) as f32,
-                (d.origin[1] - cam[1]) as f32,
-                (d.origin[2] - cam[2]) as f32,
-            );
-            let m = Mat4::from_translation(rel)
-                * d.local
-                * Mat4::from_rotation_y(PI)
-                * Mat4::from_scale(Vec3::splat(-0.025))
-                * t(
-                    1.0 - layout.width as f32 / 2.0,
-                    -(layout.height as f32),
-                    0.0,
+        let mut queued: Vec<(Mat4, f32, TextDisplayDraw)> = std::mem::take(&mut self.queued_text)
+            .into_iter()
+            .filter(|d| d.layout.height > 0)
+            .map(|d| {
+                let rel = Vec3::new(
+                    (d.origin[0] - cam[0]) as f32,
+                    (d.origin[1] - cam[1]) as f32,
+                    (d.origin[2] - cam[2]) as f32,
                 );
+                let m = Mat4::from_translation(rel)
+                    * d.local
+                    * Mat4::from_rotation_y(PI)
+                    * Mat4::from_scale(Vec3::splat(-0.025))
+                    * t(
+                        1.0 - d.layout.width as f32 / 2.0,
+                        -(d.layout.height as f32),
+                        0.0,
+                    );
+                let distance = m.w_axis.truncate().length_squared();
+                (m, distance, d)
+            })
+            .collect();
+        queued.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for (seq, (m, _, d)) in (1u32..).zip(queued) {
+            let layout = &*d.layout;
             let level = ctx.frame.params.light.color(d.light);
             let kind = if d.see_through {
                 FlatKind::DisplayTextSeeThrough
@@ -1551,9 +1632,10 @@ impl BlockEntityScene {
                     uv: layout.white,
                     color,
                 };
-                self.flat.push_quad(
+                self.flat.push_quad_ranked(
                     kind,
                     FlatBind::Background,
+                    seq,
                     [v(x0, y0), v(x0, y1), v(x1, y1), v(x1, y0)],
                 );
             }
@@ -1567,8 +1649,12 @@ impl BlockEntityScene {
                     uv: q.uv[i],
                     color,
                 };
-                self.flat
-                    .push_quad(kind, FlatBind::Page(q.page), [v(0), v(1), v(2), v(3)]);
+                self.flat.push_quad_ranked(
+                    kind,
+                    FlatBind::Page(q.page),
+                    seq,
+                    [v(0), v(1), v(2), v(3)],
+                );
             }
         }
     }

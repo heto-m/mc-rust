@@ -15,6 +15,8 @@ pub const OUTLINE_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8
 pub const OUTLINE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub const MAX_INSTANCES: usize = 1 << 16;
 pub const MAX_BONES: usize = 1 << 20;
+/// A freed layer is reused only after this many frames, so submitted frames never see it rewritten.
+const FRAMES_IN_FLIGHT: u64 = 4;
 const MAX_CLASS_LAYERS: [u32; 5] = [1024, 256, 64, 32, 16];
 
 /// Affine bone transform as three rows (the bottom row is always 0 0 0 1).
@@ -170,6 +172,25 @@ struct ClassArray {
     capacity: u32,
     used: u32,
     generation: u32,
+    live: Vec<bool>,
+    free: Vec<u16>,
+    retired: std::collections::VecDeque<(u64, u16)>,
+}
+
+impl ClassArray {
+    fn reclaim(&mut self, frame: u64) {
+        while let Some(&(freed, layer)) = self.retired.front() {
+            if freed + FRAMES_IN_FLIGHT > frame {
+                break;
+            }
+            self.retired.pop_front();
+            self.free.push(layer);
+        }
+    }
+
+    fn live_layers(&self) -> u32 {
+        self.used - (self.free.len() + self.retired.len()) as u32
+    }
 }
 
 #[derive(Debug)]
@@ -206,6 +227,7 @@ pub struct EntityRenderer {
     sorted: Vec<GpuInstance>,
     order: Vec<(u64, u32)>,
     runs: Vec<Run>,
+    frame: u64,
 }
 
 fn storage_buffer(device: &wgpu::Device, label: &str, size: usize) -> wgpu::Buffer {
@@ -402,6 +424,9 @@ impl EntityRenderer {
             capacity: 0,
             used: 0,
             generation: 0,
+            live: Vec::new(),
+            free: Vec::new(),
+            retired: Default::default(),
         };
         EntityRenderer {
             device: device.clone(),
@@ -427,6 +452,7 @@ impl EntityRenderer {
             sorted: Vec::new(),
             order: Vec::new(),
             runs: Vec::new(),
+            frame: 0,
         }
     }
 
@@ -476,15 +502,26 @@ impl EntityRenderer {
         if image.width == 0 || image.height == 0 || image.rgba.len() as u64 != expected {
             return None;
         }
-        if self.classes[class].used >= MAX_CLASS_LAYERS[class] {
-            return None;
-        }
-        if self.classes[class].used == self.classes[class].capacity {
-            self.grow_class(class);
+        let frame = self.frame;
+        self.classes[class].reclaim(frame);
+        if self.classes[class].free.is_empty() {
+            if self.classes[class].used >= self.max_layers(class) {
+                return None;
+            }
+            if self.classes[class].used == self.classes[class].capacity {
+                self.grow_class(class);
+            }
         }
         let array = &mut self.classes[class];
-        let layer = array.used;
-        array.used += 1;
+        let layer = match array.free.pop() {
+            Some(layer) => u32::from(layer),
+            None => {
+                array.used += 1;
+                array.live.push(false);
+                array.used - 1
+            }
+        };
+        array.live[layer as usize] = true;
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: array.texture.as_ref().expect("grown above"),
@@ -518,15 +555,47 @@ impl EntityRenderer {
         })
     }
 
+    /// Returns a texture's layer to its size class; reuse waits out the frames in flight.
+    pub fn free_texture(&mut self, id: TexId) {
+        let frame = self.frame;
+        let Some(array) = self.classes.get_mut(usize::from(id.class)) else {
+            return;
+        };
+        match array.live.get_mut(usize::from(id.layer)) {
+            Some(live) if *live => *live = false,
+            _ => return,
+        }
+        array.retired.push_back((frame, id.layer));
+    }
+
+    /// Layers currently holding a texture in size class `class`.
+    pub fn live_layers(&self, class: usize) -> u32 {
+        self.classes.get(class).map_or(0, ClassArray::live_layers)
+    }
+
+    /// Layers ever allocated in size class `class` (live, retired and free).
+    pub fn allocated_layers(&self, class: usize) -> u32 {
+        self.classes.get(class).map_or(0, |c| c.used)
+    }
+
+    pub fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    fn max_layers(&self, class: usize) -> u32 {
+        MAX_CLASS_LAYERS[class].min(self.device.limits().max_texture_array_layers)
+    }
+
     fn grow_class(&mut self, class: usize) {
         let size = CLASS_SIZES[class];
+        let max_layers = self.max_layers(class);
         let array = &mut self.classes[class];
         let capacity = if array.capacity == 0 {
             CLASS_INITIAL_LAYERS[class]
         } else {
             array.capacity.saturating_mul(2)
         }
-        .min(MAX_CLASS_LAYERS[class]);
+        .min(max_layers);
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("entity textures"),
             size: wgpu::Extent3d {
@@ -568,6 +637,7 @@ impl EntityRenderer {
     }
 
     pub fn begin_frame(&mut self) {
+        self.frame += 1;
         self.frame_bones.clear();
         self.frame_instances.clear();
         self.frame_outlines = 0;

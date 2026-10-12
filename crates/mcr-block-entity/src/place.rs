@@ -165,7 +165,7 @@ impl Placement {
                 "powered" => p.powered = value == "true",
                 "has_book" => p.has_book = value == "true",
                 "dusted" => p.dusted = value.parse().unwrap_or(0),
-                "copper_golem_pose" => p.pose = value.into(),
+                "copper_golem_pose" | "trial_spawner_state" => p.pose = value.into(),
                 _ => {}
             }
         }
