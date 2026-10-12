@@ -196,6 +196,7 @@ mod tests {
             "lambdynlights",
             "c2me",
             "bobby",
+            "particlerain",
         ] {
             assert_eq!(p.get(id).unwrap().status, PolicyStatus::Partial, "{id}");
         }

@@ -342,6 +342,8 @@ pub struct Play {
     pub java_gui: bool,
     /// Java draws entities, block entities, nametags and the hand into the world.
     pub java_world: bool,
+    /// What Java's FOV mods (zoom) do to the field of view; 1 without them.
+    pub java_fov_scale: f32,
     /// A Java screen owns all input; gameplay input stops.
     pub java_screen: bool,
     /// Java's GUI scale in mod mode, which native overlays follow.
@@ -494,6 +496,7 @@ impl Play {
             hud_hidden: false,
             java_gui: false,
             java_world: false,
+            java_fov_scale: 1.0,
             java_screen: false,
             gui_scale_override: None,
             open_mods: false,
@@ -1444,7 +1447,7 @@ impl Play {
         if self.busy() || self.closed.is_some() {
             return;
         }
-        let k = degrees_per_pixel(self.options.mouse_sensitivity);
+        let k = degrees_per_pixel(self.options.mouse_sensitivity) * self.java_fov_scale.min(1.0);
         let sx = if self.options.invert_x_mouse {
             -1.0
         } else {
@@ -2183,7 +2186,7 @@ impl Play {
         let t = f64::from(partial);
         let eye = lerp3(self.prev_eye, self.cur_eye, t);
         let fov_mod = self.prev_fov_mod + (self.fov_mod - self.prev_fov_mod) * partial;
-        let fov = (self.options.fov.0 as f32 * fov_mod).clamp(1.0, 170.0);
+        let fov = (self.options.fov.0 as f32 * fov_mod * self.java_fov_scale).clamp(1.0, 170.0);
         let (look_yaw, look_pitch) = self.spectate_view.unwrap_or((self.yaw, self.pitch));
         let mut camera = Camera {
             position: DVec3::from(eye),

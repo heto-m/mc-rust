@@ -112,6 +112,16 @@ pub struct BridgeConfig {
 }
 
 impl BridgeConfig {
+    /// Java resolves relative paths against `user.dir` (the game dir), so every path it gets must be absolute.
+    pub fn make_absolute(&mut self) -> std::io::Result<()> {
+        self.cache_dir = std::path::absolute(&self.cache_dir)?;
+        self.game_dir = std::path::absolute(&self.game_dir)?;
+        for jar in &mut self.mods {
+            *jar = std::path::absolute(&*jar)?;
+        }
+        Ok(())
+    }
+
     pub fn new(cache_dir: PathBuf, game_dir: PathBuf, mods: Vec<PathBuf>) -> Self {
         Self {
             cache_dir,
@@ -196,6 +206,7 @@ pub fn plan(
             utf8(&game_dir.join("natives").join("netty"))?
         ),
         format!("-Djdk.net.hosts.file={}", utf8(&game_dir.join(HOSTS_FILE))?),
+        format!("-Duser.dir={}", utf8(game_dir)?),
         "-Djava.awt.headless=true".into(),
         "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED".into(),
         format!("-D{TABLE_PROPERTY}={:x}", table_address as u64),
@@ -312,6 +323,7 @@ mod tests {
                 "-Djna.tmpdir=/g/java/natives/jna".into(),
                 "-Dio.netty.native.workdir=/g/java/natives/netty".into(),
                 "-Djdk.net.hosts.file=/g/java/mcr-hosts".into(),
+                "-Duser.dir=/g/java".into(),
                 "-Djava.awt.headless=true".into(),
                 "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED".into(),
                 "-Dmcr.bridge.table=1234abcd".into(),
@@ -340,6 +352,16 @@ mod tests {
         ] {
             assert!(p.properties.contains(&prop.to_owned()), "{prop}");
         }
+    }
+
+    #[test]
+    fn relative_paths_become_absolute_for_java() {
+        let mut cfg = BridgeConfig::new(".cache".into(), "run/java".into(), vec!["m/a.jar".into()]);
+        cfg.make_absolute().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(cfg.cache_dir, cwd.join(".cache"));
+        assert_eq!(cfg.game_dir, cwd.join("run/java"));
+        assert_eq!(cfg.mods, [cwd.join("m/a.jar")]);
     }
 
     #[test]

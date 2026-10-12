@@ -60,6 +60,9 @@ public final class McrFrame {
         return partialTick;
     }
 
+    /** {@code Camera.update} sets it: Java's field of view over vanilla's, i.e. what FOV mods changed. */
+    public static volatile float fovScale = 1.0F;
+
     /** mcr's camera for this frame, or null outside the lockstep or when Rust's values are unusable. */
     public static @org.jspecify.annotations.Nullable McrCamera camera() {
         return lockstep() && camera.valid() ? camera : null;
@@ -187,6 +190,7 @@ public final class McrFrame {
         STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_FLAGS, stateFlags);
         STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_WIDTH, main == null ? 0 : main.width);
         STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_HEIGHT, main == null ? 0 : main.height);
+        STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_FOV_SCALE, Float.floatToRawIntBits(fovScale));
         if (frameIndex >= 0 && lockstep()) {
             STATE_LONG.setRelease(state, (long) BridgeAbi.FSTATE_DONE, frameIndex + 1);
         }

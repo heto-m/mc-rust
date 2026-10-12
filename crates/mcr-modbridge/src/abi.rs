@@ -13,7 +13,7 @@ use crate::net::{NetShared, SPILL_LIMIT};
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 7;
+pub const BRIDGE_VERSION: u32 = 8;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -95,6 +95,8 @@ pub const FSTATE_NANOS: usize = 16;
 pub const FSTATE_FLAGS: usize = 24;
 pub const FSTATE_WIDTH: usize = 28;
 pub const FSTATE_HEIGHT: usize = 32;
+/// Java's field of view over vanilla's for the same state (an `f32`): what FOV mods changed.
+pub const FSTATE_FOV_SCALE: usize = 36;
 pub const FSTATE_SIZE: usize = 64;
 pub const FSTATE_READY: u32 = 1;
 pub const FSTATE_LOADED: u32 = 2;
@@ -611,6 +613,7 @@ mod tests {
             ("FSTATE_FLAGS", FSTATE_FLAGS as i64),
             ("FSTATE_WIDTH", FSTATE_WIDTH as i64),
             ("FSTATE_HEIGHT", FSTATE_HEIGHT as i64),
+            ("FSTATE_FOV_SCALE", FSTATE_FOV_SCALE as i64),
             ("FSTATE_SIZE", FSTATE_SIZE as i64),
             ("FSTATE_READY", FSTATE_READY.into()),
             ("FSTATE_LOADED", FSTATE_LOADED.into()),

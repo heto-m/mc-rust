@@ -20,11 +20,14 @@ public final class McrTestMod implements ClientModInitializer {
     static final Logger LOGGER = LoggerFactory.getLogger("mcr_testmod");
     public static final String MESSAGE = "hello from mcr_testmod";
     public static final String COMMAND = "time query day";
+    public static final String CONFIG_FILE = "config/mcr_testmod.txt";
     /** Fabric's client command dispatcher only exists once the server's command tree arrived. */
     private static final int COMMAND_DELAY_TICKS = 40;
 
     /** `-Dmcr.testmod.hangAfterTicks=N`: N client ticks after loading, the render thread blocks for good. */
     private static final int HANG_AFTER = Integer.getInteger("mcr.testmod.hangAfterTicks", -1);
+    /** `-Dmcr.testmod.stallMillis=M`: with {@code hangAfterTicks}, the block lasts M ms, once, instead. */
+    private static final long STALL_MILLIS = Long.getLong("mcr.testmod.stallMillis", -1L);
 
     private static final KeyMapping PING = new KeyMapping(
             "key.mcr_testmod.ping",
@@ -49,7 +52,9 @@ public final class McrTestMod implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        writeRelativeConfig();
         MarkerLayer.register();
+        MarkerParticle.register();
         PayloadTypeRegistry.serverboundPlay().register(Hello.TYPE, Hello.CODEC);
         KeyMappingHelper.registerKeyMapping(PING);
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
@@ -58,13 +63,21 @@ public final class McrTestMod implements ClientModInitializer {
         });
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             GuiCapture.tick(client);
+            MarkerParticle.tick(client);
             while (PING.consumeClick()) {
                 Bridge.info("testmod_key", ++pings);
+                MarkerParticle.start();
             }
             if (SoundSelfTest.enabled()) {
                 SoundSelfTest.tick(client);
             }
             if (HANG_AFTER >= 0 && client.isGameLoadFinished() && client.gui.overlay() == null && ++loadedTicks > HANG_AFTER) {
+                if (STALL_MILLIS >= 0) {
+                    LOGGER.warn("mcr_testmod: stalling the render thread for {} ms", STALL_MILLIS);
+                    loadedTicks = Integer.MIN_VALUE;
+                    stall(STALL_MILLIS);
+                    return;
+                }
                 LOGGER.warn("mcr_testmod: blocking the render thread for good");
                 while (true) {
                     java.util.concurrent.locks.LockSupport.park();
@@ -74,5 +87,24 @@ public final class McrTestMod implements ClientModInitializer {
                 client.getConnection().sendCommand(COMMAND);
             }
         });
+    }
+
+    private static void stall(long millis) {
+        long end = System.nanoTime() + millis * 1_000_000L;
+        long left;
+        while ((left = end - System.nanoTime()) > 0) {
+            java.util.concurrent.locks.LockSupport.parkNanos(left);
+        }
+    }
+
+    /** Like many mods, writes its config through a path relative to the working directory. */
+    private static void writeRelativeConfig() {
+        java.io.File file = new java.io.File(CONFIG_FILE);
+        file.getParentFile().mkdirs();
+        try (java.io.FileWriter out = new java.io.FileWriter(file)) {
+            out.write("written relative to the working directory\n");
+        } catch (java.io.IOException e) {
+            LOGGER.warn("mcr_testmod: cannot write {}", CONFIG_FILE, e);
+        }
     }
 }

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use mcr_modbridge::ModInput;
-use mcr_modbridge::manager::{Manager, SessionStore, SessionTracker};
+use mcr_modbridge::manager::{Manager, ModStatus, Report, SessionStore, SessionTracker};
 use mcr_modbridge::sound::SoundLink;
 use mcr_modbridge::{
     Bridge, BridgeConfig, BridgeEvent, ComposeStats, ModFrames, NetLink, SHUTDOWN_TIMEOUT,
@@ -75,6 +75,9 @@ pub fn startup(opts: &Options) -> Result<Startup> {
     let session = manager.session();
     let previous = session.load();
     let report = manager.scan(&settings);
+    for line in report_lines(&report) {
+        eprintln!("[mods] {line}");
+    }
     let jars = report.jars();
     let would_boot = !jars.is_empty();
     let prompt = would_boot && previous.needs_fallback_prompt();
@@ -97,6 +100,26 @@ pub fn startup(opts: &Options) -> Result<Startup> {
     });
     let app = ModsApp::new(manager, settings, previous, prompt);
     Ok(Startup { boot, app })
+}
+
+/// One line per mod that is not loaded, or loaded with a policy caveat.
+fn report_lines(report: &Report) -> Vec<String> {
+    report
+        .entries
+        .iter()
+        .filter_map(|e| {
+            let why = match (&e.status, &e.policy) {
+                (ModStatus::Active, Some(p)) => format!("{:?}: {}", p.status, p.reason),
+                (ModStatus::Active, None) => return None,
+                (ModStatus::Disabled, _) => "disabled".to_owned(),
+                (ModStatus::Blocked(r), _) => format!("blocked: {r}"),
+                (ModStatus::Excluded(r), _) => format!("excluded: {r}"),
+                (ModStatus::ServerOnly, _) => "server-only".to_owned(),
+                (ModStatus::Unsupported(r), _) => format!("not loaded: {r}"),
+            };
+            Some(format!("{} {}: {why}", e.info.id, e.info.version))
+        })
+        .collect()
 }
 
 impl BootPlan {
@@ -270,6 +293,41 @@ mod tests {
         let started = startup(&options(&dir)).unwrap();
         assert!(started.boot.is_none());
         assert!(!java_thread());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn startup_names_mods_left_out_and_caveats() {
+        let dir = temp("startup-lines");
+        write_jar(&dir, "a.jar", &manifest("alpha", ""));
+        write_jar(&dir, "s.jar", &manifest("sodium", ""));
+        write_jar(&dir, "c.jar", &manifest("continuity", ""));
+        write_jar(
+            &dir,
+            "b.jar",
+            &manifest("beta", r#","depends":{"missing_lib":"*"}"#),
+        );
+        let manager = Manager::new(&dir, &dir.join("mods"));
+        let lines = report_lines(&manager.scan(&manager.load_settings()));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("sodium 1.0.0: blocked: ")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("beta 1.0.0: excluded: ") && l.contains("missing_lib")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("continuity 1.0.0: Partial: ")),
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.starts_with("alpha")), "{lines:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

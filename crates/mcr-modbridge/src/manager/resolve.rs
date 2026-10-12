@@ -5,15 +5,18 @@ use super::version::{Range, Version};
 
 pub const GAME_VERSION: &str = "26.3";
 pub const LOADER_VERSION: &str = "0.19.5";
+/// Bundled with the pinned loader under its own mod id.
+pub const MIXINEXTRAS_VERSION: &str = "0.5.5";
 pub const JAVA_VERSION: &str = "25";
 pub const BRIDGE_ID: &str = "mcr_bridge";
 pub const BRIDGE_VERSION: &str = "0.1.0";
 
-/// What the loader itself provides: the game, Fabric Loader, Java and the bridge mod.
+/// What the loader itself provides: the game, Fabric Loader, MixinExtras, Java and the bridge mod.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostEnv {
     pub minecraft: String,
     pub loader: String,
+    pub mixinextras: String,
     pub java: String,
 }
 
@@ -22,16 +25,18 @@ impl Default for HostEnv {
         Self {
             minecraft: GAME_VERSION.into(),
             loader: LOADER_VERSION.into(),
+            mixinextras: MIXINEXTRAS_VERSION.into(),
             java: JAVA_VERSION.into(),
         }
     }
 }
 
 impl HostEnv {
-    fn provided(&self) -> [(&'static str, &str); 4] {
+    fn provided(&self) -> [(&'static str, &str); 5] {
         [
             ("minecraft", &self.minecraft),
             ("fabricloader", &self.loader),
+            ("mixinextras", &self.mixinextras),
             ("java", &self.java),
             (BRIDGE_ID, BRIDGE_VERSION),
         ]
@@ -210,6 +215,7 @@ mod tests {
             dep("minecraft", &["~26.3"]),
             dep("fabricloader", &[">=0.19.3"]),
             dep("java", &[">=25"]),
+            dep("mixinextras", &[">=0.5.5"]),
             dep(BRIDGE_ID, &["*"]),
         ];
         assert_eq!(run(&[a.clone()]), [None]);

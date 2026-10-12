@@ -67,6 +67,27 @@ impl Default for Options {
     }
 }
 
+impl Options {
+    /// Mod mode moves the working directory to Java's game dir, so every path is fixed up front.
+    pub fn absolutize(&mut self) -> std::io::Result<()> {
+        for path in [&mut self.jar, &mut self.game_dir, &mut self.assets_dir] {
+            *path = std::path::absolute(&*path)?;
+        }
+        for path in [
+            &mut self.world,
+            &mut self.screenshot,
+            &mut self.autopilot,
+            &mut self.mods,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *path = std::path::absolute(&*path)?;
+        }
+        Ok(())
+    }
+}
+
 pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect host[:port]] [--render-distance N] [--no-vsync] [--no-occlusion] [--no-graph]
            [--jar <client.jar>] [--screenshot out.png [--camera x,y,z,yaw,pitch] [--size WxH] [--frames N [--frame-step dx,dy,dz,dyaw,dpitch]]]
            [--autofly blocks_per_s] [--bench frames [--bench-view x,y,z,yaw,pitch]... [--bench-modes]]

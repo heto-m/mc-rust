@@ -3,18 +3,20 @@
   "id": "mcr_testmod",
   "version": "0.1.0",
   "name": "mcr test mod",
-  "description": "Sends one ClientPlayNetworking payload and one command on join, shows a GPU parity test screen, plays its own sound on request, reports presses of its own key mapping and marks armor stands with a render layer; used by mcr's bridge tests.",
+  "description": "Sends one ClientPlayNetworking payload and one command on join, shows a GPU parity test screen, plays its own sound on request, reports presses of its own key mapping (each spawns its own particles and halves the field of view for five seconds) and marks armor stands with a render layer; used by mcr's bridge tests.",
   "license": "MIT",
   "environment": "client",
   "entrypoints": {
     "client": ["dev.mcr.testmod.McrTestMod"]
   },
+  "mixins": ["mcr_testmod.mixins.json"],
   "depends": {
     "fabricloader": ">=0.19.3",
     "fabric-networking-api-v1": "*",
     "fabric-lifecycle-events-v1": "*",
     "fabric-rendering-v1": "*",
     "fabric-key-mapping-api-v1": "*",
+    "fabric-particles-v1": "*",
     "mcr_bridge": "*",
     "minecraft": "26.3"
   }

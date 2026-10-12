@@ -724,7 +724,7 @@ impl Shell {
                 gui.toasts.add_system(
                     &mut gui.ui,
                     mcr_ui::SystemToastId::new(BRIDGE_TOAST),
-                    "Mods detached",
+                    "Mods",
                     Some(&message),
                 );
             }
@@ -1007,18 +1007,27 @@ impl Shell {
         self.ui_input(UiInput::MouseRelease { x, y, button, mods });
     }
 
+    pub fn screen_hover(&mut self, x: f32, y: f32) {
+        if !self.route_hover(x, y) {
+            self.ui_input(UiInput::MouseMove { x, y });
+        }
+    }
+
     pub fn frame(&mut self) -> Option<FrameStats> {
         let java_gui = self.java_gui();
         let third_person = self.play.as_ref().is_some_and(Play::third_person);
+        let mut fov_scale = 1.0;
         let java_world = self.mod_frames().is_some_and(|f| {
             let mut link = f.lock();
             link.set_third_person(third_person);
+            fov_scale = link.java().fov_scale;
             link.world_active()
         });
         self.update_route();
         if let Some(play) = &mut self.play {
             play.java_gui = java_gui;
             play.java_world = java_world;
+            play.java_fov_scale = if java_world { fov_scale } else { 1.0 };
             return play.frame();
         }
         self.update_menu_size();

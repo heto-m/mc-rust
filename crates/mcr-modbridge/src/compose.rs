@@ -276,8 +276,8 @@ impl FrameLink {
         self.stats = ComposeStats::default();
     }
 
-    fn detach(&mut self, reason: &str) {
-        self.lockstep.detach();
+    /// The lockstep already detached; drops Java's GUI and tells the user.
+    fn report_detached(&mut self, reason: &str) {
         self.input.queue().discard();
         self.shown = None;
         tracing::error!("mod bridge detached from rendering: {reason}");
@@ -287,6 +287,15 @@ impl FrameLink {
         abi::emit(BridgeEvent::RenderDetached {
             reason: reason.into(),
         });
+    }
+
+    /// Java is gone or offline: a live link reports it, a stalled one just stops recovering.
+    fn detach_for_good(&mut self, reason: &str) {
+        let live = self.lockstep.state() != LinkState::Detached;
+        self.lockstep.detach();
+        if live {
+            self.report_detached(reason);
+        }
     }
 
     fn backend() -> Option<&'static Backend> {
@@ -352,20 +361,25 @@ impl FrameLink {
         self.composing = None;
         self.opaque_waited = false;
         backend.slots.set_scene(ctx.scene, ctx.depth);
-        if self.shared.frame.is_gone() && self.lockstep.state() != LinkState::Detached {
-            self.detach("Java stopped");
+        if self.shared.frame.is_gone() {
+            self.detach_for_good("Java stopped");
         }
-        if self.shared.net.is_detached() && self.lockstep.state() == LinkState::Running {
-            self.detach("Java lost its connection");
+        if self.shared.net.is_detached() && self.lockstep.state() != LinkState::Booting {
+            self.detach_for_good("Java lost its connection");
         }
         let java = self.java();
         if java.ready {
             self.lockstep.ready();
         }
         let late = self.lockstep.outstanding();
-        if self.lockstep.complete(java.done) {
+        if self.lockstep.complete(java.done, Instant::now()) {
             // A frame that missed its compose still runs, onto Java's own target, before the next one.
             backend.slots.drain_all(backend.gpu, late.unwrap_or(0));
+        }
+        if self.lockstep.reattach() {
+            tracing::info!("mod bridge re-attached to rendering");
+            self.notice = Some("Mods are drawing again".into());
+            abi::emit(BridgeEvent::RenderResumed);
         }
         match self.lockstep.state() {
             LinkState::Running => backend.slots.drain_immediate(backend.gpu),
@@ -407,7 +421,7 @@ impl FrameLink {
         let waited = start.elapsed();
         let java = self.java();
         if done {
-            self.lockstep.complete(java.done);
+            self.lockstep.complete(java.done, Instant::now());
             push_sample(&mut self.stats.waits_us, waited);
             push_sample(&mut self.stats.java_us, Duration::from_nanos(java.nanos));
         }
@@ -431,7 +445,7 @@ impl FrameLink {
             return;
         };
         if self.lockstep.state() != LinkState::Running {
-            self.lockstep.complete(self.java().done);
+            self.lockstep.complete(self.java().done, Instant::now());
             backend.slots.drain_all(gpu, u64::MAX);
             return;
         }
@@ -449,23 +463,21 @@ impl FrameLink {
         let waited = start.elapsed();
         let java = self.java();
         if done {
-            self.lockstep.complete(java.done);
+            self.lockstep.complete(java.done, Instant::now());
             push_sample(&mut self.stats.waits_us, waited);
             push_sample(&mut self.stats.java_us, Duration::from_nanos(java.nanos));
             self.compose(ctx, backend, index);
             self.stats.composed += 1;
-        } else if self.lockstep.expire(Instant::now(), java.loaded) || self.shared.frame.is_gone() {
-            let reason = if self.shared.frame.is_gone() {
-                "Java stopped".to_owned()
-            } else {
-                format!(
-                    "no frame for {:.1}s",
-                    waited
-                        .as_secs_f32()
-                        .max(crate::frame::HANG_TIMEOUT.as_secs_f32())
-                )
-            };
-            self.detach(&reason);
+        } else if self.shared.frame.is_gone() {
+            self.detach_for_good("Java stopped");
+            backend.slots.drain_all(gpu, u64::MAX);
+        } else if self.lockstep.expire(Instant::now(), java.loaded) {
+            self.report_detached(&format!(
+                "no frame for {:.1}s",
+                waited
+                    .as_secs_f32()
+                    .max(crate::frame::HANG_TIMEOUT.as_secs_f32())
+            ));
             backend.slots.drain_all(gpu, u64::MAX);
         } else {
             self.stats.late += 1;

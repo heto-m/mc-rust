@@ -5,3 +5,4 @@ fabric-api-module fabric-lifecycle-events-v1
 fabric-api-module fabric-rendering-v1
 fabric-api-module fabric-key-mapping-api-v1
 module mcr-bridge
+fabric-api-module fabric-particles-v1

@@ -293,9 +293,20 @@ struct Manifest {
     icon: Option<String>,
 }
 
+/// Fabric Loader accepts raw control characters (newlines) inside strings; serde_json does not.
+fn parse_lenient(text: &str) -> Result<Value, ScanError> {
+    serde_json::from_str(text).or_else(|strict| {
+        let spaced: String = text
+            .chars()
+            .map(|c| if c.is_ascii_control() { ' ' } else { c })
+            .collect();
+        serde_json::from_str(&spaced).map_err(|_| ScanError::Manifest(strict.to_string()))
+    })
+}
+
 fn parse_manifest(text: &str) -> Result<Manifest, ScanError> {
     let bad = |m: &str| ScanError::Manifest(m.to_owned());
-    let root: Value = serde_json::from_str(text).map_err(|e| ScanError::Manifest(e.to_string()))?;
+    let root = parse_lenient(text)?;
     let id = root["id"].as_str().ok_or_else(|| bad("missing id"))?;
     if !valid_id(id) {
         return Err(bad("invalid mod id"));

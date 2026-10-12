@@ -37,7 +37,9 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
   `McrBoot.main(long table, String[] args)`. Flags: `-Djava.class.path=<boot jar + loader + libs + client.jar>`,
   `--enable-native-access=ALL-UNNAMED`, `-Xrs`, `-XX:+UseZGC`, `-XX:+UseCompactObjectHeaders`, `-Xmx` from
   settings (default 2G), `-Dfabric.gameJarPath`, `-Dfabric.addMods`, `-Dorg.lwjgl.librarypath`, plus `exit`/`abort`
-  hooks so `System.exit` from a mod becomes an orderly mcr shutdown.
+  hooks so `System.exit` from a mod becomes an orderly mcr shutdown. `Bridge::start` makes every path absolute,
+  passes `-Duser.dir=<game dir>` and moves the process into the game dir: mods open `config/…` through
+  `java.io`, which resolves relative paths against the process directory and ignores `user.dir`.
 - **Java→Rust** calls are FFM downcalls to function pointers Rust passes in a versioned `#[repr(C)]` table
   (no symbol export needed on any OS). **Rust→Java** upcall stubs are registered by Java at boot but are only ever
   invoked on the Java thread inside a downcall. Every other Rust→Java flow is a message in an SPSC ring that
@@ -93,6 +95,12 @@ mcr's (`compose.rs`, `frame.rs`).
 
 Clears of the main target's color, and of the scene depth in world slots, are dropped. A Java frame that misses
 the 2 s deadline detaches the bridge from rendering: mcr's native HUD and entities return and a toast says so.
+Java keeps getting frames one at a time; after 30 frames in a row that each finish within 250 ms it is composed
+again (REI and JEI reloading their plugins on join stall Java for over 2 s). Three such recoveries per session;
+the next stall, Java stopping or Java losing its connection detach for good.
+
+Java's camera FOV over vanilla's (zoom mods, FOV effects mods add) reaches Rust as `FSTATE_FOV_SCALE`, clamped to
+0.02–4, and scales mcr's projection and mouse sensitivity while Java draws the world.
 
 In mod mode Java draws entities, block entities, nametags, the first-person hand, glowing outlines, post effects,
 particles of non-`minecraft` types, GUI and HUD. Rust draws terrain, sky, clouds, weather, world border, water,
@@ -141,7 +149,11 @@ off-heap section arrays (`BitStorage` is an interface), if measurements say it p
   answers, container and screen actions (including dialogs, advancement tabs and operator block editors), and
   chat/commands (re-signed by Rust). A Java packet-handling failure detaches Java; Rust stays connected.
 - Performance and renderer mods that need OpenGL (Sodium, Iris, ImmediatelyFast, Distant Horizons, Xaero's,
-  JourneyMap, FancyMenu) are blocked with a reason shown in the mod manager.
+  JourneyMap, FancyMenu) are blocked with a reason shown in the mod manager. Results for real mods are in
+  [mod-compat.md](mod-compat.md).
+- The resolver treats `minecraft`, `fabricloader`, `java`, the bridge mod and `mixinextras` (bundled with the
+  pinned loader) as provided. Manifests are parsed as leniently as Fabric's: raw control characters in strings
+  are accepted.
 
 ## Change sequence
 

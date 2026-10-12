@@ -4,12 +4,15 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import dev.mcr.bridge.McrCamera;
 import dev.mcr.bridge.McrFrame;
 import net.minecraft.client.Camera;
+import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.CameraType;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
+import net.minecraft.util.Mth;
 import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -25,7 +28,24 @@ abstract class CameraMixin {
     private float depthFar;
 
     @Shadow
+    private float fov;
+
+    @Shadow
+    private float fovModifier;
+
+    @Shadow
+    private float oldFovModifier;
+
+    @Unique
+    private float mcr$fovPartialTicks;
+
+    @Shadow
     protected abstract void setRotation(float yRot, float xRot);
+
+    @Shadow
+    private float modifyFovBasedOnDeathOrFluid(float partialTicks, float fov) {
+        throw new AssertionError();
+    }
 
     @Shadow
     protected abstract void setPosition(double x, double y, double z);
@@ -55,5 +75,24 @@ abstract class CameraMixin {
         if (projection != null) {
             cir.setReturnValue(projection);
         }
+    }
+
+    @Inject(method = "calculateFov", at = @At("HEAD"))
+    private void mcr$fovPartialTicks(float partialTicks, CallbackInfoReturnable<Float> cir) {
+        mcr$fovPartialTicks = partialTicks;
+    }
+
+    /** Rust draws the world with its own FOV, so it scales that by what mods (zoom) did to Java's. */
+    @Inject(method = "update", at = @At("TAIL"))
+    private void mcr$reportModFov(DeltaTracker deltaTracker, CallbackInfo ci) {
+        if (McrFrame.camera() == null) {
+            McrFrame.fovScale = 1.0F;
+            return;
+        }
+        float partial = mcr$fovPartialTicks;
+        float base = Minecraft.getInstance().options.fov().get().intValue() * Mth.lerp(partial, oldFovModifier, fovModifier);
+        float vanilla = modifyFovBasedOnDeathOrFluid(partial, base);
+        float scale = fov / vanilla;
+        McrFrame.fovScale = vanilla > 0.0F && Float.isFinite(scale) ? scale : 1.0F;
     }
 }

@@ -22,6 +22,7 @@ pub struct Rig {
     pub frame_count: u64,
     /// Why the bridge stopped composing, if it did.
     pub detached: Option<String>,
+    pub resumed: bool,
     clock: TickClock,
     last: Instant,
     feed_ticks: bool,
@@ -69,6 +70,7 @@ impl Rig {
             screen: String::new(),
             frame_count: 0,
             detached: None,
+            resumed: false,
             clock: TickClock::default(),
             last: Instant::now(),
             feed_ticks: true,
@@ -101,6 +103,7 @@ impl Rig {
                 BridgeEvent::Crash { report } => panic!("java crashed: {report:?}"),
                 BridgeEvent::VmExited { code } => panic!("java exited with {code}"),
                 BridgeEvent::RenderDetached { reason } => self.detached = Some(reason),
+                BridgeEvent::RenderResumed => self.resumed = true,
                 BridgeEvent::Screen(s) => self.screen = s,
                 BridgeEvent::Info { key, value } => {
                     self.infos.insert(key, value);

@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use mcr_jvm::Doorbell;
 
 use crate::abi::{
-    FSTATE_DONE, FSTATE_FLAGS, FSTATE_HEIGHT, FSTATE_LOADED, FSTATE_NANOS, FSTATE_READY,
-    FSTATE_SIZE, FSTATE_TICKS, FSTATE_WIDTH,
+    FSTATE_DONE, FSTATE_FLAGS, FSTATE_FOV_SCALE, FSTATE_HEIGHT, FSTATE_LOADED, FSTATE_NANOS,
+    FSTATE_READY, FSTATE_SIZE, FSTATE_TICKS, FSTATE_WIDTH,
 };
 
 /// After loading, a Java frame slower than this detaches the bridge from rendering.
@@ -18,6 +18,12 @@ pub const LOADING_HANG_TIMEOUT: Duration = Duration::from_secs(60);
 pub const LOADING_WAIT: Duration = Duration::from_millis(50);
 /// Once loaded, a frame waits at most this long; a later Java frame shows its previous GUI.
 pub const FRAME_WAIT: Duration = Duration::from_millis(100);
+/// A stalled Java that finishes this many frames in a row, each within [`PROMPT_FRAME`], is
+/// composed again.
+pub const REATTACH_FRAMES: u32 = 30;
+pub const PROMPT_FRAME: Duration = Duration::from_millis(250);
+/// Stalls a session recovers from; the next one detaches for good.
+pub const MAX_REATTACHES: u32 = 3;
 /// Java runs at most this many ticks per frame, like vanilla's `runTick`; the rest carries over.
 pub const MAX_TICKS_PER_FRAME: u32 = 10;
 
@@ -30,6 +36,7 @@ struct FrameState {
     flags: AtomicU32,
     width: AtomicU32,
     height: AtomicU32,
+    fov_scale: AtomicU32,
 }
 
 const _: () = {
@@ -39,11 +46,15 @@ const _: () = {
     assert!(std::mem::offset_of!(FrameState, flags) == FSTATE_FLAGS);
     assert!(std::mem::offset_of!(FrameState, width) == FSTATE_WIDTH);
     assert!(std::mem::offset_of!(FrameState, height) == FSTATE_HEIGHT);
+    assert!(std::mem::offset_of!(FrameState, fov_scale) == FSTATE_FOV_SCALE);
     assert!(std::mem::size_of::<FrameState>() == FSTATE_SIZE);
 };
 
+/// FOV mods (zoom) may shrink or widen the view this much at most.
+pub const FOV_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.02..=4.0;
+
 /// What Java last reported about its frames.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct JavaFrame {
     /// Frames finished so far: the last finished index plus one.
     pub done: u64,
@@ -55,6 +66,17 @@ pub struct JavaFrame {
     pub loaded: bool,
     /// Java's main render target size.
     pub size: (u32, u32),
+    /// The factor mods applied to Java's field of view, within [`FOV_SCALE_RANGE`]; 1 when none did.
+    pub fov_scale: f32,
+}
+
+fn fov_scale(bits: u32) -> f32 {
+    let scale = f32::from_bits(bits);
+    if scale.is_finite() && scale > 0.0 {
+        scale.clamp(*FOV_SCALE_RANGE.start(), *FOV_SCALE_RANGE.end())
+    } else {
+        1.0
+    }
 }
 
 /// Process-wide like the VM: Java writes the state block and rings the bell after each frame.
@@ -91,6 +113,7 @@ impl FrameShared {
                 s.width.load(Ordering::Acquire),
                 s.height.load(Ordering::Acquire),
             ),
+            fov_scale: fov_scale(s.fov_scale.load(Ordering::Acquire)),
         }
     }
 
@@ -139,7 +162,8 @@ pub enum LinkState {
     Booting,
     /// Lockstep: one frame posted at a time, its GUI composed in the same mcr frame.
     Running,
-    /// Java missed the hang deadline or died; mcr renders natively and never waits again.
+    /// Java missed the hang deadline or died; mcr renders natively and does not wait for it. A
+    /// stall (not a death) re-attaches once Java is prompt again.
     Detached,
 }
 
@@ -149,6 +173,9 @@ pub struct Lockstep {
     state: LinkState,
     next: u64,
     outstanding: Option<(u64, Instant)>,
+    /// Prompt frames in a row since a recoverable stall; `None` once detached for good.
+    recovering: Option<u32>,
+    reattaches: u32,
 }
 
 impl Default for Lockstep {
@@ -163,6 +190,8 @@ impl Lockstep {
             state: LinkState::Booting,
             next: 0,
             outstanding: None,
+            recovering: None,
+            reattaches: 0,
         }
     }
 
@@ -177,8 +206,15 @@ impl Lockstep {
         }
     }
 
+    /// Detaches for good: Java is gone or lost its connection.
     pub fn detach(&mut self) {
         self.state = LinkState::Detached;
+        self.recovering = None;
+    }
+
+    /// Detached by a stall that may still re-attach.
+    pub fn recoverable(&self) -> bool {
+        self.state == LinkState::Detached && self.recovering.is_some()
     }
 
     pub fn outstanding(&self) -> Option<u64> {
@@ -204,15 +240,32 @@ impl Lockstep {
         }
     }
 
-    /// Java finished `done` frames in total; `true` if that completes the outstanding one.
-    pub fn complete(&mut self, done: u64) -> bool {
+    /// Java finished `done` frames in total by `now`; `true` if that completes the outstanding one.
+    pub fn complete(&mut self, done: u64, now: Instant) -> bool {
         match self.outstanding {
-            Some((index, _)) if done > index => {
+            Some((index, posted)) if done > index => {
                 self.outstanding = None;
+                if let Some(prompt) = &mut self.recovering {
+                    let on_time = now.saturating_duration_since(posted) <= PROMPT_FRAME;
+                    *prompt = if on_time { *prompt + 1 } else { 0 };
+                }
                 true
             }
             _ => false,
         }
+    }
+
+    /// Re-attaches a stalled bridge after enough prompt frames; `true` on that transition.
+    pub fn reattach(&mut self) -> bool {
+        if self.state != LinkState::Detached
+            || !matches!(self.recovering, Some(n) if n >= REATTACH_FRAMES)
+        {
+            return false;
+        }
+        self.state = LinkState::Running;
+        self.recovering = None;
+        self.reattaches += 1;
+        true
     }
 
     fn limit(loaded: bool) -> Duration {
@@ -238,6 +291,7 @@ impl Lockstep {
         match (self.state, self.outstanding) {
             (LinkState::Running, Some((_, posted))) if now >= posted + Self::limit(loaded) => {
                 self.state = LinkState::Detached;
+                self.recovering = (self.reattaches < MAX_REATTACHES).then_some(0);
                 true
             }
             _ => false,
@@ -282,6 +336,18 @@ mod tests {
     use crate::pacer::TickClock;
 
     #[test]
+    fn fov_scale_is_sanitized() {
+        assert_eq!(fov_scale(0), 1.0);
+        assert_eq!(fov_scale(f32::NAN.to_bits()), 1.0);
+        assert_eq!(fov_scale(f32::INFINITY.to_bits()), 1.0);
+        assert_eq!(fov_scale((-0.5f32).to_bits()), 1.0);
+        assert_eq!(fov_scale(0.25f32.to_bits()), 0.25);
+        assert_eq!(fov_scale(1.0e-9f32.to_bits()), 0.02);
+        assert_eq!(fov_scale(100.0f32.to_bits()), 4.0);
+        assert_eq!(FrameShared::new().read().fov_scale, 1.0);
+    }
+
+    #[test]
     fn lockstep_posts_one_frame_at_a_time() {
         let t0 = Instant::now();
         let mut l = Lockstep::new();
@@ -290,8 +356,8 @@ mod tests {
         assert!(l.can_post());
         assert_eq!(l.post(t0), 0);
         assert!(!l.can_post());
-        assert!(!l.complete(0));
-        assert!(l.complete(1));
+        assert!(!l.complete(0, t0));
+        assert!(l.complete(1, t0));
         assert!(l.can_post());
         assert_eq!(l.post(t0), 1);
         assert_eq!(l.outstanding(), Some(1));
@@ -317,11 +383,73 @@ mod tests {
             "a detached bridge is never awaited"
         );
         assert!(!l.can_post(), "the stuck frame is still outstanding");
-        assert!(l.complete(1));
+        assert!(l.complete(1, t0 + HANG_TIMEOUT * 3));
         assert!(
             l.can_post(),
             "a detached Java that recovers keeps getting frames"
         );
+    }
+
+    fn stall(l: &mut Lockstep, t: Instant) -> Instant {
+        let index = l.post(t);
+        let late = t + HANG_TIMEOUT;
+        assert!(l.expire(late, true));
+        assert!(l.complete(index + 1, late));
+        late
+    }
+
+    fn prompt_frames(l: &mut Lockstep, mut t: Instant, n: u32) -> Instant {
+        for _ in 0..n {
+            let index = l.post(t);
+            t += Duration::from_millis(16);
+            assert!(l.complete(index + 1, t));
+        }
+        t
+    }
+
+    #[test]
+    fn a_stall_reattaches_after_prompt_frames() {
+        let mut l = Lockstep::new();
+        l.ready();
+        let mut t = stall(&mut l, Instant::now());
+        assert!(l.recoverable());
+        t = prompt_frames(&mut l, t, REATTACH_FRAMES - 1);
+        let index = l.post(t);
+        assert!(l.complete(index + 1, t + PROMPT_FRAME * 2));
+        assert!(!l.reattach(), "a slow frame restarts the count");
+        t = prompt_frames(&mut l, t + PROMPT_FRAME * 2, REATTACH_FRAMES - 1);
+        assert!(!l.reattach());
+        t = prompt_frames(&mut l, t, 1);
+        assert!(l.reattach());
+        assert_eq!(l.state(), LinkState::Running);
+        assert!(!l.reattach(), "re-attaches once");
+        assert!(l.wait_until(t, true).is_none(), "nothing outstanding");
+        l.post(t);
+        assert!(l.wait_until(t, true).is_some(), "awaited again");
+    }
+
+    #[test]
+    fn deaths_and_repeated_stalls_detach_for_good() {
+        let mut l = Lockstep::new();
+        l.ready();
+        let mut t = Instant::now();
+        for _ in 0..MAX_REATTACHES {
+            t = stall(&mut l, t);
+            t = prompt_frames(&mut l, t, REATTACH_FRAMES);
+            assert!(l.reattach());
+        }
+        t = stall(&mut l, t);
+        assert!(!l.recoverable());
+        prompt_frames(&mut l, t, REATTACH_FRAMES * 2);
+        assert!(!l.reattach(), "the last stall is final");
+
+        let mut l = Lockstep::new();
+        l.ready();
+        let t = stall(&mut l, Instant::now());
+        l.detach();
+        prompt_frames(&mut l, t, REATTACH_FRAMES * 2);
+        assert!(!l.reattach(), "Java gone is final");
+        assert_eq!(l.state(), LinkState::Detached);
     }
 
     #[test]
@@ -401,7 +529,7 @@ mod tests {
             rust_ticks += u64::from(ticks);
             bank.add(ticks, partial);
             if lock.outstanding().is_some() && java_busy == 0 {
-                lock.complete(lock.outstanding().unwrap() + 1);
+                lock.complete(lock.outstanding().unwrap() + 1, now);
             }
             java_busy = java_busy.saturating_sub(1);
             if lock.can_post() {
@@ -415,7 +543,7 @@ mod tests {
         }
         for _ in 0..64 {
             if let Some(i) = lock.outstanding() {
-                lock.complete(i + 1);
+                lock.complete(i + 1, now);
             }
             lock.post(now);
             let (t, _) = bank.take();

@@ -27,10 +27,12 @@ pub enum BridgeEvent {
         server: String,
     },
     Stopping,
-    /// Java missed a frame deadline or died; mcr stopped composing its GUI for good.
+    /// Java missed a frame deadline or died; mcr stopped composing its GUI.
     RenderDetached {
         reason: String,
     },
+    /// Java recovered from a stall; its GUI and world layers are composed again.
+    RenderResumed,
     Unknown {
         kind: i32,
         text: String,

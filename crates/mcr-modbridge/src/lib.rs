@@ -101,7 +101,10 @@ pub struct Bridge {
 }
 
 impl Bridge {
+    /// Moves the process into `config.game_dir`: mods open `config/…` through java.io, which
+    /// ignores `user.dir`.
     pub fn start(mut config: BridgeConfig) -> Result<Self, BridgeError> {
+        config.make_absolute()?;
         let manifest = LaunchManifest::load(&config.cache_dir)?;
         for jar in [launch::BOOT_JAR, launch::BRIDGE_JAR] {
             let path = config.cache_dir.join(jar);
@@ -139,6 +142,7 @@ impl Bridge {
             loader = manifest.loader_version,
             "starting the Fabric bridge"
         );
+        std::env::set_current_dir(&config.game_dir)?;
         let vm = JavaVm::start(jvm)?;
         let watcher = std::thread::Builder::new()
             .name("mcr-bridge-vm".into())

@@ -313,6 +313,15 @@ impl Shell {
         true
     }
 
+    pub(super) fn route_hover(&mut self, x: f32, y: f32) -> bool {
+        if self.java_input().is_none() {
+            return false;
+        }
+        let scale = f64::from(self.route.java.gui_scale.max(1));
+        self.route_cursor(f64::from(x) * scale, f64::from(y) * scale);
+        true
+    }
+
     pub fn ime_active(&mut self, active: bool) {
         self.route.ime_active = active;
     }

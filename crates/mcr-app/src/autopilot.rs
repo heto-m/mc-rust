@@ -34,6 +34,10 @@ pub enum Step {
         y: f32,
         right: bool,
     },
+    Hover {
+        x: f32,
+        y: f32,
+    },
     SlotClick {
         slot: usize,
         right: bool,
@@ -132,6 +136,13 @@ pub fn parse(text: &str) -> Result<Vec<Step>, String> {
                     right: it.next() == Some("right"),
                 }
             }
+            "hover" => {
+                let (a, b) = rest.split_once(' ').ok_or_else(|| err("hover x y"))?;
+                Step::Hover {
+                    x: num(a)?,
+                    y: num(b.trim())?,
+                }
+            }
             "slotclick" => {
                 let mut it = rest.split_whitespace();
                 Step::SlotClick {
@@ -144,7 +155,7 @@ pub fn parse(text: &str) -> Result<Vec<Step>, String> {
             }
             "sleep" => Step::Sleep(rest.parse().map_err(|_| err("sleep needs ticks"))?),
             "slot" => Step::Slot(rest.parse().map_err(|_| err("slot 1-9"))?),
-            "shot" => Step::Shot(PathBuf::from(rest)),
+            "shot" => Step::Shot(std::path::absolute(rest).unwrap_or_else(|_| rest.into())),
             "report" => Step::Report,
             "quit" => Step::Quit,
             _ => return Err(err("unknown command")),
@@ -253,6 +264,7 @@ impl Autopilot {
                         MouseButton::Left
                     },
                 ),
+                Step::Hover { x, y } => sh.screen_hover(x, y),
                 Step::SlotClick { slot, right } => {
                     if let Some(play) = &mut sh.play {
                         let button = if right {
@@ -283,7 +295,7 @@ impl Autopilot {
                         let state = &play.world.client.state;
                         let [block, sky] = crate::entities::light_at(&state.chunks, p, 1.62);
                         println!(
-                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?} mod input {:?}",
+                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?} mod input {:?} fov_scale {:.2}",
                             play.ticks,
                             p[0],
                             p[1],
@@ -303,6 +315,7 @@ impl Autopilot {
                                 .collect::<Vec<_>>(),
                             (state.inventory.cursor.item, state.inventory.cursor.count),
                             sh.mod_authority(),
+                            play.java_fov_scale,
                         );
                     }
                 }
@@ -329,6 +342,11 @@ mod tests {
         assert_eq!(steps[5], Step::WaitMods);
         assert!(matches!(&steps[1], Step::Hold(keys, 20) if keys.len() == 2));
         assert_eq!(steps[3], Step::Chat("/time set day".into()));
+        assert_eq!(
+            parse("hover 12 34.5").unwrap(),
+            [Step::Hover { x: 12.0, y: 34.5 }]
+        );
+        assert!(parse("hover 12").is_err());
         assert!(parse("hold nonsense 3").is_err());
         assert!(parse("dance").is_err());
     }

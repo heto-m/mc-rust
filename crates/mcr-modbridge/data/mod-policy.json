@@ -21,6 +21,7 @@
     {"id": "lambdynlights", "status": "partial", "reason": "terrain lighting is mcr's"},
     {"id": "badoptimizations", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
     {"id": "c2me", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
-    {"id": "bobby", "status": "partial", "reason": "optimises or caches paths mcr replaces"}
+    {"id": "bobby", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
+    {"id": "particlerain", "status": "partial", "reason": "weather is drawn by mcr; its particles add to mcr's rain instead of replacing it"}
   ]
 }

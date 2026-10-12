@@ -122,6 +122,17 @@ fn bad_manifests_are_invalid_with_a_reason() {
 }
 
 #[test]
+fn raw_newlines_in_strings_are_tolerated_like_fabric() {
+    let jar = Jar::new().manifest(
+        "{\"schemaVersion\":1,\"id\":\"demo\",\"version\":\"1.0\",\"description\":\"line one\nline two\"}",
+    );
+    let m = scan_one(&jar);
+    assert!(!matches!(m.kind, ModKind::Invalid(_)), "{:?}", m.kind);
+    assert_eq!(m.id, "demo");
+    assert_eq!(m.description, "line one line two");
+}
+
+#[test]
 fn text_fields_are_sanitised_and_bounded() {
     let jar = Jar::fabric_with(
         "demo",

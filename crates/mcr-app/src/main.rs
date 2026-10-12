@@ -528,13 +528,14 @@ pub(crate) fn load_autopilot(path: &std::path::Path) -> Result<autopilot::Autopi
 
 fn main() -> Result<()> {
     let launched = Instant::now();
-    let opts = match cli::parse(std::env::args().skip(1)) {
+    let mut opts = match cli::parse(std::env::args().skip(1)) {
         Ok(opts) => opts,
         Err(e) => {
             eprintln!("{e}\n{}", cli::USAGE);
             std::process::exit(2);
         }
     };
+    opts.absolutize()?;
     if let Some(out) = opts.screenshot.clone() {
         if opts.world.is_none() && !opts.synthetic {
             return screenshot::run_shell(&opts, &out);

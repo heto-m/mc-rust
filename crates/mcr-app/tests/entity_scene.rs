@@ -422,6 +422,86 @@ fn java_draws_entities_into_mcrs_world() {
     assert!(after > before + 100, "the glowing pig has no outline");
 }
 
+fn report_fov_scales(lines: &[String]) -> Vec<f32> {
+    lines
+        .iter()
+        .filter(|l| l.starts_with("report:"))
+        .filter_map(|l| l.rsplit("fov_scale ").next()?.trim().parse().ok())
+        .collect()
+}
+
+fn reddish(c: [u8; 3]) -> bool {
+    c[0] > 150 && c[1] < 90 && c[2] < 90
+}
+
+/// The test key starts a burst: the test mod's own particle type in front of the camera and a halved
+/// field of view, which mcr must apply to its whole world view.
+#[test]
+fn mod_particles_and_zoom_reach_mcrs_world() {
+    let Some(live) = live() else {
+        return;
+    };
+    let dir = prepare("burst");
+    live.send(&STAGE.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+    let base = dir.join("base.png");
+    let burst = dir.join("burst.png");
+    let script = format!(
+        "wait 200\nshot {}\nreport\ntap k\nwait 20\nreport\nshot {}\nwait 140\nreport\n",
+        base.display(),
+        burst.display()
+    );
+    let lines = run_client(&live, &dir, &script, |line| {
+        if line.starts_with("ready:") {
+            join_commands()
+        } else {
+            Vec::new()
+        }
+    });
+    let scales = report_fov_scales(&lines);
+    assert_eq!(scales.len(), 3, "three reports: {lines:?}");
+    assert!(
+        (scales[0] - 1.0).abs() < 0.01,
+        "no zoom before the key: {scales:?}"
+    );
+    assert!(
+        (scales[1] - 0.5).abs() < 0.01,
+        "the mod's zoom did not reach mcr: {scales:?}"
+    );
+    assert!(
+        (scales[2] - 1.0).abs() < 0.01,
+        "the zoom did not end: {scales:?}"
+    );
+    let particles = lines
+        .iter()
+        .filter(|l| l.contains("world_render"))
+        .filter_map(|l| {
+            l.split("particles=")
+                .nth(1)?
+                .split(['"', ' '])
+                .next()?
+                .parse::<u32>()
+                .ok()
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(
+        particles > 0,
+        "Java spawned none of the test mod's particles"
+    );
+    let centre = Probe {
+        name: "burst",
+        at: [EYE[0], EYE[1] - 0.6, EYE[2] + 2.5],
+        half: 0.6,
+    };
+    let before = count(&Image::load(&base), centre, reddish);
+    let during = count(&Image::load(&burst), centre, reddish);
+    eprintln!("{}: red pixels {before} -> {during}", centre.name);
+    assert!(
+        during > before + 200,
+        "the test mod's particles are not visible: {before} -> {during}"
+    );
+}
+
 /// Frame times with many entities in view, for the design notes.
 #[test]
 fn java_frame_time_with_entity_counts() {
