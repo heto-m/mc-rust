@@ -1837,6 +1837,7 @@ dependencies = [
  "mcr-buf",
  "mcr-client",
  "mcr-jvm",
+ "mcr-nbt",
  "mcr-net",
  "mcr-physics",
  "mcr-protocol",

@@ -159,6 +159,40 @@ fn new_world(s: &CreateWorldSettings) -> NewWorld {
     }
 }
 
+/// Java's Create New World options as the native screen's settings.
+pub fn java_create_settings(w: &mcr_modbridge::world::NewWorldRequest) -> CreateWorldSettings {
+    use mcr_modbridge::world::{NewMode, NewPreset};
+    CreateWorldSettings {
+        name: w.name.clone(),
+        mode: match w.mode {
+            NewMode::Survival => NewGameMode::Survival,
+            NewMode::Hardcore => NewGameMode::Hardcore,
+            NewMode::Creative => NewGameMode::Creative,
+        },
+        difficulty: w.difficulty.min(3),
+        cheats: w.cheats,
+        preset: match w.preset {
+            NewPreset::Normal => WorldPreset::Normal,
+            NewPreset::Flat => WorldPreset::Flat,
+            NewPreset::LargeBiomes => WorldPreset::LargeBiomes,
+            NewPreset::Amplified => WorldPreset::Amplified,
+        },
+        seed: w.seed.clone(),
+        structures: w.structures,
+        bonus_chest: w.bonus_chest,
+    }
+}
+
+/// Whether the local server should be frozen: Java's pause rule while its GUI is composed, else the native one.
+pub fn should_freeze(
+    in_world: bool,
+    java_gui: bool,
+    java_pausing: bool,
+    native_pause: bool,
+) -> bool {
+    in_world && if java_gui { java_pausing } else { native_pause }
+}
+
 enum Prep {
     Status(String),
     Ready {
@@ -551,6 +585,41 @@ mod tests {
         });
         assert_eq!(creative.game_mode, GameMode::Creative);
         assert!(creative.cheats);
+    }
+
+    #[test]
+    fn java_create_options_map_to_native_settings() {
+        use mcr_modbridge::world::{NewMode, NewPreset, NewWorldRequest};
+        let s = java_create_settings(&NewWorldRequest {
+            name: "Flat".into(),
+            mode: NewMode::Creative,
+            difficulty: 1,
+            cheats: true,
+            preset: NewPreset::Flat,
+            seed: "7".into(),
+            structures: false,
+            bonus_chest: true,
+        });
+        assert_eq!(s.mode, NewGameMode::Creative);
+        assert_eq!(s.preset, WorldPreset::Flat);
+        assert_eq!(
+            (s.difficulty, s.cheats, s.structures, s.bonus_chest),
+            (1, true, false, true)
+        );
+        let w = new_world(&s);
+        assert_eq!(w.world_type, WorldType::Flat);
+        assert_eq!(w.game_mode, GameMode::Creative);
+    }
+
+    #[test]
+    fn freeze_follows_java_while_its_gui_is_up() {
+        assert!(should_freeze(true, true, true, false));
+        assert!(!should_freeze(true, true, false, true), "Java's rule wins");
+        assert!(should_freeze(true, false, false, true));
+        assert!(
+            !should_freeze(false, true, true, true),
+            "no world, no freeze"
+        );
     }
 
     #[test]

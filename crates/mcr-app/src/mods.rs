@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use mcr_modbridge::ModInput;
 use mcr_modbridge::manager::{Manager, ModStatus, Report, SessionStore, SessionTracker};
 use mcr_modbridge::sound::SoundLink;
+use mcr_modbridge::world::WorldRequest;
 use mcr_modbridge::{
     Bridge, BridgeConfig, BridgeEvent, ComposeStats, ModFrames, NetLink, SHUTDOWN_TIMEOUT,
 };
@@ -17,6 +18,7 @@ use crate::cli::Options;
 use crate::mods_ui::ModsApp;
 
 pub const CACHE_DIR: &str = ".cache";
+static CACHE_ABS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// The JVM's AOT caches, under the game dir.
 pub const AOT_DIR: &str = "cache/jvm-aot";
 
@@ -53,12 +55,18 @@ pub struct ModNet {
     pub input: Option<ModInput>,
     connects: Arc<Mutex<Vec<String>>>,
     keys: Arc<Mutex<Vec<(String, String)>>>,
+    worlds: Arc<Mutex<Vec<WorldRequest>>>,
 }
 
 impl ModNet {
     /// Addresses Java's own `ConnectScreen` asked Rust to join, oldest first.
     pub fn take_connect_requests(&self) -> Vec<String> {
         std::mem::take(&mut *self.connects.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// What Java's world screens asked for, oldest first.
+    pub fn take_world_requests(&self) -> Vec<WorldRequest> {
+        std::mem::take(&mut *self.worlds.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// Vanilla mappings Java rebound, oldest first, as `(mapping, key)` names.
@@ -69,6 +77,8 @@ impl ModNet {
 
 /// Java's rebinds waiting for the shell; a stuck shell cannot grow it without bound.
 const MAX_KEY_CHANGES: usize = 1024;
+/// Java's world requests waiting for the shell.
+const MAX_WORLD_REQUESTS: usize = 16;
 
 /// The mod mode decision and the Mods screen's model, made once at startup.
 pub struct Startup {
@@ -89,7 +99,13 @@ pub struct BootPlan {
 
 /// Plans a Java boot only when at least one mod is enabled and resolvable, and the last session did
 /// not crash or hang (that case shows the fallback prompt instead).
+/// The repository `.cache` as an absolute path, resolved before Java moves the process into its game dir.
+pub fn cache_dir() -> &'static Path {
+    CACHE_ABS.get_or_init(|| std::path::absolute(CACHE_DIR).unwrap_or_else(|_| CACHE_DIR.into()))
+}
+
 pub fn startup(opts: &Options) -> Result<Startup> {
+    cache_dir();
     let mods_dir = opts
         .mods
         .clone()
@@ -176,7 +192,7 @@ impl ModHost {
     /// Java records its GPU work on `renderer`'s device and its GUI is composed into every frame.
     fn start(opts: &Options, plan: BootPlan, renderer: &mut Renderer) -> Result<Self> {
         let mut config = BridgeConfig::new(
-            CACHE_DIR.into(),
+            cache_dir().to_path_buf(),
             opts.game_dir.join("java"),
             plan.jars.clone(),
         );
@@ -189,6 +205,7 @@ impl ModHost {
         config.compose = true;
         config.http_hosts.extend(plan.http_hosts.iter().cloned());
         config.max_heap = format!("{}m", plan.heap_mib);
+        config.saves_dir = Some(opts.game_dir.join("saves"));
         config.aot = std::env::current_exe()
             .ok()
             .map(|helper| mcr_modbridge::AotSettings {
@@ -233,9 +250,11 @@ impl ModHost {
             input,
             connects: Arc::new(Mutex::new(Vec::new())),
             keys: Arc::new(Mutex::new(Vec::new())),
+            worlds: Arc::new(Mutex::new(Vec::new())),
         };
         let connects = net.connects.clone();
         let keys = net.keys.clone();
+        let worlds = net.worlds.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let watcher = tracker.clone();
@@ -256,6 +275,13 @@ impl ModHost {
                                 let mut queue = keys.lock().unwrap_or_else(PoisonError::into_inner);
                                 let room = MAX_KEY_CHANGES.saturating_sub(queue.len());
                                 queue.extend(changes.into_iter().take(room));
+                            }
+                            BridgeEvent::World(request) => {
+                                let mut queue =
+                                    worlds.lock().unwrap_or_else(PoisonError::into_inner);
+                                if queue.len() < MAX_WORLD_REQUESTS {
+                                    queue.push(request);
+                                }
                             }
                             _ => {}
                         }

@@ -4,7 +4,7 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 16;
+    public static final int VERSION = 17;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
     public static final String COMPOSE_PROPERTY = "mcr.compose";
 
@@ -25,6 +25,12 @@ public final class BridgeAbi {
     public static final int MSG_INPUT = 3;
     public static final int MSG_KEYS = 4;
     public static final int MSG_PACKS = 5;
+    public static final int MSG_WORLD = 6;
+    public static final int WORLD_STATUS = 1;
+    public static final int WORLD_EULA = 2;
+    public static final int WORLD_READY = 3;
+    public static final int WORLD_FAILED = 4;
+    public static final int WORLD_STOPPED = 5;
     public static final int SYNC_MAX_LINES = 256;
 
     public static final int IN_TYPE = 0;
@@ -64,6 +70,7 @@ public final class BridgeAbi {
     public static final int JAVA_GRABBED = 4;
     public static final int JAVA_TEXT_INPUT = 8;
     public static final int JAVA_QUIT = 16;
+    public static final int JAVA_PAUSING = 32;
     public static final int MOVE_FORWARD = 1;
     public static final int MOVE_BACKWARD = 2;
     public static final int MOVE_LEFT = 4;
@@ -153,6 +160,7 @@ public final class BridgeAbi {
     public static final int REPORT_CONNECT = 6;
     public static final int REPORT_STOPPING = 7;
     public static final int REPORT_KEYS = 8;
+    public static final int REPORT_WORLD = 9;
 
     public static final int PHASE_LOGIN = 1;
     public static final int PHASE_CONFIGURATION = 2;

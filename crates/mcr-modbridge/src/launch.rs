@@ -88,6 +88,9 @@ impl LaunchManifest {
     }
 }
 
+pub const SAVES_PROPERTY: &str = "mcr.bridge.saves";
+pub const BACKUPS_PROPERTY: &str = "mcr.bridge.backups";
+
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
     /// The repository `.cache` (jars, natives, assets).
@@ -111,6 +114,8 @@ pub struct BridgeConfig {
     pub proxy_port: Option<u16>,
     /// The JVM's AOT cache; `None` runs without one.
     pub aot: Option<AotSettings>,
+    /// mcr's saves folder, which Java's world screens list; its backups go to `backups` beside it.
+    pub saves_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +133,9 @@ impl BridgeConfig {
         self.game_dir = std::path::absolute(&self.game_dir)?;
         if let Some(aot) = &mut self.aot {
             aot.dir = std::path::absolute(&aot.dir)?;
+        }
+        if let Some(saves) = &mut self.saves_dir {
+            *saves = std::path::absolute(&*saves)?;
         }
         for jar in &mut self.mods {
             *jar = std::path::absolute(&*jar)?;
@@ -153,6 +161,7 @@ impl BridgeConfig {
                 .collect(),
             proxy_port: None,
             aot: None,
+            saves_dir: None,
         }
     }
 }
@@ -239,6 +248,11 @@ pub fn plan(
             properties.push(format!("-D{scheme}.proxyHost=127.0.0.1"));
             properties.push(format!("-D{scheme}.proxyPort={port}"));
         }
+    }
+    if let Some(saves) = &config.saves_dir {
+        properties.push(format!("-D{SAVES_PROPERTY}={}", utf8(saves)?));
+        let backups = saves.parent().unwrap_or(saves).join("backups");
+        properties.push(format!("-D{BACKUPS_PROPERTY}={}", utf8(&backups)?));
     }
     properties.extend(manifest.jvm_args.iter().cloned());
     properties.extend(config.extra_jvm.iter().cloned());
@@ -376,6 +390,16 @@ mod tests {
         ] {
             assert!(p.properties.contains(&prop.to_owned()), "{prop}");
         }
+        cfg.saves_dir = Some("/g/saves".into());
+        let p = plan(&m, &cfg, 0x1234_abcd).unwrap();
+        assert!(
+            p.properties
+                .contains(&"-Dmcr.bridge.saves=/g/saves".to_owned())
+        );
+        assert!(
+            p.properties
+                .contains(&"-Dmcr.bridge.backups=/g/backups".to_owned())
+        );
     }
 
     #[test]

@@ -111,6 +111,7 @@ public final class McrFrame {
                         applySize(minecraft);
                         McrSync.applyEntityScale(minecraft);
                     }
+                    McrWorlds.pump(minecraft);
                     McrNet.pump(minecraft);
                     if (lockstep()) {
                         McrInput.deliver(minecraft);
@@ -140,6 +141,7 @@ public final class McrFrame {
                 case BridgeAbi.MSG_INPUT -> McrInput.enqueue(payload);
                 case BridgeAbi.MSG_KEYS -> McrSync.applyKeys(payload);
                 case BridgeAbi.MSG_PACKS -> McrSync.applyPacks(minecraft, payload);
+                case BridgeAbi.MSG_WORLD -> McrWorlds.receive(payload);
                 case BridgeAbi.MSG_SHUTDOWN -> {
                     stopping = true;
                     woke = true;

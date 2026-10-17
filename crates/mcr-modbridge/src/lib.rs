@@ -15,6 +15,7 @@ pub mod proxy;
 mod sections;
 pub mod sound;
 pub mod sync;
+pub mod world;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;

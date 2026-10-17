@@ -14,7 +14,7 @@ use crate::sections::SectionShared;
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 16;
+pub const BRIDGE_VERSION: u32 = 17;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -39,6 +39,13 @@ pub const MSG_INPUT: u16 = 3;
 pub const MSG_KEYS: u16 = 4;
 /// One absolute pack file path per line, in server push order: the server packs Rust applied.
 pub const MSG_PACKS: u16 = 5;
+/// `[u32 kind][utf8 text]`: the local world session's progress for Java's world screens.
+pub const MSG_WORLD: u16 = 6;
+pub const WORLD_STATUS: u32 = 1;
+pub const WORLD_EULA: u32 = 2;
+pub const WORLD_READY: u32 = 3;
+pub const WORLD_FAILED: u32 = 4;
+pub const WORLD_STOPPED: u32 = 5;
 /// Java caps the lines of `MSG_KEYS`, `MSG_PACKS` and `REPORT_KEYS` at this many.
 pub const SYNC_MAX_LINES: usize = 256;
 
@@ -80,6 +87,8 @@ pub const JAVA_OVERLAY: u32 = 2;
 pub const JAVA_GRABBED: u32 = 4;
 pub const JAVA_TEXT_INPUT: u32 = 8;
 pub const JAVA_QUIT: u32 = 16;
+/// Vanilla's `Gui.isPausing()`: the screen or overlay would pause a singleplayer game.
+pub const JAVA_PAUSING: u32 = 32;
 pub const MOVE_FORWARD: u32 = 1;
 pub const MOVE_BACKWARD: u32 = 2;
 pub const MOVE_LEFT: u32 = 4;
@@ -203,6 +212,8 @@ pub const REPORT_CONNECT: i32 = 6;
 pub const REPORT_STOPPING: i32 = 7;
 /// `name\tkey` lines: vanilla mappings Java rebound since it last applied or reported them.
 pub const REPORT_KEYS: i32 = 8;
+/// Java's world screens: `play\t<folder>`, `create` with `key=value` lines, `eula\t0|1`, `cancel`.
+pub const REPORT_WORLD: i32 = 9;
 
 pub const PHASE_LOGIN: u8 = 1;
 pub const PHASE_CONFIGURATION: u8 = 2;
@@ -719,6 +730,13 @@ mod tests {
             ("MSG_INPUT", MSG_INPUT.into()),
             ("MSG_KEYS", MSG_KEYS.into()),
             ("MSG_PACKS", MSG_PACKS.into()),
+            ("MSG_WORLD", MSG_WORLD.into()),
+            ("WORLD_STATUS", WORLD_STATUS.into()),
+            ("WORLD_EULA", WORLD_EULA.into()),
+            ("WORLD_READY", WORLD_READY.into()),
+            ("WORLD_FAILED", WORLD_FAILED.into()),
+            ("WORLD_STOPPED", WORLD_STOPPED.into()),
+            ("REPORT_WORLD", REPORT_WORLD.into()),
             ("SYNC_MAX_LINES", SYNC_MAX_LINES as i64),
             ("REPORT_KEYS", REPORT_KEYS.into()),
             ("IN_TYPE", IN_TYPE as i64),
@@ -755,6 +773,7 @@ mod tests {
             ("JAVA_GRABBED", JAVA_GRABBED.into()),
             ("JAVA_TEXT_INPUT", JAVA_TEXT_INPUT.into()),
             ("JAVA_QUIT", JAVA_QUIT.into()),
+            ("JAVA_PAUSING", JAVA_PAUSING.into()),
             ("MOVE_FORWARD", MOVE_FORWARD.into()),
             ("MOVE_BACKWARD", MOVE_BACKWARD.into()),
             ("MOVE_LEFT", MOVE_LEFT.into()),

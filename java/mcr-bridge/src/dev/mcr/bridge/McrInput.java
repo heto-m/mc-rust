@@ -172,6 +172,9 @@ public final class McrInput {
         if (quit) {
             flags |= BridgeAbi.JAVA_QUIT;
         }
+        if (minecraft.gui.isPausing()) {
+            flags |= BridgeAbi.JAVA_PAUSING;
+        }
         MemorySegment s = state();
         STATE_INT.setRelease(s, (long) BridgeAbi.ISTATE_JAVA_FLAGS, flags);
         STATE_INT.setRelease(s, (long) BridgeAbi.ISTATE_CURSOR, cursor);

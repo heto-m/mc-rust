@@ -112,6 +112,7 @@ public final class McrTestMod implements ClientModInitializer {
             GuiCapture.tick(client);
             MarkerParticle.tick(client);
             SyncProbe.tick(client);
+            WorldProbe.tick(client);
             while (CAMERA.consumeClick()) {
                 TestCamera.cycle(client);
             }

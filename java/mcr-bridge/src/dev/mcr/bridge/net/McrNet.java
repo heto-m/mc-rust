@@ -3,6 +3,7 @@ package dev.mcr.bridge.net;
 import dev.mcr.boot.Ring;
 import dev.mcr.bridge.Bridge;
 import dev.mcr.bridge.BridgeAbi;
+import dev.mcr.bridge.McrWorlds;
 import dev.mcr.bridge.McrBridge;
 import dev.mcr.bridge.McrParticles;
 import dev.mcr.bridge.mixin.ConnectionAccessor;
@@ -281,7 +282,10 @@ public final class McrNet {
         }
         ServerData data = new ServerData(host, host + ":" + port, ServerData.Type.OTHER);
         Screen parent = minecraft.gui.screen();
-        if (parent == null || parent instanceof ConnectScreen) {
+        if (McrWorlds.joining()) {
+            McrWorlds.joined();
+            parent = McrWorlds.worldList();
+        } else if (parent == null || parent instanceof ConnectScreen) {
             parent = new TitleScreen();
         }
         ConnectScreen.startConnecting(parent, minecraft, new ServerAddress(host, port), data, false, null);

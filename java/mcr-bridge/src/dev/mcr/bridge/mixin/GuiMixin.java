@@ -5,7 +5,6 @@ import dev.mcr.bridge.BridgeAbi;
 import dev.mcr.bridge.McrInput;
 import com.mojang.realmsclient.RealmsMainScreen;
 import net.minecraft.client.gui.components.toasts.SystemToast;
-import net.minecraft.client.gui.screens.worldselection.SelectWorldScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Gui;
@@ -28,12 +27,12 @@ abstract class GuiMixin {
 
     @Inject(method = "setScreen", at = @At("HEAD"), cancellable = true)
     private void mcr$notYet(@Nullable Screen requested, CallbackInfo ci) {
-        if (McrInput.active() && (requested instanceof SelectWorldScreen || requested instanceof RealmsMainScreen)) {
+        if (McrInput.active() && requested instanceof RealmsMainScreen) {
             Minecraft minecraft = Minecraft.getInstance();
             SystemToast.addOrUpdate(
                     minecraft.gui.toastManager(),
                     NOT_SUPPORTED,
-                    Component.literal(requested instanceof SelectWorldScreen ? "Singleplayer" : "Realms"),
+                    Component.literal("Realms"),
                     Component.literal("Not supported in mcr yet"));
             ci.cancel();
         }

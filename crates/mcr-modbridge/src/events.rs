@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::abi::{
     REPORT_CONNECT, REPORT_CRASH, REPORT_INFO, REPORT_INIT, REPORT_KEYS, REPORT_MOD_LOADED,
-    REPORT_SCREEN, REPORT_STOPPING, SYNC_MAX_LINES,
+    REPORT_SCREEN, REPORT_STOPPING, REPORT_WORLD, SYNC_MAX_LINES,
 };
 
 /// Longest mapping or key name accepted from Java.
@@ -32,6 +32,8 @@ pub enum BridgeEvent {
     Stopping,
     /// Vanilla key mappings Java rebound: `(mapping name, key name)` in vanilla's `options.txt` spelling.
     KeysChanged(Vec<(String, String)>),
+    /// Java's world screens asked for a local world, answered the EULA or cancelled.
+    World(crate::world::WorldRequest),
     /// Java missed a frame deadline or died; mcr stopped composing its GUI.
     RenderDetached {
         reason: String,
@@ -79,6 +81,13 @@ impl BridgeEvent {
             },
             REPORT_STOPPING => Self::Stopping,
             REPORT_KEYS => Self::KeysChanged(parse_keys(text)),
+            REPORT_WORLD => match crate::world::WorldRequest::parse(text) {
+                Some(request) => Self::World(request),
+                None => Self::Unknown {
+                    kind,
+                    text: text.into(),
+                },
+            },
             _ => Self::Unknown {
                 kind,
                 text: text.into(),
@@ -159,6 +168,14 @@ mod tests {
         assert!(matches!(
             BridgeEvent::from_report(REPORT_KEYS, &many),
             BridgeEvent::KeysChanged(v) if v.len() == SYNC_MAX_LINES
+        ));
+        assert_eq!(
+            BridgeEvent::from_report(REPORT_WORLD, "play\tW"),
+            BridgeEvent::World(crate::world::WorldRequest::Play("W".into()))
+        );
+        assert!(matches!(
+            BridgeEvent::from_report(REPORT_WORLD, "play\t../W"),
+            BridgeEvent::Unknown { .. }
         ));
         assert_eq!(
             BridgeEvent::from_report(99, "x"),

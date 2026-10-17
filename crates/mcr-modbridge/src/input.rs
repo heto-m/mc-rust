@@ -14,8 +14,9 @@ use crate::abi::{
     IN_TEXT, IN_TEXT_DATA, IN_TYPE, IN_WHEEL, IN_X, IN_Y, ISTATE_CURSOR, ISTATE_GUI_SCALE,
     ISTATE_JAVA_FLAGS, ISTATE_KEYS, ISTATE_MODS, ISTATE_NATIVE_KIND, ISTATE_NATIVE_SEQ,
     ISTATE_RUST_FLAGS, ISTATE_SCREEN_MOVES, ISTATE_SIZE, ISTATE_TEXT_AREA, JAVA_GRABBED,
-    JAVA_OVERLAY, JAVA_QUIT, JAVA_SCREEN, JAVA_TEXT_INPUT, MOVE_BACKWARD, MOVE_FORWARD, MOVE_JUMP,
-    MOVE_LEFT, MOVE_RIGHT, MOVE_SNEAK, MOVE_SPRINT, MSG_INPUT, RUST_FOCUSED,
+    JAVA_OVERLAY, JAVA_PAUSING, JAVA_QUIT, JAVA_SCREEN, JAVA_TEXT_INPUT, MOVE_BACKWARD,
+    MOVE_FORWARD, MOVE_JUMP, MOVE_LEFT, MOVE_RIGHT, MOVE_SNEAK, MOVE_SPRINT, MSG_INPUT,
+    RUST_FOCUSED,
 };
 
 /// SDL keycodes of keys without a character are their scancode with this bit set.
@@ -409,6 +410,8 @@ pub struct JavaInput {
     pub text_input: bool,
     /// Java's Quit was pressed.
     pub quit: bool,
+    /// Vanilla would pause a singleplayer game for Java's screen or overlay.
+    pub pausing: bool,
     pub cursor: CursorKind,
     /// Java's GUI scale, 0 before Java reported one.
     pub gui_scale: u32,
@@ -445,6 +448,7 @@ fn read_java(s: &InputState) -> JavaInput {
         grabbed: flags & JAVA_GRABBED != 0,
         text_input: flags & JAVA_TEXT_INPUT != 0,
         quit: flags & JAVA_QUIT != 0,
+        pausing: flags & JAVA_PAUSING != 0,
         cursor: CursorKind::from_raw(s.cursor.load(Ordering::Acquire)),
         gui_scale: if scale <= MAX_GUI_SCALE { scale } else { 0 },
         text_area: valid.then_some(area),
@@ -1052,7 +1056,10 @@ mod tests {
         assert_eq!(input.java(), JavaInput::default());
         shared.simulate_java(JAVA_SCREEN | JAVA_GRABBED | JAVA_QUIT, 2, 3);
         let j = input.java();
-        assert!(j.screen && j.grabbed && j.quit && !j.overlay && !j.text_input);
+        assert!(j.screen && j.grabbed && j.quit && !j.overlay && !j.text_input && !j.pausing);
+        shared.simulate_java(JAVA_SCREEN | JAVA_PAUSING, 0, 2);
+        assert!(input.java().pausing);
+        shared.simulate_java(JAVA_SCREEN | JAVA_GRABBED | JAVA_QUIT, 2, 3);
         assert!(j.captures_input());
         assert_eq!((j.cursor, j.gui_scale), (CursorKind::IBeam, 3));
         shared.simulate_java(0, 99, 1000);

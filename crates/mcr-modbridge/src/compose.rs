@@ -296,6 +296,11 @@ impl FrameLink {
         self.pending.packs(sync::encode_packs(paths));
     }
 
+    /// The local world session's progress for Java's world screens, delivered in order.
+    pub fn world(&mut self, event: crate::world::WorldEvent) {
+        self.pending.world(event);
+    }
+
     /// Java draws the world's entities, block entities and hand this frame; mcr's own stay off.
     pub fn world_active(&self) -> bool {
         self.gui_active() && self.java().loaded

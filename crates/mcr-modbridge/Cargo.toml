@@ -28,6 +28,7 @@ zip.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 mcr-auth = { path = "../mcr-auth" }
+mcr-nbt = { path = "../mcr-nbt" }
 mcr-net = { path = "../mcr-net" }
 
 [[bench]]

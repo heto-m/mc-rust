@@ -39,6 +39,15 @@ use crate::respacks::{PackAction, ResourceStack, ServerPacks, downloads_dir};
 use crate::servers::FileServers;
 use crate::settings::{OptionsScreen, Settings, SharedSettings};
 use crate::singleplayer::{EULA_URL, FileWorlds, Launch, LaunchInput, Session, Update};
+use mcr_modbridge::world::{WorldEvent, WorldRequest};
+
+/// Why the local server stopped, as the player reads it.
+fn stop_text(reason: Option<String>) -> String {
+    match reason.filter(|r| !r.trim().is_empty()) {
+        Some(r) => format!("The local server stopped:\n{}", sanitize_for_log(&r)),
+        None => "The local server stopped".to_owned(),
+    }
+}
 
 /// A join either lands, fails with a message, or is redirected by a `transfer` packet.
 enum ConnectFailure {
@@ -97,6 +106,12 @@ pub struct Shell {
     worlds: Rc<RefCell<FileWorlds>>,
     sp: Option<Session>,
     sp_status: Option<StatusHandle>,
+    /// The session was started from Java's world screens: Java shows its progress, not native screens.
+    sp_java: bool,
+    /// A Java launch waiting for the EULA answer.
+    pending_launch: Option<Launch>,
+    /// Why a Java-flow join failed; Java hears it once the server has stopped.
+    sp_java_failure: Option<String>,
 }
 
 impl std::fmt::Debug for Shell {
@@ -193,6 +208,9 @@ impl Shell {
             worlds,
             sp: None,
             sp_status: None,
+            sp_java: false,
+            pending_launch: None,
+            sp_java_failure: None,
             cfg,
         };
         shell.show_title();
@@ -204,8 +222,10 @@ impl Shell {
         {
             shell.connect(&addr, false);
         }
-        if let Some(folder) = shell.cfg.singleplayer.take() {
-            shell.play_world(Launch::Existing(folder));
+        if shell.mod_frames().is_none()
+            && let Some(folder) = shell.cfg.singleplayer.take()
+        {
+            shell.play_world(Launch::Existing(folder), false);
         }
         Ok(shell)
     }
@@ -535,15 +555,23 @@ impl Shell {
         self.push(Box::new(screen));
     }
 
-    /// Starts a world's local server behind a progress screen; one at a time.
-    fn play_world(&mut self, launch: Launch) {
+    /// Starts a world's local server behind a progress screen (Java's for `from_java`); one at a time.
+    fn play_world(&mut self, launch: Launch, from_java: bool) {
         if self.sp.is_some() || self.play.is_some() {
             eprintln!("singleplayer: a world is already open");
+            if from_java {
+                self.java_world(WorldEvent::Failed("A world is already open".into()));
+            }
             return;
         }
         let layout = self.worlds.borrow().layout().clone();
         if !layout.eula_accepted() {
-            self.eula_prompt(launch);
+            if from_java {
+                self.pending_launch = Some(launch);
+                self.java_world(WorldEvent::Eula);
+            } else {
+                self.eula_prompt(launch);
+            }
             return;
         }
         let options = self.settings.borrow().file.options.clone();
@@ -556,14 +584,99 @@ impl Shell {
                 .map(|u| u.hyphenated().to_string()),
             view_distance: self.cfg.render_distance.unwrap_or(options.render_distance),
             simulation_distance: options.simulation_distance,
-            dev_cache: std::path::absolute(crate::mods::CACHE_DIR)
-                .unwrap_or_else(|_| PathBuf::from(crate::mods::CACHE_DIR)),
+            dev_cache: crate::mods::cache_dir().to_path_buf(),
         };
-        let (screen, status) = ConnectingScreen::with_text("lang:createWorld.preparing");
-        self.push(Box::new(screen));
-        self.sp_status = Some(status);
+        if !from_java {
+            let (screen, status) = ConnectingScreen::with_text("lang:createWorld.preparing");
+            self.push(Box::new(screen));
+            self.sp_status = Some(status);
+        }
+        self.sp_java = from_java;
+        self.sp_java_failure = None;
         self.failure = None;
         self.sp = Some(Session::start(input));
+    }
+
+    /// Progress for Java's world screens; dropped without mods.
+    fn java_world(&self, event: WorldEvent) {
+        if let Some(frames) = self.mod_frames() {
+            frames.lock().world(event);
+        }
+    }
+
+    /// Play, Create, the EULA answer and Cancel from Java's world screens.
+    fn poll_mod_worlds(&mut self) {
+        let Some(net) = &self.cfg.mod_net else { return };
+        for request in net.take_world_requests() {
+            match request {
+                WorldRequest::Play(folder) => self.play_world(Launch::Existing(folder), true),
+                WorldRequest::Create(w) => self.play_world(
+                    Launch::New(crate::singleplayer::java_create_settings(&w)),
+                    true,
+                ),
+                WorldRequest::Eula(agreed) => {
+                    let Some(launch) = self.pending_launch.take() else {
+                        continue;
+                    };
+                    if !agreed {
+                        continue;
+                    }
+                    let layout = self.worlds.borrow().layout().clone();
+                    match layout.accept_eula() {
+                        Ok(()) => self.play_world(launch, true),
+                        Err(e) => self.java_world(WorldEvent::Failed(format!(
+                            "could not save the EULA agreement: {e}"
+                        ))),
+                    }
+                }
+                WorldRequest::Cancel => {
+                    self.pending_launch = None;
+                    match &mut self.sp {
+                        Some(sp) if self.sp_java => {
+                            sp.stop();
+                            if self.play.is_none() {
+                                self.connecting = None;
+                                self.end_pack_session();
+                            }
+                        }
+                        _ => self.java_world(WorldEvent::Stopped(None)),
+                    }
+                }
+            }
+        }
+    }
+
+    /// A Java-flow session update goes to Java; the shell only keeps its own state.
+    fn java_sp_update(&mut self, update: Update) {
+        match update {
+            Update::Status(text) => self.java_world(WorldEvent::Status(text)),
+            Update::Ready(port) => {
+                let folder = self.sp.as_ref().and_then(|s| s.folder.clone());
+                self.worlds.borrow_mut().set_busy(folder);
+                self.java_world(WorldEvent::Ready);
+                self.connect(&format!("127.0.0.1:{port}"), false);
+            }
+            Update::Failed(message) => {
+                eprintln!("singleplayer: {message}");
+                self.sp = None;
+                self.sp_java = false;
+                self.connecting = None;
+                self.worlds.borrow_mut().set_busy(None);
+                self.failure = Some(message.clone());
+                self.java_world(WorldEvent::Failed(message));
+            }
+            Update::Exited { requested, reason } => {
+                self.sp = None;
+                self.sp_java = false;
+                self.worlds.borrow_mut().set_busy(None);
+                let reason = (!requested).then(|| stop_text(reason));
+                if let (Some(play), Some(text)) = (&mut self.play, &reason) {
+                    play.force_close(text.clone());
+                }
+                let failure = self.sp_java_failure.take();
+                self.java_world(WorldEvent::Stopped(reason.or(failure)));
+            }
+        }
     }
 
     fn sp_failed(&mut self, message: String) {
@@ -580,7 +693,12 @@ impl Shell {
     }
 
     fn poll_singleplayer(&mut self) {
-        let paused = self.play.as_ref().is_some_and(Play::pause_open);
+        let paused = crate::singleplayer::should_freeze(
+            self.play.is_some(),
+            self.route.gui,
+            self.route.java.pausing,
+            self.play.as_ref().is_some_and(Play::pause_open),
+        );
         let updates = match &mut self.sp {
             Some(sp) => {
                 sp.set_paused(paused);
@@ -589,6 +707,10 @@ impl Shell {
             None => return,
         };
         for update in updates {
+            if self.sp_java {
+                self.java_sp_update(update);
+                continue;
+            }
             match update {
                 Update::Status(text) => {
                     if let Some(status) = &self.sp_status {
@@ -612,10 +734,7 @@ impl Shell {
                     let to_list = self.sp.as_ref().is_some_and(|s| s.return_to_list);
                     self.sp = None;
                     self.worlds.borrow_mut().set_busy(None);
-                    let text = match reason.filter(|r| !r.trim().is_empty()) {
-                        Some(r) => format!("The local server stopped:\n{}", sanitize_for_log(&r)),
-                        None => "The local server stopped".to_owned(),
-                    };
+                    let text = stop_text(reason);
                     if let Some(play) = &mut self.play {
                         if !requested {
                             play.force_close(text);
@@ -634,6 +753,10 @@ impl Shell {
         if self.sp.as_ref().is_some_and(Session::is_done) {
             self.sp = None;
             self.worlds.borrow_mut().set_busy(None);
+            if std::mem::take(&mut self.sp_java) {
+                let failure = self.sp_java_failure.take();
+                self.java_world(WorldEvent::Stopped(failure));
+            }
         }
     }
 
@@ -801,9 +924,17 @@ impl Shell {
                 if let Some(sp) = &mut self.sp {
                     sp.stop();
                     self.sp_status = None;
+                    if self.sp_java {
+                        self.sp_java_failure = Some(message.clone());
+                    }
                 }
                 self.end_pack_session();
                 self.failure = Some(message.clone());
+                if self.route.gui {
+                    // Java's own connect screen shows the failure once the bridge session closes.
+                    self.show_title();
+                    return;
+                }
                 self.close_connecting_screen();
                 self.push(Box::new(
                     DisconnectedScreen::new(Component::text(message))
@@ -818,6 +949,14 @@ impl Shell {
         self.parts = Some(play.finish());
         self.end_pack_session();
         self.update_menu_size();
+        if self.sp_java || self.route.gui {
+            if let Some(sp) = &mut self.sp {
+                sp.stop();
+            }
+            self.failure = reason;
+            self.show_title();
+            return;
+        }
         if let Some(sp) = &mut self.sp {
             sp.stop();
             sp.return_to_list = reason.is_none();
@@ -847,6 +986,7 @@ impl Shell {
         self.last_frame = now;
         self.poll_connect();
         self.poll_singleplayer();
+        self.poll_mod_worlds();
         self.poll_mod_connects();
         self.sync_java_settings();
         self.poll_packs();
@@ -862,6 +1002,11 @@ impl Shell {
             && let Some(addr) = self.cfg.connect.take()
         {
             self.connect(&addr, false);
+        }
+        if self.mods_settled()
+            && let Some(folder) = self.cfg.singleplayer.take()
+        {
+            self.play_world(Launch::Existing(folder), self.mod_frames().is_some());
         }
         let mut ran = 0;
         if let Some(play) = &mut self.play {
@@ -1056,8 +1201,10 @@ impl Shell {
                         self.sp_status = None;
                     }
                 }
-                ScreenAction::PlayWorld(folder) => self.play_world(Launch::Existing(folder)),
-                ScreenAction::CreateWorld(settings) => self.play_world(Launch::New(*settings)),
+                ScreenAction::PlayWorld(folder) => self.play_world(Launch::Existing(folder), false),
+                ScreenAction::CreateWorld(settings) => {
+                    self.play_world(Launch::New(*settings), false)
+                }
                 ScreenAction::ResourcePackAnswer(accepted) => self.pack_answer(accepted),
                 ScreenAction::ConductAnswer {
                     accept,

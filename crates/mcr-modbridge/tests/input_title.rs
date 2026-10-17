@@ -1,5 +1,5 @@
 //! Java's title screen driven by scripted input: Mod Menu's search box, paste, the "mcr" button,
-//! the singleplayer toast and Quit.
+//! Singleplayer opening Java's world screens (an empty list goes straight to Create New World) and Quit.
 
 mod gpu_common;
 
@@ -38,8 +38,10 @@ fn title_screen_takes_mcr_input() {
     assert_eq!(l.input.take_native_request(), Some(NativeKind::Menu));
 
     l.click(l.button("Singleplayer"));
+    l.wait_screen("CreateWorldScreen");
+    l.tap(ESCAPE);
+    l.until("back on the title screen", |l| l.rig.screen == TITLE);
     l.run_for(Duration::from_millis(500));
-    assert_eq!(l.rig.screen, TITLE, "singleplayer stays closed");
 
     l.click(l.button("Mods"));
     l.wait_screen("modmenu");

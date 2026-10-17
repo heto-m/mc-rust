@@ -25,6 +25,8 @@ pub struct Rig {
     pub resumed: bool,
     /// Vanilla key mappings Java reported rebinding.
     pub keys_changed: Vec<(String, String)>,
+    /// What Java's world screens asked mcr for.
+    pub worlds: Vec<mcr_modbridge::world::WorldRequest>,
     clock: TickClock,
     last: Instant,
     feed_ticks: bool,
@@ -76,6 +78,7 @@ impl Rig {
             detached: None,
             resumed: false,
             keys_changed: Vec::new(),
+            worlds: Vec::new(),
             clock: TickClock::default(),
             last: Instant::now(),
             feed_ticks: true,
@@ -115,6 +118,7 @@ impl Rig {
                     self.infos.insert(key, value);
                 }
                 BridgeEvent::KeysChanged(keys) => self.keys_changed.extend(keys),
+                BridgeEvent::World(request) => self.worlds.push(request),
                 _ => {}
             }
         }

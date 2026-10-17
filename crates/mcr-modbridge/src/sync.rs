@@ -58,6 +58,7 @@ pub(crate) struct Pending {
     keys: Option<Vec<u8>>,
     sent_keys: Option<Vec<u8>>,
     packs: Option<Vec<u8>>,
+    world: crate::world::WorldQueue,
 }
 
 impl Pending {
@@ -70,6 +71,10 @@ impl Pending {
 
     pub fn packs(&mut self, encoded: Vec<u8>) {
         self.packs = Some(encoded);
+    }
+
+    pub fn world(&mut self, event: crate::world::WorldEvent) {
+        self.world.push(event);
     }
 
     /// Pushes what is queued; anything the ring has no room for waits for the next frame.
@@ -86,12 +91,18 @@ impl Pending {
         {
             self.packs = Some(packs);
         }
+        while let Some(event) = self.world.front() {
+            if !push(crate::abi::MSG_WORLD, &event.encode()) {
+                break;
+            }
+            self.world.pop();
+        }
     }
 
     /// Nothing waits to be sent.
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.keys.is_none() && self.packs.is_none()
+        self.keys.is_none() && self.packs.is_none() && self.world.is_empty()
     }
 }
 
@@ -151,5 +162,31 @@ mod tests {
         assert!(p.is_empty(), "an unchanged table is not sent again");
         p.keys(encode_keys([("key.jump", "key.keyboard.k")]));
         assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn world_messages_go_in_order_and_wait_for_room() {
+        use crate::abi::MSG_WORLD;
+        use crate::world::WorldEvent;
+        let mut p = Pending::default();
+        p.world(WorldEvent::Eula);
+        p.world(WorldEvent::Ready);
+        let mut sent = Vec::new();
+        p.flush(|kind, payload| {
+            if sent.is_empty() {
+                sent.push((kind, payload.to_vec()));
+                true
+            } else {
+                false
+            }
+        });
+        assert_eq!(sent, [(MSG_WORLD, WorldEvent::Eula.encode())]);
+        sent.clear();
+        p.flush(|kind, payload| {
+            sent.push((kind, payload.to_vec()));
+            true
+        });
+        assert_eq!(sent, [(MSG_WORLD, WorldEvent::Ready.encode())]);
+        assert!(p.is_empty());
     }
 }
