@@ -19,8 +19,15 @@ fn refused(path: &Path, why: &str) -> SpError {
 pub fn open_read(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
-    nofollow(&mut options);
-    options.open(path)
+    nofollow_nonblock(&mut options);
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 #[cfg(unix)]
@@ -31,6 +38,16 @@ fn nofollow(options: &mut OpenOptions) {
 
 #[cfg(not(unix))]
 fn nofollow(_options: &mut OpenOptions) {}
+
+// O_NONBLOCK keeps a planted FIFO from blocking the open; regular files ignore it.
+#[cfg(unix)]
+fn nofollow_nonblock(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+}
+
+#[cfg(not(unix))]
+fn nofollow_nonblock(_options: &mut OpenOptions) {}
 
 /// Fails if `path` exists and is a symlink or not a regular file.
 pub fn check_file(path: &Path) -> Result<()> {
@@ -99,8 +116,12 @@ pub fn create_log(path: &Path) -> Result<File> {
     check_file(path)?;
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
-    nofollow(&mut options);
-    Ok(options.open(path)?)
+    nofollow_nonblock(&mut options);
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(refused(path, "is not a regular file"));
+    }
+    Ok(file)
 }
 
 /// Fails on the first symlink under `dir` (bounded walk); a missing `dir` is fine.
@@ -183,6 +204,19 @@ mod tests {
         fs::create_dir_all(&saves).unwrap();
         fs::create_dir_all(&outside).unwrap();
         (saves, outside)
+    }
+
+    #[test]
+    fn planted_fifo_never_blocks() {
+        let (saves, _) = dirs("fifo");
+        let fifo = saves.join("level.dat");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: c is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(open_read(&fifo).is_err());
+        assert!(write_file(&fifo, b"x").is_err());
+        assert!(create_log(&fifo).is_err());
+        let _ = fs::remove_dir_all(saves.parent().unwrap());
     }
 
     #[test]
