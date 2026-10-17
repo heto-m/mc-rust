@@ -109,6 +109,16 @@ pub struct BridgeConfig {
     pub http_hosts: Vec<String>,
     /// The proxy's port; [`crate::Bridge::start`] fills it.
     pub proxy_port: Option<u16>,
+    /// The JVM's AOT cache; `None` runs without one.
+    pub aot: Option<AotSettings>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AotSettings {
+    /// Caches and recordings, one set of files per key.
+    pub dir: PathBuf,
+    /// Runs `<helper> --jvm-aot-create <dir> <key>` (see [`mcr_jvm::aot::CREATE_ARG`]) after a recording.
+    pub helper: PathBuf,
 }
 
 impl BridgeConfig {
@@ -116,6 +126,9 @@ impl BridgeConfig {
     pub fn make_absolute(&mut self) -> std::io::Result<()> {
         self.cache_dir = std::path::absolute(&self.cache_dir)?;
         self.game_dir = std::path::absolute(&self.game_dir)?;
+        if let Some(aot) = &mut self.aot {
+            aot.dir = std::path::absolute(&aot.dir)?;
+        }
         for jar in &mut self.mods {
             *jar = std::path::absolute(&*jar)?;
         }
@@ -139,6 +152,7 @@ impl BridgeConfig {
                 .map(|h| (*h).to_owned())
                 .collect(),
             proxy_port: None,
+            aot: None,
         }
     }
 }
@@ -146,6 +160,8 @@ impl BridgeConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchPlan {
     pub options_class_path: Vec<PathBuf>,
+    /// Jars Fabric loads besides the class path: the bridge and the mods.
+    pub mod_jars: Vec<PathBuf>,
     pub max_heap: String,
     pub properties: Vec<String>,
     pub args: Vec<String>,
@@ -181,12 +197,13 @@ pub fn plan(
 ) -> Result<LaunchPlan, BridgeError> {
     let boot_jar = config.cache_dir.join(BOOT_JAR);
     let bridge_jar = config.cache_dir.join(BRIDGE_JAR);
+    // Knot loads the game from fabric.gameJarPath; on the class path its signed manifest costs AOT recording 9 s.
     let mut class_path = vec![boot_jar.clone()];
     class_path.extend(manifest.class_path.iter().cloned());
-    class_path.push(manifest.game_jar.clone());
 
     let mut mods = vec![bridge_jar];
     mods.extend(config.mods.iter().cloned());
+    let mod_jars = mods.clone();
     let natives = utf8(&manifest.natives_dir)?;
     let game_dir = &config.game_dir;
     let mut properties = vec![
@@ -247,6 +264,7 @@ pub fn plan(
 
     Ok(LaunchPlan {
         options_class_path: class_path,
+        mod_jars,
         max_heap: config.max_heap.clone(),
         properties,
         args,
@@ -309,9 +327,12 @@ mod tests {
                 "/c/java/mcr-boot.jar",
                 "/c/fabric/libraries/a.jar",
                 "/c/fabric/libraries/b.jar",
-                "/c/versions/26.3/client.jar"
             ]
             .map(PathBuf::from)
+        );
+        assert_eq!(
+            p.mod_jars,
+            ["/c/java/mcr-bridge.jar", "/m/modmenu.jar"].map(PathBuf::from)
         );
         assert_eq!(
             p.properties,

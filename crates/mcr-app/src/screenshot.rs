@@ -194,9 +194,39 @@ fn shell_bench(shell: &mut crate::shell::Shell, frames: u32) {
     }
 }
 
+/// Unpaced frames until `secs` after `origin` (joining, or the title screen), printing the frame rate of
+/// every second and at 5, 15, 30 and 60 s (the mean of the seconds either side).
+fn shell_timeline(shell: &mut crate::shell::Shell, secs: u32, origin: Instant) {
+    shell.set_mod_uncapped(true);
+    let mut per_second = vec![0u32; secs as usize];
+    let mut last = Instant::now();
+    loop {
+        let now = Instant::now();
+        let Some(slot) = per_second.get_mut(now.duration_since(origin).as_secs() as usize) else {
+            break;
+        };
+        *slot += 1;
+        shell.advance((now - last).as_secs_f32());
+        last = now;
+        shell.frame();
+    }
+    let list: Vec<String> = per_second.iter().map(u32::to_string).collect();
+    println!("timeline fps per second: {}", list.join(" "));
+    let marks: Vec<String> = [5usize, 15, 30, 60]
+        .into_iter()
+        .filter(|&t| t < per_second.len())
+        .map(|t| {
+            let around = &per_second[t - 1..(t + 1).min(per_second.len())];
+            let fps = around.iter().sum::<u32>() / around.len() as u32;
+            format!("{t}s {fps}")
+        })
+        .collect();
+    println!("timeline: {}", marks.join(", "));
+}
+
 const JAVA_FADE: Duration = Duration::from_secs(3);
 
-pub fn run_shell(opts: &crate::cli::Options, out: &Path) -> Result<()> {
+pub fn run_shell(opts: &crate::cli::Options, out: &Path, launched: Instant) -> Result<()> {
     let (width, height) = opts.size;
     let mut config = world_setup::renderer_config(opts, RendererConfig::default());
     let started = crate::mods::startup(opts)?;
@@ -216,6 +246,7 @@ pub fn run_shell(opts: &crate::cli::Options, out: &Path) -> Result<()> {
         renderer,
         mod_host.as_ref().map(crate::mods::ModHost::net),
         started.app,
+        launched,
     );
     if let Some(host) = mod_host {
         host.finish();
@@ -229,6 +260,7 @@ fn shell_frames(
     renderer: Renderer,
     mod_net: Option<crate::mods::ModNet>,
     mods: crate::mods_ui::ModsApp,
+    launched: Instant,
 ) -> Result<()> {
     use crate::shell::{Shell, ShellConfig};
     let (width, height) = opts.size;
@@ -258,6 +290,7 @@ fn shell_frames(
     let started = Instant::now();
     let mut last = Instant::now();
     let mut ready_ticks: Option<u64> = None;
+    let mut ready_at: Option<Instant> = None;
     let mut frames = 0u32;
     let mut frame_times: Vec<f32> = Vec::new();
     let mut settled_at: Option<Instant> = None;
@@ -271,6 +304,7 @@ fn shell_frames(
             && let Some(play) = &shell.play
         {
             ready_ticks = Some(play.ticks);
+            ready_at = Some(Instant::now());
             shell.reset_mod_stats();
             println!(
                 "ready: {} ticks, {:.2}s since start",
@@ -294,6 +328,12 @@ fn shell_frames(
         }
         if settled_at.is_none() && shell.mods_settled() {
             settled_at = Some(Instant::now());
+            if opts.mods.is_some() {
+                println!(
+                    "title: Java's GUI shown {:.2}s after launch",
+                    launched.elapsed().as_secs_f32()
+                );
+            }
         }
         // Java's title screen fades its widgets in over two seconds.
         let java_ready = opts.mods.is_none() || settled_at.is_some_and(|t| t.elapsed() > JAVA_FADE);
@@ -319,6 +359,10 @@ fn shell_frames(
     }
     for _ in 0..3 {
         shell.frame();
+    }
+    if let Some(secs) = opts.bench_timeline {
+        let origin = ready_at.or(settled_at).unwrap_or(started);
+        shell_timeline(&mut shell, secs, origin);
     }
     if opts.bench_frames > 0 {
         shell_bench(&mut shell, opts.bench_frames);

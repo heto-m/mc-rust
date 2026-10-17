@@ -54,6 +54,8 @@ pub struct JvmConfig {
     pub boot_class: String,
     pub args: Vec<String>,
     pub host_call: Option<HostCallFn>,
+    /// How long [`JavaVm::join`] waits for `DestroyJavaVM`, which also writes an AOT recording.
+    pub destroy_timeout: Duration,
 }
 
 impl JvmConfig {
@@ -64,6 +66,7 @@ impl JvmConfig {
             boot_class: DEFAULT_BOOT_CLASS.into(),
             args: Vec::new(),
             host_call: None,
+            destroy_timeout: DESTROY_TIMEOUT,
         }
     }
 }
@@ -76,6 +79,7 @@ impl fmt::Debug for JvmConfig {
             .field("boot_class", &self.boot_class)
             .field("args", &self.args)
             .field("host_call", &self.host_call.is_some())
+            .field("destroy_timeout", &self.destroy_timeout)
             .finish()
     }
 }
@@ -84,7 +88,7 @@ impl fmt::Debug for JvmConfig {
 pub enum DestroyOutcome {
     Destroyed,
     Failed(i32),
-    /// `DestroyJavaVM` did not return within [`DESTROY_TIMEOUT`]; the thread is left behind.
+    /// `DestroyJavaVM` did not return within [`JvmConfig::destroy_timeout`]; the thread is left behind.
     Leaked,
 }
 
@@ -104,6 +108,7 @@ pub enum VmOutcome {
 pub struct JavaVm {
     events: Receiver<Event>,
     thread: Option<JoinHandle<()>>,
+    destroy_timeout: Duration,
 }
 
 impl JavaVm {
@@ -123,6 +128,7 @@ impl JavaVm {
         let (events_tx, events) = mpsc::channel();
         EXIT.lock().unwrap_or_else(PoisonError::into_inner).events = Some(events_tx.clone());
         let (created_tx, created_rx) = mpsc::sync_channel(1);
+        let destroy_timeout = config.destroy_timeout;
         let boot_class = config.boot_class;
         let args = config.args;
         let thread = std::thread::Builder::new()
@@ -134,6 +140,7 @@ impl JavaVm {
             Ok(Ok(())) => Ok(Self {
                 events,
                 thread: Some(thread),
+                destroy_timeout,
             }),
             Ok(Err(e)) => {
                 let _ = thread.join();
@@ -148,7 +155,7 @@ impl JavaVm {
     }
 
     /// Blocks until Java exits, or until the boot call returns and the VM is destroyed (bounded by
-    /// [`DESTROY_TIMEOUT`]).
+    /// [`JvmConfig::destroy_timeout`]).
     pub fn join(mut self) -> VmOutcome {
         let mut boot = None;
         loop {
@@ -157,7 +164,7 @@ impl JavaVm {
                     .events
                     .recv()
                     .map_err(|_| RecvTimeoutError::Disconnected),
-                Some(_) => self.events.recv_timeout(DESTROY_TIMEOUT),
+                Some(_) => self.events.recv_timeout(self.destroy_timeout),
             };
             match event {
                 Ok(Event::Exit(code)) => return VmOutcome::Exited { code },
@@ -178,7 +185,8 @@ impl JavaVm {
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     eprintln!(
-                        "mcr-jvm: DestroyJavaVM did not finish in {DESTROY_TIMEOUT:?}; leaking the VM"
+                        "mcr-jvm: DestroyJavaVM did not finish in {:?}; leaking the VM",
+                        self.destroy_timeout
                     );
                     return VmOutcome::Finished {
                         boot: boot.unwrap_or(Err(JvmError::ThreadLost)),

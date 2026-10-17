@@ -1,5 +1,6 @@
 //! Embedded HotSpot JVM host. Keep it free of Minecraft knowledge.
 
+pub mod aot;
 mod dev;
 mod doorbell;
 mod error;

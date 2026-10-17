@@ -542,7 +542,33 @@ fn pin_mmap_threshold() {
     }
 }
 
+/// The detached `--jvm-aot-create <dir> <key>` helper that a recording session starts on exit.
+fn aot_helper() -> Option<i32> {
+    use mcr_modbridge::aot;
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() != Some(aot::CREATE_ARG) {
+        return None;
+    }
+    let (Some(dir), Some(key)) = (args.next(), args.next()) else {
+        return Some(2);
+    };
+    aot::lower_priority();
+    match aot::AotCache::open(dir, &key).and_then(|c| c.create()) {
+        Ok(outcome) => {
+            eprintln!("{outcome:?}");
+            Some(0)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            Some(1)
+        }
+    }
+}
+
 fn main() -> Result<()> {
+    if let Some(code) = aot_helper() {
+        std::process::exit(code);
+    }
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pin_mmap_threshold();
     let launched = Instant::now();
@@ -559,7 +585,7 @@ fn main() -> Result<()> {
     }
     if let Some(out) = opts.screenshot.clone() {
         if opts.world.is_none() && !opts.synthetic {
-            return screenshot::run_shell(&opts, &out);
+            return screenshot::run_shell(&opts, &out, launched);
         }
         return screenshot::run(&opts, &out, launched);
     }

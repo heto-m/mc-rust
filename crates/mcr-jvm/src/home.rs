@@ -46,6 +46,12 @@ impl JavaHome {
         self.major
     }
 
+    pub fn java(&self) -> PathBuf {
+        self.path
+            .join("bin")
+            .join(if cfg!(windows) { "java.exe" } else { "java" })
+    }
+
     pub fn libjvm(&self) -> PathBuf {
         if cfg!(windows) {
             self.path.join("bin/server/jvm.dll")

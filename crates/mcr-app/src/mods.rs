@@ -17,6 +17,8 @@ use crate::cli::Options;
 use crate::mods_ui::ModsApp;
 
 pub const CACHE_DIR: &str = ".cache";
+/// The JVM's AOT caches, under the game dir.
+pub const AOT_DIR: &str = "cache/jvm-aot";
 
 /// The headless Fabric boot running next to the native client; Java mirrors every connection.
 pub struct ModHost {
@@ -24,6 +26,19 @@ pub struct ModHost {
     thread: JoinHandle<Bridge>,
     net: ModNet,
     tracker: Arc<SessionTracker>,
+    recording: bool,
+}
+
+fn aot_line(plan: &mcr_modbridge::aot::AotPlan) -> String {
+    use mcr_modbridge::aot::AotPlan;
+    match plan {
+        AotPlan::Use(path) => format!("JVM AOT cache: {}", path.display()),
+        AotPlan::Record(_) => {
+            "JVM AOT cache: recording this session; it is built after you quit".to_owned()
+        }
+        AotPlan::Building => "JVM AOT cache: still being built, starting without it".to_owned(),
+        AotPlan::Off(why) => format!("JVM AOT cache off: {why}"),
+    }
 }
 
 /// What the shell needs from the mod host: hooks for each connection and Java's join requests.
@@ -174,6 +189,12 @@ impl ModHost {
         config.compose = true;
         config.http_hosts.extend(plan.http_hosts.iter().cloned());
         config.max_heap = format!("{}m", plan.heap_mib);
+        config.aot = std::env::current_exe()
+            .ok()
+            .map(|helper| mcr_modbridge::AotSettings {
+                dir: opts.game_dir.join(AOT_DIR),
+                helper,
+            });
         let session = &plan.session;
         let tracker = Arc::new(SessionTracker::begin(session.clone()));
         let fail = |e: anyhow::Error| {
@@ -190,6 +211,10 @@ impl ModHost {
         let mut bridge = Bridge::start(config)
             .context("starting the Fabric bridge")
             .map_err(fail)?;
+        let recording = bridge.aot_plan().is_some_and(|p| p.records());
+        if let Some(line) = bridge.aot_plan().map(aot_line) {
+            eprintln!("[mods] {line}");
+        }
         let frames = bridge.frames();
         if let Some(f) = &frames {
             renderer.set_external(Some(Box::new(f.clone())));
@@ -243,6 +268,7 @@ impl ModHost {
             thread,
             net,
             tracker,
+            recording,
         })
     }
 
@@ -268,6 +294,17 @@ impl ModHost {
         let outcome = bridge.shutdown(SHUTDOWN_TIMEOUT);
         self.tracker.finish(&outcome);
         eprintln!("[mods] shutdown: {outcome:?}");
+        if self.recording {
+            let kept = matches!(outcome, mcr_modbridge::ShutdownOutcome::Clean { .. });
+            eprintln!(
+                "[mods] JVM AOT recording {}",
+                if kept {
+                    "kept; building the cache in the background"
+                } else {
+                    "dropped: Java did not stop cleanly"
+                }
+            );
+        }
         if outcome.needs_process_exit() {
             std::process::exit(0);
         }

@@ -28,6 +28,7 @@ pub struct Options {
     pub bench_frames: u32,
     pub bench_views: Vec<Camera>,
     pub bench_modes: bool,
+    pub bench_timeline: Option<u32>,
     pub frames: u32,
     pub frame_step: Option<Camera>,
     pub occlusion: bool,
@@ -59,6 +60,7 @@ impl Default for Options {
             bench_frames: 0,
             bench_views: Vec::new(),
             bench_modes: false,
+            bench_timeline: None,
             frames: 0,
             frame_step: None,
             occlusion: true,
@@ -94,7 +96,7 @@ pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect ho
            [--jar <client.jar>] [--screenshot out.png [--camera x,y,z,yaw,pitch] [--size WxH] [--frames N [--frame-step dx,dy,dz,dyaw,dpitch]]]
            [--autofly blocks_per_s] [--bench frames [--bench-view x,y,z,yaw,pitch]... [--bench-modes]]
        connect mode: [--name <name>] [--game-dir dir] [--assets-dir dir] [--autopilot script]
-           [--screenshot out.png [--after-ticks N]]
+           [--screenshot out.png [--after-ticks N] [--bench N] [--bench-timeline secs]]
        soak: --connect host[:port] --soak secs runs offscreen, rejoins after kicks and prints soak-stats every 10 s
        mods: [--mods <dir>] uses <dir> instead of <game-dir>/mods; enabled mods boot under Fabric (needs `cargo xtask fabric-fetch`)
 camera angles are degrees; yaw 0 looks toward -Z, positive turns left";
@@ -171,6 +173,15 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                 opts.bench_frames = value(&arg, &mut args)?
                     .parse()
                     .map_err(|_| "--bench needs a frame count")?;
+            }
+            "--bench-timeline" => {
+                opts.bench_timeline = Some(
+                    value(&arg, &mut args)?
+                        .parse()
+                        .ok()
+                        .filter(|s| (1..=3600).contains(s))
+                        .ok_or("--bench-timeline needs 1..=3600 seconds")?,
+                );
             }
             "--frames" => {
                 opts.frames = value(&arg, &mut args)?
@@ -264,6 +275,15 @@ mod tests {
         assert_eq!(o.bench_frames, 100);
         assert_eq!(o.bench_views.len(), 2);
         assert_eq!(o.bench_views[1].position.y, 20.0);
+    }
+
+    #[test]
+    fn bench_timeline_seconds() {
+        let o = parse_str("--screenshot o.png --bench-timeline 62").unwrap();
+        assert_eq!(o.bench_timeline, Some(62));
+        for bad in ["0", "3601", "x"] {
+            assert!(parse_str(&format!("--screenshot o.png --bench-timeline {bad}")).is_err());
+        }
     }
 
     #[test]

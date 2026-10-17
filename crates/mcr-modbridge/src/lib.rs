@@ -31,13 +31,16 @@ pub use events::BridgeEvent;
 pub use frame::Pipelining;
 pub use input::ModInput;
 pub use launch::{
-    BOOT_JAR, BRIDGE_JAR, BridgeConfig, LAUNCH_MANIFEST, LaunchManifest, LaunchPlan, plan,
-    prepare_game_dir,
+    AotSettings, BOOT_JAR, BRIDGE_JAR, BridgeConfig, LAUNCH_MANIFEST, LaunchManifest, LaunchPlan,
+    plan, prepare_game_dir,
 };
+pub use mcr_jvm::aot;
 pub use net::NetLink;
 pub use pacer::{FRAME_RATE, TICK_RATE, TickClock};
 
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+/// `DestroyJavaVM` writes an AOT recording first, which takes seconds for a modded session.
+pub const RECORDING_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
@@ -102,6 +105,14 @@ pub struct Bridge {
     frames: Option<ModFrames>,
     _proxy: proxy::HttpProxy,
     input: ModInput,
+    aot: Option<Warmup>,
+}
+
+#[derive(Debug)]
+struct Warmup {
+    cache: aot::AotCache,
+    plan: aot::AotPlan,
+    helper: PathBuf,
 }
 
 impl Bridge {
@@ -139,8 +150,19 @@ impl Bridge {
             shared.control.writer().ok_or(BridgeError::Busy)?,
         ));
 
-        let mut jvm = JvmConfig::new(home, plan.jvm_options());
+        let mut options = plan.jvm_options();
+        let warmup = config
+            .aot
+            .as_ref()
+            .and_then(|settings| warmup(settings, &home, &plan));
+        if let Some(w) = &warmup {
+            options.extra.extend(w.plan.options());
+        }
+        let mut jvm = JvmConfig::new(home, options);
         jvm.args = plan.args.clone();
+        if warmup.as_ref().is_some_and(|w| w.plan.records()) {
+            jvm.destroy_timeout = RECORDING_SHUTDOWN_TIMEOUT;
+        }
         tracing::info!(
             mods = config.mods.len(),
             loader = manifest.loader_version,
@@ -148,6 +170,18 @@ impl Bridge {
         );
         std::env::set_current_dir(&config.game_dir)?;
         let vm = JavaVm::start(jvm)?;
+        if let Some(Warmup {
+            cache,
+            plan: aot::AotPlan::Use(path),
+            ..
+        }) = &warmup
+            && aot::mapped(path) == Some(false)
+        {
+            tracing::warn!("the JVM refused its AOT cache; the next start records a new one");
+            if let Err(e) = cache.reject() {
+                tracing::warn!("removing the AOT cache: {e}");
+            }
+        }
         let watcher = std::thread::Builder::new()
             .name("mcr-bridge-vm".into())
             .spawn(move || {
@@ -188,6 +222,7 @@ impl Bridge {
             frames,
             _proxy: http,
             input,
+            aot: warmup,
         })
     }
 
@@ -195,6 +230,11 @@ impl Bridge {
     /// on the renderer with `set_external`.
     pub fn frames(&self) -> Option<ModFrames> {
         self.frames.clone()
+    }
+
+    /// What this session does with the JVM's AOT cache, when one is configured.
+    pub fn aot_plan(&self) -> Option<&aot::AotPlan> {
+        self.aot.as_ref().map(|w| &w.plan)
     }
 
     /// The packet bridge; one per process like the VM.
@@ -252,7 +292,20 @@ impl Bridge {
 
     /// An exited or crashed VM is frozen for good; the outcome then asks the caller to end the process.
     pub fn shutdown(mut self, timeout: Duration) -> ShutdownOutcome {
+        let outcome = self.stop_vm(timeout);
+        if let Some(w) = self.aot.take() {
+            w.finish(matches!(outcome, ShutdownOutcome::Clean { .. }));
+        }
+        outcome
+    }
+
+    fn stop_vm(&mut self, timeout: Duration) -> ShutdownOutcome {
         let start = Instant::now();
+        let timeout = if self.aot.as_ref().is_some_and(|w| w.plan.records()) {
+            timeout.max(RECORDING_SHUTDOWN_TIMEOUT)
+        } else {
+            timeout
+        };
         if self.frames.take().is_some()
             && let Ok(backend) = gpu::backend()
         {
@@ -291,6 +344,74 @@ impl Bridge {
             if let Some(event) = self.next_event((deadline - now).min(Duration::from_millis(50))) {
                 drop(event);
             }
+        }
+    }
+}
+
+/// Picks this session's AOT plan; any failure only means starting without the cache.
+fn warmup(settings: &AotSettings, home: &mcr_jvm::JavaHome, plan: &LaunchPlan) -> Option<Warmup> {
+    let started = Instant::now();
+    let options: Vec<String> = match plan.jvm_options().to_strings() {
+        Ok(all) => all.into_iter().filter(|o| !o.starts_with("-D")).collect(),
+        Err(e) => {
+            tracing::warn!("AOT cache off: {e}");
+            return None;
+        }
+    };
+    let inputs = aot::KeyInputs {
+        java_home: home.path(),
+        options: &options,
+        class_path: &plan.options_class_path,
+        jars: &plan.mod_jars,
+        extra: &format!("bridge {BRIDGE_VERSION}"),
+    };
+    let result = aot::AotCache::new(&settings.dir, &inputs).and_then(|cache| {
+        let plan_now = cache.plan();
+        cache.begin(&plan_now)?;
+        if plan_now.records() {
+            cache.write_job(&home.java(), &options, &plan.options_class_path)?;
+        }
+        Ok((cache, plan_now))
+    });
+    match result {
+        Ok((cache, aot_plan)) => {
+            tracing::info!(
+                key = cache.key(),
+                plan = ?aot_plan,
+                ms = started.elapsed().as_millis() as u64,
+                "JVM AOT cache"
+            );
+            Some(Warmup {
+                cache,
+                plan: aot_plan,
+                helper: settings.helper.clone(),
+            })
+        }
+        Err(e) => {
+            tracing::warn!("AOT cache off: {e}");
+            None
+        }
+    }
+}
+
+impl Warmup {
+    /// Keeps a finished recording and starts the helper that builds the cache from it.
+    fn finish(self, clean: bool) {
+        if self.plan.records() {
+            match self.cache.end_recording(clean) {
+                Ok(true) => {
+                    tracing::info!("AOT recording kept; building the cache in the background")
+                }
+                Ok(false) => {
+                    tracing::info!("AOT recording dropped: the session did not end cleanly")
+                }
+                Err(e) => tracing::warn!("AOT recording: {e}"),
+            }
+        }
+        if self.cache.needs_create()
+            && let Err(e) = self.cache.spawn_create(&self.helper)
+        {
+            tracing::warn!("starting the AOT cache build: {e}");
         }
     }
 }

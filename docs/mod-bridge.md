@@ -34,7 +34,7 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
 - **Embedding.** `mcr-jvm` loads `libjvm` at runtime (`libloading`, `jni-sys` types) from a located JDK 25
   (`MCR_JAVA_HOME`, `.cache/tools/jdk25`, `JAVA_HOME`) and calls `JNI_CreateJavaVM` on a dedicated 16 MiB-stack
   thread (never the primordial thread). JNI is used only to boot: `FindClass` + `CallStaticVoidMethod` on
-  `McrBoot.main(long table, String[] args)`. Flags: `-Djava.class.path=<boot jar + loader + libs + client.jar>`,
+  `McrBoot.main(long table, String[] args)`. Flags: `-Djava.class.path=<boot jar + loader + libs>` (Knot loads `client.jar` from `fabric.gameJarPath`),
   `--enable-native-access=ALL-UNNAMED`, `-Xrs`, `-XX:+UseZGC`, `-XX:+UseCompactObjectHeaders`, `-Xmx` from
   settings (default 2G), `-Dfabric.gameJarPath`, `-Dfabric.addMods`, `-Dorg.lwjgl.librarypath`, plus `exit`/`abort`
   hooks so `System.exit` from a mod becomes an orderly mcr shutdown. `Bridge::start` makes every path absolute,
@@ -55,6 +55,22 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
   blocking `awaitFrame` downcall. The mcr main thread never enters Java, so safepoints never stop it. A GC
   pause only delays the Java frame, and the render thread waits for that frame's slots (ZGC pauses are under 1 ms).
   The JVM cannot be re-created in-process, so changing the mod set requires restarting `mcr`.
+- **Warm-up (AOT cache).** Java starts from a JDK 25 AOT cache per mod set (`mcr_jvm::aot`), stored in
+  `<game dir>/cache/jvm-aot/<key>.aot`. The key hashes the JDK, the JVM options other than `-D`, the class path
+  (size and modification time) and every mod jar's content, plus `BRIDGE_VERSION`. The first session of a mod set
+  records (`-XX:AOTMode=record`; about 1 s slower to the title, and 4–5 s more at quit while `DestroyJavaVM`
+  writes the recording). After a clean quit mcr starts itself as a detached helper (`mcr --jvm-aot-create <dir>
+  <key>`, nice 10, 3–4 s for 29 mods) that runs `java -XX:AOTMode=create` and renames the result into place.
+  A session that starts while the helper runs, or before a recording is built, runs without the cache. HotSpot
+  validates the cache and ignores a mismatched one. On Linux mcr also checks `/proc/self/maps` and deletes a
+  cache the JVM refused, so the next session records again. Two caches are kept (least recently used goes), a
+  cache over 1 GiB is dropped, and a key that failed three times stops recording. `MCR_JVM_AOT=off` disables
+  it. The cache holds the classes of all loaders, Knot's included, in their final, mixin-transformed form. A
+  class is taken from it only when its bytes match, so mixins still run but parsing and verification are
+  skipped. With ZGC, JDK 25 neither links classes ahead of time nor caches heap objects. Lambdas and
+  other hidden classes from Knot, signed jars (Fabric Loader) and pre-Java-6 class files are not cached.
+  With 29 mods the cache saves about 0.8 s of 11.1 s to the title screen (1.1 s with a cold page cache) and
+  does not change the frame rate after joining (numbers in the `mod-jvm-warmup` design).
 
 ## Seams (vanilla 26.3 classes)
 
@@ -122,7 +138,9 @@ and its submits of Java's work, and Java's frame phases (pre, tick, extract, wor
 in `FSTATE_PROF`). It also shows the Rust time in Java's GPU downcalls, and passes, draws, submits and uploads
 per Java frame. Java samples its render thread with JFR (`McrProfiler`) and logs each mod's share every 10
 seconds. `MCR_MOD_PROFILE=frame` skips the sampler, which slows Java down. `mcr --screenshot out.png --bench N`, alone or with `--mods` and `--connect … --after-ticks T`, runs N
-unpaced frames offscreen and prints the totals.
+unpaced frames offscreen and prints the totals. `--bench-timeline S` instead runs unpaced frames until S seconds
+after joining (or after Java's title screen appears) and prints the frame rate of every second; with `--mods`
+the shell flow also prints when Java's title screen appeared.
 
 Java's camera FOV over vanilla's (zoom mods, FOV effects mods add) reaches Rust as `FSTATE_FOV_SCALE`, clamped to
 0.02–4, and scales mcr's projection and mouse sensitivity while Java draws the world. The other way, `FrameBegin`

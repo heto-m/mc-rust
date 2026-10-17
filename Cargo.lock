@@ -1806,6 +1806,7 @@ dependencies = [
  "jni-sys 0.4.1",
  "libc",
  "libloading",
+ "sha1 0.10.7",
  "thiserror 2.0.21",
 ]
 
