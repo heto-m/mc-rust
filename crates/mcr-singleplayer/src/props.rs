@@ -226,7 +226,7 @@ const MAX_ENTRIES: usize = 1000;
 pub fn read_properties_file(path: &std::path::Path) -> Option<String> {
     use std::io::Read;
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
+    crate::safe::open_read(path)
         .ok()?
         .take(MAX_PROPERTIES_BYTES as u64)
         .read_to_end(&mut bytes)

@@ -8,6 +8,7 @@ pub mod level;
 pub mod memory;
 pub mod props;
 pub mod provision;
+pub mod safe;
 pub mod server;
 pub mod stale;
 

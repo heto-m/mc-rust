@@ -178,6 +178,23 @@ mod tests {
         assert_eq!(folder_for("New World", taken), "New World (2)");
         assert_eq!(folder_for("New World (1)", taken), "New World (2)");
         assert_eq!(folder_for(&"x".repeat(300), none).chars().count(), 200);
+        for hostile in [
+            "..",
+            ".",
+            "../x",
+            "a/../../b",
+            "..\\..\\c",
+            "/etc",
+            "C:\\x",
+            "a\0b",
+        ] {
+            let folder = folder_for(hostile, none);
+            assert!(valid_folder(&folder), "{hostile:?} -> {folder:?}");
+            assert!(
+                !folder.contains(['/', '\\', '.']),
+                "{hostile:?} -> {folder:?}"
+            );
+        }
     }
 
     #[test]

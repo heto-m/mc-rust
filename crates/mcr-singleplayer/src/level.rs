@@ -149,7 +149,7 @@ pub fn parse_level(bytes: &[u8]) -> Result<LevelInfo> {
 }
 
 fn read_bounded(path: &Path, max: u64) -> Result<Vec<u8>> {
-    let file = fs::File::open(path)?;
+    let file = crate::safe::open_read(path)?;
     let mut bytes = Vec::new();
     file.take(max + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > max {
@@ -176,10 +176,8 @@ pub fn rename(world: &Path, name: &str) -> Result<()> {
     };
     data.insert("LevelName", Value::String(name));
     let out = write_disk(&root_name, &root, Compression::Gzip)?;
-    let tmp = world.join("level.dat.mcr-tmp");
-    fs::write(&tmp, out)?;
-    fs::copy(&path, world.join("level.dat_old"))?;
-    fs::rename(&tmp, &path)?;
+    crate::safe::write_file(&world.join("level.dat_old"), &bytes)?;
+    crate::safe::write_file(&path, &out)?;
     Ok(())
 }
 
@@ -310,16 +308,10 @@ pub fn scan(saves: &Path) -> Vec<WorldSummary> {
     worlds
 }
 
-/// Removes a world folder; `folder` must be a plain name of a directory directly under `saves`.
+/// Removes a world folder: a real directory directly under `saves`. `remove_dir_all` unlinks
+/// symlinks inside it without following them.
 pub fn delete_world(saves: &Path, folder: &str) -> Result<()> {
-    if !valid_folder(folder) {
-        return Err(SpError::Refused(format!("not a world folder: {folder}")));
-    }
-    let path = saves.join(folder);
-    let meta = fs::symlink_metadata(&path)?;
-    if !meta.is_dir() {
-        return Err(SpError::Refused(format!("not a world folder: {folder}")));
-    }
+    let path = crate::safe::checked_world(saves, folder)?;
     fs::remove_dir_all(&path)?;
     Ok(())
 }
@@ -433,6 +425,45 @@ pub(crate) mod tests {
         assert!(delete_world(&saves, "..").is_err());
         assert!(delete_world(&saves, "usercache.json").is_err());
         let _ = fs::remove_dir_all(&saves);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_and_rename_stay_inside_the_world() {
+        use std::os::unix::fs::symlink;
+        let root = temp_dir("symlinked");
+        let saves = root.join("saves");
+        let outside = root.join("outside");
+        fs::create_dir_all(saves.join("w/region")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("precious"), "keep").unwrap();
+        fs::write(saves.join("w/level.dat"), level_dat(modern("W", 1))).unwrap();
+        symlink(&outside, saves.join("w/region/escape")).unwrap();
+        symlink(outside.join("precious"), saves.join("w/level.dat_old")).unwrap();
+        assert!(
+            rename(&saves.join("w"), "Renamed").is_err(),
+            "symlinked level.dat_old"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("precious")).unwrap(),
+            "keep"
+        );
+        symlink(&outside, saves.join("linked")).unwrap();
+        assert!(delete_world(&saves, "linked").is_err());
+        assert!(outside.join("precious").exists());
+        delete_world(&saves, "w").unwrap();
+        assert!(!saves.join("w").exists());
+        assert_eq!(
+            fs::read_to_string(outside.join("precious")).unwrap(),
+            "keep"
+        );
+        fs::create_dir_all(saves.join("v")).unwrap();
+        symlink(outside.join("precious"), saves.join("v/level.dat")).unwrap();
+        assert!(
+            read_level(&saves.join("v")).is_err(),
+            "level.dat is never read through a link"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

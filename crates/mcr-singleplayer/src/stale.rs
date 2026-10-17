@@ -43,7 +43,7 @@ pub fn world_marker(world: &Path) -> std::ffi::OsString {
 /// The pid and launch token from a pid file; the file comes from the world folder and is untrusted.
 pub fn read_pid_file(path: &Path) -> Option<(u32, Option<String>)> {
     let mut text = String::new();
-    fs::File::open(path)
+    crate::safe::open_read(path)
         .ok()?
         .take(128)
         .read_to_string(&mut text)
@@ -191,7 +191,7 @@ pub fn terminate(_pid: u32) -> bool {
 #[cfg(target_os = "linux")]
 pub fn lock_owner(path: &Path) -> Option<u32> {
     use std::os::fd::AsRawFd;
-    let file = fs::File::open(path).ok()?;
+    let file = crate::safe::open_read(path).ok()?;
     // SAFETY: flock is plain data; an all-zero value is valid before the fields are set.
     let mut lock: libc::flock = unsafe { std::mem::zeroed() };
     lock.l_type = libc::F_WRLCK as libc::c_short;

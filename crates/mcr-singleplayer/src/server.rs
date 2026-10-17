@@ -190,8 +190,8 @@ impl Log {
     fn open(path: &Path) -> Self {
         let out = path
             .parent()
-            .map_or(Ok(()), fs::create_dir_all)
-            .and_then(|()| File::create(path))
+            .map_or(Ok(()), crate::safe::ensure_dir)
+            .and_then(|()| crate::safe::create_log(path))
             .map(LineWriter::new)
             .map_err(|e| tracing::warn!("server log {}: {e}", path.display()))
             .ok();
@@ -294,7 +294,7 @@ fn send_console(stdin: &mut Option<ChildStdin>, line: &str) {
 }
 
 fn spawn(spec: &Spec) -> io::Result<Child> {
-    fs::create_dir_all(&spec.cwd)?;
+    crate::safe::ensure_dir(&spec.cwd).map_err(io::Error::other)?;
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
         .current_dir(&spec.cwd)
@@ -320,7 +320,10 @@ fn supervise(
         }
     };
     if let Some(path) = &spec.pid_file {
-        let _ = fs::write(path, format!("{} {}\n", child.id(), spec.token));
+        let pid = format!("{} {}\n", child.id(), spec.token);
+        if let Err(e) = crate::safe::write_file(path, pid.as_bytes()) {
+            tracing::warn!("server pid file: {e}");
+        }
     }
     let _ = started.send(Ok(child.id()));
     let log = Arc::new(Mutex::new(Log::open(&spec.log)));

@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use mcr_singleplayer::level::{self, Difficulty, GameMode, LevelInfo};
 use mcr_singleplayer::props::{self, LaunchProps, NewWorld, WorldType};
 use mcr_singleplayer::server::{Event, ManagedServer, STOP_GRACE, Spec, VanillaLaunch};
-use mcr_singleplayer::{Layout, java, memory, provision, stale};
+use mcr_singleplayer::{Layout, java, memory, provision, safe, stale};
 use mcr_ui::{CreateWorldSettings, Favicon, NewGameMode, WorldEntry, WorldPreset, WorldStore};
 
 pub const EULA_URL: &str = "https://aka.ms/MinecraftEULA";
@@ -97,7 +97,7 @@ impl WorldStore for FileWorlds {
         if self.busy.as_deref() == Some(folder) {
             return Err("the world is open".into());
         }
-        let world = self.layout.world(folder).ok_or("not a world folder")?;
+        let world = safe::checked_world(&self.layout.saves(), folder).map_err(|e| e.to_string())?;
         level::rename(&world, name).map_err(|e| e.to_string())
     }
 
@@ -203,23 +203,23 @@ fn prepare(
 ) -> Result<(Spec, String, u16), String> {
     let layout = &input.layout;
     let saves = layout.saves();
-    let (folder, level, created) = match &input.launch {
+    let refused = |e: mcr_singleplayer::SpError| format!("The world cannot be used: {e}");
+    let (folder, world_dir, server_dir, level, created) = match &input.launch {
         Launch::Existing(folder) => {
-            let world = layout.world(folder).ok_or("not a world folder")?;
+            let (world, server) = safe::open_world(&saves, folder, false).map_err(refused)?;
             let level =
                 level::read_level(&world).map_err(|e| format!("cannot read the world: {e}"))?;
-            (folder.clone(), Some(level), None)
+            (folder.clone(), world, server, Some(level), None)
         }
         Launch::New(s) => {
-            let world = new_world(s);
-            let folder =
-                mcr_singleplayer::layout::folder_for(&world.name, |c| saves.join(c).exists());
-            (folder, None, Some(world))
+            let new = new_world(s);
+            let folder = mcr_singleplayer::layout::folder_for(&new.name, |c| {
+                saves.join(c).symlink_metadata().is_ok()
+            });
+            let (world, server) = safe::open_world(&saves, &folder, true).map_err(refused)?;
+            (folder, world, server, None, Some(new))
         }
     };
-    let world_dir = layout.world(&folder).ok_or("not a world folder")?;
-    let server_dir = layout.server_dir(&folder).ok_or("not a world folder")?;
-    std::fs::create_dir_all(&server_dir).map_err(|e| format!("cannot create the world: {e}"))?;
     let _ = tx.send(Prep::Status("Checking the world…".into()));
     if stale::clear_stale(&world_dir, &server_dir).map_err(|e| e.to_string())? {
         println!("singleplayer: stopped a leftover server for {folder}");
@@ -255,7 +255,8 @@ fn prepare(
     let jar = std::path::absolute(&jar).unwrap_or(jar);
 
     let write = |name: &str, text: &str| {
-        std::fs::write(server_dir.join(name), text).map_err(|e| format!("cannot write {name}: {e}"))
+        safe::write_file(&server_dir.join(name), text.as_bytes())
+            .map_err(|e| format!("cannot write {name}: {e}"))
     };
     write(
         "eula.txt",
@@ -564,6 +565,7 @@ mod tests {
         let mut root = mcr_nbt::Compound::new();
         root.insert("Data", mcr_nbt::Value::Compound(data));
         let bytes = mcr_nbt::write_disk("", &root, mcr_nbt::Compression::Gzip).unwrap();
+        let bytes_for_link = bytes.clone();
         std::fs::write(world.join("level.dat"), bytes).unwrap();
         let mut store = FileWorlds::new(Layout::new(&dir));
         store.refresh();
@@ -579,6 +581,18 @@ mod tests {
         store.delete("One").unwrap();
         store.refresh();
         assert!(store.worlds().is_empty());
+        #[cfg(unix)]
+        {
+            let elsewhere = dir.join("elsewhere");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            std::fs::write(elsewhere.join("level.dat"), &bytes_for_link).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, dir.join("saves/Linked")).unwrap();
+            store.refresh();
+            assert!(store.worlds().is_empty(), "a symlinked world is not listed");
+            assert!(store.rename("Linked", "X").is_err());
+            assert!(store.delete("Linked").is_err());
+            assert!(elsewhere.join("level.dat").exists());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
