@@ -573,6 +573,8 @@ struct Report {
     java_steps: bool,
     java_turn: bool,
     mod_input: String,
+    perspective: String,
+    view_roll: f64,
 }
 
 fn reports(lines: &[String]) -> Vec<Report> {
@@ -600,6 +602,8 @@ fn reports(lines: &[String]) -> Vec<Report> {
                 java_steps: word(l, " java_steps ")? == "true",
                 java_turn: word(l, " java_turn ")? == "true",
                 mod_input: word(l, " mod input ")?,
+                perspective: word(l, " perspective ")?,
+                view_roll: word(l, " view_roll ")?.parse().ok()?,
             })
         })
         .collect()
@@ -750,6 +754,78 @@ fn rolled_mod_cameras_roll_mcrs_view() {
         (r[0].java_roll + 15.0).abs() < 0.5,
         "the view rolls opposite to the camera: {r:?}"
     );
+}
+
+/// Java's camera type leads mcr's perspective: F5 cycles it in Java, and a mod that takes F5 for its
+/// own cycle (like Shoulder Surfing) decides where mcr's camera goes.
+#[test]
+fn java_perspective_leads_mcrs_camera() {
+    let Some(live) = live() else {
+        return;
+    };
+    let script = "wait 200\nreport\ntap f5\nwait 20\nreport\ntap f5\nwait 20\nreport\ntap f5\nwait 20\nreport\n";
+    for (props, cycle) in [
+        (
+            &["-Dmcr.testmod.perspective=true"][..],
+            ["first", "front", "back", "first"],
+        ),
+        (&[][..], ["first", "back", "front", "first"]),
+    ] {
+        let dir = prepare(&format!("perspective-{}", props.len()));
+        live.send(&STAGE.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        let lines = run_client_with(&live, &dir, script, props, |line| {
+            if line.starts_with("ready:") {
+                join_commands()
+            } else {
+                Vec::new()
+            }
+        });
+        let r = reports(&lines);
+        eprintln!("{props:?}: {r:#?}");
+        assert_eq!(r.len(), 4, "{r:?}");
+        let seen: Vec<&str> = r.iter().map(|r| r.perspective.as_str()).collect();
+        assert_eq!(seen, cycle, "{props:?}");
+        for r in &r {
+            assert_eq!(r.java_camera, "none", "settled without a handoff: {r:?}");
+            let eye_z = r.pos[2];
+            match r.perspective.as_str() {
+                "first" => assert!((r.camera[2] - eye_z).abs() < 0.01, "{r:?}"),
+                "back" => assert!(r.camera[2] < eye_z - 2.0, "behind the player: {r:?}"),
+                _ => assert!(r.camera[2] > eye_z + 2.0, "in front of the player: {r:?}"),
+            }
+        }
+    }
+}
+
+/// A mod that rolls the level's bob pose (like Camera Overhaul) rolls mcr's view; vanilla's own bob
+/// pose reports no roll.
+#[test]
+fn pose_rolls_reach_mcrs_view() {
+    let Some(live) = live() else {
+        return;
+    };
+    for (props, want) in [(&["-Dmcr.testmod.poseRoll=true"][..], 10.0), (&[][..], 0.0)] {
+        let dir = prepare(&format!("pose-roll-{want}"));
+        live.send(&STAGE.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        let script = "wait 200\nreport\npress w\nwait 8\nreport\nrelease w\nwait 2\n";
+        let lines = run_client_with(&live, &dir, script, props, |line| {
+            if line.starts_with("ready:") {
+                join_commands()
+            } else {
+                Vec::new()
+            }
+        });
+        let r = reports(&lines);
+        eprintln!("{props:?}: {r:?}");
+        assert_eq!(r.len(), 2, "{r:?}");
+        for r in &r {
+            assert!(
+                (r.view_roll - want).abs() < 0.05,
+                "{props:?}: walking or standing: {r:?}"
+            );
+            assert_eq!(r.java_camera, "none", "{r:?}");
+        }
+    }
 }
 
 /// A mod that cancels vanilla's weather extraction (like Particle Rain) hides mcr's rain and snow.

@@ -6,9 +6,7 @@ import dev.mcr.bridge.McrCameraHandoff;
 import dev.mcr.bridge.McrFrame;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
-import net.minecraft.client.CameraType;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.Options;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.Vec3;
@@ -27,7 +25,7 @@ import org.spongepowered.asm.mixin.injection.invoke.arg.Args;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/** mcr owns the camera: Java's eye, rotation, perspective and culling projection are Rust's. */
+/** Java's eye, rotation and culling projection are mcr's camera; Java's camera type leads the perspective. */
 @Mixin(Camera.class)
 abstract class CameraMixin implements McrCameraHandoff.Placement {
     @Shadow
@@ -88,14 +86,10 @@ abstract class CameraMixin implements McrCameraHandoff.Placement {
     @Inject(method = "alignWithEntity", at = @At("HEAD"))
     private void mcr$rustCamera(float partialTicks, CallbackInfo ci) {
         McrCamera camera = McrFrame.camera();
-        mcr$rust = camera != null && McrCameraHandoff.followsRust(entity) ? camera : null;
-        if (mcr$rust == null) {
-            return;
-        }
-        Options options = Minecraft.getInstance().options;
-        if (options.getCameraType().isFirstPerson() == camera.detached()) {
-            options.setCameraType(camera.detached() ? CameraType.THIRD_PERSON_BACK : CameraType.FIRST_PERSON);
-        }
+        // Java switched its camera type before mcr followed: vanilla aligns this frame and the handoff carries it.
+        boolean samePerspective = camera != null
+                && Minecraft.getInstance().options.getCameraType().isFirstPerson() != camera.detached();
+        mcr$rust = samePerspective && McrCameraHandoff.followsRust(entity) ? camera : null;
     }
 
     @Inject(method = "alignWithEntity", at = @At("RETURN"))
@@ -188,6 +182,11 @@ abstract class CameraMixin implements McrCameraHandoff.Placement {
         }
         setPosition(x, y, z);
         prepareCullFrustum(getViewRotationMatrix(cachedViewRotMatrix), createProjectionMatrixForCulling(), position);
+    }
+
+    @Override
+    public void mcr$setDetached(boolean detached) {
+        this.detached = detached;
     }
 
     @Inject(method = "createProjectionMatrixForCulling", at = @At("HEAD"), cancellable = true)

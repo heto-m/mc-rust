@@ -81,7 +81,7 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
 | Window | SDL3 `offscreen` video driver (hint set in `RenderSystem.initBackendSystem`), so `Window` works on a fake window. Size and scale are pushed per frame | Rust |
 | Input | `ModInput` events ride the control ring as `MSG_INPUT` ahead of each `MSG_FRAME`; `McrInput.deliver` calls `KeyboardHandler.keyPress/textInput/textEditing` and `MouseHandler.onMove/onButton/onScroll/onDrop` with SDL3 values. `InputConstants.isKeyDown/grabMouse/releaseMouse`, `Window.isFocused/selectCursor`, `ClipboardManager`, `TextInputManager`, `SDL_GetModState` sites are redirected. Key and button events also pass through `SDLEventHandler.handleKeyEvent/handleMouseButtonEvent` with vanilla's body skipped, so mods hooked there (malilib's hotkeys) see them and can consume them | Rust |
 | Network | `Connection.connect` is redirected to a `BridgeChannel` (netty `EmbeddedChannel` confined to the render thread by its own event loop) carrying vanilla codecs, so `ConnectScreen` runs unchanged while Rust connects. Frames travel in two net rings (32 MiB in, 4 MiB out) tagged with phase and session; outbound packets are filtered by (phase, packet class), chat goes to Rust as text | Rust owns socket and state |
-| Player | Rust's local player and camera overwrite `LocalPlayer`/`Camera` every tick and frame, unless a mod moved the camera (see camera handoff). Vanilla gameplay keybinds are suppressed in Java | Rust |
+| Player | Rust's local player and camera overwrite `LocalPlayer`/`Camera` every tick and frame, unless a mod moved the camera (see camera handoff). Java's camera type leads the perspective (see perspective). Vanilla gameplay keybinds except F5 are suppressed in Java | Rust |
 | World | Java keeps its own `ClientLevel`/`ClientChunkCache`. Sections compile meshless (`RenderSection.compileSync/compileAsync` → `BridgeSectionMesh`, block entities only); terrain uploads and draw groups, sky, weather and world border are off (weather extraction only proves no mod replaced it). `Camera.alignWithEntity` takes Rust's eye and rotation; the level projection is Rust's | duplicated, see below |
 | Sound | `SoundEngine` logic kept. `Library.init`/`acquireChannel` and `Channel`/`Listener` methods forward to `mcr-audio` | Rust plays |
 
@@ -181,13 +181,33 @@ it back as the render camera with `FRAME_CAMERA_HANDOFF`, and Java places its ow
 terrain share one camera with one frame of latency. A roll of the camera's rotation about its view axis counts as
 a change too: Java reports it relative to the camera's yaw and pitch (`FSTATE_CAMERA_ROLL`, robust at a vertical
 pitch), mcr multiplies it into its view on top of its own damage tilt, and Java re-applies the roll it reported the
-frame before when it places its camera. Rolls applied to the level's pose stack instead (Camera Overhaul's, in
-`bobHurt`) are replaced together with vanilla's bobbing when mcr rewrites Java's level projection. When the mod took the player's input (`player.input` is no
+frame before when it places its camera. When the mod took the player's input (`player.input` is no
 longer a `KeyboardInput`), mcr's player stops moving and turning, Java's movement keys follow the keyboard and its
 `turnPlayer` runs, so the mod's camera entity flies. Without a mod the reported flags are 0 and nothing changes.
 `turnPlayer` always runs up to `LocalPlayer.turn`; a probe in `Entity.turn` stops it before it rotates the
 player (mcr owns the look). If a mod cancelled the turn before that point (Freelook turns only its camera), Java sets `FSTATE_TURN`
 and mcr's player stops turning with the mouse while Java draws the world.
+
+**Perspective.** Java's `Options` camera type decides first person, third person back or front while Java draws
+the world. Java publishes it at the end of each frame (`FSTATE_PERSPECTIVE`, from `isFirstPerson`/`isMirrored`, so
+a mod perspective on top of a vanilla camera type, such as Shoulder Surfing's shoulder view on third person back,
+maps to that type), and mcr sets its perspective from it before it builds the frame's player camera. mcr's native
+player model, hand and spyglass overlay follow it. F5 is then Java's: `GameplayKeys` leaves `keyTogglePerspective`
+alone while mcr's camera paces Java, so vanilla's handler, or a mod that consumes the key first, cycles it, and mcr
+ignores the key. Java never writes its camera type to match mcr. On the frame Java switches, its camera type and
+`FRAME_DETACHED` disagree, so the alignment runs vanilla's own body (pull-back against Java's level, mirror), the
+handoff reports that camera and Java draws the frame from mcr's camera with mcr's detached state (no player model
+seen from the eye); mcr renders the next frame from the reported camera while already following the new type, and
+the handoff ends one frame later. Without mods, or while the bridge is detached, mcr cycles its own perspective on
+F5; after a stall the perspective Java shows wins again once Java is composed.
+
+**Pose roll.** Mods may roll the level's bob pose instead of the camera (Camera Overhaul rotates it at `bobHurt`
+HEAD). mcr replaces Java's level projection with its own view, so Java takes the pose `renderLevel` multiplies into
+its projection, rebuilds the pose vanilla's `bobHurt` and `bobView` alone would make from the same render state
+(`McrViewRoll`), and reports the twist of `pose · vanilla⁻¹` about the view axis (`FSTATE_VIEW_ROLL`, 0 below
+1e-5 rad). mcr multiplies it in front of its own death and hurt tilt, so the world rolls and Java's entities roll
+with it; the hand already rolls in Java. Pitch, yaw and translation a mod adds to the bob pose are not carried, and
+neither is vanilla's view bobbing, which mcr does not draw in the world.
 
 **Weather replacement.** Vanilla's `WeatherEffectRenderer.extractRenderState` runs up to its first statement and
 returns. If the level reached its weather step but that statement never ran (a mod cancelled, redirected or
@@ -226,7 +246,7 @@ input block (screen, overlay, grab, text input, cursor, GUI scale, quit):
 | `Native` | no Java GUI (no mods, booting, detached) | mcr only |
 | `Overlay` | an mcr screen above Java's GUI ("mcr" button, mod manager) | mcr only |
 | `JavaScreen` | a Java screen, the title or Java's loading overlay | Java only |
-| `JavaGame` | in game, no screen | both; gameplay keys act in mcr, Java's vanilla gameplay mappings stay suppressed |
+| `JavaGame` | in game, no screen | both; gameplay keys act in mcr, Java's vanilla gameplay mappings stay suppressed (F5 is Java's) |
 
 Java owns inventory, chat, commands, advancements, the player list, F3 and Esc in mod mode. mcr keeps its
 container model but opens no native game screens. Java's "mcr" button on the title and pause screens opens the

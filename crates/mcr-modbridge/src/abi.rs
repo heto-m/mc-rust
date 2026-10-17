@@ -14,7 +14,7 @@ use crate::sections::SectionShared;
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 13;
+pub const BRIDGE_VERSION: u32 = 14;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -111,7 +111,7 @@ pub const FRAME_CAMERA_DISTANCE: usize = 232;
 pub const FRAME_SIZE: usize = 236;
 /// Java signals every frame it finishes and tags its GPU work with slots.
 pub const FRAME_LOCKSTEP: u32 = 1;
-/// mcr's camera is in third person: Java renders the local player and no hand.
+/// mcr's player camera is in third person this frame, `FRAME_CAMERA_DISTANCE` from the eye.
 pub const FRAME_DETACHED: u32 = 2;
 /// mcr renders from the camera Java reported last frame: `view`, `proj` and the render camera
 /// fields are that camera's, while the camera fields stay the player's.
@@ -138,7 +138,16 @@ pub const FSTATE_CAMERA_PITCH: usize = 76;
 pub const FSTATE_PROF: usize = 80;
 /// Radians about the view axis, applied in view space after yaw and pitch.
 pub const FSTATE_CAMERA_ROLL: usize = 112;
+/// Java's camera type while it leads the perspective: a `PERSPECTIVE_*` value.
+pub const FSTATE_PERSPECTIVE: usize = 116;
+/// Radians about the view axis that mods added to the level's bob pose (an `f32`), in mcr's view space.
+pub const FSTATE_VIEW_ROLL: usize = 120;
 pub const FSTATE_SIZE: usize = 128;
+/// Java does not lead the perspective (outside the lockstep or without a level).
+pub const PERSPECTIVE_NONE: u32 = 0;
+pub const PERSPECTIVE_FIRST: u32 = 1;
+pub const PERSPECTIVE_THIRD_BACK: u32 = 2;
+pub const PERSPECTIVE_THIRD_FRONT: u32 = 3;
 /// Leaving the frame wait to returning from it: packets, input and size.
 pub const PROF_PRE: usize = 0;
 /// Client ticks.
@@ -761,6 +770,12 @@ mod tests {
             ("FSTATE_CAMERA_PITCH", FSTATE_CAMERA_PITCH as i64),
             ("FSTATE_PROF", FSTATE_PROF as i64),
             ("FSTATE_CAMERA_ROLL", FSTATE_CAMERA_ROLL as i64),
+            ("FSTATE_PERSPECTIVE", FSTATE_PERSPECTIVE as i64),
+            ("FSTATE_VIEW_ROLL", FSTATE_VIEW_ROLL as i64),
+            ("PERSPECTIVE_NONE", PERSPECTIVE_NONE.into()),
+            ("PERSPECTIVE_FIRST", PERSPECTIVE_FIRST.into()),
+            ("PERSPECTIVE_THIRD_BACK", PERSPECTIVE_THIRD_BACK.into()),
+            ("PERSPECTIVE_THIRD_FRONT", PERSPECTIVE_THIRD_FRONT.into()),
             ("FSTATE_SIZE", FSTATE_SIZE as i64),
             ("PROF_PRE", PROF_PRE as i64),
             ("PROF_TICK", PROF_TICK as i64),

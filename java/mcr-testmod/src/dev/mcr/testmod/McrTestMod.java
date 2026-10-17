@@ -7,6 +7,7 @@ import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
+import net.minecraft.client.CameraType;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.ByteBufCodecs;
@@ -49,6 +50,15 @@ public final class McrTestMod implements ClientModInitializer {
 
     /** `-Dmcr.testmod.shoulder=true`: the third-person camera moves a block sideways, redirected like Shoulder Surfing. */
     public static final boolean SHOULDER = Boolean.getBoolean("mcr.testmod.shoulder");
+
+    /** `-Dmcr.testmod.poseRoll=true`: the level's bob pose rolls 10 degrees, like Camera Overhaul's roll. */
+    public static final boolean POSE_ROLL = Boolean.getBoolean("mcr.testmod.poseRoll");
+
+    /**
+     * `-Dmcr.testmod.perspective=true`: F5 is consumed before vanilla's handler, as Shoulder Surfing does, and
+     * cycles first person, third person front, third person back.
+     */
+    private static final boolean PERSPECTIVE = Boolean.getBoolean("mcr.testmod.perspective");
     private static final KeyMapping.Category CATEGORY =
             KeyMapping.Category.register(Identifier.fromNamespaceAndPath("mcr_testmod", "test"));
 
@@ -88,6 +98,15 @@ public final class McrTestMod implements ClientModInitializer {
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
             sender.sendPacket(new Hello(MESSAGE));
             commandIn = COMMAND_DELAY_TICKS;
+        });
+        ClientTickEvents.START_CLIENT_TICK.register(client -> {
+            while (PERSPECTIVE && client.options.keyTogglePerspective.consumeClick()) {
+                client.options.setCameraType(switch (client.options.getCameraType()) {
+                    case FIRST_PERSON -> CameraType.THIRD_PERSON_FRONT;
+                    case THIRD_PERSON_FRONT -> CameraType.THIRD_PERSON_BACK;
+                    case THIRD_PERSON_BACK -> CameraType.FIRST_PERSON;
+                });
+            }
         });
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             GuiCapture.tick(client);

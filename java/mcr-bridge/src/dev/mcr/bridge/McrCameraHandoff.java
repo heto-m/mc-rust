@@ -5,6 +5,7 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.VarHandle;
 import java.lang.ref.WeakReference;
 import net.minecraft.client.Camera;
+import net.minecraft.client.CameraType;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.KeyboardInput;
 import net.minecraft.client.player.LocalPlayer;
@@ -27,6 +28,9 @@ public final class McrCameraHandoff {
     public interface Placement {
         /** {@code roll} in radians about the view axis, in vanilla's quaternion convention. */
         void mcr$place(double x, double y, double z, float yRot, float xRot, float roll);
+
+        /** Whether Java draws the camera entity, as from a third-person camera. */
+        void mcr$setDetached(boolean detached);
     }
 
     /** The camera entity the server set (spectating); mcr follows it itself, so it is no mod's. Weak, so a left world is not kept alive. */
@@ -96,6 +100,21 @@ public final class McrCameraHandoff {
         if (moved || render != null) {
             ((Placement) camera).mcr$place(target.x(), target.y(), target.z(), target.yRot(), target.xRot(), targetRoll);
         }
+        if (moved && render == null) {
+            ((Placement) camera).mcr$setDetached(player.detached());
+        }
+    }
+
+    /** Java's camera type as a `PERSPECTIVE_*` value while mcr's camera paces Java in a level, which mcr then follows. */
+    static int perspective(Minecraft minecraft) {
+        CameraType type = McrFrame.camera() == null || minecraft.level == null ? null : minecraft.options.getCameraType();
+        if (type == null) {
+            return BridgeAbi.PERSPECTIVE_NONE;
+        }
+        if (type.isFirstPerson()) {
+            return BridgeAbi.PERSPECTIVE_FIRST;
+        }
+        return type.isMirrored() ? BridgeAbi.PERSPECTIVE_THIRD_FRONT : BridgeAbi.PERSPECTIVE_THIRD_BACK;
     }
 
     /** The camera's turn about its view axis beyond its yaw and pitch, robust at a vertical pitch. */
@@ -108,7 +127,9 @@ public final class McrCameraHandoff {
         return 2.0F * (float) Math.atan2(sign * q.z, sign * q.w);
     }
 
-    static void publish(MemorySegment state) {
+    static void publish(MemorySegment state, Minecraft minecraft) {
+        STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_PERSPECTIVE, perspective(minecraft));
+        STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_VIEW_ROLL, Float.floatToRawIntBits(McrViewRoll.roll()));
         STATE_LONG.setRelease(state, (long) BridgeAbi.FSTATE_CAMERA_POS, Double.doubleToRawLongBits(x));
         STATE_LONG.setRelease(state, (long) BridgeAbi.FSTATE_CAMERA_POS + 8, Double.doubleToRawLongBits(y));
         STATE_LONG.setRelease(state, (long) BridgeAbi.FSTATE_CAMERA_POS + 16, Double.doubleToRawLongBits(z));

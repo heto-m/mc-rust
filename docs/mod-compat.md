@@ -91,9 +91,9 @@ crafting table for Crafting Tweaks.
 | Subtle Effects | 1.15.0-hotfix.1 | works | boots and joins; its particles are Java's |
 | Dynamic Crosshair | 9.15 | works | its crosshair replaces the vanilla one and hides it with no target |
 | LambDynamicLights | 4.13.0 | partial | policy: terrain lighting is mcr's, only Java-drawn entities could light up |
-| Freelook | 1.4.4 | partial | holding Alt turns the camera, not the player (`FSTATE_TURN`); its default third-person view stays first person because mcr owns the perspective |
-| Camera Overhaul | 2.1.2 | partial | its pitch and yaw nudges reach mcr through the camera handoff; its strafe and turn roll is applied in `GameRenderer.bobHurt` to Java's level projection, which mcr replaces with its own view, so only the hand tilts |
-| Shoulder Surfing Reloaded | 5.2.0 | partial | with `replace_default_perspective = true` F5 gives its shoulder camera, which mcr renders; with the default config its own perspective is never reached, since mcr cycles the perspective itself |
+| Freelook | 1.4.4 | works | holding Alt switches Java to its default third-person view, which mcr follows (`FSTATE_PERSPECTIVE`), and the mouse turns the camera, not the player (`FSTATE_TURN`); releasing it returns to first person |
+| Camera Overhaul | 2.1.2 | works | its pitch and yaw nudges reach mcr through the camera handoff; its strafe and turn roll of the bob pose rolls mcr's world (`FSTATE_VIEW_ROLL`, about 1° while strafing with the defaults) as well as the hand |
+| Shoulder Surfing Reloaded | 5.2.0 | works | with the default config it starts in its shoulder view (third person back, offset sideways, decoupled camera orbiting with the mouse) and F5 cycles first person, third back, third front and the shoulder view; mcr follows Java's camera type |
 | Krypton | 0.3.2 | works | boots and joins; mcr owns the socket, so its network optimisations have nothing to act on |
 | Debugify | 26.3.0.0 | works | boots and joins |
 | More Culling | 1.9.0 | partial | policy: terrain is rendered by mcr; no visible effect |
@@ -103,6 +103,10 @@ crafting table for Crafting Tweaks.
 Libraries, all loading cleanly: Balm 26.3.0.3, CreativeCore 2.14.19, Forge Config API Port 26.3.1, Fzzy Config
 0.7.7, GeckoLib 5.5.7, Iceberg 1.4.3.1, MaLiLib 0.30.2, PrickleMC 26.3.0.2, Prism 1.1.3, Puzzles Lib 26.3.14,
 ukulib 2.2.0. Prickle's update check asks a host outside the proxy allow-list and is refused (one log line).
+
+Freelook, Camera Overhaul and Shoulder Surfing were re-tested alone with their libraries at bridge ABI 14 after
+`mod-perspective`, where Java's camera type leads mcr's perspective and mod rolls of the bob pose reach mcr's view.
+Without mods F5 still cycles mcr's own first person, third back and third front.
 
 Open items from the first sweep: Mouse Tweaks' drag-click (shift-drag moved three stacks) and wheel tweak (a
 scroll moved one plank into the crafting grid) work through the new autopilot steps. Controlling's rebinding of

@@ -31,7 +31,7 @@ pub use abi::{
 };
 pub use compose::{ComposeStats, FrameLink, ModFrames};
 pub use events::BridgeEvent;
-pub use frame::Pipelining;
+pub use frame::{Perspective, Pipelining};
 pub use input::ModInput;
 pub use launch::{
     AotSettings, BOOT_JAR, BRIDGE_JAR, BridgeConfig, LAUNCH_MANIFEST, LaunchManifest, LaunchPlan,

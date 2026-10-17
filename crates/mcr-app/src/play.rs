@@ -173,6 +173,25 @@ enum Perspective {
     ThirdFront,
 }
 
+impl Perspective {
+    /// Vanilla's F5 order.
+    fn next(self) -> Self {
+        match self {
+            Self::First => Self::ThirdBack,
+            Self::ThirdBack => Self::ThirdFront,
+            Self::ThirdFront => Self::First,
+        }
+    }
+
+    fn from_java(java: mcr_modbridge::Perspective) -> Self {
+        match java {
+            mcr_modbridge::Perspective::First => Self::First,
+            mcr_modbridge::Perspective::ThirdBack => Self::ThirdBack,
+            mcr_modbridge::Perspective::ThirdFront => Self::ThirdFront,
+        }
+    }
+}
+
 struct FrameOverlay<'a> {
     outline: &'a OutlineRenderer,
     ui_renderer: &'a mut UiRenderer,
@@ -376,6 +395,10 @@ pub struct Play {
     pub java_steps: bool,
     /// A mod in Java consumes the mouse's turning (Freelook), so the player does not turn.
     pub java_turn: bool,
+    /// Java's camera type decides the perspective (mod mode, Java draws the world); F5 is Java's.
+    java_perspective: bool,
+    /// Radians about the view axis that Java mods added to the level's pose (Camera Overhaul).
+    pub java_view_roll: f32,
     /// A Java screen owns all input; gameplay input stops.
     pub java_screen: bool,
     /// `MOVE_*` bits a mod (InvMove) lets through while a Java screen is open.
@@ -543,6 +566,8 @@ impl Play {
             java_weather: false,
             java_steps: false,
             java_turn: false,
+            java_perspective: false,
+            java_view_roll: 0.0,
             java_screen: false,
             java_screen_moves: 0,
             gui_scale_override: None,
@@ -946,6 +971,31 @@ impl Play {
 
     pub fn third_person(&self) -> bool {
         self.perspective != Perspective::First
+    }
+
+    /// Follows Java's camera type while Java leads the perspective (`None`: mcr's F5 decides).
+    pub fn follow_perspective(&mut self, java: Option<mcr_modbridge::Perspective>) {
+        self.java_perspective = java.is_some();
+        if let Some(java) = java {
+            self.set_perspective(Perspective::from_java(java));
+        }
+    }
+
+    pub fn perspective_name(&self) -> &'static str {
+        match self.perspective {
+            Perspective::First => "first",
+            Perspective::ThirdBack => "back",
+            Perspective::ThirdFront => "front",
+        }
+    }
+
+    fn set_perspective(&mut self, next: Perspective) {
+        let was_first = self.perspective == Perspective::First;
+        self.perspective = next;
+        if was_first != (next == Perspective::First) {
+            let ty = self.camera_type().filter(|_| !was_first);
+            self.spectator_effect.check(ty);
+        }
     }
 
     /// How far the third-person player camera sits from the eye; `None` in first person.
@@ -2266,15 +2316,8 @@ impl Play {
         } else if i == k.debug {
             self.debug_on = !self.debug_on;
         } else if i == k.perspective {
-            let was_first = self.perspective == Perspective::First;
-            self.perspective = match self.perspective {
-                Perspective::First => Perspective::ThirdBack,
-                Perspective::ThirdBack => Perspective::ThirdFront,
-                Perspective::ThirdFront => Perspective::First,
-            };
-            if was_first != (self.perspective == Perspective::First) {
-                let ty = self.camera_type().filter(|_| !was_first);
-                self.spectator_effect.check(ty);
+            if !self.java_perspective {
+                self.set_perspective(self.perspective.next());
             }
         } else if i == k.spectator_effect {
             self.spectator_effect.toggle();
@@ -2296,7 +2339,7 @@ impl Play {
 
     fn view_roll(&self, partial: f32) -> Mat4 {
         let player = &self.world.client.state.player;
-        let mut roll = Mat4::IDENTITY;
+        let mut roll = Mat4::from_rotation_z(self.java_view_roll);
         if player.dead {
             let death = self.entities.as_ref().map_or(0, |e| e.local_death_time()) as f32;
             let duration = (death + partial).min(20.0);
@@ -2777,6 +2820,32 @@ mod tests {
         let k = degrees_per_pixel(0.5);
         assert!((k - 0.15).abs() < 1e-4);
         assert!(degrees_per_pixel(1.0) > degrees_per_pixel(0.0));
+    }
+
+    #[test]
+    fn perspectives_cycle_like_vanilla_and_map_from_java() {
+        let mut p = Perspective::First;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            p = p.next();
+            seen.push(p);
+        }
+        assert_eq!(
+            seen,
+            [
+                Perspective::ThirdBack,
+                Perspective::ThirdFront,
+                Perspective::First
+            ]
+        );
+        assert_eq!(
+            Perspective::from_java(mcr_modbridge::Perspective::ThirdFront),
+            Perspective::ThirdFront
+        );
+        assert_eq!(
+            Perspective::from_java(mcr_modbridge::Perspective::First),
+            Perspective::First
+        );
     }
 
     #[test]

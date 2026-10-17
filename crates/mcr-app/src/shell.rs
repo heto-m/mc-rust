@@ -1285,6 +1285,10 @@ impl Shell {
 
     pub fn frame(&mut self) -> Option<FrameStats> {
         let java_gui = self.java_gui();
+        let java_perspective = self.mod_frames().and_then(|f| f.lock().java_perspective());
+        if let Some(play) = &mut self.play {
+            play.follow_perspective(java_perspective);
+        }
         let third_person = self
             .play
             .as_ref()
@@ -1295,6 +1299,7 @@ impl Shell {
         let mut java_weather = false;
         let mut java_steps = false;
         let mut java_turn = false;
+        let mut view_roll = 0.0;
         let java_world = self.mod_frames().is_some_and(|f| {
             let mut link = f.lock();
             link.set_third_person(third_person);
@@ -1304,6 +1309,7 @@ impl Shell {
             java_weather = link.weather_replaced();
             java_steps = link.steps_replaced();
             java_turn = link.turn_captured();
+            view_roll = link.view_roll();
             link.set_camera_handoff(
                 java_camera
                     .and(self.play.as_ref())
@@ -1320,6 +1326,7 @@ impl Shell {
             play.java_weather = java_weather;
             play.java_steps = java_steps;
             play.java_turn = java_turn;
+            play.java_view_roll = view_roll;
             return play.frame();
         }
         self.update_menu_size();

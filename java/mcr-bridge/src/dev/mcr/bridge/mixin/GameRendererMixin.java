@@ -8,6 +8,7 @@ import dev.mcr.bridge.McrCameraHandoff;
 import dev.mcr.bridge.McrFrame;
 import dev.mcr.bridge.McrFrameTimes;
 import dev.mcr.bridge.McrParticles;
+import dev.mcr.bridge.McrViewRoll;
 import dev.mcr.bridge.gpu.FrameSlots;
 import net.minecraft.client.Camera;
 import net.minecraft.client.renderer.GameRenderer;
@@ -16,6 +17,7 @@ import net.minecraft.client.renderer.ProjectionMatrixBuffer;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.GameRenderState;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -40,6 +42,16 @@ abstract class GameRendererMixin {
     @Inject(method = "extractCamera", at = @At("HEAD"))
     private void mcr$cameraHandoff(CallbackInfo ci) {
         McrCameraHandoff.extract(mainCamera);
+    }
+
+    @ModifyArg(
+            method = "renderLevel",
+            at = @At(value = "INVOKE", target = "Lorg/joml/Matrix4f;mul(Lorg/joml/Matrix4fc;)Lorg/joml/Matrix4f;", ordinal = 0),
+            require = 0)
+    private Matrix4fc mcr$bobPose(Matrix4fc pose) {
+        McrViewRoll.levelPose(
+                pose, gameRenderState.levelRenderState.cameraRenderState.entityRenderState, gameRenderState.optionsRenderState);
+        return pose;
     }
 
     @ModifyArg(

@@ -9,6 +9,7 @@
     "CameraRollMixin",
     "EntityTurnMixin",
     "FreelookMixin",
+    "PoseRollMixin",
     "RawHotkeyMixin",
     "ScreenMoveMixin",
     "ShoulderMixin",

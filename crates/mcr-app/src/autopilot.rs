@@ -358,7 +358,7 @@ impl Autopilot {
                             .java_camera
                             .map_or("none", |c| if c.input { "captured" } else { "moved" });
                         println!(
-                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?} mod input {:?} fov_scale {:.2} camera {:.2} {:.2} {:.2} java_camera {java_cam} java_roll {:.1} java_weather {} java_steps {} java_turn {}",
+                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?} mod input {:?} fov_scale {:.2} camera {:.2} {:.2} {:.2} java_camera {java_cam} java_roll {:.1} java_weather {} java_steps {} java_turn {} perspective {} view_roll {:.1}",
                             play.ticks,
                             p[0],
                             p[1],
@@ -386,6 +386,8 @@ impl Autopilot {
                             play.java_weather,
                             play.java_steps,
                             play.java_turn,
+                            play.perspective_name(),
+                            play.java_view_roll.to_degrees(),
                         );
                     }
                 }

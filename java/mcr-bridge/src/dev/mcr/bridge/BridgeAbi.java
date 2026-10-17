@@ -4,7 +4,7 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 13;
+    public static final int VERSION = 14;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
     public static final String COMPOSE_PROPERTY = "mcr.compose";
 
@@ -109,7 +109,13 @@ public final class BridgeAbi {
     public static final int FSTATE_CAMERA_PITCH = 76;
     public static final int FSTATE_PROF = 80;
     public static final int FSTATE_CAMERA_ROLL = 112;
+    public static final int FSTATE_PERSPECTIVE = 116;
+    public static final int FSTATE_VIEW_ROLL = 120;
     public static final int FSTATE_SIZE = 128;
+    public static final int PERSPECTIVE_NONE = 0;
+    public static final int PERSPECTIVE_FIRST = 1;
+    public static final int PERSPECTIVE_THIRD_BACK = 2;
+    public static final int PERSPECTIVE_THIRD_FRONT = 3;
     public static final int PROF_PRE = 0;
     public static final int PROF_TICK = 1;
     public static final int PROF_EXTRACT = 2;

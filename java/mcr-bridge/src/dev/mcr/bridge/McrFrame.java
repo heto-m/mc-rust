@@ -105,6 +105,7 @@ public final class McrFrame {
                     McrFrameTimes.reset();
                     McrFrameTimes.begin(BridgeAbi.PROF_PRE);
                     McrParticles.reset();
+                    McrViewRoll.reset();
                     if (lockstep()) {
                         FrameSlots.beginFrame(frameIndex);
                         applySize(minecraft);
@@ -212,7 +213,7 @@ public final class McrFrame {
         STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_WIDTH, main == null ? 0 : main.width);
         STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_HEIGHT, main == null ? 0 : main.height);
         STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_FOV_SCALE, Float.floatToRawIntBits(fovScale));
-        McrCameraHandoff.publish(state);
+        McrCameraHandoff.publish(state, minecraft);
         McrFrameTimes.publish(state);
         if (frameIndex >= 0 && lockstep()) {
             STATE_LONG.setRelease(state, (long) BridgeAbi.FSTATE_DONE, frameIndex + 1);

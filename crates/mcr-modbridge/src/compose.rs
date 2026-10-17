@@ -16,7 +16,9 @@ use crate::abi::{
     MSG_FRAME, Shared,
 };
 use crate::events::BridgeEvent;
-use crate::frame::{AheadPolicy, JavaCamera, JavaFrame, LinkState, Lockstep, Pipelining, TickBank};
+use crate::frame::{
+    AheadPolicy, JavaCamera, JavaFrame, LinkState, Lockstep, Perspective, Pipelining, TickBank,
+};
 use crate::gpu::backend::Backend;
 use crate::input::ModInput;
 use crate::pacer::{self, SharedWriter};
@@ -233,6 +235,22 @@ impl FrameLink {
     /// The camera a mod gave Java's last frame, while Java draws the world.
     pub fn java_camera(&self) -> Option<JavaCamera> {
         self.world_active().then(|| self.java().camera).flatten()
+    }
+
+    /// Java's camera type while Java draws the world; mcr's perspective follows it then.
+    pub fn java_perspective(&self) -> Option<Perspective> {
+        self.world_active()
+            .then(|| self.java().perspective)
+            .flatten()
+    }
+
+    /// Radians about the view axis that mods added to Java's level pose, while Java draws the world.
+    pub fn view_roll(&self) -> f32 {
+        if self.world_active() {
+            self.java().view_roll
+        } else {
+            0.0
+        }
     }
 
     /// A mod replaced vanilla's rain and snow in Java's last frame.

@@ -8,8 +8,10 @@ use mcr_jvm::Doorbell;
 use crate::abi::{
     CAMERA_DETACHED, CAMERA_INPUT, CAMERA_MOD, FSTATE_CAMERA, FSTATE_CAMERA_PITCH,
     FSTATE_CAMERA_POS, FSTATE_CAMERA_ROLL, FSTATE_CAMERA_YAW, FSTATE_DONE, FSTATE_FLAGS,
-    FSTATE_FOV_SCALE, FSTATE_HEIGHT, FSTATE_LOADED, FSTATE_NANOS, FSTATE_PROF, FSTATE_READY,
-    FSTATE_SIZE, FSTATE_STEPS, FSTATE_TICKS, FSTATE_TURN, FSTATE_WEATHER, FSTATE_WIDTH, PROF_COUNT,
+    FSTATE_FOV_SCALE, FSTATE_HEIGHT, FSTATE_LOADED, FSTATE_NANOS, FSTATE_PERSPECTIVE, FSTATE_PROF,
+    FSTATE_READY, FSTATE_SIZE, FSTATE_STEPS, FSTATE_TICKS, FSTATE_TURN, FSTATE_VIEW_ROLL,
+    FSTATE_WEATHER, FSTATE_WIDTH, PERSPECTIVE_FIRST, PERSPECTIVE_NONE, PERSPECTIVE_THIRD_BACK,
+    PERSPECTIVE_THIRD_FRONT, PROF_COUNT,
 };
 
 /// After loading, a Java frame slower than this detaches the bridge from rendering.
@@ -46,6 +48,9 @@ struct FrameState {
     camera_pitch: AtomicU32,
     prof: [AtomicU32; PROF_COUNT],
     camera_roll: AtomicU32,
+    perspective: AtomicU32,
+    view_roll: AtomicU32,
+    _pad2: u32,
 }
 
 const _: () = {
@@ -62,6 +67,8 @@ const _: () = {
     assert!(std::mem::offset_of!(FrameState, camera_pitch) == FSTATE_CAMERA_PITCH);
     assert!(std::mem::offset_of!(FrameState, prof) == FSTATE_PROF);
     assert!(std::mem::offset_of!(FrameState, camera_roll) == FSTATE_CAMERA_ROLL);
+    assert!(std::mem::offset_of!(FrameState, perspective) == FSTATE_PERSPECTIVE);
+    assert!(std::mem::offset_of!(FrameState, view_roll) == FSTATE_VIEW_ROLL);
     assert!(std::mem::size_of::<FrameState>() == FSTATE_SIZE);
 };
 
@@ -91,8 +98,46 @@ pub struct JavaFrame {
     pub steps_replaced: bool,
     /// A mod consumed the last mouse turn of the local player (Freelook).
     pub turn_captured: bool,
+    /// Java's camera type while it leads the perspective.
+    pub perspective: Option<Perspective>,
+    /// Radians about the view axis that mods added to the level's bob pose, within `[-PI, PI]`.
+    pub view_roll: f32,
     /// Phase times of Java's last frame in microseconds, indexed by `abi::PROF_*`.
     pub prof: [u32; PROF_COUNT],
+}
+
+/// Java's camera type, which mcr's perspective follows while Java draws the world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Perspective {
+    First,
+    ThirdBack,
+    ThirdFront,
+}
+
+impl Perspective {
+    fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            PERSPECTIVE_FIRST => Some(Self::First),
+            PERSPECTIVE_THIRD_BACK => Some(Self::ThirdBack),
+            PERSPECTIVE_THIRD_FRONT => Some(Self::ThirdFront),
+            PERSPECTIVE_NONE => None,
+            _ => None,
+        }
+    }
+}
+
+fn wrap_angle(a: f32) -> f32 {
+    let pi = std::f32::consts::PI;
+    ((a + pi).rem_euclid(2.0 * pi) - pi).clamp(-pi, pi)
+}
+
+fn view_roll(bits: u32) -> f32 {
+    let roll = f32::from_bits(bits);
+    if roll.is_finite() {
+        wrap_angle(roll)
+    } else {
+        0.0
+    }
 }
 
 /// A camera a mod set in Java, sane but not yet bounded to the loaded world.
@@ -119,13 +164,16 @@ impl JavaCamera {
         {
             return None;
         }
-        let pi = std::f32::consts::PI;
-        let wrap = |a: f32| ((a + pi).rem_euclid(2.0 * pi) - pi).clamp(-pi, pi);
+        let half_pi = std::f32::consts::FRAC_PI_2;
         Some(Self {
             pos,
-            yaw: wrap(yaw),
-            pitch: pitch.clamp(-pi / 2.0, pi / 2.0),
-            roll: if roll.is_finite() { wrap(roll) } else { 0.0 },
+            yaw: wrap_angle(yaw),
+            pitch: pitch.clamp(-half_pi, half_pi),
+            roll: if roll.is_finite() {
+                wrap_angle(roll)
+            } else {
+                0.0
+            },
             detached: flags & CAMERA_DETACHED != 0,
             input: flags & CAMERA_INPUT != 0,
         })
@@ -210,6 +258,8 @@ impl FrameShared {
             weather_replaced: flags & FSTATE_WEATHER != 0,
             steps_replaced: flags & FSTATE_STEPS != 0,
             turn_captured: flags & FSTATE_TURN != 0,
+            perspective: Perspective::from_raw(s.perspective.load(Ordering::Acquire)),
+            view_roll: view_roll(s.view_roll.load(Ordering::Acquire)),
             prof: s.prof.each_ref().map(|v| v.load(Ordering::Acquire)),
         }
     }
@@ -257,6 +307,14 @@ impl FrameShared {
         for (dst, v) in self.state.prof.iter().zip(prof) {
             dst.store(v, Ordering::Release);
         }
+    }
+
+    #[cfg(test)]
+    pub fn simulate_view(&self, perspective: u32, view_roll: f32) {
+        self.state.perspective.store(perspective, Ordering::Release);
+        self.state
+            .view_roll
+            .store(view_roll.to_bits(), Ordering::Release);
     }
 
     #[cfg(test)]
@@ -607,6 +665,32 @@ mod tests {
             0.0,
             "a bad roll is dropped, not the camera"
         );
+    }
+
+    #[test]
+    fn perspective_and_view_roll_are_sanitized() {
+        let shared = FrameShared::new();
+        let java = shared.read();
+        assert_eq!((java.perspective, java.view_roll), (None, 0.0));
+        for (raw, want) in [
+            (PERSPECTIVE_FIRST, Some(Perspective::First)),
+            (PERSPECTIVE_THIRD_BACK, Some(Perspective::ThirdBack)),
+            (PERSPECTIVE_THIRD_FRONT, Some(Perspective::ThirdFront)),
+            (PERSPECTIVE_NONE, None),
+            (4, None),
+            (u32::MAX, None),
+        ] {
+            shared.simulate_view(raw, 0.0);
+            assert_eq!(shared.read().perspective, want, "{raw}");
+        }
+        shared.simulate_view(0, 0.25);
+        assert_eq!(shared.read().view_roll, 0.25);
+        shared.simulate_view(0, 7.0);
+        assert!((shared.read().view_roll - (7.0 - std::f32::consts::TAU)).abs() < 1e-5);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            shared.simulate_view(0, bad);
+            assert_eq!(shared.read().view_roll, 0.0);
+        }
     }
 
     #[test]
