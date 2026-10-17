@@ -1,7 +1,7 @@
 //! Server resource packs: request handling, downloads and the resource stack they reload into.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
 
 use anyhow::{Context, Result};
 use mcr_assets::{PackFormat, ResourceManager};
@@ -16,6 +16,40 @@ use mcr_ui::{PackSetting, vanilla_resources};
 use uuid::Uuid;
 
 const MAX_QUEUED: usize = 64;
+/// Download batches waiting for the single download thread; more fail at once.
+const MAX_PENDING_DOWNLOADS: usize = 16;
+
+/// One thread runs every download batch in turn, like vanilla's download queue.
+struct DownloadWorker<J> {
+    jobs: SyncSender<J>,
+}
+
+impl<J: Send + 'static> DownloadWorker<J> {
+    fn start(mut run: impl FnMut(J) + Send + 'static) -> Self {
+        let (jobs, rx) = sync_channel::<J>(MAX_PENDING_DOWNLOADS);
+        std::thread::Builder::new()
+            .name("mcr-pack-download".into())
+            .spawn(move || {
+                for job in rx {
+                    run(job);
+                }
+            })
+            .ok();
+        Self { jobs }
+    }
+
+    fn submit(&self, job: J) -> Result<(), J> {
+        self.jobs.try_send(job).map_err(|e| match e {
+            TrySendError::Full(job) | TrySendError::Disconnected(job) => job,
+        })
+    }
+}
+
+struct DownloadJob {
+    session: u64,
+    requests: Vec<DownloadRequest>,
+    protect: Vec<PathBuf>,
+}
 
 /// Where the vanilla resources live; stacks server packs on top of them.
 #[derive(Debug, Clone)]
@@ -56,6 +90,7 @@ pub enum PackAction {
 }
 
 struct Done {
+    session: u64,
     ids: Vec<Uuid>,
     result: BatchResult,
 }
@@ -81,6 +116,8 @@ pub struct ServerPacks {
     downloader: Downloader,
     done_tx: Sender<Done>,
     done_rx: Receiver<Done>,
+    worker: Option<DownloadWorker<DownloadJob>>,
+    session: u64,
     setting: PackSetting,
     queued: Vec<Queued>,
     prompt_required: bool,
@@ -126,6 +163,8 @@ impl ServerPacks {
             downloader: Downloader::new(downloads, headers),
             done_tx,
             done_rx,
+            worker: None,
+            session: 0,
             setting: PackSetting::Prompt,
             queued: Vec::new(),
             prompt_required: false,
@@ -143,6 +182,7 @@ impl ServerPacks {
     pub fn begin(&mut self, setting: PackSetting) -> PackLink {
         let (link, end) = pack_channel();
         self.end = Some(end);
+        self.session += 1;
         self.setting = setting;
         self.queued.clear();
         self.manager.begin_session(prompt_status(setting));
@@ -204,6 +244,9 @@ impl ServerPacks {
             }
         }
         while let Ok(done) = self.done_rx.try_recv() {
+            if done.session != self.session || self.end.is_none() {
+                continue;
+            }
             self.manager.download_finished(&done.ids, done.result);
             let effects = self.manager.take_effects();
             actions.extend(self.apply(effects));
@@ -290,37 +333,116 @@ impl ServerPacks {
         actions
     }
 
-    fn spawn_download(&self, requests: Vec<DownloadRequest>) {
+    fn spawn_download(&mut self, requests: Vec<DownloadRequest>) {
         let downloader = self.downloader.clone();
-        let protect = self.active.clone();
         let tx = self.done_tx.clone();
-        std::thread::spawn(move || {
-            vacuum(downloader.dir(), MAX_CACHED_PACKS, &protect);
-            let mut result = BatchResult::default();
-            for request in &requests {
-                let mut next_log = 0u64;
-                let mut progress = |bytes: u64, total: Option<u64>| {
-                    if bytes >= next_log {
-                        tracing::info!("resource pack {}: {bytes} of {total:?} bytes", request.id);
-                        next_log = bytes + (8 << 20);
-                    }
-                };
-                match downloader.fetch(request, &mut progress) {
-                    Ok(path) => {
-                        result.downloaded.insert(request.id, path);
-                    }
-                    Err(e) => {
-                        tracing::warn!("resource pack {} failed: {e}", request.id);
-                        result.failed.push(request.id);
-                    }
-                }
-            }
-            let ids = requests.iter().map(|r| r.id).collect();
-            let _ = tx.send(Done { ids, result });
+        let worker = self.worker.get_or_insert_with(|| {
+            DownloadWorker::start(move |job: DownloadJob| {
+                let result = download_batch(&downloader, &job.requests, &job.protect);
+                let ids = job.requests.iter().map(|r| r.id).collect();
+                let _ = tx.send(Done {
+                    session: job.session,
+                    ids,
+                    result,
+                });
+            })
         });
+        let job = DownloadJob {
+            session: self.session,
+            requests,
+            protect: self.active.clone(),
+        };
+        if let Err(job) = worker.submit(job) {
+            let ids: Vec<Uuid> = job.requests.iter().map(|r| r.id).collect();
+            let result = BatchResult {
+                failed: ids.clone(),
+                ..BatchResult::default()
+            };
+            let _ = self.done_tx.send(Done {
+                session: job.session,
+                ids,
+                result,
+            });
+        }
     }
+}
+
+fn download_batch(
+    downloader: &Downloader,
+    requests: &[DownloadRequest],
+    protect: &[PathBuf],
+) -> BatchResult {
+    vacuum(downloader.dir(), MAX_CACHED_PACKS, protect);
+    let mut result = BatchResult::default();
+    for request in requests {
+        let mut next_log = 0u64;
+        let mut progress = |bytes: u64, total: Option<u64>| {
+            if bytes >= next_log {
+                tracing::info!("resource pack {}: {bytes} of {total:?} bytes", request.id);
+                next_log = bytes + (8 << 20);
+            }
+        };
+        match downloader.fetch(request, &mut progress) {
+            Ok(path) => {
+                result.downloaded.insert(request.id, path);
+            }
+            Err(e) => {
+                tracing::warn!("resource pack {} failed: {e}", request.id);
+                result.failed.push(request.id);
+            }
+        }
+    }
+    result
 }
 
 pub fn downloads_dir(game_dir: &Path) -> PathBuf {
     game_dir.join("downloads")
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn one_download_thread_with_a_bounded_queue() {
+        let gate = Arc::new(Barrier::new(2));
+        let held = gate.clone();
+        let worker = DownloadWorker::start(move |first: bool| {
+            if first {
+                held.wait();
+            }
+        });
+        let mut accepted = 0;
+        for i in 0..1000 {
+            if worker.submit(i == 0).is_ok() {
+                accepted += 1;
+            }
+        }
+        assert!(accepted <= MAX_PENDING_DOWNLOADS + 1, "{accepted}");
+        gate.wait();
+    }
+
+    #[test]
+    fn results_of_an_earlier_session_are_ignored() {
+        let dir = std::env::temp_dir().join(format!("mcr-packs-{}", std::process::id()));
+        let mut packs = ServerPacks::new(dir, "Soak", Uuid::nil());
+        let _first = packs.begin(PackSetting::Enabled);
+        let stale = packs.session;
+        let _second = packs.begin(PackSetting::Enabled);
+        let id = Uuid::from_u128(7);
+        packs
+            .done_tx
+            .send(Done {
+                session: stale,
+                ids: vec![id],
+                result: BatchResult {
+                    failed: vec![id],
+                    ..BatchResult::default()
+                },
+            })
+            .unwrap();
+        assert!(packs.poll().is_empty());
+        assert!(packs.done_rx.try_recv().is_err());
+    }
 }

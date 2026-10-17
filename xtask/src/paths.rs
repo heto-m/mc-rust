@@ -90,6 +90,14 @@ impl Layout {
     pub fn server_run_dir(&self, ver: &str) -> PathBuf {
         self.root.join("run").join(format!("server-{ver}"))
     }
+
+    pub fn soak_server_dir(&self, ver: &str) -> PathBuf {
+        self.root.join("run").join(format!("soak-server-{ver}"))
+    }
+
+    pub fn soak_dir(&self) -> PathBuf {
+        self.root.join("run").join("soak")
+    }
 }
 
 pub fn java_bin(jdk_dir: &Path) -> PathBuf {

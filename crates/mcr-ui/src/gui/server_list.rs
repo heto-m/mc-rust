@@ -190,6 +190,20 @@ pub struct ServerListScreen {
     list: ScrollList,
     mouse: (f32, f32),
     favicons: RefCell<std::collections::HashMap<u64, (Option<crate::SpriteId>, u64)>>,
+    releaser: RefCell<Option<crate::SpriteReleaser>>,
+}
+
+impl Drop for ServerListScreen {
+    fn drop(&mut self) {
+        if let Some(releaser) = self.releaser.get_mut() {
+            releaser.release(
+                self.favicons
+                    .get_mut()
+                    .drain()
+                    .filter_map(|(_, (id, _))| id),
+            );
+        }
+    }
 }
 
 impl std::fmt::Debug for ServerListScreen {
@@ -210,6 +224,7 @@ impl ServerListScreen {
             list: ScrollList::new([0, HEADER, 0, 0], ROW_HEIGHT),
             mouse: (0.0, 0.0),
             favicons: RefCell::default(),
+            releaser: RefCell::default(),
         }
     }
 
@@ -362,6 +377,9 @@ impl ServerListScreen {
             ServerStatus::Online(o) => o.favicon.as_ref().and_then(|f| {
                 let now = cx.frame.number();
                 let mut cache = self.favicons.borrow_mut();
+                self.releaser
+                    .borrow_mut()
+                    .get_or_insert_with(|| cx.frame.ui().sprites_mut().releaser());
                 if !cache.contains_key(&f.id) && cache.len() >= MAX_FAVICONS {
                     cache.retain(|_, (id, used)| {
                         let keep = *used >= now;

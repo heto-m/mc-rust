@@ -112,3 +112,15 @@ fn thousands_of_hostile_item_stacks_stay_bounded() {
     assert!(stats.models <= 4096, "{stats:?}");
     assert!(stats.parts <= mcr_entity_model::MAX_INSTANCES);
 }
+
+#[test]
+fn server_named_equipment_misses_stay_bounded() {
+    let Some(assets) = support::assets() else {
+        return;
+    };
+    for n in 0..20_000 {
+        assert!(assets.equipment(&format!("hostile:armor_{n}")).is_none());
+    }
+    assert!(assets.equipment("minecraft:diamond").is_some());
+    assert!(assets.equipment_cached() <= mcr_entity_model::MAX_EQUIPMENT_MISSES + 1);
+}

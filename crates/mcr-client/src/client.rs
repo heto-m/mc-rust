@@ -494,19 +494,19 @@ impl Client {
                     &self.config.dialog_link,
                     crate::resolve_dialog(&self.state.registries, &p.dialog.0),
                 ) {
-                    let _ = link.requests.send(crate::DialogRequest::Show(dialog));
+                    link.send(crate::DialogRequest::Show(dialog));
                 }
             }
             ConfigClientbound::ClearDialog(_) => {
                 if let Some(link) = &self.config.dialog_link {
-                    let _ = link.requests.send(crate::DialogRequest::Clear);
+                    link.send(crate::DialogRequest::Clear);
                 }
             }
             ConfigClientbound::CodeOfConduct(p) => {
                 let hash = crate::conduct::conduct_hash(p.text.as_str());
                 match &self.config.conduct_link {
                     Some(link) if self.config.accepted_conduct != Some(hash) => {
-                        let _ = link.requests.send(crate::conduct::ConductRequest {
+                        link.send(crate::conduct::ConductRequest {
                             text: crate::conduct::sanitize_conduct(p.text.as_str()),
                             hash,
                         });
@@ -564,7 +564,7 @@ impl Client {
         }
         for request in std::mem::take(&mut out.dialogs) {
             if let Some(link) = &self.config.dialog_link {
-                let _ = link.requests.send(request);
+                link.send(request);
             }
         }
         for reply in std::mem::take(&mut out.replies) {
@@ -689,7 +689,7 @@ impl Client {
                         &self.config.dialog_link,
                         crate::resolve_dialog(&self.state.registries, &reference),
                     ) {
-                        let _ = link.requests.send(DialogRequest::Show(dialog));
+                        link.send(DialogRequest::Show(dialog));
                     }
                 }
                 DialogReply::Disconnect(reason) => {

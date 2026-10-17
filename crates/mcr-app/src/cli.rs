@@ -33,6 +33,7 @@ pub struct Options {
     pub occlusion: bool,
     pub visibility_graph: bool,
     pub mods: Option<PathBuf>,
+    pub soak: Option<u64>,
 }
 
 impl Default for Options {
@@ -63,6 +64,7 @@ impl Default for Options {
             occlusion: true,
             visibility_graph: true,
             mods: None,
+            soak: None,
         }
     }
 }
@@ -93,6 +95,7 @@ pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect ho
            [--autofly blocks_per_s] [--bench frames [--bench-view x,y,z,yaw,pitch]... [--bench-modes]]
        connect mode: [--name <name>] [--game-dir dir] [--assets-dir dir] [--autopilot script]
            [--screenshot out.png [--after-ticks N]]
+       soak: --connect host[:port] --soak secs runs offscreen, rejoins after kicks and prints soak-stats every 10 s
        mods: [--mods <dir>] uses <dir> instead of <game-dir>/mods; enabled mods boot under Fabric (needs `cargo xtask fabric-fetch`)
 camera angles are degrees; yaw 0 looks toward -Z, positive turns left";
 
@@ -149,6 +152,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             "--game-dir" => opts.game_dir = value(&arg, &mut args)?.into(),
             "--assets-dir" => opts.assets_dir = value(&arg, &mut args)?.into(),
             "--mods" => opts.mods = Some(value(&arg, &mut args)?.into()),
+            "--soak" => {
+                opts.soak = Some(
+                    value(&arg, &mut args)?
+                        .parse()
+                        .map_err(|_| "--soak needs a duration in seconds")?,
+                );
+            }
             "--autopilot" => opts.autopilot = Some(value(&arg, &mut args)?.into()),
             "--after-ticks" => {
                 opts.after_ticks = Some(
@@ -189,6 +199,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             }
             other => return Err(format!("unknown argument {other}")),
         }
+    }
+    if opts.soak.is_some() && opts.connect.is_none() {
+        return Err("--soak needs --connect".into());
     }
     if opts.synthetic && opts.screenshot.is_some() {
         return Err("--screenshot needs --world or the menu flow".into());

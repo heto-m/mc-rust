@@ -1,38 +1,75 @@
 use crossbeam_channel::{Receiver, Sender, bounded};
 use std::fmt;
 use std::ops::Deref;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MAX_KEPT_CAPACITY: usize = 1 << 20;
+/// Idle capacity a pool keeps in all; a burst of large chunk packets is not held for the session.
+pub const MAX_IDLE_BYTES: usize = 8 << 20;
 
 #[derive(Clone)]
 pub struct BufPool {
     tx: Sender<Vec<u8>>,
     rx: Receiver<Vec<u8>>,
+    idle: Arc<AtomicUsize>,
 }
 
 impl BufPool {
     pub fn new(capacity: usize) -> Self {
         let (tx, rx) = bounded(capacity);
-        Self { tx, rx }
+        Self {
+            tx,
+            rx,
+            idle: Arc::default(),
+        }
     }
 
     pub fn get(&self) -> Vec<u8> {
         let mut v = self.rx.try_recv().unwrap_or_default();
+        self.idle.fetch_sub(v.capacity(), Ordering::AcqRel);
         v.clear();
         v
     }
 
     pub fn put(&self, v: Vec<u8>) {
-        if v.capacity() <= MAX_KEPT_CAPACITY {
-            let _ = self.tx.try_send(v);
+        let cap = v.capacity();
+        if cap > MAX_KEPT_CAPACITY {
+            return;
         }
+        let reserved = reserve(&self.idle, cap, MAX_IDLE_BYTES);
+        if reserved && self.tx.try_send(v).is_err() {
+            self.idle.fetch_sub(cap, Ordering::AcqRel);
+        }
+    }
+
+    pub fn idle_bytes(&self) -> usize {
+        self.idle.load(Ordering::Acquire)
     }
 
     pub fn pooled(&self, buf: Vec<u8>, offset: usize) -> PooledBuf {
         PooledBuf {
             buf,
             offset,
-            home: Some(self.tx.clone()),
+            home: Some(self.clone()),
+        }
+    }
+}
+
+fn reserve(counter: &AtomicUsize, n: usize, max: usize) -> bool {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        if current + n > max {
+            return false;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current + n,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(seen) => current = seen,
         }
     }
 }
@@ -49,7 +86,7 @@ impl fmt::Debug for BufPool {
 pub struct PooledBuf {
     buf: Vec<u8>,
     offset: usize,
-    home: Option<Sender<Vec<u8>>>,
+    home: Option<BufPool>,
 }
 
 impl PooledBuf {
@@ -80,10 +117,8 @@ impl fmt::Debug for PooledBuf {
 
 impl Drop for PooledBuf {
     fn drop(&mut self) {
-        if let Some(home) = &self.home
-            && self.buf.capacity() <= MAX_KEPT_CAPACITY
-        {
-            let _ = home.try_send(std::mem::take(&mut self.buf));
+        if let Some(home) = &self.home {
+            home.put(std::mem::take(&mut self.buf));
         }
     }
 }
@@ -91,6 +126,20 @@ impl Drop for PooledBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_capacity_is_bounded_in_bytes() {
+        let pool = BufPool::new(256);
+        for _ in 0..1000 {
+            pool.put(Vec::with_capacity(1 << 20));
+            drop(pool.pooled(Vec::with_capacity(512 << 10), 0));
+        }
+        assert!(pool.idle_bytes() <= MAX_IDLE_BYTES);
+        for _ in 0..300 {
+            drop(pool.get());
+        }
+        assert_eq!(pool.idle_bytes(), 0);
+    }
 
     #[test]
     fn buffers_are_recycled() {

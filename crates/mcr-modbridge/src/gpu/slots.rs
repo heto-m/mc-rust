@@ -20,6 +20,8 @@ pub const MAX_QUEUED: usize = 4096;
 const LOGGED_OVERFLOWS: u64 = 10;
 const POOLED_BUFFERS: usize = 64;
 const POOLED_CAPACITY: usize = 16 << 20;
+/// Idle capacity the pool may hold in all, so a burst of large submits is not kept for the session.
+const POOLED_TOTAL: usize = 64 << 20;
 
 static BYTE_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
@@ -40,7 +42,8 @@ pub(crate) fn recycle(v: Vec<u8>) {
         return;
     }
     let mut pool = BYTE_POOL.lock().unwrap_or_else(PoisonError::into_inner);
-    if pool.len() < POOLED_BUFFERS {
+    let held: usize = pool.iter().map(Vec::capacity).sum();
+    if pool.len() < POOLED_BUFFERS && held + v.capacity() <= POOLED_TOTAL {
         pool.push(v);
     }
 }
@@ -70,6 +73,19 @@ impl SubmitTrack {
     pub fn inflight(&self) -> MutexGuard<'_, VecDeque<(u64, wgpu::SubmissionIndex)>> {
         self.inflight.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn record(&self, n: u64, index: wgpu::SubmissionIndex) {
+        let done = self.done.load(Ordering::Acquire);
+        push_pruned(&mut self.inflight(), done, (n, index));
+    }
+}
+
+/// Waits rarely prune: Java's fences mostly name submits the GPU already finished.
+fn push_pruned<T>(inflight: &mut VecDeque<(u64, T)>, done: u64, entry: (u64, T)) {
+    while inflight.front().is_some_and(|(k, _)| *k <= done) {
+        inflight.pop_front();
+    }
+    inflight.push_back(entry);
 }
 
 #[derive(Debug)]
@@ -100,7 +116,7 @@ impl Submission {
         gpu.queue.on_submitted_work_done(move || {
             done.fetch_max(n, Ordering::AcqRel);
         });
-        self.track.inflight().push_back((n, index));
+        self.track.record(n, index);
         self.track.queued.fetch_max(n, Ordering::AcqRel);
         for (staging, flag) in self.maps {
             staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
@@ -436,6 +452,25 @@ fn run_scoped(gpu: &Gpu, sub: Submission) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_byte_pool_holds_a_bounded_total() {
+        for _ in 0..256 {
+            recycle(Vec::with_capacity(8 << 20));
+        }
+        let pool = BYTE_POOL.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(pool.iter().map(Vec::capacity).sum::<usize>() <= POOLED_TOTAL);
+    }
+
+    #[test]
+    fn finished_submits_leave_the_inflight_list() {
+        let mut inflight = VecDeque::new();
+        for n in 1..=100_000u64 {
+            push_pruned(&mut inflight, n.saturating_sub(3), (n, ()));
+        }
+        assert!(inflight.len() <= 4, "{}", inflight.len());
+        assert_eq!(inflight.back().map(|e| e.0), Some(100_000));
+    }
 
     #[test]
     fn immediate_prefix_stops_at_gui_work() {

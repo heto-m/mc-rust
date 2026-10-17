@@ -1601,6 +1601,7 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "bytemuck",
+ "libc",
  "mcr-animate",
  "mcr-anvil",
  "mcr-assets",

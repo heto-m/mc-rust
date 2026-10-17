@@ -107,6 +107,7 @@ pub struct Hud {
     sprites: HudSprites,
     own: Sprites,
     heads: RefCell<FxHashMap<String, (Option<SpriteId>, u64)>>,
+    head_sprites: RefCell<mcr_ui::OwnedSprites>,
     waypoint_styles: RefCell<FxHashMap<String, WaypointStyle>>,
     style_reader: Option<crate::skins::AssetReader>,
     pub chat: SharedChat,
@@ -160,6 +161,7 @@ impl Hud {
         self.sprites = fresh.sprites;
         self.own = fresh.own;
         self.heads.get_mut().clear();
+        self.head_sprites.get_mut().forget();
     }
 
     pub fn with_style_reader(mut self, read: crate::skins::AssetReader) -> Self {
@@ -272,6 +274,7 @@ impl Hud {
                 ],
             },
             heads: RefCell::default(),
+            head_sprites: RefCell::default(),
             waypoint_styles: RefCell::default(),
             style_reader: None,
             chat: SharedChat::default(),
@@ -647,6 +650,7 @@ impl Hud {
     ) -> Option<SpriteId> {
         let (key, pixels) = skins.head(player.uuid, player.show_hat)?;
         let mut heads = self.heads.borrow_mut();
+        let mut owned = self.head_sprites.borrow_mut();
         let now = frame.number();
         if let Some((id, used)) = heads.get_mut(&key) {
             *used = now;
@@ -656,16 +660,13 @@ impl Hud {
             heads.retain(|_, (id, used)| {
                 let keep = *used >= now;
                 if let (false, Some(id)) = (keep, id) {
-                    frame.ui().sprites_mut().free_raw(*id);
+                    owned.free(frame.ui().sprites_mut(), *id);
                 }
                 keep
             });
         }
         let id = if heads.len() < MAX_HEAD_SPRITES {
-            frame
-                .ui()
-                .sprites_mut()
-                .add_raw(HEAD_SIZE, HEAD_SIZE, &pixels)
+            owned.add(frame.ui().sprites_mut(), HEAD_SIZE, HEAD_SIZE, &pixels)
         } else {
             None
         };

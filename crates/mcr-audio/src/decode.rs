@@ -1,6 +1,6 @@
 use std::io::Cursor;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -91,6 +91,33 @@ pub fn decode_ogg(bytes: Vec<u8>) -> Result<Pcm, AudioError> {
 }
 
 const STREAM_RING_SECONDS: usize = 1;
+/// Vanilla's streaming channel pool; each open stream owns a decoder thread.
+pub const MAX_STREAMS: usize = 8;
+static LIVE_STREAMS: AtomicUsize = AtomicUsize::new(0);
+
+struct StreamPermit(&'static AtomicUsize);
+
+impl StreamPermit {
+    fn acquire(live: &'static AtomicUsize, max: usize) -> Option<Self> {
+        let mut n = live.load(Ordering::Acquire);
+        loop {
+            if n >= max {
+                return None;
+            }
+            match live.compare_exchange_weak(n, n + 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Some(Self(live)),
+                Err(seen) => n = seen,
+            }
+        }
+    }
+}
+
+impl Drop for StreamPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 const STREAM_PREFILL: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
@@ -137,6 +164,8 @@ pub(crate) enum Pull {
 }
 
 pub fn open_stream(bytes: Vec<u8>) -> Result<StreamSource, AudioError> {
+    let permit = StreamPermit::acquire(&LIVE_STREAMS, MAX_STREAMS)
+        .ok_or_else(|| AudioError::Decode("all streaming channels are busy".into()))?;
     let mut r = reader(bytes)?;
     let src_channels = r.ident_hdr.audio_channels as usize;
     let channels = src_channels.min(2) as u8;
@@ -149,6 +178,7 @@ pub fn open_stream(bytes: Vec<u8>) -> Result<StreamSource, AudioError> {
     thread::Builder::new()
         .name("mcr-audio-stream".into())
         .spawn(move || {
+            let _permit = permit;
             let mut pending = Vec::new();
             let mut offset = 0;
             loop {
@@ -277,6 +307,18 @@ pub fn pushed_stream(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stream_permits_bound_decoder_threads() {
+        static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        for _ in 0..1000 {
+            let held: Vec<_> = (0..20)
+                .filter_map(|_| super::StreamPermit::acquire(&LIVE, super::MAX_STREAMS))
+                .collect();
+            assert_eq!(held.len(), super::MAX_STREAMS);
+        }
+        assert_eq!(LIVE.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
     use super::*;
 
     fn pull_all(source: &mut StreamSource, max: usize) -> (Vec<[f32; 2]>, usize, bool) {

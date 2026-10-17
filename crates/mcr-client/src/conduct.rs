@@ -1,4 +1,4 @@
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex};
 
 /// A server's code of conduct is shown, never cut by more than this.
@@ -32,11 +32,15 @@ pub enum ConductReply {
 
 #[derive(Debug, Clone)]
 pub struct ConductLink {
-    pub(crate) requests: Sender<ConductRequest>,
+    requests: SyncSender<ConductRequest>,
     replies: Arc<Mutex<Receiver<ConductReply>>>,
 }
 
 impl ConductLink {
+    pub(crate) fn send(&self, request: ConductRequest) {
+        let _ = self.requests.try_send(request);
+    }
+
     pub(crate) fn next_reply(&self) -> Option<ConductReply> {
         self.replies.lock().ok()?.try_recv().ok()
     }
@@ -55,7 +59,7 @@ impl ConductEnd {
 }
 
 pub fn conduct_channel() -> (ConductLink, ConductEnd) {
-    let (request_tx, request_rx) = channel();
+    let (request_tx, request_rx) = sync_channel(4);
     let (reply_tx, reply_rx) = channel();
     (
         ConductLink {
@@ -72,6 +76,18 @@ pub fn conduct_channel() -> (ConductLink, ConductEnd) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unread_conduct_requests_are_bounded() {
+        let (link, end) = conduct_channel();
+        for _ in 0..10_000 {
+            link.send(ConductRequest {
+                text: "rules".into(),
+                hash: 1,
+            });
+        }
+        assert!(end.requests.try_iter().count() <= 4);
+    }
 
     #[test]
     fn hash_matches_java() {

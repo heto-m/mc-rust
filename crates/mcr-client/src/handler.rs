@@ -112,8 +112,8 @@ impl ClientState {
                 }
             }
             P::GameRuleValues(p) => {
-                for (k, v) in p.values.0.into_iter().take(1024) {
-                    self.server.game_rules.insert(k.as_str().to_owned(), v);
+                for (k, v) in p.values.0.into_iter().take(crate::state::MAX_GAME_RULES) {
+                    self.server.set_game_rule(k.as_str(), v);
                 }
             }
             P::UpdateTags(p) => self.registries.apply_tags(&p),
@@ -160,15 +160,12 @@ impl ClientState {
             }
             P::SetChunkCacheCenter(p) => {
                 self.world.chunk_center = (p.x, p.z);
-                let doomed: Vec<_> = self
-                    .loaded_chunk_positions()
-                    .filter(|c| !self.chunk_in_range(c.x, c.z))
-                    .collect();
-                for pos in doomed {
-                    self.unload_chunk(pos, out);
-                }
+                self.unload_out_of_range(out);
             }
-            P::SetChunkCacheRadius(p) => self.world.view_distance = p.radius.clamp(0, 64),
+            P::SetChunkCacheRadius(p) => {
+                self.world.view_distance = p.radius.clamp(0, 64);
+                self.unload_out_of_range(out);
+            }
             P::SetSimulationDistance(p) => {
                 self.world.simulation_distance = p.simulation_distance.clamp(0, 64)
             }
@@ -287,9 +284,9 @@ impl ClientState {
             }
             P::SetTime(p) => {
                 self.world.game_time = p.game_time;
-                for update in p.clock_updates.iter().take(64) {
+                for update in p.clock_updates.iter().take(crate::state::MAX_CLOCKS) {
                     let ticks = update.total_ticks as f64 + f64::from(update.partial_tick);
-                    self.world.clocks.insert(
+                    self.world.set_clock(
                         update.clock,
                         crate::state::ClockState {
                             ticks,
@@ -945,19 +942,16 @@ impl ClientState {
         Ok(())
     }
 
-    pub(crate) fn loaded_chunk_positions(&self) -> impl Iterator<Item = ChunkPos> + '_ {
-        let r = self.chunk_storage_radius() + 64;
-        let (cx, cz) = self.world.chunk_center;
-        let mut out = Vec::new();
-        for dx in -r..=r {
-            for dz in -r..=r {
-                let pos = ChunkPos::new(cx + dx, cz + dz);
-                if self.chunks.column(pos).is_some() {
-                    out.push(pos);
-                }
-            }
+    /// Every stored column is checked, so a long jump of the centre cannot strand old ones.
+    fn unload_out_of_range(&mut self, out: &mut Outbox) {
+        let doomed: Vec<_> = self
+            .chunks
+            .positions()
+            .filter(|c| !self.chunk_in_range(c.x, c.z))
+            .collect();
+        for pos in doomed {
+            self.unload_chunk(pos, out);
         }
-        out.into_iter()
     }
 
     fn on_login(

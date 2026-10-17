@@ -3,6 +3,7 @@ package dev.mcr.bridge;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.VarHandle;
+import java.lang.ref.WeakReference;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.KeyboardInput;
@@ -26,8 +27,8 @@ public final class McrCameraHandoff {
         void mcr$place(double x, double y, double z, float yRot, float xRot);
     }
 
-    /** The camera entity the server set (spectating); mcr follows it itself, so it is no mod's. */
-    private static @Nullable Entity serverCamera;
+    /** The camera entity the server set (spectating); mcr follows it itself, so it is no mod's. Weak, so a left world is not kept alive. */
+    private static WeakReference<Entity> serverCamera = new WeakReference<>(null);
 
     private static int flags;
     private static double x;
@@ -39,12 +40,12 @@ public final class McrCameraHandoff {
     private McrCameraHandoff() {}
 
     public static void serverCamera(@Nullable Entity entity) {
-        serverCamera = entity;
+        serverCamera = new WeakReference<>(entity);
     }
 
     /** Whether {@code entity} is a camera entity mcr's own camera follows. */
     public static boolean followsRust(@Nullable Entity entity) {
-        return entity == null || entity == Minecraft.getInstance().player || entity == serverCamera;
+        return entity == null || entity == Minecraft.getInstance().player || entity == serverCamera.get();
     }
 
     /** The mod took the player's movement keys for its camera. */

@@ -245,19 +245,21 @@ impl RenderSystem {
     }
 
     /// Drops every section of `world` from the GPU and returns the renderer for the next session.
-    pub fn into_parts(mut self, world: &dyn MeshWorld) -> (Renderer, Arc<Assets>) {
-        let base = Self::min_section(world);
-        let count = (world.store().config().height() >> 4) as i32;
-        for pos in world.loaded_columns() {
-            for y in base..base + count {
-                self.renderer.remove_section([pos.x, y, pos.z]);
-            }
-        }
+    pub fn into_parts(mut self) -> (Renderer, Arc<Assets>) {
+        self.renderer.clear_sections();
         self.renderer.set_post_effects(&[]);
         (self.renderer, self.assets)
     }
 
     fn remove_unloaded(&mut self, world: &mut dyn MeshWorld) {
+        if world.take_reset() {
+            self.renderer.clear_sections();
+            self.waiting.clear();
+            self.urgent.clear();
+            self.urgent_inflight.clear();
+            self.ready.clear();
+            self.view = None;
+        }
         let base = Self::min_section(world);
         let count = (world.store().config().height() >> 4) as i32;
         for pos in world.take_unloaded() {
@@ -285,6 +287,7 @@ impl RenderSystem {
             mcr_mesh::DEFAULT_BLEND_RADIUS,
         );
         self.ready.clear();
+        self.urgent_inflight.clear();
         self.requeue_all(world);
     }
 

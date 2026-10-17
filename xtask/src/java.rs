@@ -68,11 +68,11 @@ pub struct Dirs<'a> {
     pub cache: &'a Path,
 }
 
-pub fn run(layout: &Layout) -> Result<()> {
+pub fn run(layout: &Layout, out: Option<&Path>) -> Result<()> {
     let toolchain = resolve_toolchain(layout)?;
     let (java, out, cache) = (
         layout.java_src_dir(),
-        layout.java_out_dir(),
+        out.map_or_else(|| layout.java_out_dir(), Path::to_path_buf),
         layout.cache_dir(),
     );
     let dirs = Dirs {

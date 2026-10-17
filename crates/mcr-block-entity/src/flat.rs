@@ -95,6 +95,7 @@ pub struct FlatRenderer {
     page_revision: u64,
     output_srgb: bool,
     groups: Vec<Group>,
+    quads: usize,
     draws: Vec<Draw>,
     vertices: wgpu::Buffer,
     vertex_capacity: usize,
@@ -103,6 +104,39 @@ pub struct FlatRenderer {
     portal_layers: f32,
     fog: [f32; 4],
     fog_color: [f32; 4],
+}
+
+/// Groups empty last frame are dropped, or text-display ranks long gone would pile up.
+fn begin_groups(groups: &mut Vec<Group>) {
+    groups.retain(|g| !g.vertices.is_empty());
+    for g in groups.iter_mut() {
+        g.vertices.clear();
+    }
+}
+
+fn push_group(
+    groups: &mut Vec<Group>,
+    kind: FlatKind,
+    bind: FlatBind,
+    seq: u32,
+    quad: &[FlatVertex; 4],
+) {
+    let at = match groups
+        .iter()
+        .position(|g| g.kind == kind && g.bind == bind && g.seq == seq)
+    {
+        Some(i) => i,
+        None => {
+            groups.push(Group {
+                kind,
+                bind,
+                seq,
+                vertices: Vec::new(),
+            });
+            groups.len() - 1
+        }
+    };
+    groups[at].vertices.extend_from_slice(quad);
 }
 
 fn index_data(quads: usize) -> Vec<u32> {
@@ -372,6 +406,7 @@ impl FlatRenderer {
             page_revision: u64::MAX,
             output_srgb: formats.color.is_srgb(),
             groups: Vec::new(),
+            quads: 0,
             draws: Vec::new(),
             vertices,
             vertex_capacity,
@@ -466,14 +501,13 @@ impl FlatRenderer {
     }
 
     pub fn begin_frame(&mut self) {
-        for g in &mut self.groups {
-            g.vertices.clear();
-        }
+        begin_groups(&mut self.groups);
+        self.quads = 0;
         self.draws.clear();
     }
 
     pub fn quad_count(&self) -> usize {
-        self.groups.iter().map(|g| g.vertices.len() / 4).sum()
+        self.quads
     }
 
     pub fn push_quad(&mut self, kind: FlatKind, bind: FlatBind, quad: [FlatVertex; 4]) {
@@ -489,26 +523,11 @@ impl FlatRenderer {
         seq: u32,
         quad: [FlatVertex; 4],
     ) {
-        if self.quad_count() >= MAX_QUADS {
+        if self.quads >= MAX_QUADS {
             return;
         }
-        let group = match self
-            .groups
-            .iter()
-            .position(|g| g.kind == kind && g.bind == bind && g.seq == seq)
-        {
-            Some(i) => i,
-            None => {
-                self.groups.push(Group {
-                    kind,
-                    bind,
-                    seq,
-                    vertices: Vec::new(),
-                });
-                self.groups.len() - 1
-            }
-        };
-        self.groups[group].vertices.extend_from_slice(&quad);
+        push_group(&mut self.groups, kind, bind, seq, &quad);
+        self.quads += 1;
     }
 
     pub fn set_fog(&mut self, fog: [f32; 4], color: [f32; 3]) {
@@ -637,5 +656,29 @@ impl FlatRenderer {
 
     pub fn draw_calls(&self) -> usize {
         self.draws.len()
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    #[test]
+    fn groups_of_vanished_text_displays_are_dropped() {
+        let mut groups = Vec::new();
+        let quad = [FlatVertex::zeroed(); 4];
+        for frame in 0..1000u32 {
+            begin_groups(&mut groups);
+            for seq in frame..frame + 8 {
+                push_group(
+                    &mut groups,
+                    FlatKind::DisplayText,
+                    FlatBind::Background,
+                    seq,
+                    &quad,
+                );
+            }
+        }
+        assert!(groups.len() <= 16, "{}", groups.len());
     }
 }

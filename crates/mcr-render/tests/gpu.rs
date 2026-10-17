@@ -398,6 +398,25 @@ fn arena_exhaustion_keeps_existing_sections() {
     r.set_section([1, 0, 0], &one_quad_per_face()).unwrap();
 }
 
+#[test]
+fn clearing_sections_frees_every_world_and_height() {
+    let Some(mut r) = renderer(32, 32) else {
+        return;
+    };
+    let cam = terrain_camera(DVec3::ZERO);
+    for round in 0..12 {
+        upload_world(&mut r, 3, [round * 40, (round % 3) * 8 - 8, 0]);
+        frame(&mut r, &cam);
+        assert!(r.section_count() > 0);
+        r.clear_sections();
+        frame(&mut r, &cam);
+        assert_eq!(r.section_count(), 0);
+        assert_eq!(r.graph_nodes(), 0);
+        assert_eq!(r.cube_quads_used(), 0);
+        assert_eq!(r.model_quads_used(), 0);
+    }
+}
+
 fn flat_group(layers: &[[u8; 4]]) -> mcr_render::TextureGroupData {
     let mips = (0..5)
         .map(|m| {

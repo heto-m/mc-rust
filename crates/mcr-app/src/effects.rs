@@ -305,6 +305,37 @@ impl WeatherSource for ClientWeather<'_> {
 struct Breaking {
     pos: BlockPos,
     stage: u8,
+    age: u32,
+}
+
+/// Vanilla drops a crack decal 400 ticks after its last update (a breaker that left mid-dig).
+const DECAL_TICKS: u32 = 400;
+
+#[derive(Debug, Default)]
+struct BreakingDecals(FxHashMap<i32, Breaking>);
+
+impl BreakingDecals {
+    fn update(&mut self, entity_id: i32, pos: BlockPos, progress: u8) {
+        if progress > 9 {
+            self.0.remove(&entity_id);
+        } else if self.0.len() < MAX_DECALS || self.0.contains_key(&entity_id) {
+            self.0.insert(
+                entity_id,
+                Breaking {
+                    pos,
+                    stage: progress,
+                    age: 0,
+                },
+            );
+        }
+    }
+
+    fn tick(&mut self) {
+        self.0.retain(|_, b| {
+            b.age += 1;
+            b.age <= DECAL_TICKS
+        });
+    }
 }
 
 pub struct WorldEffects {
@@ -312,7 +343,7 @@ pub struct WorldEffects {
     rain: RainTicker,
     biomes: Vec<(bool, f32)>,
     biome_count: usize,
-    breaking: FxHashMap<i32, Breaking>,
+    breaking: BreakingDecals,
     flash_ticks: u32,
     lightning_type: i32,
     status: ParticleStatus,
@@ -340,7 +371,7 @@ impl WorldEffects {
             rain: RainTicker::default(),
             biomes: Vec::new(),
             biome_count: 0,
-            breaking: FxHashMap::default(),
+            breaking: BreakingDecals::default(),
             flash_ticks: 0,
             lightning_type: mcr_data::v26_3()
                 .entity_type_by_name("minecraft:lightning_bolt")
@@ -359,7 +390,7 @@ impl WorldEffects {
         self.particles.clear();
         self.fireworks.clear();
         self.sounds.clear();
-        self.breaking.clear();
+        self.breaking.0.clear();
         self.flash_ticks = 0;
     }
 
@@ -397,17 +428,7 @@ impl WorldEffects {
     }
 
     pub fn destruction(&mut self, entity_id: i32, pos: BlockPos, progress: u8) {
-        if progress > 9 {
-            self.breaking.remove(&entity_id);
-        } else if self.breaking.len() < MAX_DECALS || self.breaking.contains_key(&entity_id) {
-            self.breaking.insert(
-                entity_id,
-                Breaking {
-                    pos,
-                    stage: progress,
-                },
-            );
-        }
+        self.breaking.update(entity_id, pos, progress);
     }
 
     pub fn decals(&self, state: &ClientState, own: Option<(BlockPos, u8)>) -> Vec<DestroyDecal> {
@@ -430,6 +451,7 @@ impl WorldEffects {
             }
         };
         self.breaking
+            .0
             .values()
             .map(|b| make(b.pos, b.stage))
             .chain(own.map(|(pos, stage)| make(pos, stage)))
@@ -890,6 +912,7 @@ impl WorldEffects {
         options: &Options,
     ) -> Option<RainSound> {
         self.flash_ticks = self.flash_ticks.saturating_sub(1);
+        self.breaking.tick();
         self.particles.set_camera(camera);
         self.camera = camera;
         self.tick_fireworks();
@@ -1019,6 +1042,21 @@ pub fn tick_boss_darkening(current: f32, darken: bool) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abandoned_crack_decals_expire() {
+        let mut decals = BreakingDecals::default();
+        for id in 0..10_000 {
+            decals.update(id, BlockPos::new(id, 64, 0), 3);
+            decals.tick();
+        }
+        assert!(decals.0.len() <= MAX_DECALS);
+        decals.update(-1, BlockPos::new(0, 0, 0), 5);
+        for _ in 0..=DECAL_TICKS {
+            decals.tick();
+        }
+        assert!(decals.0.is_empty());
+    }
 
     #[test]
     fn barrier_and_light_blocks_have_a_particle_texture() {

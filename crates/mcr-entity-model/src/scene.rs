@@ -282,6 +282,12 @@ impl EntityScene {
         self.stats
     }
 
+    pub fn live_layers(&self) -> u32 {
+        (0..crate::gpu::CLASS_SIZES.len())
+            .map(|c| self.gpu.live_layers(c))
+            .sum()
+    }
+
     /// Registers or replaces a runtime-composed texture (player skins) under `key`.
     pub fn set_dynamic_texture(&mut self, key: &str, image: crate::assets::ImageRgba) {
         self.textures.replace(key, image);

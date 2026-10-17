@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
-
 use crate::category::SoundSource;
 use crate::decode::{Pcm, decode_ogg, open_stream};
 use crate::error::AudioError;
 use crate::events::{JavaRandom, SoundEvents};
 use crate::mixer::{AudioHandle, Command, Listener, PlayRequest, Source, Spatial, VoiceId};
+use crate::pcm_cache::PcmCache;
 use crate::store::{AssetStore, SoundOverlay};
 
 #[derive(Debug)]
@@ -14,7 +13,7 @@ pub struct SoundManager {
     store: AssetStore,
     events: SoundEvents,
     handle: AudioHandle,
-    cache: FxHashMap<String, Arc<Pcm>>,
+    cache: PcmCache,
     last_sound: Option<String>,
 }
 
@@ -29,7 +28,7 @@ impl SoundManager {
             store,
             events,
             handle,
-            cache: FxHashMap::default(),
+            cache: PcmCache::default(),
             last_sound: None,
         }
     }
@@ -143,7 +142,7 @@ impl SoundManager {
             return Ok(pcm.clone());
         }
         let pcm = Arc::new(decode_ogg(self.store.sound_file(name)?)?);
-        self.cache.insert(name.to_string(), pcm.clone());
+        self.cache.insert(name, pcm.clone());
         Ok(pcm)
     }
 }

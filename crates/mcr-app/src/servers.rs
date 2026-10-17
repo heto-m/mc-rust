@@ -226,7 +226,6 @@ impl ServerStore for FileServers {
             self.entries.remove(index);
             self.statuses.remove(index);
             self.epoch += 1;
-            self.inflight = 0;
             self.statuses.iter_mut().for_each(|s| *s = None);
             self.save();
         }
@@ -252,9 +251,9 @@ impl ServerStore for FileServers {
         }
     }
 
+    /// Pings of the old epoch keep their slot until they answer, so refreshing cannot pile up threads.
     fn refresh(&mut self) {
         self.epoch += 1;
-        self.inflight = 0;
         self.statuses.iter_mut().for_each(|s| *s = None);
     }
 
@@ -270,6 +269,27 @@ impl ServerStore for FileServers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refreshing_keeps_running_pings_counted() {
+        let dir = std::env::temp_dir().join(format!("mcr-pings-{}", std::process::id()));
+        let mut list = FileServers::load(&dir);
+        for i in 0..32 {
+            list.entries.push(ServerEntry {
+                name: format!("s{i}"),
+                address: "127.0.0.1:1".into(),
+            });
+            list.statuses.push(None);
+        }
+        for _ in 0..50 {
+            for i in 0..32 {
+                list.status(i);
+            }
+            assert!(list.inflight <= MAX_INFLIGHT);
+            list.refresh();
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn entries_survive_a_reload() {

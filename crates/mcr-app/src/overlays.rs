@@ -31,6 +31,7 @@ pub struct Overlays {
     vignette: Option<SpriteId>,
     vignette_loaded: bool,
     vignette_brightness: f32,
+    owned: mcr_ui::OwnedSprites,
 }
 
 /// Vanilla's `Lightmap.getBrightness` for a raw light level, without the dimension's ambient light.
@@ -153,7 +154,8 @@ impl Overlays {
                 .read("assets/minecraft/textures/misc/vignette.png")
                 .and_then(|b| decode_scope(&b))
                 .and_then(|(w, h, px)| {
-                    frame.ui().sprites_mut().add_raw(w, h, &vignette_alpha(&px))
+                    let sprites = frame.ui().sprites_mut();
+                    self.owned.add(sprites, w, h, &vignette_alpha(&px))
                 });
         }
         let Some(sprite) = self.vignette else { return };
@@ -173,7 +175,7 @@ impl Overlays {
             self.scope = assets
                 .read("assets/minecraft/textures/misc/spyglass_scope.png")
                 .and_then(|b| decode_scope(&b))
-                .and_then(|(w, h, px)| frame.ui().sprites_mut().add_raw(w, h, &px));
+                .and_then(|(w, h, px)| self.owned.add(frame.ui().sprites_mut(), w, h, &px));
         }
         let Some(sprite) = self.scope else { return };
         let (gui_w, gui_h) = frame.gui_size();

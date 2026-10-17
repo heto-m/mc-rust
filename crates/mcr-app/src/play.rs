@@ -580,7 +580,7 @@ impl Play {
             self.loops.reset(audio);
             audio.stop_world_sounds();
         }
-        let (renderer, assets) = self.render.into_parts(&self.world);
+        let (renderer, assets) = self.render.into_parts();
         Parts {
             renderer,
             gui: self.gui,
@@ -609,6 +609,15 @@ impl Play {
 
     pub fn feet(&self) -> [f64; 3] {
         self.world.client.state.player.pos()
+    }
+
+    pub fn soak_counts(&self) -> (u32, usize, usize) {
+        let state = &self.world.client.state;
+        (
+            self.entities.as_ref().map_or(0, |e| e.scene.live_layers()),
+            state.entities.len(),
+            state.chunks.len(),
+        )
     }
 
     pub fn pipeline_stats(&self) -> PipelineStats {
@@ -1055,7 +1064,7 @@ impl Play {
                 }
             }
             ClientEvent::MapUpdated(id) => self.sync_map(id),
-            ClientEvent::Respawned => {
+            event if crate::net_world::resets_world(&event) => {
                 self.effects.clear();
                 self.entity_events.clear();
                 if let Some(entities) = &mut self.entities {
@@ -1940,6 +1949,13 @@ impl Play {
             self.stack.tick(&mut env, &mut actions);
         }
         self.handle_actions(actions);
+    }
+
+    /// Respawns a dead player as the death screen's button would; the soak has nobody to press it.
+    pub fn respawn_if_dead(&mut self) {
+        if self.world.client.state.player.dead {
+            self.handle_actions(vec![ScreenAction::Respawn]);
+        }
     }
 
     fn death_check(&mut self) {

@@ -10,6 +10,10 @@ pub trait MeshWorld {
     fn loaded_columns(&self) -> Vec<ChunkPos>;
     /// Columns removed since the last call.
     fn take_unloaded(&mut self) -> Vec<ChunkPos>;
+    /// Whether the whole world was replaced since the last call.
+    fn take_reset(&mut self) -> bool {
+        false
+    }
     /// Names indexed by the biome ids used in the stored columns; may grow while columns arrive.
     fn biome_names(&self) -> Vec<String>;
     /// Hashed world seed used for biome zoom.

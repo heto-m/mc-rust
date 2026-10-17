@@ -1146,6 +1146,43 @@ impl Shell {
             .ok()
     }
 
+    pub fn respawn_if_dead(&mut self) {
+        if let Some(play) = &mut self.play {
+            play.respawn_if_dead();
+        }
+    }
+
+    pub fn idle(&self) -> bool {
+        self.play.is_none() && self.connecting.is_none()
+    }
+
+    pub fn rejoin(&mut self) -> bool {
+        if !self.idle() || self.current_address.is_empty() {
+            return false;
+        }
+        self.failure = None;
+        self.show_title();
+        let address = self.current_address.clone();
+        self.connect(&address, true);
+        true
+    }
+
+    pub fn soak_stats(&self) -> crate::soak::Stats {
+        let renderer = match (&self.parts, &self.play) {
+            (Some(p), _) => Some(&p.renderer),
+            (None, Some(play)) => Some(&play.render.renderer),
+            _ => None,
+        };
+        let (entity_layers, entities, chunks) =
+            self.play.as_ref().map_or((0, 0, 0), Play::soak_counts);
+        crate::soak::Stats {
+            gpu: renderer.map(Renderer::gpu_counters).unwrap_or_default(),
+            entity_layers,
+            entities,
+            chunks,
+        }
+    }
+
     pub fn read_offscreen(&mut self) -> Result<Vec<u8>> {
         let renderer = self.renderer_mut().context("no renderer")?;
         Ok(renderer.read_offscreen()?)

@@ -42,6 +42,7 @@ mod servers;
 mod settings;
 mod shell;
 mod skins;
+mod soak;
 mod source;
 mod stats;
 mod status;
@@ -531,7 +532,18 @@ pub(crate) fn load_autopilot(path: &std::path::Path) -> Result<autopilot::Autopi
     Ok(autopilot::Autopilot::new(steps))
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn pin_mmap_threshold() {
+    // glibc raises it after each large free, so evicted sound buffers would pile up in the heap.
+    // SAFETY: only tunes the allocator; no other thread exists yet.
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 256 << 10);
+    }
+}
+
 fn main() -> Result<()> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pin_mmap_threshold();
     let launched = Instant::now();
     let mut opts = match cli::parse(std::env::args().skip(1)) {
         Ok(opts) => opts,
@@ -541,6 +553,9 @@ fn main() -> Result<()> {
         }
     };
     opts.absolutize()?;
+    if let Some(secs) = opts.soak {
+        return soak::run(&opts, std::time::Duration::from_secs(secs));
+    }
     if let Some(out) = opts.screenshot.clone() {
         if opts.world.is_none() && !opts.synthetic {
             return screenshot::run_shell(&opts, &out);

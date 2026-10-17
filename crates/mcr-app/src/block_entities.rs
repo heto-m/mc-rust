@@ -336,7 +336,7 @@ impl BlockEntities {
                 self.scene
                     .block_event([pos.x, pos.y, pos.z], *b0, *b1, state.world.game_time);
             }
-            ClientEvent::Respawned => self.clear(),
+            event if crate::net_world::resets_world(event) => self.clear(),
             _ => {}
         }
     }

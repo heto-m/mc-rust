@@ -144,6 +144,11 @@ pub struct UploadRing {
     current: usize,
 }
 
+/// An idle block stays only if it is one of the first few and of the standard size.
+fn keep_ring_block(position: usize, len: usize, used_last: bool) -> bool {
+    used_last || (position <= KEPT_RING_BLOCKS && len <= RING_BLOCK)
+}
+
 pub fn align(n: u64, a: u64) -> u64 {
     n.div_ceil(a) * a
 }
@@ -212,7 +217,7 @@ impl UploadRing {
         let mut i = 0;
         self.blocks.retain(|b| {
             i += 1;
-            i <= KEPT_RING_BLOCKS || b.used_last
+            keep_ring_block(i, b.data.len(), b.used_last)
         });
         self.current = 0;
         bytes
@@ -1799,3 +1804,17 @@ struct V { @builtin(position) pos: vec4f, @location(0) color: vec4f }
 @vertex fn vs(@location(0) pos: vec4f, @location(1) color: vec4f) -> V { return V(pos, color); }
 @fragment fn fs(v: V) -> @location(0) vec4f { return v.color; }
 ";
+
+#[cfg(test)]
+mod ring_tests {
+    use super::*;
+
+    #[test]
+    fn idle_oversized_ring_blocks_are_released() {
+        assert!(keep_ring_block(1, RING_BLOCK, false));
+        assert!(keep_ring_block(KEPT_RING_BLOCKS, RING_BLOCK, false));
+        assert!(!keep_ring_block(KEPT_RING_BLOCKS + 1, RING_BLOCK, false));
+        assert!(!keep_ring_block(1, 512 << 20, false));
+        assert!(keep_ring_block(1, 512 << 20, true));
+    }
+}

@@ -84,12 +84,13 @@ pub fn open_path(path: &Path) {
     } else {
         "xdg-open"
     };
-    let _ = std::process::Command::new(opener)
+    let child = std::process::Command::new(opener)
         .arg(path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+    crate::gui::reap(child);
 }
 
 #[derive(Debug)]

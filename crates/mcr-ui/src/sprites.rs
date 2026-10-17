@@ -181,6 +181,69 @@ impl SpriteInfo {
     }
 }
 
+/// Hands runtime sprites back from owners that are dropped without access to [`Sprites`].
+#[derive(Debug, Clone, Default)]
+pub struct SpriteReleaser(std::sync::Arc<std::sync::Mutex<Vec<SpriteId>>>);
+
+impl SpriteReleaser {
+    pub fn release(&self, ids: impl IntoIterator<Item = SpriteId>) {
+        if let Ok(mut queue) = self.0.lock() {
+            queue.extend(ids);
+        }
+    }
+}
+
+/// Runtime sprites that go back to their atlas when this set is dropped.
+#[derive(Debug, Default)]
+pub struct OwnedSprites {
+    releaser: Option<SpriteReleaser>,
+    ids: Vec<SpriteId>,
+}
+
+impl OwnedSprites {
+    pub fn add(
+        &mut self,
+        sprites: &mut Sprites,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Option<SpriteId> {
+        self.releaser.get_or_insert_with(|| sprites.releaser());
+        let id = sprites.add_raw(width, height, rgba)?;
+        self.ids.push(id);
+        Some(id)
+    }
+
+    pub fn free(&mut self, sprites: &mut Sprites, id: SpriteId) {
+        if let Some(at) = self.ids.iter().position(|&i| i == id) {
+            self.ids.swap_remove(at);
+            sprites.free_raw(id);
+        }
+    }
+
+    /// Drops the ids without freeing them, after the atlas they belong to was rebuilt.
+    pub fn forget(&mut self) {
+        self.ids.clear();
+        self.releaser = None;
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+}
+
+impl Drop for OwnedSprites {
+    fn drop(&mut self) {
+        if let Some(releaser) = &self.releaser {
+            releaser.release(self.ids.drain(..));
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Sprites {
     atlas: Atlas,
@@ -189,6 +252,7 @@ pub struct Sprites {
     loaded: u32,
     freed: FxHashMap<(u32, u32), Vec<SpriteId>>,
     freed_ids: rustc_hash::FxHashSet<u32>,
+    releaser: SpriteReleaser,
 }
 
 impl Sprites {
@@ -242,7 +306,23 @@ impl Sprites {
             names,
             freed: FxHashMap::default(),
             freed_ids: Default::default(),
+            releaser: SpriteReleaser::default(),
         })
+    }
+
+    /// Ids only mean something to this `Sprites`, so a handle kept across a reload frees nothing.
+    pub fn releaser(&self) -> SpriteReleaser {
+        self.releaser.clone()
+    }
+
+    fn collect_released(&mut self) {
+        let ids = match self.releaser.0.lock() {
+            Ok(mut queue) => std::mem::take(&mut *queue),
+            Err(_) => return,
+        };
+        for id in ids {
+            self.free_raw(id);
+        }
     }
 
     pub fn atlas(&self) -> &Atlas {
@@ -273,6 +353,7 @@ impl Sprites {
 
     /// Adds an unnamed straight-alpha RGBA image at runtime; `None` when it exceeds an atlas page.
     pub fn add_raw(&mut self, width: u32, height: u32, rgba: &[u8]) -> Option<SpriteId> {
+        self.collect_released();
         if let Some(id) = self.freed.get_mut(&(width, height)).and_then(Vec::pop) {
             self.freed_ids.remove(&id.0);
             self.rewrite(id, rgba);
@@ -484,7 +565,37 @@ mod raw_tests {
             loaded: 0,
             freed: FxHashMap::default(),
             freed_ids: Default::default(),
+            releaser: SpriteReleaser::default(),
         }
+    }
+
+    #[test]
+    fn owned_sprites_return_to_the_atlas_when_dropped() {
+        let mut sprites = empty();
+        let pixels = vec![1u8; 16 * 16 * 4];
+        for _ in 0..2_000 {
+            let mut owned = OwnedSprites::default();
+            let a = owned.add(&mut sprites, 16, 16, &pixels).expect("fits");
+            owned.add(&mut sprites, 16, 16, &pixels).expect("fits");
+            owned.free(&mut sprites, a);
+            assert_eq!(owned.len(), 1);
+        }
+        assert!(sprites.len() <= 3);
+        assert_eq!(sprites.atlas().pages().len(), 1);
+    }
+
+    #[test]
+    fn released_sprites_are_reused_after_their_owner_drops() {
+        let mut sprites = empty();
+        let pixels = vec![1u8; 16 * 16 * 4];
+        for _ in 0..5_000 {
+            let owned: Vec<SpriteId> = (0..4)
+                .filter_map(|_| sprites.add_raw(16, 16, &pixels))
+                .collect();
+            sprites.releaser().release(owned);
+        }
+        assert_eq!(sprites.len(), 4);
+        assert_eq!(sprites.atlas().pages().len(), 1);
     }
 
     #[test]

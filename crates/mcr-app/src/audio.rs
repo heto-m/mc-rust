@@ -63,8 +63,17 @@ pub enum MusicEvent {
 }
 
 const MAX_RECORDS: usize = 64;
+/// Menus never drain music events, so only the latest few are kept.
+const MAX_MUSIC_EVENTS: usize = 16;
 const RECORD_RANGE: f64 = 64.0;
 const SOUND_LOG_ENV: &str = "MCR_SOUND_LOG";
+
+fn push_capped<T>(queue: &mut Vec<T>, item: T, cap: usize) {
+    if queue.len() >= cap {
+        queue.remove(0);
+    }
+    queue.push(item);
+}
 
 pub struct Audio {
     manager: SoundManager,
@@ -350,7 +359,7 @@ impl Audio {
         self.records.retain(|(_, v)| !ended.contains(v));
         if self.music_voice.is_some_and(|v| ended.contains(&v)) {
             self.music_voice = None;
-            self.music_events.push(MusicEvent::Stopped);
+            self.push_music_event(MusicEvent::Stopped);
         }
         self.ended = ended;
     }
@@ -426,7 +435,7 @@ impl Audio {
                 && let Some(file) = self.manager.last_sound()
             {
                 let key = music_lang_key(file);
-                self.music_events.push(MusicEvent::Started(key));
+                self.push_music_event(MusicEvent::Started(key));
             }
         } else if let (Some(gain), Some(voice)) = (actions.gain, self.music_voice) {
             self.manager.set_voice_volume(voice, gain);
@@ -443,7 +452,7 @@ impl Audio {
     fn stop_music_voice(&mut self) {
         if let Some(voice) = self.music_voice.take() {
             self.manager.stop(voice);
-            self.music_events.push(MusicEvent::Stopped);
+            self.push_music_event(MusicEvent::Stopped);
         }
     }
 
@@ -455,6 +464,10 @@ impl Audio {
     }
 
     /// Track starts and stops since the last call, oldest first.
+    fn push_music_event(&mut self, event: MusicEvent) {
+        push_capped(&mut self.music_events, event, MAX_MUSIC_EVENTS);
+    }
+
     pub fn take_music_events(&mut self) -> Vec<MusicEvent> {
         std::mem::take(&mut self.music_events)
     }
@@ -519,6 +532,20 @@ pub fn sound_type(data: &'static Version, state: u32) -> Option<SoundType<'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undrained_music_events_stay_bounded() {
+        let mut queue = Vec::new();
+        for i in 0..10_000 {
+            push_capped(
+                &mut queue,
+                MusicEvent::Started(i.to_string()),
+                MAX_MUSIC_EVENTS,
+            );
+        }
+        assert_eq!(queue.len(), MAX_MUSIC_EVENTS);
+        assert!(matches!(&queue[MAX_MUSIC_EVENTS - 1], MusicEvent::Started(k) if k == "9999"));
+    }
 
     #[test]
     fn music_files_map_to_language_keys() {

@@ -25,7 +25,9 @@ pub use screens::{
     CHART_SAMPLES, ChatHud, ChatOptions, DebugChart, DebugOverlay, HeartKind, HudItems, HudSprites,
     HudState, fade_alpha,
 };
-pub use sprites::{Scaling, SpriteId, SpriteInfo, SpriteQuad, Sprites};
+pub use sprites::{
+    OwnedSprites, Scaling, SpriteId, SpriteInfo, SpriteQuad, SpriteReleaser, Sprites,
+};
 pub use style::{Cell, Flags, FontId, Style};
 pub use text::{
     ClickSpan, Lang, click_at, flatten, flatten_events, parse_legacy, push_legacy, wrap,

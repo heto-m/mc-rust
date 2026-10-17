@@ -29,6 +29,8 @@ pub mod hashing;
 mod hashing_tests;
 mod interaction;
 mod inventory;
+#[cfg(test)]
+mod lifecycle_tests;
 pub mod locator;
 mod menu;
 #[cfg(test)]

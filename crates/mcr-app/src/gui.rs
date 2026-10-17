@@ -93,16 +93,24 @@ pub fn gui_size(framebuffer: (u32, u32), max_scale: i32) -> ((i32, i32), u32) {
     )
 }
 
+/// Waits for an opener in the background so it does not stay a zombie until mcr exits.
+pub fn reap(child: std::io::Result<std::process::Child>) {
+    if let Ok(mut child) = child {
+        std::thread::spawn(move || child.wait());
+    }
+}
+
 pub fn open_url(url: &str) {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return;
     }
-    let _ = std::process::Command::new("xdg-open")
+    let child = std::process::Command::new("xdg-open")
         .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+    reap(child);
 }
 
 /// Draws only the GUI batch after the world pass.
@@ -133,5 +141,31 @@ impl Overlay for UiOverlay<'_> {
             multiview_mask: None,
         });
         self.ui_renderer.draw(&mut pass);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod reap_tests {
+    fn zombie_children() -> usize {
+        let me = format!("PPid:\t{}", std::process::id());
+        std::fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| std::fs::read_to_string(e.path().join("status")).ok())
+            .filter(|s| s.lines().any(|l| l == me) && s.lines().any(|l| l.starts_with("State:\tZ")))
+            .count()
+    }
+
+    #[test]
+    fn openers_do_not_stay_zombies() {
+        for _ in 0..64 {
+            super::reap(std::process::Command::new("true").spawn());
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while zombie_children() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(zombie_children(), 0);
     }
 }

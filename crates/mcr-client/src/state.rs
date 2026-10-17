@@ -244,7 +244,18 @@ impl Default for WorldInfo {
     }
 }
 
+/// World clocks and game rules are keyed by the server; past these, new keys are ignored.
+pub const MAX_CLOCKS: usize = 64;
+pub const MAX_GAME_RULES: usize = 1024;
+const MAX_GAME_RULE_CHARS: usize = 256;
+
 impl WorldInfo {
+    pub fn set_clock(&mut self, id: i32, clock: ClockState) {
+        if self.clocks.len() < MAX_CLOCKS || self.clocks.contains_key(&id) {
+            self.clocks.insert(id, clock);
+        }
+    }
+
     /// Day time of the first clock (the overworld clock in vanilla), in ticks.
     pub fn day_time(&self) -> Option<i64> {
         self.clocks
@@ -275,6 +286,19 @@ impl WorldInfo {
         } else {
             DEFAULT
         }
+    }
+}
+
+impl ServerInfo {
+    pub fn set_game_rule(&mut self, key: &str, value: String) {
+        if self.game_rules.len() >= MAX_GAME_RULES && !self.game_rules.contains_key(key) {
+            return;
+        }
+        let value = match value.char_indices().nth(MAX_GAME_RULE_CHARS) {
+            Some((end, _)) => value[..end].to_owned(),
+            None => value,
+        };
+        self.game_rules.insert(key.to_owned(), value);
     }
 }
 
@@ -545,6 +569,9 @@ impl ClientState {
         self.entities.clear();
         self.pickups.clear();
         self.transient_blocks.clear();
+        self.world.clocks.clear();
+        self.predictions = Default::default();
+        self.controlled_vehicle = None;
         self.dimension = Dimension {
             min_y,
             height: height as i32,
@@ -569,7 +596,8 @@ impl ClientState {
     pub fn chunk_in_range(&self, x: i32, z: i32) -> bool {
         let r = self.chunk_storage_radius();
         let (cx, cz) = self.world.chunk_center;
-        (x - cx).abs() <= r && (z - cz).abs() <= r
+        let near = |a: i32, b: i32| (i64::from(a) - i64::from(b)).abs() <= i64::from(r);
+        near(x, cx) && near(z, cz)
     }
 
     pub fn tick(&mut self) {
@@ -719,5 +747,12 @@ impl ClientState {
         self.player.loaded = false;
         self.player.placed = false;
         self.in_batch = false;
+        self.world.clocks.clear();
+        self.server.game_rules.clear();
+        self.gameplay = Default::default();
+        self.predictions = Default::default();
+        self.cooldowns.clear();
+        self.camera_entity = None;
+        self.controlled_vehicle = None;
     }
 }

@@ -31,8 +31,8 @@ mod view;
 
 pub use anim::{BoundAnimation, catmull_rom, sample};
 pub use assets::{
-    EquipmentInfo, EquipmentLayer, Equippable, ImageRgba, SceneAssets, TrimOverride,
-    load_jar_texture, missing_image,
+    EquipmentInfo, EquipmentLayer, Equippable, ImageRgba, MAX_EQUIPMENT_MISSES, SceneAssets,
+    TrimOverride, load_jar_texture, missing_image,
 };
 pub use catalog::{Catalog, PlanCx, Simple};
 pub use cube::{Vertex, unwrap_cube};

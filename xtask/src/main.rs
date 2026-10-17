@@ -12,6 +12,8 @@ mod net;
 mod paths;
 mod server;
 mod setup;
+mod soak;
+mod soak_churn;
 #[cfg(test)]
 mod testutil;
 
@@ -79,9 +81,45 @@ enum Command {
         force: bool,
     },
     /// Compile the Java modules under java/ into .cache/java/<module>.jar
-    JavaBuild,
+    JavaBuild {
+        /// Write the jars here instead, leaving the shared cache alone
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
     /// Render the test mod's GPU parity screen with vanilla OpenGL into .cache/golden/<ver>/gui.png
     GoldenGui,
+    /// Run `mcr --soak` offscreen against a churned vanilla server and fail on memory or thread growth
+    Soak {
+        #[arg(long)]
+        version: Option<String>,
+        /// The mcr binary to soak
+        #[arg(long, default_value = "target/debug/mcr")]
+        mcr: std::path::PathBuf,
+        #[arg(long, default_value_t = 20.0)]
+        minutes: f64,
+        #[arg(long, default_value_t = 5.0)]
+        warmup_minutes: f64,
+        #[arg(long, default_value_t = 25567)]
+        port: u16,
+        /// Largest allowed RSS (and GPU memory) slope after warm-up
+        #[arg(long, default_value_t = 1.0)]
+        max_slope: f64,
+        /// Entities summoned per wave
+        #[arg(long, default_value_t = 800)]
+        wave: u32,
+        /// Kicks and transfers spread over the run
+        #[arg(long, default_value_t = 3)]
+        disconnects: u32,
+        /// Mods directory: soak mod mode and log the JVM's garbage collections
+        #[arg(long)]
+        mods: Option<std::path::PathBuf>,
+        /// Output directory (default run/soak/soak-<time>)
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Memory cap of mcr's own scope
+        #[arg(long, default_value = "3G")]
+        mcr_memory: String,
+    },
     /// Run fetch, jdk, datagen and decompile in order
     Setup {
         #[arg(long)]
@@ -125,11 +163,39 @@ fn main() -> Result<()> {
             let ver = fetch::resolve_version(version.as_deref())?;
             fabric::run(&layout, &ver, force)?;
         }
-        Command::JavaBuild => {
-            java::run(&layout)?;
+        Command::JavaBuild { out } => {
+            java::run(&layout, out.as_deref())?;
         }
         Command::GoldenGui => {
             golden::run(&layout)?;
+        }
+        Command::Soak {
+            version,
+            mcr,
+            minutes,
+            warmup_minutes,
+            port,
+            max_slope,
+            wave,
+            disconnects,
+            mods,
+            out,
+            mcr_memory,
+        } => {
+            let ver = version.unwrap_or_else(|| "26.3".to_owned());
+            let opts = soak::Options {
+                mcr,
+                minutes,
+                warmup_minutes,
+                port,
+                max_slope_mib_per_min: max_slope,
+                wave,
+                disconnects,
+                mods,
+                out,
+                mcr_memory,
+            };
+            soak::run(&layout, &ver, &opts)?;
         }
         Command::Setup { version, force } => {
             let ver = fetch::resolve_version(version.as_deref())?;

@@ -1,4 +1,4 @@
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex};
 
 use mcr_buf::Identifier;
@@ -9,6 +9,8 @@ use crate::registry::Registries;
 
 pub const DIALOG_REGISTRY: &str = "minecraft:dialog";
 const MAX_SUB_DIALOGS: usize = 64;
+/// Requests the app has not read yet; a server flooding dialogs loses the newest.
+pub const MAX_PENDING_DIALOGS: usize = 64;
 
 /// What the server asked the app to show.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,11 +35,15 @@ pub enum DialogReply {
 /// The client's half of the dialog channel pair; it works in configuration and play alike.
 #[derive(Debug, Clone)]
 pub struct DialogLink {
-    pub(crate) requests: Sender<DialogRequest>,
+    requests: SyncSender<DialogRequest>,
     replies: Arc<Mutex<Receiver<DialogReply>>>,
 }
 
 impl DialogLink {
+    pub(crate) fn send(&self, request: DialogRequest) {
+        let _ = self.requests.try_send(request);
+    }
+
     pub(crate) fn next_reply(&self) -> Option<DialogReply> {
         self.replies.lock().ok()?.try_recv().ok()
     }
@@ -57,7 +63,7 @@ impl DialogEnd {
 }
 
 pub fn dialog_channel() -> (DialogLink, DialogEnd) {
-    let (request_tx, request_rx) = channel();
+    let (request_tx, request_rx) = sync_channel(MAX_PENDING_DIALOGS);
     let (reply_tx, reply_rx) = channel();
     (
         DialogLink {
@@ -146,6 +152,15 @@ fn inline_sub_dialogs(registries: &Registries, dialog: &mut Compound) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unread_dialog_requests_are_bounded() {
+        let (link, end) = dialog_channel();
+        for _ in 0..100_000 {
+            link.send(DialogRequest::Clear);
+        }
+        assert_eq!(end.requests.try_iter().count(), MAX_PENDING_DIALOGS);
+    }
 
     fn snbt(text: &str) -> Value {
         mcr_nbt::snbt::parse(text).unwrap()

@@ -175,6 +175,17 @@ impl VisibilityGraph {
         }
     }
 
+    pub(crate) fn clear(&mut self) {
+        let generation = self.generation;
+        *self = Self::default();
+        self.generation = generation;
+        self.dirty = true;
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
     pub(crate) fn invalidate(&mut self) {
         self.dirty = true;
     }

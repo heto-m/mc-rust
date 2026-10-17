@@ -23,6 +23,15 @@ pub struct NetworkWorld {
     urgent: Vec<SectionPos>,
     events: Vec<ClientEvent>,
     last_chunk: Instant,
+    reset: bool,
+}
+
+/// Events after which the client holds a different world: respawn, reconfiguration and the login after it.
+pub fn resets_world(event: &ClientEvent) -> bool {
+    matches!(
+        event,
+        ClientEvent::Respawned | ClientEvent::Reconfiguring | ClientEvent::Joined { .. }
+    )
 }
 
 impl std::fmt::Debug for NetworkWorld {
@@ -45,6 +54,7 @@ impl NetworkWorld {
             urgent: Vec::new(),
             events: Vec::new(),
             last_chunk: Instant::now(),
+            reset: false,
         }
     }
 
@@ -79,8 +89,11 @@ impl NetworkWorld {
                     self.loaded.remove(&pos);
                     self.unloaded.push(pos);
                 }
-                ClientEvent::Respawned => {
-                    self.unloaded.extend(self.loaded.drain());
+                event if resets_world(&event) => {
+                    self.loaded.clear();
+                    self.unloaded.clear();
+                    self.urgent.clear();
+                    self.reset = true;
                     self.events.push(event);
                 }
                 ClientEvent::BlockChanged { pos, .. } => {
@@ -136,6 +149,10 @@ impl MeshWorld for NetworkWorld {
 
     fn take_unloaded(&mut self) -> Vec<ChunkPos> {
         std::mem::take(&mut self.unloaded)
+    }
+
+    fn take_reset(&mut self) -> bool {
+        std::mem::take(&mut self.reset)
     }
 
     fn biome_names(&self) -> Vec<String> {

@@ -8,6 +8,8 @@ pub const IDLE_FRAMES: u64 = 1800;
 /// Bound on live re-creatable `dyn:` textures (skins, trims).
 pub const MAX_EVICTABLE: usize = 384;
 const EVICT_SLACK: usize = 32;
+/// Unresolvable keys (inline painting variants are server-named) remembered as missing.
+const MAX_MISSING_KEYS: usize = 4096;
 const SWEEP_INTERVAL: u64 = 64;
 
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +29,7 @@ pub struct TextureCache {
     registered: FxHashSet<String>,
     pending: Vec<(String, ImageRgba)>,
     missing: Option<TexId>,
+    missing_keys: usize,
     evictable: usize,
     last_sweep: u64,
 }
@@ -78,7 +81,9 @@ impl TextureCache {
     fn release(&mut self, key: &str, gpu: &mut EntityRenderer) {
         if let Some(entry) = self.ids.remove(key) {
             self.evictable -= usize::from(evictable_key(key));
-            if !entry.shared {
+            if entry.shared {
+                self.missing_keys -= 1;
+            } else {
                 gpu.free_texture(entry.id);
             }
         }
@@ -86,6 +91,7 @@ impl TextureCache {
 
     fn insert(&mut self, key: String, id: TexId, shared: bool, frame: u64) {
         self.evictable += usize::from(evictable_key(&key));
+        self.missing_keys += usize::from(shared);
         self.ids.insert(
             key,
             Entry {
@@ -204,7 +210,7 @@ impl TextureCache {
                     gpu.add_texture(&crate::assets::missing_image())
                         .expect("16x16 fits the smallest class")
                 });
-                if !key.starts_with("dyn:") {
+                if !key.starts_with("dyn:") && self.missing_keys < MAX_MISSING_KEYS {
                     self.insert(key.to_owned(), id, true, frame);
                 }
                 id
@@ -241,6 +247,19 @@ mod tests {
 
     fn skin(n: u32) -> ImageRgba {
         ImageRgba::solid(64, 64, [n as u8, (n >> 8) as u8, 0, 255])
+    }
+
+    #[test]
+    fn unresolvable_server_keys_stay_bounded() {
+        let Some(mut gpu) = renderer() else { return };
+        let mut cache = TextureCache::default();
+        let first = cache.resolve_with("painting/hostile", &mut gpu, |_| None);
+        for n in 0..20_000u32 {
+            let id = cache.resolve_with(&format!("painting/hostile_{n}"), &mut gpu, |_| None);
+            assert!(id == first);
+        }
+        assert_eq!(cache.len(), MAX_MISSING_KEYS);
+        assert_eq!(gpu.live_layers(0), 1);
     }
 
     #[test]

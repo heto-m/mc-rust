@@ -191,6 +191,8 @@ impl EquipmentInfo {
     }
 }
 
+pub const MAX_EQUIPMENT_MISSES: usize = 1024;
+
 /// Everything read-only the scene needs: resources, extracted model data and item definitions.
 #[derive(Debug)]
 pub struct SceneAssets {
@@ -232,7 +234,7 @@ impl SceneAssets {
         })
     }
 
-    /// Parsed `equipment/<name>.json`; `None` when the pack has no such asset.
+    /// Parsed `equipment/<name>.json`; misses are server-named, so only the first 1024 are remembered.
     pub fn equipment(&self, asset: &str) -> Option<Arc<EquipmentInfo>> {
         let name = asset.strip_prefix("minecraft:").unwrap_or(asset);
         let mut cache = self.equipment.lock().ok()?;
@@ -246,8 +248,14 @@ impl SceneAssets {
             .flatten()
             .and_then(|b| EquipmentInfo::parse(&b).ok())
             .map(Arc::new);
-        cache.insert(name.to_owned(), parsed.clone());
+        if parsed.is_some() || cache.len() < MAX_EQUIPMENT_MISSES {
+            cache.insert(name.to_owned(), parsed.clone());
+        }
         parsed
+    }
+
+    pub fn equipment_cached(&self) -> usize {
+        self.equipment.lock().map_or(0, |c| c.len())
     }
 
     pub fn read_texture(&self, key: &str) -> Option<ImageRgba> {

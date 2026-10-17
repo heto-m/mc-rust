@@ -11,6 +11,7 @@ mod manager;
 mod mixer;
 mod movement;
 mod music;
+mod pcm_cache;
 mod rng;
 mod state;
 mod store;

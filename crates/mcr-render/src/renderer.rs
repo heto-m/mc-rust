@@ -1058,6 +1058,10 @@ impl Renderer {
         &self.device
     }
 
+    pub fn gpu_counters(&self) -> crate::GpuCounters {
+        crate::GpuCounters::read(&self.device)
+    }
+
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
     }
@@ -1494,6 +1498,19 @@ impl Renderer {
         if let Some(t) = slot.tint {
             self.tint_arena.free(t, 1);
         }
+    }
+
+    /// Drops every section and visibility node, whatever world or height range they came from.
+    pub fn clear_sections(&mut self) {
+        let keys: Vec<[i32; 3]> = self.sections.keys().copied().collect();
+        for key in keys {
+            self.remove_geometry(key);
+        }
+        self.graph.clear();
+    }
+
+    pub fn graph_nodes(&self) -> usize {
+        self.graph.len()
     }
 
     pub fn remove_section(&mut self, key: [i32; 3]) {
