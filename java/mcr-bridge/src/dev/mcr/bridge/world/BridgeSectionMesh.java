@@ -39,7 +39,7 @@ public final class BridgeSectionMesh implements SectionMesh {
 
     @Override
     public List<BlockEntity> getRenderableBlockEntities() {
-        if (blockEntities.isEmpty() || McrSections.blockEntitySectionVisible(sectionNode)) {
+        if (blockEntities.isEmpty() || McrSections.blockEntitySectionVisible(sectionNode, blockEntities.get(0))) {
             return blockEntities;
         }
         return List.of();

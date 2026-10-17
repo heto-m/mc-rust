@@ -13,6 +13,7 @@
     {"id": "sound_physics_remastered", "status": "blocked", "reason": "OpenAL effects on the vanilla sound device"},
     {"id": "sodium-extra", "status": "blocked", "reason": "requires Sodium"},
     {"id": "reeses-sodium-options", "status": "blocked", "reason": "requires Sodium"},
+    {"id": "betterblockentities", "status": "blocked", "reason": "requires Sodium"},
     {"id": "voicechat", "status": "unsupported", "reason": "own OpenAL playback and capture"},
     {"id": "litematica", "status": "unsupported", "reason": "schematic rendering uses vanilla terrain meshing"},
     {"id": "dynamic_fps", "status": "unsupported", "reason": "frame pacing and window are owned by mcr"},
@@ -21,6 +22,7 @@
     {"id": "lambdynlights", "status": "partial", "reason": "terrain lighting is mcr's"},
     {"id": "badoptimizations", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
     {"id": "c2me", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
-    {"id": "bobby", "status": "partial", "reason": "optimises or caches paths mcr replaces"}
+    {"id": "bobby", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
+    {"id": "krypton", "status": "partial", "reason": "the socket and its pipeline are mcr's; no effect"}
   ]
 }

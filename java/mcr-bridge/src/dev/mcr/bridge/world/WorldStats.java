@@ -28,6 +28,7 @@ public final class WorldStats {
                 + " scan_us=" + BridgeSectionMesh.scanNanos() / 1000
                 + " culled_entities=" + McrSections.culledEntities()
                 + " culled_sections=" + McrSections.culledSections()
+                + " culled_last=" + McrSections.lastCulledSection()
                 + " particles=" + particles());
     }
 

@@ -38,6 +38,20 @@ pub enum Step {
         x: f32,
         y: f32,
     },
+    /// Press (`down`) or release (`up`) a button at GUI coordinates; `hover` between them drags.
+    Button {
+        x: f32,
+        y: f32,
+        right: bool,
+        pressed: bool,
+    },
+    /// Wheel lines, positive away from the user.
+    Wheel(f32),
+    /// Relative mouse motion in window pixels, as a grabbed mouse reports it.
+    Motion {
+        dx: f64,
+        dy: f64,
+    },
     SlotClick {
         slot: usize,
         right: bool,
@@ -134,6 +148,25 @@ pub fn parse(text: &str) -> Result<Vec<Step>, String> {
                     x,
                     y,
                     right: it.next() == Some("right"),
+                }
+            }
+            "down" | "up" => {
+                let mut it = rest.split_whitespace();
+                let x = num(it.next().ok_or_else(|| err("down|up x y [right]"))?)?;
+                let y = num(it.next().ok_or_else(|| err("down|up x y [right]"))?)?;
+                Step::Button {
+                    x,
+                    y,
+                    right: it.next() == Some("right"),
+                    pressed: cmd == "down",
+                }
+            }
+            "wheel" => Step::Wheel(num(rest)?),
+            "motion" => {
+                let (a, b) = rest.split_once(' ').ok_or_else(|| err("motion dx dy"))?;
+                Step::Motion {
+                    dx: f64::from(num(a)?),
+                    dy: f64::from(num(b.trim())?),
                 }
             }
             "hover" => {
@@ -265,6 +298,23 @@ impl Autopilot {
                     },
                 ),
                 Step::Hover { x, y } => sh.screen_hover(x, y),
+                Step::Button {
+                    x,
+                    y,
+                    right,
+                    pressed,
+                } => sh.screen_button(
+                    x,
+                    y,
+                    if right {
+                        MouseButton::Right
+                    } else {
+                        MouseButton::Left
+                    },
+                    pressed,
+                ),
+                Step::Wheel(lines) => sh.wheel(0.0, f64::from(lines), lines),
+                Step::Motion { dx, dy } => sh.mouse_motion(dx, dy),
                 Step::SlotClick { slot, right } => {
                     if let Some(play) = &mut sh.play {
                         let button = if right {
@@ -299,7 +349,7 @@ impl Autopilot {
                             .java_camera
                             .map_or("none", |c| if c.input { "captured" } else { "moved" });
                         println!(
-                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?} mod input {:?} fov_scale {:.2} camera {:.2} {:.2} {:.2} java_camera {java_cam} java_weather {}",
+                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?} mod input {:?} fov_scale {:.2} camera {:.2} {:.2} {:.2} java_camera {java_cam} java_roll {:.1} java_weather {} java_steps {} java_turn {}",
                             play.ticks,
                             p[0],
                             p[1],
@@ -323,7 +373,10 @@ impl Autopilot {
                             cam.x,
                             cam.y,
                             cam.z,
+                            play.java_camera.map_or(0.0, |c| c.roll.to_degrees()),
                             play.java_weather,
+                            play.java_steps,
+                            play.java_turn,
                         );
                     }
                 }
@@ -355,6 +408,33 @@ mod tests {
             [Step::Hover { x: 12.0, y: 34.5 }]
         );
         assert!(parse("hover 12").is_err());
+        assert_eq!(
+            parse("down 1 2\nup 3 4 right\nwheel -1.5").unwrap(),
+            [
+                Step::Button {
+                    x: 1.0,
+                    y: 2.0,
+                    right: false,
+                    pressed: true
+                },
+                Step::Button {
+                    x: 3.0,
+                    y: 4.0,
+                    right: true,
+                    pressed: false
+                },
+                Step::Wheel(-1.5)
+            ]
+        );
+        assert!(parse("down 1").is_err() && parse("wheel up").is_err());
+        assert_eq!(
+            parse("motion 200 -5").unwrap(),
+            [Step::Motion {
+                dx: 200.0,
+                dy: -5.0
+            }]
+        );
+        assert!(parse("motion 1").is_err());
         assert!(parse("hold nonsense 3").is_err());
         assert!(parse("dance").is_err());
     }

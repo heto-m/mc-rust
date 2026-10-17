@@ -14,11 +14,16 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.ModifyArg;
+import org.spongepowered.asm.mixin.injection.ModifyArgs;
+import org.spongepowered.asm.mixin.injection.invoke.arg.Args;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
@@ -76,25 +81,111 @@ abstract class CameraMixin implements McrCameraHandoff.Placement {
     @Shadow
     protected abstract void setPosition(double x, double y, double z);
 
-    @Inject(method = "alignWithEntity", at = @At("HEAD"), cancellable = true)
+    /** Rust's camera while vanilla's alignment runs for the player; mods hooked into it still act on top. */
+    @Unique
+    private McrCamera mcr$rust;
+
+    @Inject(method = "alignWithEntity", at = @At("HEAD"))
     private void mcr$rustCamera(float partialTicks, CallbackInfo ci) {
         McrCamera camera = McrFrame.camera();
-        if (camera == null || !McrCameraHandoff.followsRust(entity)) {
+        mcr$rust = camera != null && McrCameraHandoff.followsRust(entity) ? camera : null;
+        if (mcr$rust == null) {
             return;
         }
-        setRotation(camera.yRot(), camera.xRot());
-        setPosition(camera.x(), camera.y(), camera.z());
-        detached = camera.detached();
         Options options = Minecraft.getInstance().options;
-        if (options.getCameraType().isFirstPerson() == detached) {
-            options.setCameraType(detached ? CameraType.THIRD_PERSON_BACK : CameraType.FIRST_PERSON);
+        if (options.getCameraType().isFirstPerson() == camera.detached()) {
+            options.setCameraType(camera.detached() ? CameraType.THIRD_PERSON_BACK : CameraType.FIRST_PERSON);
         }
-        ci.cancel();
     }
 
+    @Inject(method = "alignWithEntity", at = @At("RETURN"))
+    private void mcr$rustCameraDone(float partialTicks, CallbackInfo ci) {
+        mcr$rust = null;
+        mcr$rustEye = null;
+    }
+
+    // Arguments, not redirects: mods inject at these same calls (Freelook, Shoulder Surfing).
+    @ModifyArg(method = "alignWithEntity", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/Camera;setRotation(FF)V"), index = 0, require = 0)
+    private float mcr$rustYRot(float yRot) {
+        return mcr$rust != null ? mcr$rust.yRot() : yRot;
+    }
+
+    @ModifyArg(method = "alignWithEntity", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/Camera;setRotation(FF)V"), index = 1, require = 0)
+    private float mcr$rustXRot(float xRot) {
+        return mcr$rust != null ? mcr$rust.xRot() : xRot;
+    }
+
+    @ModifyArg(method = "alignWithEntity", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/Camera;setPosition(DDD)V"), index = 0, require = 0)
+    private double mcr$rustX(double x) {
+        return mcr$rust != null ? mcr$eye()[0] : x;
+    }
+
+    @ModifyArg(method = "alignWithEntity", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/Camera;setPosition(DDD)V"), index = 1, require = 0)
+    private double mcr$rustY(double y) {
+        return mcr$rust != null ? mcr$eye()[1] : y;
+    }
+
+    @ModifyArg(method = "alignWithEntity", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/Camera;setPosition(DDD)V"), index = 2, require = 0)
+    private double mcr$rustZ(double z) {
+        return mcr$rust != null ? mcr$eye()[2] : z;
+    }
+
+    @ModifyArg(
+            method = "alignWithEntity",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/client/Camera;setPosition(Lnet/minecraft/world/phys/Vec3;)V"),
+            require = 0)
+    private Vec3 mcr$rustPosition(Vec3 pos) {
+        if (mcr$rust == null) {
+            return pos;
+        }
+        double[] eye = mcr$eye();
+        return new Vec3(eye[0], eye[1], eye[2]);
+    }
+
+    /** Rust's eye in third person, so the pull-back below (or a mod's own, as Shoulder Surfing's) starts there. */
+    @Unique
+    private double[] mcr$eye() {
+        if (mcr$rustEye == null) {
+            mcr$rustEye = mcr$rust.distance() > 0.0F
+                    ? mcr$rust.eye()
+                    : new double[] {mcr$rust.x(), mcr$rust.y(), mcr$rust.z()};
+        }
+        return mcr$rustEye;
+    }
+
+    @Unique
+    private double[] mcr$rustEye;
+
+    /** Vanilla pulls the third-person camera back by Rust's distance; Rust's camera already has the sleeping offset. */
+    @ModifyArgs(method = "alignWithEntity", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/Camera;move(FFF)V"), require = 0)
+    private void mcr$rustOffsets(Args args) {
+        if (mcr$rust != null) {
+            args.set(0, -mcr$rust.distance());
+            args.set(1, 0.0F);
+            args.set(2, 0.0F);
+        }
+    }
+
+    @Shadow
+    @org.spongepowered.asm.mixin.Final
+    private Quaternionf rotation;
+
+    @Shadow
+    @org.spongepowered.asm.mixin.Final
+    private Vector3f up;
+
+    @Shadow
+    @org.spongepowered.asm.mixin.Final
+    private Vector3f left;
+
     @Override
-    public void mcr$place(double x, double y, double z, float yRot, float xRot) {
+    public void mcr$place(double x, double y, double z, float yRot, float xRot, float roll) {
         setRotation(yRot, xRot);
+        if (roll != 0.0F) {
+            rotation.rotateZ(roll);
+            new Vector3f(0.0F, 1.0F, 0.0F).rotate(rotation, up);
+            new Vector3f(-1.0F, 0.0F, 0.0F).rotate(rotation, left);
+        }
         setPosition(x, y, z);
         prepareCullFrustum(getViewRotationMatrix(cachedViewRotMatrix), createProjectionMatrixForCulling(), position);
     }

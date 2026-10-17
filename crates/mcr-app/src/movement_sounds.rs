@@ -23,6 +23,8 @@ pub struct MovementSounds {
     last_crystal_tick: u64,
     crystal_intensity: f32,
     rng: FastRandom,
+    /// A mod in Java plays the footsteps instead (Presence Footsteps).
+    pub steps_replaced: bool,
 }
 
 impl std::fmt::Debug for MovementSounds {
@@ -42,6 +44,7 @@ impl MovementSounds {
             last_crystal_tick: 0,
             crystal_intensity: 0.0,
             rng: FastRandom::new(0x0005_7E95),
+            steps_replaced: false,
         }
     }
 
@@ -131,6 +134,7 @@ impl MovementSounds {
         });
         match outcome {
             StepOutcome::Quiet => {}
+            StepOutcome::Step if self.steps_replaced => {}
             StepOutcome::Step => self.footstep(state, on_pos, in_water, ticks, pos, p.vel, audio),
             StepOutcome::Swim => {
                 let cue = self.swim(p.vel);

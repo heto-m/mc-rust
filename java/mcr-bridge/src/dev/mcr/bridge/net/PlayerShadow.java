@@ -48,6 +48,8 @@ public final class PlayerShadow {
     }
 
     public static void reset() {
+        dev.mcr.bridge.McrSteps.reset();
+        dev.mcr.bridge.McrTurn.reset();
         present = false;
         appliedTick = -1;
     }

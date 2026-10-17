@@ -156,6 +156,11 @@ impl Shell {
         let mut open_mods = false;
         if let Some(play) = &mut self.play {
             play.java_screen = next == Authority::JavaScreen;
+            play.java_screen_moves = if play.java_screen {
+                java.screen_moves
+            } else {
+                0
+            };
             play.gui_scale_override = scale;
             open_mods = std::mem::take(&mut play.open_mods);
         }
@@ -296,20 +301,29 @@ impl Shell {
 
     /// A click at GUI coordinates, scaled by Java's GUI scale (scripted input).
     pub(super) fn route_click(&mut self, x: f32, y: f32, button: MouseButton) -> bool {
+        self.route_button(x, y, button, true) && self.route_button(x, y, button, false)
+    }
+
+    /// A button press or release at GUI coordinates (scripted drags).
+    pub(super) fn route_button(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: MouseButton,
+        pressed: bool,
+    ) -> bool {
         if self.java_input().is_none() {
             return false;
         }
         let scale = f64::from(self.route.java.gui_scale.max(1));
-        let (px, py) = (f64::from(x) * scale, f64::from(y) * scale);
-        self.route_cursor(px, py);
+        self.route_cursor(f64::from(x) * scale, f64::from(y) * scale);
         let key = InputKey::Mouse(match button {
             MouseButton::Left => 1,
             MouseButton::Middle => 2,
             MouseButton::Right => 3,
             MouseButton::Other(n) => i32::from(n),
         });
-        self.route_key(key, None, true, false, None);
-        self.route_key(key, None, false, false, None);
+        self.route_key(key, None, pressed, false, None);
         true
     }
 

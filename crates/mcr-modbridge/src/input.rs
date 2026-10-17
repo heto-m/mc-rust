@@ -13,8 +13,9 @@ use crate::abi::{
     IN_A, IN_B, IN_BUTTON, IN_C, IN_D, IN_DROP, IN_DX, IN_DY, IN_KEY, IN_MOTION, IN_PREEDIT,
     IN_TEXT, IN_TEXT_DATA, IN_TYPE, IN_WHEEL, IN_X, IN_Y, ISTATE_CURSOR, ISTATE_GUI_SCALE,
     ISTATE_JAVA_FLAGS, ISTATE_KEYS, ISTATE_MODS, ISTATE_NATIVE_KIND, ISTATE_NATIVE_SEQ,
-    ISTATE_RUST_FLAGS, ISTATE_SIZE, ISTATE_TEXT_AREA, JAVA_GRABBED, JAVA_OVERLAY, JAVA_QUIT,
-    JAVA_SCREEN, JAVA_TEXT_INPUT, MSG_INPUT, RUST_FOCUSED,
+    ISTATE_RUST_FLAGS, ISTATE_SCREEN_MOVES, ISTATE_SIZE, ISTATE_TEXT_AREA, JAVA_GRABBED,
+    JAVA_OVERLAY, JAVA_QUIT, JAVA_SCREEN, JAVA_TEXT_INPUT, MOVE_BACKWARD, MOVE_FORWARD, MOVE_JUMP,
+    MOVE_LEFT, MOVE_RIGHT, MOVE_SNEAK, MOVE_SPRINT, MSG_INPUT, RUST_FOCUSED,
 };
 
 /// SDL keycodes of keys without a character are their scancode with this bit set.
@@ -258,7 +259,7 @@ struct InputState {
     cursor: AtomicU32,
     native_seq: AtomicU32,
     native_kind: AtomicU32,
-    _pad: u32,
+    screen_moves: AtomicU32,
     text_area: [AtomicI32; 4],
 }
 
@@ -271,6 +272,7 @@ const _: () = {
     assert!(std::mem::offset_of!(InputState, cursor) == ISTATE_CURSOR);
     assert!(std::mem::offset_of!(InputState, native_seq) == ISTATE_NATIVE_SEQ);
     assert!(std::mem::offset_of!(InputState, native_kind) == ISTATE_NATIVE_KIND);
+    assert!(std::mem::offset_of!(InputState, screen_moves) == ISTATE_SCREEN_MOVES);
     assert!(std::mem::offset_of!(InputState, text_area) == ISTATE_TEXT_AREA);
     assert!(std::mem::size_of::<InputState>() == ISTATE_SIZE);
 };
@@ -412,6 +414,8 @@ pub struct JavaInput {
     pub gui_scale: u32,
     /// The focused text field in window pixels: x, y, width, height.
     pub text_area: Option<[i32; 4]>,
+    /// `MOVE_*` bits a mod let through while a screen is open (InvMove); 0 without a screen.
+    pub screen_moves: u32,
 }
 
 impl JavaInput {
@@ -422,6 +426,8 @@ impl JavaInput {
 }
 
 const MAX_GUI_SCALE: u32 = 16;
+const MOVE_ALL: u32 =
+    MOVE_FORWARD | MOVE_BACKWARD | MOVE_LEFT | MOVE_RIGHT | MOVE_JUMP | MOVE_SNEAK | MOVE_SPRINT;
 const MAX_AREA: i32 = 1 << 16;
 
 fn read_java(s: &InputState) -> JavaInput {
@@ -442,6 +448,11 @@ fn read_java(s: &InputState) -> JavaInput {
         cursor: CursorKind::from_raw(s.cursor.load(Ordering::Acquire)),
         gui_scale: if scale <= MAX_GUI_SCALE { scale } else { 0 },
         text_area: valid.then_some(area),
+        screen_moves: if flags & JAVA_SCREEN != 0 {
+            s.screen_moves.load(Ordering::Acquire) & MOVE_ALL
+        } else {
+            0
+        },
     }
 }
 
@@ -1053,6 +1064,18 @@ mod tests {
         assert_eq!(input.java().text_area, Some([10, 20, 300, 18]));
         shared.state.text_area[2].store(-5, Ordering::Release);
         assert_eq!(input.java().text_area, None);
+        shared.state.screen_moves.store(u32::MAX, Ordering::Release);
+        assert_eq!(
+            input.java().screen_moves,
+            0,
+            "no screen, no screen movement"
+        );
+        shared.simulate_java(JAVA_SCREEN, 0, 2);
+        assert_eq!(
+            input.java().screen_moves,
+            MOVE_ALL,
+            "unknown bits are dropped"
+        );
     }
 
     #[test]

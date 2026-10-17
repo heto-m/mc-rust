@@ -25,7 +25,10 @@ use std::time::{Duration, Instant};
 
 use mcr_jvm::{DestroyOutcome, HomeSearch, JavaVm, JvmConfig, JvmError, RingError, VmOutcome};
 
-pub use abi::{BRIDGE_VERSION, COMPOSE_PROPERTY, ENTRIES, FrameBegin, TABLE_PROPERTY};
+pub use abi::{
+    BRIDGE_VERSION, COMPOSE_PROPERTY, ENTRIES, FrameBegin, MOVE_BACKWARD, MOVE_FORWARD, MOVE_JUMP,
+    MOVE_LEFT, MOVE_RIGHT, MOVE_SNEAK, MOVE_SPRINT, TABLE_PROPERTY,
+};
 pub use compose::{ComposeStats, FrameLink, ModFrames};
 pub use events::BridgeEvent;
 pub use frame::Pipelining;

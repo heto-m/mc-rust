@@ -1075,6 +1075,26 @@ impl Shell {
         self.ui_input(UiInput::MouseRelease { x, y, button, mods });
     }
 
+    /// Half of a click, so scripts can drag between a press and its release.
+    pub fn screen_button(&mut self, x: f32, y: f32, button: mcr_ui::MouseButton, pressed: bool) {
+        if self.route_button(x, y, button, pressed) {
+            return;
+        }
+        let mods = self.mods;
+        self.ui_input(UiInput::MouseMove { x, y });
+        self.ui_input(if pressed {
+            UiInput::MousePress {
+                x,
+                y,
+                button,
+                mods,
+                double: false,
+            }
+        } else {
+            UiInput::MouseRelease { x, y, button, mods }
+        });
+    }
+
     pub fn screen_hover(&mut self, x: f32, y: f32) {
         if !self.route_hover(x, y) {
             self.ui_input(UiInput::MouseMove { x, y });
@@ -1083,11 +1103,16 @@ impl Shell {
 
     pub fn frame(&mut self) -> Option<FrameStats> {
         let java_gui = self.java_gui();
-        let third_person = self.play.as_ref().is_some_and(Play::third_person);
+        let third_person = self
+            .play
+            .as_ref()
+            .and_then(|play| play.third_person_distance(play.partial()));
         let mut fov_scale = 1.0;
         let (distance, entity_scale) = self.java_view();
         let mut java_camera = None;
         let mut java_weather = false;
+        let mut java_steps = false;
+        let mut java_turn = false;
         let java_world = self.mod_frames().is_some_and(|f| {
             let mut link = f.lock();
             link.set_third_person(third_person);
@@ -1095,6 +1120,8 @@ impl Shell {
             fov_scale = link.java().fov_scale;
             java_camera = link.java_camera();
             java_weather = link.weather_replaced();
+            java_steps = link.steps_replaced();
+            java_turn = link.turn_captured();
             link.set_camera_handoff(
                 java_camera
                     .and(self.play.as_ref())
@@ -1109,6 +1136,8 @@ impl Shell {
             play.java_fov_scale = if java_world { fov_scale } else { 1.0 };
             play.java_camera = java_camera;
             play.java_weather = java_weather;
+            play.java_steps = java_steps;
+            play.java_turn = java_turn;
             return play.frame();
         }
         self.update_menu_size();

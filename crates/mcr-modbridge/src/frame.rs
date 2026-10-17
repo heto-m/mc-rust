@@ -7,9 +7,9 @@ use mcr_jvm::Doorbell;
 
 use crate::abi::{
     CAMERA_DETACHED, CAMERA_INPUT, CAMERA_MOD, FSTATE_CAMERA, FSTATE_CAMERA_PITCH,
-    FSTATE_CAMERA_POS, FSTATE_CAMERA_YAW, FSTATE_DONE, FSTATE_FLAGS, FSTATE_FOV_SCALE,
-    FSTATE_HEIGHT, FSTATE_LOADED, FSTATE_NANOS, FSTATE_PROF, FSTATE_READY, FSTATE_SIZE,
-    FSTATE_TICKS, FSTATE_WEATHER, FSTATE_WIDTH, PROF_COUNT,
+    FSTATE_CAMERA_POS, FSTATE_CAMERA_ROLL, FSTATE_CAMERA_YAW, FSTATE_DONE, FSTATE_FLAGS,
+    FSTATE_FOV_SCALE, FSTATE_HEIGHT, FSTATE_LOADED, FSTATE_NANOS, FSTATE_PROF, FSTATE_READY,
+    FSTATE_SIZE, FSTATE_STEPS, FSTATE_TICKS, FSTATE_TURN, FSTATE_WEATHER, FSTATE_WIDTH, PROF_COUNT,
 };
 
 /// After loading, a Java frame slower than this detaches the bridge from rendering.
@@ -45,6 +45,7 @@ struct FrameState {
     camera_yaw: AtomicU32,
     camera_pitch: AtomicU32,
     prof: [AtomicU32; PROF_COUNT],
+    camera_roll: AtomicU32,
 }
 
 const _: () = {
@@ -60,6 +61,7 @@ const _: () = {
     assert!(std::mem::offset_of!(FrameState, camera_yaw) == FSTATE_CAMERA_YAW);
     assert!(std::mem::offset_of!(FrameState, camera_pitch) == FSTATE_CAMERA_PITCH);
     assert!(std::mem::offset_of!(FrameState, prof) == FSTATE_PROF);
+    assert!(std::mem::offset_of!(FrameState, camera_roll) == FSTATE_CAMERA_ROLL);
     assert!(std::mem::size_of::<FrameState>() == FSTATE_SIZE);
 };
 
@@ -85,6 +87,10 @@ pub struct JavaFrame {
     pub camera: Option<JavaCamera>,
     /// A mod replaced vanilla's rain and snow, so mcr must not draw its own.
     pub weather_replaced: bool,
+    /// A mod replaced the local player's footsteps (Presence Footsteps).
+    pub steps_replaced: bool,
+    /// A mod consumed the last mouse turn of the local player (Freelook).
+    pub turn_captured: bool,
     /// Phase times of Java's last frame in microseconds, indexed by `abi::PROF_*`.
     pub prof: [u32; PROF_COUNT],
 }
@@ -96,6 +102,8 @@ pub struct JavaCamera {
     /// Radians in mcr's convention, `yaw` within `[-PI, PI]` and `pitch` within `[-PI/2, PI/2]`.
     pub yaw: f32,
     pub pitch: f32,
+    /// Radians about the view axis in view space, within `[-PI, PI]`; 0 when the mod set none.
+    pub roll: f32,
     /// The camera shows the local player (third person or another camera entity).
     pub detached: bool,
     /// The mod moves its camera with the movement keys, so the player stands still.
@@ -103,7 +111,7 @@ pub struct JavaCamera {
 }
 
 impl JavaCamera {
-    fn new(flags: u32, pos: [f64; 3], yaw: f32, pitch: f32) -> Option<Self> {
+    fn new(flags: u32, pos: [f64; 3], yaw: f32, pitch: f32, roll: f32) -> Option<Self> {
         if flags & CAMERA_MOD == 0
             || !pos.iter().all(|v| v.is_finite())
             || !yaw.is_finite()
@@ -112,11 +120,12 @@ impl JavaCamera {
             return None;
         }
         let pi = std::f32::consts::PI;
-        let yaw = (yaw + pi).rem_euclid(2.0 * pi) - pi;
+        let wrap = |a: f32| ((a + pi).rem_euclid(2.0 * pi) - pi).clamp(-pi, pi);
         Some(Self {
             pos,
-            yaw: yaw.clamp(-pi, pi),
+            yaw: wrap(yaw),
             pitch: pitch.clamp(-pi / 2.0, pi / 2.0),
+            roll: if roll.is_finite() { wrap(roll) } else { 0.0 },
             detached: flags & CAMERA_DETACHED != 0,
             input: flags & CAMERA_INPUT != 0,
         })
@@ -196,8 +205,11 @@ impl FrameShared {
                     .map(|v| f64::from_bits(v.load(Ordering::Acquire))),
                 f32::from_bits(s.camera_yaw.load(Ordering::Acquire)),
                 f32::from_bits(s.camera_pitch.load(Ordering::Acquire)),
+                f32::from_bits(s.camera_roll.load(Ordering::Acquire)),
             ),
             weather_replaced: flags & FSTATE_WEATHER != 0,
+            steps_replaced: flags & FSTATE_STEPS != 0,
+            turn_captured: flags & FSTATE_TURN != 0,
             prof: s.prof.each_ref().map(|v| v.load(Ordering::Acquire)),
         }
     }
@@ -248,13 +260,14 @@ impl FrameShared {
     }
 
     #[cfg(test)]
-    pub fn simulate_camera(&self, flags: u32, pos: [f64; 3], yaw: f32, pitch: f32) {
+    pub fn simulate_camera(&self, flags: u32, pos: [f64; 3], yaw: f32, pitch: f32, roll: f32) {
         let s = &self.state;
         for (dst, v) in s.camera_pos.iter().zip(pos) {
             dst.store(v.to_bits(), Ordering::Release);
         }
         s.camera_yaw.store(yaw.to_bits(), Ordering::Release);
         s.camera_pitch.store(pitch.to_bits(), Ordering::Release);
+        s.camera_roll.store(roll.to_bits(), Ordering::Release);
         s.camera.store(flags, Ordering::Release);
     }
 }
@@ -569,29 +582,36 @@ mod tests {
     fn java_cameras_are_sanitized() {
         let shared = FrameShared::new();
         assert_eq!(shared.read().camera, None);
-        shared.simulate_camera(CAMERA_DETACHED, [1.0, 2.0, 3.0], 0.5, 0.25);
+        shared.simulate_camera(CAMERA_DETACHED, [1.0, 2.0, 3.0], 0.5, 0.25, 0.0);
         assert_eq!(
             shared.read().camera,
             None,
             "without CAMERA_MOD Java's camera is mcr's"
         );
-        shared.simulate_camera(CAMERA_MOD | CAMERA_INPUT, [1.0, 2.0, 3.0], 7.0, -3.0);
+        shared.simulate_camera(CAMERA_MOD | CAMERA_INPUT, [1.0, 2.0, 3.0], 7.0, -3.0, -7.0);
         let cam = shared.read().camera.unwrap();
         assert_eq!(cam.pos, [1.0, 2.0, 3.0]);
+        assert!((cam.roll - (std::f32::consts::TAU - 7.0)).abs() < 1e-5);
         assert!((cam.yaw - (7.0 - std::f32::consts::TAU)).abs() < 1e-5);
         assert_eq!(cam.pitch, -std::f32::consts::FRAC_PI_2);
         assert!(cam.input && !cam.detached);
         for bad in [f64::NAN, f64::INFINITY] {
-            shared.simulate_camera(CAMERA_MOD, [0.0, bad, 0.0], 0.0, 0.0);
+            shared.simulate_camera(CAMERA_MOD, [0.0, bad, 0.0], 0.0, 0.0, 0.0);
             assert_eq!(shared.read().camera, None);
         }
-        shared.simulate_camera(CAMERA_MOD, [0.0; 3], f32::NAN, 0.0);
+        shared.simulate_camera(CAMERA_MOD, [0.0; 3], f32::NAN, 0.0, 0.0);
         assert_eq!(shared.read().camera, None);
+        shared.simulate_camera(CAMERA_MOD, [0.0; 3], 0.0, 0.0, f32::INFINITY);
+        assert_eq!(
+            shared.read().camera.unwrap().roll,
+            0.0,
+            "a bad roll is dropped, not the camera"
+        );
     }
 
     #[test]
     fn java_cameras_stay_near_the_player() {
-        let cam = JavaCamera::new(CAMERA_MOD, [1e9, -1e9, -5.0], 0.0, 0.0).unwrap();
+        let cam = JavaCamera::new(CAMERA_MOD, [1e9, -1e9, -5.0], 0.0, 0.0, 0.0).unwrap();
         let b = cam.bounded([10.0, 64.0, 0.0], 100.0, -128.0..=384.0);
         assert_eq!(b.pos, [110.0, -128.0, -5.0]);
         let b = cam.bounded([0.0; 3], f64::NAN, 1.0..=0.0);

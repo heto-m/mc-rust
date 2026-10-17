@@ -568,7 +568,11 @@ struct Report {
     pos: [f64; 3],
     camera: [f64; 3],
     java_camera: String,
+    java_roll: f64,
     java_weather: bool,
+    java_steps: bool,
+    java_turn: bool,
+    mod_input: String,
 }
 
 fn reports(lines: &[String]) -> Vec<Report> {
@@ -591,7 +595,11 @@ fn reports(lines: &[String]) -> Vec<Report> {
                 pos: floats(l, " pos ")?,
                 camera: floats(l, " camera ")?,
                 java_camera: word(l, " java_camera ")?,
+                java_roll: word(l, " java_roll ")?.parse().ok()?,
                 java_weather: word(l, " java_weather ")? == "true",
+                java_steps: word(l, " java_steps ")? == "true",
+                java_turn: word(l, " java_turn ")? == "true",
+                mod_input: word(l, " mod input ")?,
             })
         })
         .collect()
@@ -674,6 +682,76 @@ fn mod_cameras_hand_off_to_mcr() {
     assert!(moved > 5000, "the terrain did not follow the lifted camera");
 }
 
+/// A mod that redirects the third-person pull-back (like Shoulder Surfing) moves mcr's camera; without
+/// one, Java's third-person camera equals mcr's and nothing is handed off.
+#[test]
+fn third_person_offsets_reach_mcr() {
+    let Some(live) = live() else {
+        return;
+    };
+    let script = "wait 200\ntap f5\nwait 20\nreport\ntap f5\ntap f5\nwait 5\n";
+    let mut cameras = Vec::new();
+    for (props, shoulder) in [
+        (&["-Dmcr.testmod.shoulder=true"][..], true),
+        (&[][..], false),
+    ] {
+        let dir = prepare(&format!("shoulder-{shoulder}"));
+        live.send(&STAGE.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        let lines = run_client_with(&live, &dir, script, props, |line| {
+            if line.starts_with("ready:") {
+                join_commands()
+            } else {
+                Vec::new()
+            }
+        });
+        let r = reports(&lines);
+        assert_eq!(r.len(), 1, "{r:?}");
+        let want = if shoulder { "moved" } else { "none" };
+        assert_eq!(r[0].java_camera, want, "{props:?}: {r:?}");
+        cameras.push(r[0].camera);
+    }
+    let offset = (0..3)
+        .map(|a| (cameras[0][a] - cameras[1][a]).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    assert!(
+        (offset - 1.0).abs() < 0.1,
+        "the shoulder camera sits a block aside: {cameras:?}"
+    );
+}
+
+/// A mod that rolls Java's camera about its view axis rolls mcr's view too.
+#[test]
+fn rolled_mod_cameras_roll_mcrs_view() {
+    let Some(live) = live() else {
+        return;
+    };
+    let dir = prepare("camera-roll");
+    live.send(&STAGE.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+    let shot = dir.join("rolled.png");
+    let script = format!("wait 200\nreport\nshot {}\nwait 5\n", shot.display());
+    let lines = run_client_with(
+        &live,
+        &dir,
+        &script,
+        &["-Dmcr.testmod.cameraRoll=true"],
+        |line| {
+            if line.starts_with("ready:") {
+                join_commands()
+            } else {
+                Vec::new()
+            }
+        },
+    );
+    let r = reports(&lines);
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0].java_camera, "moved", "{r:?}");
+    assert!(
+        (r[0].java_roll + 15.0).abs() < 0.5,
+        "the view rolls opposite to the camera: {r:?}"
+    );
+}
+
 /// A mod that cancels vanilla's weather extraction (like Particle Rain) hides mcr's rain and snow.
 #[test]
 fn replaced_weather_hides_mcrs_rain() {
@@ -700,6 +778,155 @@ fn replaced_weather_hides_mcrs_rain() {
         assert_eq!(r[0].java_weather, replaced, "{props:?}: {r:?}");
     }
     live.send(&["weather clear 100000".into()]);
+}
+
+/// A mod hooked inside `Camera.alignWithEntity` that takes the mouse's turning for its camera (like
+/// Freelook) turns mcr's camera while the player keeps its rotation; without it the mouse turns the player.
+#[test]
+fn freelook_hooks_turn_the_camera_not_the_player() {
+    let Some(live) = live() else {
+        return;
+    };
+    let script = "wait 200\nreport\nmotion 300 0\nwait 10\nreport\nmotion 300 0\nwait 10\nreport\n";
+    for (props, freelook) in [
+        (&["-Dmcr.testmod.freelook=true"][..], true),
+        (&[][..], false),
+    ] {
+        let dir = prepare(&format!("freelook-{freelook}"));
+        live.send(&STAGE.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        let lines = run_client_with(&live, &dir, script, props, |line| {
+            if line.starts_with("ready:") {
+                join_commands()
+            } else {
+                Vec::new()
+            }
+        });
+        let r = reports(&lines);
+        assert_eq!(r.len(), 3, "{r:?}");
+        let yaws: Vec<f64> = lines
+            .iter()
+            .filter(|l| l.starts_with("report:"))
+            .filter_map(|l| {
+                l.split(" yaw ")
+                    .nth(1)?
+                    .split_whitespace()
+                    .next()?
+                    .parse()
+                    .ok()
+            })
+            .collect();
+        eprintln!("{props:?}: yaws {yaws:?} reports {r:?}");
+        if freelook {
+            assert!(
+                r.iter().all(|r| r.java_turn),
+                "the mod's turn capture: {r:?}"
+            );
+            assert!(
+                yaws.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01),
+                "the player turned: {yaws:?}"
+            );
+            assert_eq!(r[2].java_camera, "moved", "the camera turned: {r:?}");
+        } else {
+            assert!(
+                r.iter().all(|r| !r.java_turn && r.java_camera == "none"),
+                "{r:?}"
+            );
+            assert!(
+                (yaws[2] - yaws[0]).abs() > 5.0,
+                "the player did not turn: {yaws:?}"
+            );
+        }
+    }
+}
+
+/// A mod hooked into vanilla's SDL key events (like malilib's hotkeys) sees mcr's keys and can
+/// consume them: with the test mod eating E, the inventory key no longer opens Java's inventory.
+#[test]
+fn raw_key_hooks_see_and_consume_mcrs_keys() {
+    let Some(live) = live() else {
+        return;
+    };
+    let script = "wait 200\ntap e\nwait 10\nreport\ntap escape\nwait 5\n";
+    for (props, consumed) in [
+        (&["-Dmcr.testmod.rawHotkey=true"][..], true),
+        (&[][..], false),
+    ] {
+        let dir = prepare(&format!("raw-key-{consumed}"));
+        live.send(&STAGE.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        let lines = run_client_with(&live, &dir, script, props, |line| {
+            if line.starts_with("ready:") {
+                join_commands()
+            } else {
+                Vec::new()
+            }
+        });
+        let r = reports(&lines);
+        assert_eq!(r.len(), 1, "{r:?}");
+        let want = if consumed { "JavaGame" } else { "JavaScreen" };
+        assert_eq!(r[0].mod_input, want, "{props:?}: {r:?}");
+    }
+}
+
+/// A mod that takes over the player's footsteps (like Presence Footsteps) silences mcr's own.
+#[test]
+fn replaced_footsteps_silence_mcrs_own() {
+    let Some(live) = live() else {
+        return;
+    };
+    for (props, replaced) in [
+        (&["-Dmcr.testmod.replaceSteps=true"][..], true),
+        (&[][..], false),
+    ] {
+        let dir = prepare(&format!("steps-{replaced}"));
+        live.send(&STAGE.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        let lines = run_client_with(&live, &dir, "wait 200\nreport\n", props, |line| {
+            if line.starts_with("ready:") {
+                join_commands()
+            } else {
+                Vec::new()
+            }
+        });
+        let r = reports(&lines);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].java_steps, replaced, "{props:?}: {r:?}");
+    }
+}
+
+/// A mod that lets the movement keys through in screens (like InvMove) moves mcr's player while
+/// the inventory is open; without it the player stands still.
+#[test]
+fn movement_in_screens_moves_mcrs_player() {
+    let Some(live) = live() else {
+        return;
+    };
+    let script =
+        "wait 200\nreport\ntap e\nwait 10\nhold w 20\nwait 5\nreport\ntap escape\nwait 5\n";
+    for (props, moves) in [
+        (&["-Dmcr.testmod.moveInScreens=true"][..], true),
+        (&[][..], false),
+    ] {
+        let dir = prepare(&format!("screen-move-{moves}"));
+        live.send(&STAGE.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        let lines = run_client_with(&live, &dir, script, props, |line| {
+            if line.starts_with("ready:") {
+                join_commands()
+            } else {
+                Vec::new()
+            }
+        });
+        let r = reports(&lines);
+        assert_eq!(r.len(), 2, "{r:?}");
+        let walked = r[1].pos[2] - r[0].pos[2];
+        eprintln!("{props:?}: walked {walked:.2} blocks with the inventory open");
+        if moves {
+            assert!(walked > 1.0, "the player did not walk: {r:?}");
+        } else {
+            assert!(
+                walked.abs() < 0.01,
+                "the player walked without the mod: {r:?}"
+            );
+        }
+    }
 }
 
 /// Java frame times with 500 zombies sealed in stone in view, with and without mcr's reached

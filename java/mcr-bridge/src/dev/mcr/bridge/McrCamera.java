@@ -18,6 +18,7 @@ public final class McrCamera {
     private float yRot;
     private float xRot;
     private boolean detached;
+    private float distance;
     private boolean valid;
     private final Matrix4f view = new Matrix4f();
     private final Matrix4f projection = new Matrix4f();
@@ -28,6 +29,8 @@ public final class McrCamera {
         ok &= matrix(p, BridgeAbi.FRAME_VIEW, view);
         ok &= matrix(p, BridgeAbi.FRAME_PROJ, projection);
         this.detached = detached;
+        float d = p.get(FLOAT, BridgeAbi.FRAME_CAMERA_DISTANCE);
+        distance = detached && Float.isFinite(d) && d > 0.0F && d < 64.0F ? d : 0.0F;
         valid = ok;
     }
 
@@ -106,6 +109,22 @@ public final class McrCamera {
 
     public boolean detached() {
         return detached;
+    }
+
+    /** How far the third-person camera sits from the eye; 0 in first person or when unknown. */
+    public float distance() {
+        return distance;
+    }
+
+    /** The eye the third-person camera looks from: {@link #distance()} ahead of the camera. */
+    public double[] eye() {
+        double y = Math.toRadians(yRot);
+        double x = Math.toRadians(xRot);
+        return new double[] {
+            this.x - Math.sin(y) * Math.cos(x) * distance,
+            this.y - Math.sin(x) * distance,
+            this.z + Math.cos(y) * Math.cos(x) * distance
+        };
     }
 
     /**

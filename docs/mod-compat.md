@@ -53,3 +53,67 @@ that mod code spawns, are drawn by Java.
 Freecam and Particle Rain were re-tested alone with Fabric API (and Cloth Config) at bridge ABI 10 after
 `mod-camera-weather`: Freecam's F4 camera flew 20 blocks while the player stayed put and toggled back, and
 Particle Rain's particles showed in a thunderless rain with mcr's columns hidden. Both left the mod policy.
+
+## Second sweep
+
+Sweep `mod-compat-sweep-2`, October 2026, bridge ABI 13, same setup: each mod alone with its libraries and Fabric
+API 0.162.0, then everything from both sweeps together, offscreen at 1280x720 against a vanilla 26.3 server in
+offline mode. The autopilot added mouse `down`/`up`/`wheel` steps for drags, a horse ride for mount HUDs and a
+crafting table for Crafting Tweaks.
+
+| Mod | Version | Status | Reason |
+|---|---|---|---|
+| VoxelMap | 1.16.13 | works | round minimap with coordinates; it draws through Java's GUI, not OpenGL |
+| Xaero's World Map | 1.47.0 | blocked | draws with OpenGL directly |
+| MiniHUD | 0.41.2 | works | info lines; its malilib hotkey (H) toggles them since key events also reach vanilla's SDL event handler |
+| Status Effect Bars | 1.0.12 | works | duration bars under the effect icons |
+| Armor HUD | 3.5.0 | works | armor icons left of the hotbar |
+| uku's Armor HUD | 0.14.0 | works | armor icons with durability; declares a conflict with Armor HUD, so only one loads; its profile fetch fails offline |
+| Better Mount HUD | 1.3.1 | works | the horse's hearts above the food bar while riding (mcr's own riding camera sits inside the horse's head, a native riding bug) |
+| Overflowing Bars | 26.3.0 | works | compacted armor and health rows |
+| Chat Patches | 8.0.0 | works | timestamps in front of chat lines |
+| More Chat History | 2.0.0 | works | boots and joins; longer history not exercised |
+| Chat Animation | 1.3.4 | works | boots and joins; the slide-in is an animation the screenshots cannot show |
+| No Chat Reports | 2.21.0 | works | removes the unverified-chat toast; mcr itself never signs chat |
+| Crafting Tweaks | 26.3.0.1 | works | rotate, balance and clear buttons on the crafting table (none on the 2x2 grid by default) |
+| Item Scroller | 0.33.1 | works | shift-drag moves every slot dragged over; hotkeys go through malilib |
+| InvMove | 0.9.6 | works | walks with the inventory open (`ISTATE_SCREEN_MOVES`) |
+| Smooth Swapping | 0.9.11 | works | boots and joins; the swap animation is not visible in still shots |
+| Enchantment Descriptions | 26.3.0.2 | works | description line under each enchantment |
+| Legendary Tooltips | 1.6.3 | works | framed tooltips |
+| Capes | 1.5.10 | works | boots and joins; the offline test player has no cape |
+| WaveyCapes | 1.11.2 | works | boots and joins; no cape to wave offline |
+| Ears | 2.2.1-d | works | boots and joins; the test skin has no ears |
+| AmbientSounds | 6.3.10 | works | boots and joins; its sounds play through Java's sound bridge |
+| Presence Footsteps | 1.14.0 | works | its footsteps replace mcr's (`FSTATE_STEPS`) |
+| Sound Physics Remastered | 1.5.1 | blocked | OpenAL effects on the vanilla sound device |
+| Visuality | 0.7.15 | works | boots and joins; its particles are Java's |
+| Subtle Effects | 1.15.0-hotfix.1 | works | boots and joins; its particles are Java's |
+| Dynamic Crosshair | 9.15 | works | its crosshair replaces the vanilla one and hides it with no target |
+| LambDynamicLights | 4.13.0 | partial | policy: terrain lighting is mcr's, only Java-drawn entities could light up |
+| Freelook | 1.4.4 | partial | holding Alt turns the camera, not the player (`FSTATE_TURN`); its default third-person view stays first person because mcr owns the perspective |
+| Camera Overhaul | 2.1.2 | partial | its pitch and yaw nudges reach mcr through the camera handoff; its strafe and turn roll is applied in `GameRenderer.bobHurt` to Java's level projection, which mcr replaces with its own view, so only the hand tilts |
+| Shoulder Surfing Reloaded | 5.2.0 | partial | with `replace_default_perspective = true` F5 gives its shoulder camera, which mcr renders; with the default config its own perspective is never reached, since mcr cycles the perspective itself |
+| Krypton | 0.3.2 | works | boots and joins; mcr owns the socket, so its network optimisations have nothing to act on |
+| Debugify | 26.3.0.0 | works | boots and joins |
+| More Culling | 1.9.0 | partial | policy: terrain is rendered by mcr; no visible effect |
+| Dynamic FPS | 3.11.10 | unsupported | policy: frame pacing and the window are mcr's |
+| Better Block Entities | 1.3.9 | blocked | requires Sodium |
+
+Libraries, all loading cleanly: Balm 26.3.0.3, CreativeCore 2.14.19, Forge Config API Port 26.3.1, Fzzy Config
+0.7.7, GeckoLib 5.5.7, Iceberg 1.4.3.1, MaLiLib 0.30.2, PrickleMC 26.3.0.2, Prism 1.1.3, Puzzles Lib 26.3.14,
+ukulib 2.2.0. Prickle's update check asks a host outside the proxy allow-list and is refused (one log line).
+
+Open items from the first sweep: Mouse Tweaks' drag-click (shift-drag moved three stacks) and wheel tweak (a
+scroll moved one plank into the crafting grid) work through the new autopilot steps. Controlling's rebinding of
+Jump to J reached mcr's own `options.txt`. Entity Model Features with Fresh Animations 1.10.5 animates the cow's and villager's heads, and Entity Texture
+Features applied a pack's random cow texture (`optifine/random/entity/cow`).
+
+All mods of both sweeps together (85 jars, 171 mod ids after the policy blocked or excluded eight) boot, join and
+keep Java's GUI and entities composed after the REI/JEI join stall; Particle Rain and Presence Footsteps still take
+over rain and footsteps, and the HUD mods share the screen (JEI's bar overlaps the hotbar at this GUI scale, as it
+would in vanilla).
+
+The block-entity section seen culled about once per frame in the first sweep is a legitimate cull: the shared
+sections drop dungeon spawners and mineshaft chests underground that mcr's visibility graph never reaches (seen at
+`mob_spawner@343,-33,508` with the player on the surface at y 98). The stage scenes cull nothing.

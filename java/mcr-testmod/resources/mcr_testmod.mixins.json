@@ -6,7 +6,13 @@
   "client": [
     "CameraFovMixin",
     "CameraNudgeMixin",
+    "CameraRollMixin",
     "EntityTurnMixin",
+    "FreelookMixin",
+    "RawHotkeyMixin",
+    "ScreenMoveMixin",
+    "ShoulderMixin",
+    "StepReplaceMixin",
     "WeatherReplaceMixin"
   ],
   "injectors": {

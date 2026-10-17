@@ -14,7 +14,7 @@ use crate::sections::SectionShared;
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 12;
+pub const BRIDGE_VERSION: u32 = 13;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -70,6 +70,8 @@ pub const ISTATE_GUI_SCALE: usize = 76;
 pub const ISTATE_CURSOR: usize = 80;
 pub const ISTATE_NATIVE_SEQ: usize = 84;
 pub const ISTATE_NATIVE_KIND: usize = 88;
+/// Movement keys a mod let through while a Java screen is open, as `MOVE_*` bits.
+pub const ISTATE_SCREEN_MOVES: usize = 92;
 pub const ISTATE_TEXT_AREA: usize = 96;
 pub const ISTATE_SIZE: usize = 128;
 pub const RUST_FOCUSED: u32 = 1;
@@ -78,6 +80,13 @@ pub const JAVA_OVERLAY: u32 = 2;
 pub const JAVA_GRABBED: u32 = 4;
 pub const JAVA_TEXT_INPUT: u32 = 8;
 pub const JAVA_QUIT: u32 = 16;
+pub const MOVE_FORWARD: u32 = 1;
+pub const MOVE_BACKWARD: u32 = 2;
+pub const MOVE_LEFT: u32 = 4;
+pub const MOVE_RIGHT: u32 = 8;
+pub const MOVE_JUMP: u32 = 16;
+pub const MOVE_SNEAK: u32 = 32;
+pub const MOVE_SPRINT: u32 = 64;
 
 pub const FRAME_INDEX: usize = 0;
 pub const FRAME_TICKS: usize = 8;
@@ -97,7 +106,9 @@ pub const FRAME_ENTITY_SCALE: usize = 196;
 pub const FRAME_RENDER_CAMERA: usize = 200;
 pub const FRAME_RENDER_YAW: usize = 224;
 pub const FRAME_RENDER_PITCH: usize = 228;
-pub const FRAME_SIZE: usize = 232;
+/// How far mcr's third-person player camera sits from the eye (an `f32`); 0 in first person.
+pub const FRAME_CAMERA_DISTANCE: usize = 232;
+pub const FRAME_SIZE: usize = 236;
 /// Java signals every frame it finishes and tags its GPU work with slots.
 pub const FRAME_LOCKSTEP: u32 = 1;
 /// mcr's camera is in third person: Java renders the local player and no hand.
@@ -125,6 +136,8 @@ pub const FSTATE_CAMERA_YAW: usize = 72;
 pub const FSTATE_CAMERA_PITCH: usize = 76;
 /// `PROF_COUNT` microsecond counters (`u32`) of Java's last frame, indexed by `PROF_*`.
 pub const FSTATE_PROF: usize = 80;
+/// Radians about the view axis, applied in view space after yaw and pitch.
+pub const FSTATE_CAMERA_ROLL: usize = 112;
 pub const FSTATE_SIZE: usize = 128;
 /// Leaving the frame wait to returning from it: packets, input and size.
 pub const PROF_PRE: usize = 0;
@@ -144,6 +157,10 @@ pub const FSTATE_READY: u32 = 1;
 pub const FSTATE_LOADED: u32 = 2;
 /// A mod cancelled or redirected vanilla's weather extraction this frame.
 pub const FSTATE_WEATHER: u32 = 4;
+/// A mod took over the local player's footsteps, so mcr must not play its own.
+pub const FSTATE_STEPS: u32 = 8;
+/// A mod consumes the mouse's turning (Freelook), so mcr must not turn its player.
+pub const FSTATE_TURN: u32 = 16;
 /// A mod moved Java's camera or made another entity the camera entity.
 pub const CAMERA_MOD: u32 = 1;
 /// The camera shows the local player: third person, or a camera entity other than the player.
@@ -349,6 +366,8 @@ pub struct FrameBegin {
     pub render_pos: [f64; 3],
     pub render_yaw: f32,
     pub render_pitch: f32,
+    /// Distance from the eye to the player camera along its view axis; 0 in first person.
+    pub camera_distance: f32,
 }
 
 impl Default for FrameBegin {
@@ -371,6 +390,7 @@ impl Default for FrameBegin {
             render_pos: [0.0; 3],
             render_yaw: 0.0,
             render_pitch: 0.0,
+            camera_distance: 0.0,
         }
     }
 }
@@ -425,6 +445,11 @@ impl FrameBegin {
             &mut out,
             FRAME_RENDER_PITCH,
             &self.render_pitch.to_ne_bytes(),
+        );
+        put(
+            &mut out,
+            FRAME_CAMERA_DISTANCE,
+            &self.camera_distance.to_ne_bytes(),
         );
         out
     }
@@ -679,6 +704,7 @@ mod tests {
             ("ISTATE_CURSOR", ISTATE_CURSOR as i64),
             ("ISTATE_NATIVE_SEQ", ISTATE_NATIVE_SEQ as i64),
             ("ISTATE_NATIVE_KIND", ISTATE_NATIVE_KIND as i64),
+            ("ISTATE_SCREEN_MOVES", ISTATE_SCREEN_MOVES as i64),
             ("ISTATE_TEXT_AREA", ISTATE_TEXT_AREA as i64),
             ("ISTATE_SIZE", ISTATE_SIZE as i64),
             ("RUST_FOCUSED", RUST_FOCUSED.into()),
@@ -687,6 +713,13 @@ mod tests {
             ("JAVA_GRABBED", JAVA_GRABBED.into()),
             ("JAVA_TEXT_INPUT", JAVA_TEXT_INPUT.into()),
             ("JAVA_QUIT", JAVA_QUIT.into()),
+            ("MOVE_FORWARD", MOVE_FORWARD.into()),
+            ("MOVE_BACKWARD", MOVE_BACKWARD.into()),
+            ("MOVE_LEFT", MOVE_LEFT.into()),
+            ("MOVE_RIGHT", MOVE_RIGHT.into()),
+            ("MOVE_JUMP", MOVE_JUMP.into()),
+            ("MOVE_SNEAK", MOVE_SNEAK.into()),
+            ("MOVE_SPRINT", MOVE_SPRINT.into()),
             ("INPUT_MAX_TEXT", crate::input::MAX_EVENT_TEXT as i64),
             (
                 "INPUT_MAX_CLIPBOARD",
@@ -709,6 +742,7 @@ mod tests {
             ("FRAME_RENDER_CAMERA", FRAME_RENDER_CAMERA as i64),
             ("FRAME_RENDER_YAW", FRAME_RENDER_YAW as i64),
             ("FRAME_RENDER_PITCH", FRAME_RENDER_PITCH as i64),
+            ("FRAME_CAMERA_DISTANCE", FRAME_CAMERA_DISTANCE as i64),
             ("FRAME_SIZE", FRAME_SIZE as i64),
             ("FRAME_LOCKSTEP", FRAME_LOCKSTEP.into()),
             ("FRAME_DETACHED", FRAME_DETACHED.into()),
@@ -726,6 +760,7 @@ mod tests {
             ("FSTATE_CAMERA_YAW", FSTATE_CAMERA_YAW as i64),
             ("FSTATE_CAMERA_PITCH", FSTATE_CAMERA_PITCH as i64),
             ("FSTATE_PROF", FSTATE_PROF as i64),
+            ("FSTATE_CAMERA_ROLL", FSTATE_CAMERA_ROLL as i64),
             ("FSTATE_SIZE", FSTATE_SIZE as i64),
             ("PROF_PRE", PROF_PRE as i64),
             ("PROF_TICK", PROF_TICK as i64),
@@ -738,6 +773,8 @@ mod tests {
             ("FSTATE_READY", FSTATE_READY.into()),
             ("FSTATE_LOADED", FSTATE_LOADED.into()),
             ("FSTATE_WEATHER", FSTATE_WEATHER.into()),
+            ("FSTATE_STEPS", FSTATE_STEPS.into()),
+            ("FSTATE_TURN", FSTATE_TURN.into()),
             ("CAMERA_MOD", CAMERA_MOD.into()),
             ("CAMERA_DETACHED", CAMERA_DETACHED.into()),
             ("CAMERA_INPUT", CAMERA_INPUT.into()),
@@ -922,6 +959,7 @@ mod tests {
             render_pos: [-2.5, 70.25, 3e6],
             render_yaw: 1.25,
             render_pitch: -0.5,
+            camera_distance: 3.25,
         };
         let b = f.encode();
         let u32_at = |o: usize| u32::from_ne_bytes(b[o..o + 4].try_into().unwrap());
@@ -959,7 +997,8 @@ mod tests {
         );
         assert_eq!(f32::from_bits(u32_at(FRAME_RENDER_YAW)), 1.25);
         assert_eq!(f32::from_bits(u32_at(FRAME_RENDER_PITCH)), -0.5);
-        assert_eq!(FRAME_RENDER_PITCH + 4, FRAME_SIZE);
+        assert_eq!(f32::from_bits(u32_at(FRAME_CAMERA_DISTANCE)), 3.25);
+        assert_eq!(FRAME_CAMERA_DISTANCE + 4, FRAME_SIZE);
     }
 
     #[test]

@@ -20,6 +20,7 @@ import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonInfo;
 import net.minecraft.client.input.PreeditEvent;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.entity.player.Input;
 
 /**
  * Rust's input in place of SDL's: events from the control ring go to the handlers vanilla's
@@ -45,6 +46,7 @@ public final class McrInput {
     private static boolean textInput;
     private static boolean quit;
     private static int cursor;
+    private static int screenMoves;
     private static int nativeSeq;
     private static String probed = "";
 
@@ -98,7 +100,7 @@ public final class McrInput {
         while ((e = QUEUE.poll()) != null) {
             switch (e.type) {
                 case BridgeAbi.IN_KEY -> {
-                    if (e.a > 0 && e.a < SCANCODES && e.d >= -1 && e.d <= 1) {
+                    if (e.a > 0 && e.a < SCANCODES && e.d >= -1 && e.d <= 1 && McrRawInput.key(e.a, e.b, e.c & 0xFFFF, e.d)) {
                         minecraft.keyboardHandler.keyPress(handle, e.d, new KeyEvent(e.a, e.b, e.c & 0xFFFF));
                     }
                 }
@@ -107,7 +109,8 @@ public final class McrInput {
                     minecraft.keyboardHandler.textEditing(handle, PreeditEvent.fromSdlTextEditing(e.text, e.a, e.b));
                 case BridgeAbi.IN_MOTION -> minecraft.mouseHandler.onMove(handle, e.x, e.y, e.dx, e.dy);
                 case BridgeAbi.IN_BUTTON -> {
-                    if (e.a > 0 && e.a <= MAX_BUTTON) {
+                    if (e.a > 0 && e.a <= MAX_BUTTON
+                            && McrRawInput.button(e.a, e.c != 0, minecraft.mouseHandler.xpos(), minecraft.mouseHandler.ypos())) {
                         minecraft.mouseHandler.onButton(handle, new MouseButtonInfo(e.a, e.b & 0xFFFF), e.c != 0 ? 1 : 0);
                     }
                 }
@@ -172,6 +175,7 @@ public final class McrInput {
         MemorySegment s = state();
         STATE_INT.setRelease(s, (long) BridgeAbi.ISTATE_JAVA_FLAGS, flags);
         STATE_INT.setRelease(s, (long) BridgeAbi.ISTATE_CURSOR, cursor);
+        STATE_INT.setRelease(s, (long) BridgeAbi.ISTATE_SCREEN_MOVES, minecraft.gui.screen() != null ? screenMoves : 0);
         Window window = minecraft.getWindow();
         if (window != null) {
             STATE_INT.setRelease(s, (long) BridgeAbi.ISTATE_GUI_SCALE, window.getGuiScale());
@@ -179,6 +183,21 @@ public final class McrInput {
         if (PROBE) {
             probe(minecraft);
         }
+    }
+
+    /** Movement a mod let through while a screen is open (InvMove); mcr's player moves with it. */
+    public static void screenMoves(Input input) {
+        if (Minecraft.getInstance().gui.screen() == null) {
+            screenMoves = 0;
+            return;
+        }
+        screenMoves = (input.forward() ? BridgeAbi.MOVE_FORWARD : 0)
+                | (input.backward() ? BridgeAbi.MOVE_BACKWARD : 0)
+                | (input.left() ? BridgeAbi.MOVE_LEFT : 0)
+                | (input.right() ? BridgeAbi.MOVE_RIGHT : 0)
+                | (input.jump() ? BridgeAbi.MOVE_JUMP : 0)
+                | (input.shift() ? BridgeAbi.MOVE_SNEAK : 0)
+                | (input.sprint() ? BridgeAbi.MOVE_SPRINT : 0);
     }
 
     public static void setTextInput(boolean on) {

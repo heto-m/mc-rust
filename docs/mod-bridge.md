@@ -79,7 +79,7 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
 | GPU | `PreferredGraphicsApi.getBackendsToTry` → `McrGpuBackend` implementing `com.mojang.renderpearl.api.device.GpuBackend`; `createDevice` returns `new FrontendGpuDevice(new McrDeviceBackend())` (`GpuDeviceBackend`, `CommandEncoderBackend`, `RenderPassBackend`, `GpuSurfaceBackend`) | Java records, Rust submits |
 | Shaders | Frontend `GlslCompiler` already emits SPIR-V (shaderc). The backend gets `SpvModule` plus flattened bindings (set 0, binding = uniform index) → Rust splits combined image samplers → naga `spv-in` → wgpu | Rust |
 | Window | SDL3 `offscreen` video driver (hint set in `RenderSystem.initBackendSystem`), so `Window` works on a fake window. Size and scale are pushed per frame | Rust |
-| Input | `ModInput` events ride the control ring as `MSG_INPUT` ahead of each `MSG_FRAME`; `McrInput.deliver` calls `KeyboardHandler.keyPress/textInput/textEditing` and `MouseHandler.onMove/onButton/onScroll/onDrop` with SDL3 values. `InputConstants.isKeyDown/grabMouse/releaseMouse`, `Window.isFocused/selectCursor`, `ClipboardManager`, `TextInputManager`, `SDL_GetModState` sites and `turnPlayer` are redirected | Rust |
+| Input | `ModInput` events ride the control ring as `MSG_INPUT` ahead of each `MSG_FRAME`; `McrInput.deliver` calls `KeyboardHandler.keyPress/textInput/textEditing` and `MouseHandler.onMove/onButton/onScroll/onDrop` with SDL3 values. `InputConstants.isKeyDown/grabMouse/releaseMouse`, `Window.isFocused/selectCursor`, `ClipboardManager`, `TextInputManager`, `SDL_GetModState` sites are redirected. Key and button events also pass through `SDLEventHandler.handleKeyEvent/handleMouseButtonEvent` with vanilla's body skipped, so mods hooked there (malilib's hotkeys) see them and can consume them | Rust |
 | Network | `Connection.connect` is redirected to a `BridgeChannel` (netty `EmbeddedChannel` confined to the render thread by its own event loop) carrying vanilla codecs, so `ConnectScreen` runs unchanged while Rust connects. Frames travel in two net rings (32 MiB in, 4 MiB out) tagged with phase and session; outbound packets are filtered by (phase, packet class), chat goes to Rust as text | Rust owns socket and state |
 | Player | Rust's local player and camera overwrite `LocalPlayer`/`Camera` every tick and frame, unless a mod moved the camera (see camera handoff). Vanilla gameplay keybinds are suppressed in Java | Rust |
 | World | Java keeps its own `ClientLevel`/`ClientChunkCache`. Sections compile meshless (`RenderSection.compileSync/compileAsync` → `BridgeSectionMesh`, block entities only); terrain uploads and draw groups, sky, weather and world border are off (weather extraction only proves no mod replaced it). `Camera.alignWithEntity` takes Rust's eye and rotation; the level projection is Rust's | duplicated, see below |
@@ -149,19 +149,39 @@ carries mcr's render distance (the one its fog uses) and entity distance scaling
 match mcr's terrain.
 
 **Camera handoff.** Mods that move Java's camera (Freecam, camera tweaks, `Camera.update` mixins) keep working:
-`alignWithEntity` takes Rust's camera only while the camera entity is the player or the server's spectate target.
+`alignWithEntity` takes Rust's camera only while the camera entity is the player or the server's spectate target,
+and then runs vanilla's body with Rust's values swapped into its `setRotation`/`setPosition` calls, so injections
+inside it (Camera Overhaul, Freelook, Shoulder Surfing) still apply on top. In third person `setPosition` gets
+Rust's eye and the pull-back `move` gets Rust's camera distance (`FRAME_CAMERA_DISTANCE`), so vanilla lands on
+Rust's camera and a mod that redirects the pull-back (Shoulder Surfing) offsets from the eye; other `move` calls
+are zeroed, since Rust's camera already has them.
 At `GameRenderer.extractCamera` Java compares its final camera with Rust's and, when a mod changed it, reports it
 in the frame state (`FSTATE_CAMERA*`, with whether it shows the player and whether the mod took the player's
 input). The next frame mcr renders terrain from it (bounded to the loaded world, non-finite values ignored), sends
 it back as the render camera with `FRAME_CAMERA_HANDOFF`, and Java places its own camera there, so entities and
-terrain share one camera with one frame of latency. When the mod took the player's input (`player.input` is no
+terrain share one camera with one frame of latency. A roll of the camera's rotation about its view axis counts as
+a change too: Java reports it relative to the camera's yaw and pitch (`FSTATE_CAMERA_ROLL`, robust at a vertical
+pitch), mcr multiplies it into its view on top of its own damage tilt, and Java re-applies the roll it reported the
+frame before when it places its camera. Rolls applied to the level's pose stack instead (Camera Overhaul's, in
+`bobHurt`) are replaced together with vanilla's bobbing when mcr rewrites Java's level projection. When the mod took the player's input (`player.input` is no
 longer a `KeyboardInput`), mcr's player stops moving and turning, Java's movement keys follow the keyboard and its
 `turnPlayer` runs, so the mod's camera entity flies. Without a mod the reported flags are 0 and nothing changes.
+`turnPlayer` always runs up to `LocalPlayer.turn`; a probe in `Entity.turn` stops it before it rotates the
+player (mcr owns the look). If a mod cancelled the turn before that point (Freelook turns only its camera), Java sets `FSTATE_TURN`
+and mcr's player stops turning with the mouse while Java draws the world.
 
 **Weather replacement.** Vanilla's `WeatherEffectRenderer.extractRenderState` runs up to its first statement and
 returns. If the level reached its weather step but that statement never ran (a mod cancelled, redirected or
 overwrote it, as Particle Rain does), Java sets `FSTATE_WEATHER` and mcr hides its rain and snow columns, keeping
 the rain's sky and fog darkening.
+
+**Footsteps.** Once a second Java asks vanilla's `Entity.walkingStepSound` for a step of its shadow player. If
+that never reaches `Player.playStepSound` (a mod such as Presence Footsteps cancelled it to play its own), Java
+sets `FSTATE_STEPS` and mcr stops playing the player's footsteps. The probe itself never plays a sound.
+
+**Movement in screens.** While a Java screen is open vanilla wipes the player's movement input. Java records the
+movement keys a mod let through just before that wipe (`ISTATE_SCREEN_MOVES`, the `MOVE_*` bits), and mcr moves
+its player with them, so InvMove-style mods walk with the inventory open. Without such a mod the bits are 0.
 
 **Section visibility.** Java's own visibility graph sees through every bridge section (they have no geometry), so
 mcr shares the sections its graph reached from this frame's camera (`SHARED_SECTIONS`: a box in section

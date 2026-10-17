@@ -4,7 +4,7 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 12;
+    public static final int VERSION = 13;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
     public static final String COMPOSE_PROPERTY = "mcr.compose";
 
@@ -55,6 +55,7 @@ public final class BridgeAbi {
     public static final int ISTATE_CURSOR = 80;
     public static final int ISTATE_NATIVE_SEQ = 84;
     public static final int ISTATE_NATIVE_KIND = 88;
+    public static final int ISTATE_SCREEN_MOVES = 92;
     public static final int ISTATE_TEXT_AREA = 96;
     public static final int ISTATE_SIZE = 128;
     public static final int RUST_FOCUSED = 1;
@@ -63,6 +64,13 @@ public final class BridgeAbi {
     public static final int JAVA_GRABBED = 4;
     public static final int JAVA_TEXT_INPUT = 8;
     public static final int JAVA_QUIT = 16;
+    public static final int MOVE_FORWARD = 1;
+    public static final int MOVE_BACKWARD = 2;
+    public static final int MOVE_LEFT = 4;
+    public static final int MOVE_RIGHT = 8;
+    public static final int MOVE_JUMP = 16;
+    public static final int MOVE_SNEAK = 32;
+    public static final int MOVE_SPRINT = 64;
 
     public static final int FRAME_INDEX = 0;
     public static final int FRAME_TICKS = 8;
@@ -81,7 +89,8 @@ public final class BridgeAbi {
     public static final int FRAME_RENDER_CAMERA = 200;
     public static final int FRAME_RENDER_YAW = 224;
     public static final int FRAME_RENDER_PITCH = 228;
-    public static final int FRAME_SIZE = 232;
+    public static final int FRAME_CAMERA_DISTANCE = 232;
+    public static final int FRAME_SIZE = 236;
     public static final int FRAME_LOCKSTEP = 1;
     public static final int FRAME_DETACHED = 2;
     public static final int FRAME_CAMERA_HANDOFF = 4;
@@ -99,6 +108,7 @@ public final class BridgeAbi {
     public static final int FSTATE_CAMERA_YAW = 72;
     public static final int FSTATE_CAMERA_PITCH = 76;
     public static final int FSTATE_PROF = 80;
+    public static final int FSTATE_CAMERA_ROLL = 112;
     public static final int FSTATE_SIZE = 128;
     public static final int PROF_PRE = 0;
     public static final int PROF_TICK = 1;
@@ -111,6 +121,8 @@ public final class BridgeAbi {
     public static final int FSTATE_READY = 1;
     public static final int FSTATE_LOADED = 2;
     public static final int FSTATE_WEATHER = 4;
+    public static final int FSTATE_STEPS = 8;
+    public static final int FSTATE_TURN = 16;
     public static final int CAMERA_MOD = 1;
     public static final int CAMERA_DETACHED = 2;
     public static final int CAMERA_INPUT = 4;

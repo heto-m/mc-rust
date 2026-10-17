@@ -198,7 +198,9 @@ public final class McrFrame {
         boolean loaded = minecraft.isGameLoadFinished() && minecraft.gui.overlay() == null;
         McrInput.publish(minecraft);
         int weather = McrWeather.takeReplaced() ? BridgeAbi.FSTATE_WEATHER : 0;
-        publish(Bridge.get(), minecraft, BridgeAbi.FSTATE_READY | (loaded ? BridgeAbi.FSTATE_LOADED : 0) | weather);
+        int steps = McrSteps.replaced() ? BridgeAbi.FSTATE_STEPS : 0;
+        int turn = McrTurn.captured() ? BridgeAbi.FSTATE_TURN : 0;
+        publish(Bridge.get(), minecraft, BridgeAbi.FSTATE_READY | (loaded ? BridgeAbi.FSTATE_LOADED : 0) | weather | steps | turn);
     }
 
     private static void publish(Bridge bridge, Minecraft minecraft, int stateFlags) {

@@ -32,6 +32,23 @@ public final class McrTestMod implements ClientModInitializer {
     /** `-Dmcr.testmod.replaceWeather=true`: vanilla's rain and snow are replaced, like Particle Rain does. */
     public static final boolean REPLACE_WEATHER = Boolean.getBoolean("mcr.testmod.replaceWeather");
 
+    /** `-Dmcr.testmod.moveInScreens=true`: movement keys move the player while a screen is open, like InvMove. */
+    public static final boolean MOVE_IN_SCREENS = Boolean.getBoolean("mcr.testmod.moveInScreens");
+
+    /** `-Dmcr.testmod.replaceSteps=true`: the player's footsteps are the mod's, like Presence Footsteps. */
+    public static final boolean REPLACE_STEPS = Boolean.getBoolean("mcr.testmod.replaceSteps");
+
+    /** `-Dmcr.testmod.freelook=true`: the mouse turns the camera but not the player, like Freelook. */
+    public static final boolean FREELOOK = Boolean.getBoolean("mcr.testmod.freelook");
+
+    /** `-Dmcr.testmod.rawHotkey=true`: a hook on vanilla's SDL key events consumes E, like a malilib hotkey. */
+    public static final boolean RAW_HOTKEY = Boolean.getBoolean("mcr.testmod.rawHotkey");
+
+    /** `-Dmcr.testmod.cameraRoll=true`: the camera tilts 15 degrees about its view axis. */
+    public static final boolean CAMERA_ROLL = Boolean.getBoolean("mcr.testmod.cameraRoll");
+
+    /** `-Dmcr.testmod.shoulder=true`: the third-person camera moves a block sideways, redirected like Shoulder Surfing. */
+    public static final boolean SHOULDER = Boolean.getBoolean("mcr.testmod.shoulder");
     private static final KeyMapping.Category CATEGORY =
             KeyMapping.Category.register(Identifier.fromNamespaceAndPath("mcr_testmod", "test"));
 

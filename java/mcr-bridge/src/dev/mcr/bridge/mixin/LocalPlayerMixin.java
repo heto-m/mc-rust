@@ -1,5 +1,7 @@
 package dev.mcr.bridge.mixin;
 
+import dev.mcr.bridge.McrInput;
+import dev.mcr.bridge.McrSteps;
 import dev.mcr.bridge.net.McrNet;
 import dev.mcr.bridge.net.PlayerShadow;
 import net.minecraft.client.player.ClientInput;
@@ -21,6 +23,9 @@ abstract class LocalPlayerMixin {
     @Inject(method = "tick", at = @At("TAIL"))
     private void mcr$shadowRust(CallbackInfo ci) {
         PlayerShadow.apply((LocalPlayer) (Object) this);
+        if (McrNet.bridged()) {
+            McrSteps.tick((LocalPlayer) (Object) this);
+        }
     }
 
     @Inject(
@@ -28,6 +33,7 @@ abstract class LocalPlayerMixin {
             at = @At(value = "INVOKE", target = "Lnet/minecraft/client/player/ClientInput;tick()V", shift = At.Shift.AFTER))
     private void mcr$noMovementInput(CallbackInfo ci) {
         if (McrNet.bridged()) {
+            McrInput.screenMoves(input.keyPresses);
             input.keyPresses = Input.EMPTY;
             ((ClientInputAccessor) input).mcr$setMoveVector(Vec2.ZERO);
         }

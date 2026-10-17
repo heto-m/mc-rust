@@ -1,5 +1,6 @@
 package dev.mcr.bridge.mixin;
 
+import dev.mcr.bridge.McrSteps;
 import dev.mcr.bridge.sound.SoundOwnership;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.player.Player;
@@ -13,7 +14,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 abstract class PlayerStepSoundMixin {
     @Inject(method = "playStepSound", at = @At("HEAD"), cancellable = true)
     private void mcr$rustPlaysLocalSteps(BlockPos onPos, BlockState onState, CallbackInfo ci) {
-        if (SoundOwnership.rustOwns(this)) {
+        if (McrSteps.probeReached() || SoundOwnership.rustOwns(this)) {
             ci.cancel();
         }
     }

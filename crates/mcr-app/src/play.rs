@@ -369,8 +369,14 @@ pub struct Play {
     pub java_camera: Option<JavaCamera>,
     /// A Java mod replaced vanilla's rain and snow, so mcr draws none.
     pub java_weather: bool,
+    /// A mod plays the local player's footsteps in Java (Presence Footsteps).
+    pub java_steps: bool,
+    /// A mod in Java consumes the mouse's turning (Freelook), so the player does not turn.
+    pub java_turn: bool,
     /// A Java screen owns all input; gameplay input stops.
     pub java_screen: bool,
+    /// `MOVE_*` bits a mod (InvMove) lets through while a Java screen is open.
+    pub java_screen_moves: u32,
     /// Java's GUI scale in mod mode, which native overlays follow.
     pub gui_scale_override: Option<i32>,
     /// A native overlay asked for the Mods screen.
@@ -531,7 +537,10 @@ impl Play {
             java_fov_scale: 1.0,
             java_camera: None,
             java_weather: false,
+            java_steps: false,
+            java_turn: false,
             java_screen: false,
+            java_screen_moves: 0,
             gui_scale_override: None,
             open_mods: false,
             debug_on: false,
@@ -697,15 +706,23 @@ impl Play {
     fn player_input(&self) -> PlayerInput {
         let k = &self.keys;
         let moves = !self.busy() && !self.input_captured();
-        let on = |i: usize| moves && self.held.is_active(i);
+        let screen_moves = if self.stack.is_empty() && self.java_screen && !self.input_captured() {
+            self.java_screen_moves
+        } else {
+            0
+        };
+        let on = |i: usize, bit: u32| moves && self.held.is_active(i) || screen_moves & bit != 0;
+        use mcr_modbridge::{
+            MOVE_BACKWARD, MOVE_FORWARD, MOVE_JUMP, MOVE_LEFT, MOVE_RIGHT, MOVE_SNEAK, MOVE_SPRINT,
+        };
         PlayerInput {
-            forward: on(k.forward),
-            backward: on(k.back),
-            left: on(k.left),
-            right: on(k.right),
-            jump: on(k.jump),
-            sneak: on(k.sneak),
-            sprint: on(k.sprint),
+            forward: on(k.forward, MOVE_FORWARD),
+            backward: on(k.back, MOVE_BACKWARD),
+            left: on(k.left, MOVE_LEFT),
+            right: on(k.right, MOVE_RIGHT),
+            jump: on(k.jump, MOVE_JUMP),
+            sneak: on(k.sneak, MOVE_SNEAK),
+            sprint: on(k.sprint, MOVE_SPRINT),
             yaw: self.yaw,
             pitch: self.pitch,
         }
@@ -920,6 +937,14 @@ impl Play {
 
     pub fn third_person(&self) -> bool {
         self.perspective != Perspective::First
+    }
+
+    /// How far the third-person player camera sits from the eye; `None` in first person.
+    pub fn third_person_distance(&self, partial: f32) -> Option<f32> {
+        self.third_person().then(|| {
+            let eye = DVec3::from(lerp3(self.prev_eye, self.cur_eye, f64::from(partial)));
+            self.player_camera(partial).position.distance(eye) as f32
+        })
     }
 
     fn scoping(&self) -> bool {
@@ -1447,6 +1472,7 @@ impl Play {
         let Some(audio) = &mut self.audio else { return };
         audio.poll(self.ticks);
         let state = &self.world.client.state;
+        self.movement.steps_replaced = self.java_steps;
         self.movement.tick(state, self.ticks, audio);
         if audio.java_owned() {
             return;
@@ -1525,7 +1551,7 @@ impl Play {
     }
 
     pub fn mouse_motion(&mut self, dx: f64, dy: f64) {
-        if self.busy() || self.closed.is_some() || self.input_captured() {
+        if self.busy() || self.closed.is_some() || self.input_captured() || self.java_turn {
             return;
         }
         let k = degrees_per_pixel(self.options.mouse_sensitivity) * self.java_fov_scale.min(1.0);
@@ -2297,6 +2323,7 @@ impl Play {
             position: DVec3::from(java.pos),
             yaw: java.yaw,
             pitch: java.pitch,
+            roll: player.roll * Mat4::from_rotation_z(java.roll),
             ..player
         }
     }

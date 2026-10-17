@@ -133,6 +133,7 @@ pub struct FrameLink {
     /// `after_opaque` already spent this frame's wait budget.
     opaque_waited: bool,
     detached_camera: bool,
+    camera_distance: f32,
     input: ModInput,
     pending: Pending,
     render_distance: u32,
@@ -173,6 +174,7 @@ impl FrameLink {
             gui_pending: None,
             opaque_waited: false,
             detached_camera: false,
+            camera_distance: 0.0,
             input,
             pending: Pending::default(),
             render_distance: 0,
@@ -236,9 +238,21 @@ impl FrameLink {
         self.world_active() && self.java().weather_replaced
     }
 
-    /// mcr's camera is in third person this frame, so Java draws the local player and no hand.
-    pub fn set_third_person(&mut self, on: bool) {
-        self.detached_camera = on;
+    /// A mod plays the local player's footsteps in Java, while Java is alive and connected.
+    pub fn steps_replaced(&self) -> bool {
+        self.java().steps_replaced && !self.shared.net.is_detached() && !self.shared.frame.is_gone()
+    }
+
+    /// A mod consumes the mouse's turning in Java, while Java draws the world.
+    pub fn turn_captured(&self) -> bool {
+        self.world_active() && self.java().turn_captured
+    }
+
+    /// mcr's camera is in third person this frame, this far from the eye, so Java draws the local
+    /// player and no hand; `None` in first person.
+    pub fn set_third_person(&mut self, distance: Option<f32>) {
+        self.detached_camera = distance.is_some();
+        self.camera_distance = distance.filter(|d| d.is_finite()).unwrap_or(0.0);
     }
 
     /// mcr's render distance (chunks, as its fog uses it) and entity distance scaling; Java's
@@ -385,6 +399,7 @@ impl FrameLink {
             render_pos: r.position.to_array(),
             render_yaw: r.yaw,
             render_pitch: r.pitch,
+            camera_distance: self.camera_distance,
         };
         let pushed = {
             let mut writer = pacer::lock(&self.writer);

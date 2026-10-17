@@ -184,6 +184,7 @@ mod tests {
             "immediatelyfast",
             "xaerominimap",
             "fancymenu",
+            "betterblockentities",
         ] {
             assert_eq!(p.get(id).unwrap().status, PolicyStatus::Blocked, "{id}");
         }
@@ -196,6 +197,7 @@ mod tests {
             "lambdynlights",
             "c2me",
             "bobby",
+            "krypton",
         ] {
             assert_eq!(p.get(id).unwrap().status, PolicyStatus::Partial, "{id}");
         }

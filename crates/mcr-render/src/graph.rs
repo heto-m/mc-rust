@@ -374,6 +374,31 @@ mod tests {
     }
 
     #[test]
+    fn sections_around_the_camera_are_always_reached() {
+        let mut g = VisibilityGraph::default();
+        for x in -2..=2 {
+            for y in -2..=2 {
+                for z in -2..=2 {
+                    g.set([x, y, z], SectionVisibility::NONE);
+                }
+            }
+        }
+        g.update([0, 0, 0], 0);
+        let r = g.reached().unwrap();
+        for (k, near) in [
+            ([0, 0, 0], true),
+            ([1, 0, 0], true),
+            ([0, -1, 0], true),
+            ([0, 0, 1], true),
+            ([-1, 0, 0], true),
+            ([2, 0, 0], false),
+            ([1, 1, 0], false),
+        ] {
+            assert_eq!(r.contains(k), near, "{k:?}");
+        }
+    }
+
+    #[test]
     fn opaque_shell_hides_what_is_behind_it() {
         let mut g = VisibilityGraph::default();
         for y in -3..=3 {

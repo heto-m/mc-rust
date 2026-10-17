@@ -2,9 +2,13 @@ package dev.mcr.bridge;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Leashable;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.phys.AABB;
 
 /**
@@ -31,6 +35,8 @@ public final class McrSections {
     private static boolean blockEntities;
     private static long culledEntities;
     private static long culledSections;
+    private static long lastCulledPos = Long.MAX_VALUE;
+    private static BlockEntityType<?> lastCulledType;
 
     private McrSections() {}
 
@@ -74,11 +80,13 @@ public final class McrSections {
         blockEntities = on && active;
     }
 
-    public static boolean blockEntitySectionVisible(long sectionNode) {
+    public static boolean blockEntitySectionVisible(long sectionNode, BlockEntity first) {
         if (!blockEntities || reached(SectionPos.x(sectionNode), SectionPos.y(sectionNode), SectionPos.z(sectionNode))) {
             return true;
         }
         culledSections++;
+        lastCulledPos = first.getBlockPos().asLong();
+        lastCulledType = first.getType();
         return false;
     }
 
@@ -116,5 +124,15 @@ public final class McrSections {
 
     public static long culledSections() {
         return culledSections;
+    }
+
+    /** The first block entity of the last culled section as "type@x,y,z", or "none". */
+    public static String lastCulledSection() {
+        long p = lastCulledPos;
+        if (p == Long.MAX_VALUE || lastCulledType == null) {
+            return "none";
+        }
+        return BuiltInRegistries.BLOCK_ENTITY_TYPE.getKey(lastCulledType) + "@"
+                + BlockPos.getX(p) + "," + BlockPos.getY(p) + "," + BlockPos.getZ(p);
     }
 }

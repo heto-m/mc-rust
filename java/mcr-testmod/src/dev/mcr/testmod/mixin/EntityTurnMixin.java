@@ -1,5 +1,7 @@
 package dev.mcr.testmod.mixin;
 
+import dev.mcr.testmod.Freelook;
+import dev.mcr.testmod.McrTestMod;
 import dev.mcr.testmod.TestCamera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.Entity;
@@ -13,6 +15,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 abstract class EntityTurnMixin {
     @Inject(method = "turn", at = @At("HEAD"), cancellable = true)
     private void mcr_testmod$turnCamera(double xo, double yo, CallbackInfo ci) {
+        if (McrTestMod.FREELOOK && (Object) this == Minecraft.getInstance().player) {
+            Freelook.turn(xo, yo);
+            ci.cancel();
+            return;
+        }
         Entity camera = TestCamera.free();
         if (camera != null && (Object) this == Minecraft.getInstance().player) {
             camera.turn(xo, yo);
