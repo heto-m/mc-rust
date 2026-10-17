@@ -1343,6 +1343,13 @@ impl Play {
         self.net(Client::swing);
     }
 
+    fn reset_attack_strength(&mut self) {
+        if let Some(hand) = &mut self.hand {
+            hand.reset_attack_strength();
+        }
+        self.world.client.reset_attack_strength();
+    }
+
     fn gameplay(&mut self) {
         if self.world.client.state.player.dead {
             if self.attack_click || self.use_click {
@@ -1390,9 +1397,7 @@ impl Play {
                 if click {
                     self.net(|c| c.attack(id));
                     self.swing();
-                    if let Some(hand) = &mut self.hand {
-                        hand.reset_attack_strength();
-                    }
+                    self.reset_attack_strength();
                 }
             }
             Some(Target::Block(hit)) => self.mine(hit, click),
@@ -1400,9 +1405,7 @@ impl Play {
                 self.abort_dig();
                 if click {
                     self.swing();
-                    if let Some(hand) = &mut self.hand {
-                        hand.reset_attack_strength();
-                    }
+                    self.reset_attack_strength();
                 }
             }
         }
@@ -1420,6 +1423,8 @@ impl Play {
         }
         if let Some(mut dig) = self.dig.filter(|d| d.pos == hit.pos) {
             dig.progress += 1;
+            let fraction = dig.progress as f32 / dig.total as f32;
+            self.world.client.dig_progress(fraction);
             self.swing();
             if dig.progress % HIT_SOUND_INTERVAL == 0 {
                 self.play_block(hit.state, BlockSound::Hit, center(hit.pos));
@@ -1482,11 +1487,10 @@ impl Play {
         let Some(result) = self.net(|c| c.start_use(target)) else {
             return;
         };
-        if result == UseResult::Success {
-            if let Some(hand) = &mut self.hand {
-                hand.swing();
-            }
-            self.net(Client::swing);
+        if result == UseResult::Success
+            && let Some(hand) = &mut self.hand
+        {
+            hand.swing();
         }
         if self.world.client.using_item().is_some() {
             self.using_item = true;

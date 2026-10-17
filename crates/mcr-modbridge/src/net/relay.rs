@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use mcr_client::{LocalPlayer, Phase, Relay, Relayed};
+use mcr_client::{LocalAction, LocalPlayer, Phase, Relay, Relayed};
 
 use super::filter::{ForwardTable, Verdict};
 use super::phase::NetPhase;
@@ -146,6 +146,10 @@ impl Relay for NetRelay {
         let old = self.last_pos.replace(pos).unwrap_or(pos);
         let state = PlayerState::from_player(tick, player, old);
         self.shared.post_player(self.session, &state);
+    }
+
+    fn local_action(&mut self, action: LocalAction) {
+        self.shared.post_action(self.session, action);
     }
 
     fn closed(&mut self, reason: &str) {
@@ -369,6 +373,53 @@ mod tests {
         assert_eq!(f64_at(crate::abi::PLAYER_OLD_POS), 1.0);
         assert_eq!(seen[2].0, NET_CLOSE);
         assert_eq!(&seen[2].1[NET_HEADER..], b"Connection reset");
+    }
+
+    #[test]
+    fn local_actions_reach_java_in_order_with_their_fields() {
+        use crate::abi::*;
+        use mcr_buf::BlockPos;
+        use mcr_protocol::types::game::Hand;
+        let (link, mut java_in, _) = link(1 << 20);
+        let mut hooks = link.hooks("localhost", 25565);
+        let session = session_of(java_in.try_pop().unwrap().unwrap().payload());
+        let mut relay = hooks.relay.take().unwrap();
+        relay.local_action(LocalAction::Drop { whole_stack: true });
+        relay.local_action(LocalAction::Swing {
+            hand: Hand::Off,
+            attack: false,
+        });
+        relay.local_action(LocalAction::Destroy {
+            pos: BlockPos::new(-3, 64, 9),
+            progress: 0.5,
+        });
+        let mut seen = Vec::new();
+        while let Some(m) = java_in.try_pop().unwrap() {
+            seen.push((m.kind(), m.payload().to_vec()));
+        }
+        let u32_at = |p: &[u8], at: usize| u32::from_ne_bytes(p[at..at + 4].try_into().unwrap());
+        let i32_at = |p: &[u8], at: usize| i32::from_ne_bytes(p[at..at + 4].try_into().unwrap());
+        let kinds: Vec<u16> = seen.iter().map(|(k, _)| *k).collect();
+        assert_eq!(kinds, [NET_ACTION; 3]);
+        assert!(seen.iter().all(|(_, p)| session_of(p) == session));
+        let (_, drop) = &seen[0];
+        assert_eq!(drop.len(), ACTION_SIZE);
+        assert_eq!(
+            (u32_at(drop, ACTION_KIND), u32_at(drop, ACTION_ARG)),
+            (ACTION_DROP, 1)
+        );
+        let (_, swing) = &seen[1];
+        assert_eq!(
+            (u32_at(swing, ACTION_KIND), u32_at(swing, ACTION_ARG)),
+            (ACTION_SWING, SWING_OFF_HAND)
+        );
+        let (_, dig) = &seen[2];
+        assert_eq!(u32_at(dig, ACTION_KIND), ACTION_DESTROY);
+        assert_eq!([0, 4, 8].map(|o| i32_at(dig, ACTION_POS + o)), [-3, 64, 9]);
+        assert_eq!(
+            f32::from_ne_bytes(dig[ACTION_VALUE..ACTION_VALUE + 4].try_into().unwrap()),
+            0.5
+        );
     }
 
     #[test]

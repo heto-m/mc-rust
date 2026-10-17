@@ -15,6 +15,7 @@ use crate::client::Client;
 use crate::error::Result;
 use crate::interaction::{entity_interact_swings, item_use_on_swings, item_use_swings};
 use crate::inventory::OFFHAND_MENU_SLOT;
+use crate::relay::LocalAction;
 
 const LIVING_FLAGS: u8 = 8;
 const MAX_USE_TICKS: i32 = 72_000;
@@ -199,99 +200,110 @@ impl Client {
             // Hands stay free while riding; only entity and item use continue below.
         }
         for hand in [Hand::Main, Hand::Off] {
-            let held = self.hand_stack(hand);
-            let held_name = u32::try_from(held.item)
-                .ok()
-                .filter(|_| !held.is_empty())
-                .and_then(|i| self.state.data.item_name(i));
-            let mut block_target = false;
-            match target {
-                UseTarget::Entity { id, location } => {
-                    self.send_interact(id, hand, location)?;
-                    let entity = self
-                        .state
-                        .entities
-                        .get(id)
-                        .and_then(|e| u32::try_from(e.kind).ok())
-                        .and_then(|k| self.state.data.entity_type_name(k));
-                    if entity.is_some_and(|e| short(e) == "command_block_minecart")
-                        && self.state.player.can_use_game_master_blocks()
-                    {
-                        self.push_event(crate::events::ClientEvent::MinecartEditorOpened {
-                            entity_id: id,
-                        });
-                        return Ok(UseResult::Success);
-                    }
-                    if entity.is_some_and(|e| entity_interact_swings(e, held_name)) {
-                        return Ok(UseResult::Success);
-                    }
+            if let Some(result) = self.use_hand(hand, target)? {
+                if result == UseResult::Success {
+                    self.local_action(LocalAction::Swing {
+                        hand,
+                        attack: false,
+                    });
                 }
-                UseTarget::Block {
-                    pos,
-                    face,
-                    cursor,
-                    inside,
-                } => {
-                    block_target = true;
-                    let sneaking = self.state.player.physics.keys_sneak();
-                    let hands_busy = !self.hand_stack(Hand::Main).is_empty()
-                        || !self.hand_stack(Hand::Off).is_empty();
-                    let suppress = sneaking && hands_busy;
-                    self.use_item_on(hand, pos, face, cursor, inside)?;
-                    let block = self.block_name_at(pos);
-                    if !suppress
-                        && hand == Hand::Main
-                        && self.state.player.can_use_game_master_blocks()
-                        && let Some(kind) = block.and_then(crate::events::BlockEditor::from_block)
-                    {
-                        self.push_event(crate::events::ClientEvent::BlockEditorOpened {
-                            pos,
-                            kind,
-                        });
-                        return Ok(UseResult::Success);
-                    }
-                    if !suppress && hand == Hand::Main && block.is_some_and(block_consumes_use) {
-                        return Ok(UseResult::Success);
-                    }
-                    match self.try_place(hand, &held, pos, face) {
-                        Placement::Placed => return Ok(UseResult::Success),
-                        Placement::Failed => return Ok(UseResult::Consume),
-                        Placement::NotABlock => {}
-                    }
-                    let on_cooldown = self.state.is_on_cooldown(&held);
-                    if let (Some(item), Some(block)) = (held_name, block)
-                        && !on_cooldown
-                        && item_use_on_swings(item, block)
-                    {
-                        return Ok(UseResult::Success);
-                    }
-                }
-                UseTarget::Air => {}
-            }
-            if !held.is_empty() {
-                let kind = self.use_kind(&held);
-                self.use_item(hand)?;
-                if self.state.is_item(&held, "writable_book") {
-                    self.state.gameplay.book_editor = Some(hand);
-                    self.push_event(crate::events::ClientEvent::BookOpened { hand });
-                    return Ok(UseResult::Success);
-                }
-                match kind {
-                    Some((UseKind::Instant, _)) => {
-                        let gliding = self.state.player.physics.fall_flying;
-                        if held_name.is_some_and(|n| item_use_swings(n, block_target, gliding)) {
-                            return Ok(UseResult::Success);
-                        }
-                    }
-                    Some((kind, ticks)) => {
-                        self.begin_using(hand, kind, ticks, &held);
-                        return Ok(UseResult::Consume);
-                    }
-                    None => {}
-                }
+                return Ok(result);
             }
         }
         Ok(UseResult::Pass)
+    }
+
+    /// One hand's turn of [`Self::start_use`]; `None` passes to the next hand.
+    fn use_hand(&mut self, hand: Hand, target: UseTarget) -> Result<Option<UseResult>> {
+        let held = self.hand_stack(hand);
+        let held_name = u32::try_from(held.item)
+            .ok()
+            .filter(|_| !held.is_empty())
+            .and_then(|i| self.state.data.item_name(i));
+        let mut block_target = false;
+        match target {
+            UseTarget::Entity { id, location } => {
+                self.send_interact(id, hand, location)?;
+                let entity = self
+                    .state
+                    .entities
+                    .get(id)
+                    .and_then(|e| u32::try_from(e.kind).ok())
+                    .and_then(|k| self.state.data.entity_type_name(k));
+                if entity.is_some_and(|e| short(e) == "command_block_minecart")
+                    && self.state.player.can_use_game_master_blocks()
+                {
+                    self.push_event(crate::events::ClientEvent::MinecartEditorOpened {
+                        entity_id: id,
+                    });
+                    return Ok(Some(UseResult::Success));
+                }
+                if entity.is_some_and(|e| entity_interact_swings(e, held_name)) {
+                    return Ok(Some(UseResult::Success));
+                }
+            }
+            UseTarget::Block {
+                pos,
+                face,
+                cursor,
+                inside,
+            } => {
+                block_target = true;
+                let sneaking = self.state.player.physics.keys_sneak();
+                let hands_busy = !self.hand_stack(Hand::Main).is_empty()
+                    || !self.hand_stack(Hand::Off).is_empty();
+                let suppress = sneaking && hands_busy;
+                self.use_item_on(hand, pos, face, cursor, inside)?;
+                let block = self.block_name_at(pos);
+                if !suppress
+                    && hand == Hand::Main
+                    && self.state.player.can_use_game_master_blocks()
+                    && let Some(kind) = block.and_then(crate::events::BlockEditor::from_block)
+                {
+                    self.push_event(crate::events::ClientEvent::BlockEditorOpened { pos, kind });
+                    return Ok(Some(UseResult::Success));
+                }
+                if !suppress && hand == Hand::Main && block.is_some_and(block_consumes_use) {
+                    return Ok(Some(UseResult::Success));
+                }
+                match self.try_place(hand, &held, pos, face) {
+                    Placement::Placed => return Ok(Some(UseResult::Success)),
+                    Placement::Failed => return Ok(Some(UseResult::Consume)),
+                    Placement::NotABlock => {}
+                }
+                let on_cooldown = self.state.is_on_cooldown(&held);
+                if let (Some(item), Some(block)) = (held_name, block)
+                    && !on_cooldown
+                    && item_use_on_swings(item, block)
+                {
+                    return Ok(Some(UseResult::Success));
+                }
+            }
+            UseTarget::Air => {}
+        }
+        if !held.is_empty() {
+            let kind = self.use_kind(&held);
+            self.use_item(hand)?;
+            if self.state.is_item(&held, "writable_book") {
+                self.state.gameplay.book_editor = Some(hand);
+                self.push_event(crate::events::ClientEvent::BookOpened { hand });
+                return Ok(Some(UseResult::Success));
+            }
+            match kind {
+                Some((UseKind::Instant, _)) => {
+                    let gliding = self.state.player.physics.fall_flying;
+                    if held_name.is_some_and(|n| item_use_swings(n, block_target, gliding)) {
+                        return Ok(Some(UseResult::Success));
+                    }
+                }
+                Some((kind, ticks)) => {
+                    self.begin_using(hand, kind, ticks, &held);
+                    return Ok(Some(UseResult::Consume));
+                }
+                None => {}
+            }
+        }
+        Ok(None)
     }
 
     fn send_interact(&mut self, id: i32, hand: Hand, location: [f64; 3]) -> Result<()> {

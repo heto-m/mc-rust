@@ -82,7 +82,7 @@ pub use packs::{PackEnd, PackLink, PackReply, PackRequest, pack_channel};
 pub use pickup::Pickup;
 pub use player::LocalPlayer;
 pub use registry::{Dimension, Registries, Registry, RegistryItem};
-pub use relay::{ClientHooks, Relay, Relayed};
+pub use relay::{ClientHooks, LocalAction, Relay, Relayed};
 pub use riding::{Ride, Sim};
 pub use slot_display::{holder_items, resolve as resolve_slot_display};
 pub use social::{

@@ -61,9 +61,26 @@ impl DownKeys {
     }
 }
 
-/// Text that comes with a key press: with an IME active, only `Ime::Commit` delivers text.
-fn key_text(ime_active: bool, text: Option<&str>) -> Option<&str> {
-    if ime_active { None } else { text }
+/// Whether an IME composition is in progress. `Ime::Enabled` alone says nothing: KWin enables text input
+/// with no input method running, and then every key press still carries its text.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Ime {
+    composing: bool,
+}
+
+impl Ime {
+    fn preedit(&mut self, text: &str) {
+        self.composing = !text.is_empty();
+    }
+
+    fn end(&mut self) {
+        self.composing = false;
+    }
+
+    /// Text that comes with a key press; while composing only `Ime::Commit` delivers text.
+    fn key_text(self, text: Option<&str>) -> Option<&str> {
+        if self.composing { None } else { text }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -75,7 +92,7 @@ pub struct Route {
     pub java: JavaInput,
     cursor: (f64, f64),
     down: DownKeys,
-    ime_active: bool,
+    ime: Ime,
 }
 
 impl Route {
@@ -228,7 +245,7 @@ impl Shell {
                 input.key(scancode, printable, pressed, repeat);
                 if pressed
                     && self.route.java.text_input
-                    && let Some(text) = key_text(self.route.ime_active, text)
+                    && let Some(text) = self.route.ime.key_text(text)
                 {
                     input.text(text);
                 }
@@ -336,12 +353,14 @@ impl Shell {
         true
     }
 
-    pub fn ime_active(&mut self, active: bool) {
-        self.route.ime_active = active;
+    pub fn ime_disabled(&mut self) {
+        self.route.ime.end();
+        self.ime_preedit("", None);
     }
 
     /// Committed IME text.
     pub fn ime_commit(&mut self, text: &str) {
+        self.route.ime.end();
         if self.route.java.text_input {
             self.route_text(text);
         }
@@ -349,6 +368,7 @@ impl Shell {
 
     /// IME composition; `cursor` is a byte range of `text` as winit reports it.
     pub fn ime_preedit(&mut self, text: &str, cursor: Option<(usize, usize)>) {
+        self.route.ime.preedit(text);
         let Some(input) = self.java_input() else {
             return;
         };
@@ -409,10 +429,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ime_commit_is_the_only_text_source_while_active() {
-        assert_eq!(key_text(false, Some("a")), Some("a"));
-        assert_eq!(key_text(true, Some("a")), None);
-        assert_eq!(key_text(true, None), None);
+    fn key_text_flows_while_text_input_is_enabled_without_a_composition() {
+        let mut ime = Ime::default();
+        assert_eq!(ime.key_text(Some("a")), Some("a"));
+        ime.preedit("");
+        assert_eq!(ime.key_text(Some("/")), Some("/"));
+    }
+
+    #[test]
+    fn ime_commit_is_the_only_text_source_while_composing() {
+        let mut ime = Ime::default();
+        ime.preedit("ka");
+        assert_eq!(ime.key_text(Some("a")), None);
+        assert_eq!(ime.key_text(None), None);
+        ime.end();
+        assert_eq!(ime.key_text(Some("a")), Some("a"));
+        ime.preedit("k");
+        ime.preedit("");
+        assert_eq!(ime.key_text(Some("b")), Some("b"));
     }
 
     #[test]

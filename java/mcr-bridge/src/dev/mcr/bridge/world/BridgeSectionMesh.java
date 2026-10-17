@@ -45,6 +45,11 @@ public final class BridgeSectionMesh implements SectionMesh {
         return List.of();
     }
 
+    /** Whether the section holds any renderable block entity, before mcr's per-frame culling. */
+    public boolean hasBlockEntities() {
+        return !blockEntities.isEmpty();
+    }
+
     /** The section's block entities that have a renderer; one walk of the chunk's block entity map. */
     public static BridgeSectionMesh scan(long sectionNode) {
         long start = System.nanoTime();

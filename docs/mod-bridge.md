@@ -81,7 +81,7 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
 | Window | SDL3 `offscreen` video driver (hint set in `RenderSystem.initBackendSystem`), so `Window` works on a fake window. Size and scale are pushed per frame | Rust |
 | Input | `ModInput` events ride the control ring as `MSG_INPUT` ahead of each `MSG_FRAME`; `McrInput.deliver` calls `KeyboardHandler.keyPress/textInput/textEditing` and `MouseHandler.onMove/onButton/onScroll/onDrop` with SDL3 values. `InputConstants.isKeyDown/grabMouse/releaseMouse`, `Window.isFocused/selectCursor`, `ClipboardManager`, `TextInputManager`, `SDL_GetModState` sites are redirected. Key and button events also pass through `SDLEventHandler.handleKeyEvent/handleMouseButtonEvent` with vanilla's body skipped, so mods hooked there (malilib's hotkeys) see them and can consume them | Rust |
 | Network | `Connection.connect` is redirected to a `BridgeChannel` (netty `EmbeddedChannel` confined to the render thread by its own event loop) carrying vanilla codecs, so `ConnectScreen` runs unchanged while Rust connects. Frames travel in two net rings (32 MiB in, 4 MiB out) tagged with phase and session; outbound packets are filtered by (phase, packet class), chat goes to Rust as text | Rust owns socket and state |
-| Player | Rust's local player and camera overwrite `LocalPlayer`/`Camera` every tick and frame, unless a mod moved the camera (see camera handoff). Java's camera type leads the perspective (see perspective). Vanilla gameplay keybinds except F5 are suppressed in Java | Rust |
+| Player | Rust's local player and camera overwrite `LocalPlayer`/`Camera` every tick and frame, unless a mod moved the camera (see camera handoff). Java's camera type leads the perspective (see perspective). Vanilla gameplay keybinds except F5 are suppressed in Java. Held movement keys reach `ClientInput.keyPresses` only for the tutorial and mods (`PLAYER_INPUT`). What vanilla predicts without a server echo (drops, swings, mining progress, attack-strength resets) arrives as `NET_ACTION` and is replayed with vanilla's own `LocalPlayer` calls | Rust |
 | World | Java keeps its own `ClientLevel`/`ClientChunkCache`. Sections compile meshless (`RenderSection.compileSync/compileAsync` → `BridgeSectionMesh`, block entities only); terrain uploads and draw groups, sky, weather and world border are off (weather extraction only proves no mod replaced it). `Camera.alignWithEntity` takes Rust's eye and rotation; the level projection is Rust's | duplicated, see below |
 | Sound | `SoundEngine` logic kept. `Library.init`/`acquireChannel` and `Channel`/`Listener` methods forward to `mcr-audio` | Rust plays |
 
@@ -259,12 +259,31 @@ mcr's settings change (and before Java's first frame), so stale lines in Java's 
 mappings it rebound as `REPORT_KEYS`, and mcr applies and saves them. Mod mappings stay Java-only. Caps Lock and
 Num Lock start from the keyboard LEDs on Linux (`/sys/class/leds`).
 
+Key presses carry their text to Java unless an IME composition is in progress; then only IME commits do. winit
+reports `Ime::Enabled` on Wayland as soon as the compositor offers text input (KWin always does), even with no input
+method running, so the route keys on a non-empty preedit, never on `Enabled`.
+
 ## World duplication
 
 Java's `ClientLevel` parses every chunk again (`ClientChunkCache.replaceWithPacketData` → `LevelChunk`, `PalettedContainer`,
 `DataLayer` light). At render distance 12 this costs about 60–100 MB of heap plus the decode CPU on the Java
 thread. Accept it for now. Later, back `LevelChunkSection` storage with a `BitStorage` implementation over Rust's
 off-heap section arrays (`BitStorage` is an interface), if measurements say it pays.
+
+Bridge sections see through every face, so Java's visible section list is every section in the frustum within the
+render distance (tens of thousands at 32). Vanilla walks it twice per frame: the dirty-state walk that schedules
+compiles and the block-entity walk. The bridge skips the first while no section turned dirty or moved and the list
+was not cleared (`SectionUpdates`), hands the second a cached list of sections that hold block entities
+(`BlockEntitySections`), and lets meshless sections compile without neighbour chunks. In a still view at render
+distance 32 this halved extraction (0.41 to 0.20 ms per Java frame). Turning past 2 degrees rebuilds the list, as
+vanilla does.
+
+Measured with 29 mods at 1920x1080, render distance 32 (Ryzen 7 5800X, RX 6800 XT): mcr's own frame about 0.6 ms,
+Java's frame 0.6 to 1.0 ms with the ahead pipeline, about 1100 to 1200 fps offscreen and in a headless gamescope
+window alike. BetterF3's overlay nearly doubles Java's frame (1.5 to 1.8 ms; gui 0.09 to 0.42, extract up 0.35,
+four times the upload), so read frame rates with F3 closed or from `MCR_MOD_PROFILE=frame`. ZGC with the default
+2048 MiB heap keeps a 0.7 to 0.9 GB live set, pauses under 0.1 ms and has no allocation stalls; 1536 MiB doubles the
+collection rate and leaves little headroom at join, more than 3 GiB buys nothing.
 
 ## Policies
 

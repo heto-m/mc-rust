@@ -4,7 +4,7 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 14;
+    public static final int VERSION = 16;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
     public static final String COMPOSE_PROPERTY = "mcr.compose";
 
@@ -167,6 +167,7 @@ public final class BridgeAbi {
     public static final int NET_CLOSE = 3;
     public static final int NET_PLAYER = 4;
     public static final int NET_PROBE = 5;
+    public static final int NET_ACTION = 6;
 
     public static final int OUT_FRAME = 1;
     public static final int OUT_CHAT = 2;
@@ -191,13 +192,34 @@ public final class BridgeAbi {
     public static final int PLAYER_POSE = 100;
     public static final int PLAYER_SLOT = 104;
     public static final int PLAYER_VEHICLE = 108;
-    public static final int PLAYER_SIZE = 112;
+    public static final int PLAYER_INPUT = 112;
+    public static final int PLAYER_SIZE = 120;
 
     public static final int PLAYER_ON_GROUND = 1;
     public static final int PLAYER_SHIFT = 2;
     public static final int PLAYER_SPRINT = 4;
     public static final int PLAYER_SWIM = 8;
     public static final int PLAYER_FALL_FLYING = 16;
+
+    public static final int INPUT_FORWARD = 1;
+    public static final int INPUT_BACKWARD = 2;
+    public static final int INPUT_LEFT = 4;
+    public static final int INPUT_RIGHT = 8;
+    public static final int INPUT_JUMP = 16;
+    public static final int INPUT_SHIFT = 32;
+    public static final int INPUT_SPRINT = 64;
+
+    public static final int ACTION_KIND = 8;
+    public static final int ACTION_ARG = 12;
+    public static final int ACTION_POS = 16;
+    public static final int ACTION_VALUE = 28;
+    public static final int ACTION_SIZE = 32;
+    public static final int ACTION_SWING = 1;
+    public static final int ACTION_DROP = 2;
+    public static final int ACTION_DESTROY = 3;
+    public static final int ACTION_RESET_ATTACK = 4;
+    public static final int SWING_OFF_HAND = 1;
+    public static final int SWING_ATTACK = 2;
 
     public static final int PROBE_REQUEST = 8;
     public static final int PROBE_CENTER_X = 12;
@@ -221,7 +243,10 @@ public final class BridgeAbi {
     public static final int ANSWER_CHUNKS = 88;
     public static final int ANSWER_BLOCKS = 92;
     public static final int ANSWER_ENTITIES = 96;
-    public static final int ANSWER_DATA = 104;
+    public static final int ANSWER_HELD_COUNT = 100;
+    public static final int ANSWER_SWINGS = 104;
+    public static final int ANSWER_TUTORIAL = 108;
+    public static final int ANSWER_DATA = 112;
     public static final int ANSWER_LEVEL = 1;
     public static final int ANSWER_PLAYER = 2;
 

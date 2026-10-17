@@ -209,6 +209,12 @@ public final class McrNet {
                         }
                         yield false;
                     }
+                    case BridgeAbi.NET_ACTION -> {
+                        if (channel != null && channel.session == session) {
+                            PlayerShadow.action(minecraft, p);
+                        }
+                        yield false;
+                    }
                     case BridgeAbi.NET_PROBE -> {
                         NetProbe.answer(minecraft, p, channel == null ? 0 : channel.session);
                         yield false;

@@ -34,8 +34,21 @@ abstract class LocalPlayerMixin {
     private void mcr$noMovementInput(CallbackInfo ci) {
         if (McrNet.bridged()) {
             McrInput.screenMoves(input.keyPresses);
-            input.keyPresses = Input.EMPTY;
+            input.keyPresses = PlayerShadow.input();
             ((ClientInputAccessor) input).mcr$setMoveVector(Vec2.ZERO);
+        }
+    }
+
+    /** The tutorial watches Rust's movement keys; the rest of {@code aiStep} must not act on them. */
+    @Inject(
+            method = "aiStep",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/client/tutorial/Tutorial;onInput(Lnet/minecraft/client/player/ClientInput;)V",
+                    shift = At.Shift.AFTER))
+    private void mcr$tutorialSawInput(CallbackInfo ci) {
+        if (McrNet.bridged()) {
+            input.keyPresses = Input.EMPTY;
         }
     }
 

@@ -1,5 +1,6 @@
-use mcr_client::LocalPlayer;
-use mcr_physics::Pose;
+use mcr_client::{LocalAction, LocalPlayer};
+use mcr_physics::{PlayerInput, Pose};
+use mcr_protocol::types::game::Hand;
 
 use crate::abi::*;
 
@@ -58,6 +59,8 @@ pub struct PlayerState {
     pub pose: i32,
     pub slot: i32,
     pub vehicle: i32,
+    /// `INPUT_*` bits.
+    pub input: u32,
 }
 
 impl PlayerState {
@@ -93,6 +96,7 @@ impl PlayerState {
             pose,
             slot: i32::from(player.held_slot),
             vehicle: player.vehicle.unwrap_or(-1),
+            input: input_bits(&p.keys()),
         }
     }
 
@@ -109,7 +113,49 @@ impl PlayerState {
         put(buf, PLAYER_POSE, self.pose.to_ne_bytes());
         put(buf, PLAYER_SLOT, self.slot.to_ne_bytes());
         put(buf, PLAYER_VEHICLE, self.vehicle.to_ne_bytes());
+        put(buf, PLAYER_INPUT, self.input.to_ne_bytes());
     }
+}
+
+fn input_bits(keys: &PlayerInput) -> u32 {
+    [
+        (keys.forward, INPUT_FORWARD),
+        (keys.backward, INPUT_BACKWARD),
+        (keys.left, INPUT_LEFT),
+        (keys.right, INPUT_RIGHT),
+        (keys.jump, INPUT_JUMP),
+        (keys.sneak, INPUT_SHIFT),
+        (keys.sprint, INPUT_SPRINT),
+    ]
+    .into_iter()
+    .filter(|&(on, _)| on)
+    .fold(0, |bits, (_, bit)| bits | bit)
+}
+
+pub(crate) fn encode_action(action: LocalAction, buf: &mut [u8]) {
+    let (kind, arg, pos, value) = match action {
+        LocalAction::Swing { hand, attack } => {
+            let mut bits = 0;
+            if hand == Hand::Off {
+                bits |= SWING_OFF_HAND;
+            }
+            if attack {
+                bits |= SWING_ATTACK;
+            }
+            (ACTION_SWING, bits, [0; 3], 0.0)
+        }
+        LocalAction::Drop { whole_stack } => (ACTION_DROP, u32::from(whole_stack), [0; 3], 0.0),
+        LocalAction::Destroy { pos, progress } => {
+            (ACTION_DESTROY, 0, [pos.x, pos.y, pos.z], progress)
+        }
+        LocalAction::ResetAttackStrength => (ACTION_RESET_ATTACK, 0, [0; 3], 0.0),
+    };
+    put(buf, ACTION_KIND, kind.to_ne_bytes());
+    put(buf, ACTION_ARG, arg.to_ne_bytes());
+    for (i, v) in pos.iter().enumerate() {
+        put(buf, ACTION_POS + 4 * i, v.to_ne_bytes());
+    }
+    put(buf, ACTION_VALUE, value.to_ne_bytes());
 }
 
 /// Asks Java for a snapshot of its client world.
@@ -166,6 +212,12 @@ pub struct WorldProbe {
     pub chunk_nanos: u64,
     pub frames_fed: u64,
     pub feed_nanos: u64,
+    /// Count of Java's selected hotbar stack.
+    pub held_count: i32,
+    /// Swings Java's player started for Rust's actions.
+    pub swings: u32,
+    /// Java's tutorial step (`TutorialSteps` ordinal; 5 is `NONE`).
+    pub tutorial: i32,
     pub chunks: Vec<(i32, i32)>,
     /// Global block state ids at the requested positions, in order.
     pub blocks: Vec<i32>,
@@ -213,6 +265,9 @@ impl WorldProbe {
             chunk_nanos: u64_at(ANSWER_CHUNK_NANOS)?,
             frames_fed: u64_at(ANSWER_FRAMES)?,
             feed_nanos: u64_at(ANSWER_FEED_NANOS)?,
+            held_count: u32_at(ANSWER_HELD_COUNT)? as i32,
+            swings: u32_at(ANSWER_SWINGS)?,
+            tutorial: u32_at(ANSWER_TUTORIAL)? as i32,
             chunks,
             blocks,
             entities,
@@ -255,6 +310,9 @@ pub(crate) mod tests {
         );
         put(&mut buf, ANSWER_FRAMES, probe.frames_fed.to_ne_bytes());
         put(&mut buf, ANSWER_FEED_NANOS, probe.feed_nanos.to_ne_bytes());
+        put(&mut buf, ANSWER_HELD_COUNT, probe.held_count.to_ne_bytes());
+        put(&mut buf, ANSWER_SWINGS, probe.swings.to_ne_bytes());
+        put(&mut buf, ANSWER_TUTORIAL, probe.tutorial.to_ne_bytes());
         put(
             &mut buf,
             ANSWER_CHUNKS,
@@ -318,6 +376,9 @@ pub(crate) mod tests {
             chunk_nanos: 12_345_678,
             frames_fed: 3000,
             feed_nanos: 9_000_000,
+            held_count: 15,
+            swings: 4,
+            tutorial: 5,
             chunks: vec![(0, 0), (-1, 2)],
             blocks: vec![1, 0, 2008],
             entities: vec![5, 6, 7],
@@ -329,6 +390,22 @@ pub(crate) mod tests {
         lying[ANSWER_ENTITIES..ANSWER_ENTITIES + 4].copy_from_slice(&u32::MAX.to_ne_bytes());
         assert_eq!(WorldProbe::decode(&lying), None);
         assert_eq!(WorldProbe::decode(&[0; 4]), None);
+    }
+
+    #[test]
+    fn movement_keys_map_to_input_bits() {
+        let keys = PlayerInput {
+            forward: true,
+            left: true,
+            sneak: true,
+            sprint: true,
+            ..PlayerInput::default()
+        };
+        assert_eq!(
+            input_bits(&keys),
+            INPUT_FORWARD | INPUT_LEFT | INPUT_SHIFT | INPUT_SPRINT
+        );
+        assert_eq!(input_bits(&PlayerInput::default()), 0);
     }
 
     #[test]

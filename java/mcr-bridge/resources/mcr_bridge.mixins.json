@@ -65,6 +65,7 @@
     "SDLEventHandlerInvoker",
     "SDLEventHandlerMixin",
     "SDLEventProbeMixin",
+    "SectionDirtyStateMixin",
     "SectionRenderDispatcherMixin",
     "ServerNameResolverMixin",
     "SkyRendererMixin",

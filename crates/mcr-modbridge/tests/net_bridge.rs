@@ -511,6 +511,46 @@ fn net_bridge() {
         stats.dropped,
     );
 
+    // Java's tutorial saw Rust's movement keys during the walk.
+    wait_event(
+        &mut bridge,
+        "tutorial movement",
+        |e| matches!(e, BridgeEvent::Info { key, .. } if key == "tutorial_moved"),
+    );
+
+    // Rust's predicted drop and swings replay on Java's player; the server never echoes them.
+    console(&format!("gamemode creative {USERNAME}"));
+    console(&format!("clear {USERNAME}"));
+    console(&format!("give {USERNAME} minecraft:oak_log 16"));
+    let mut before = s.probe(&ProbeRequest::default());
+    for _ in 0..40 {
+        if before.held_count == 16 {
+            break;
+        }
+        before = s.probe(&ProbeRequest::default());
+    }
+    assert_eq!(before.held_count, 16, "Java never saw the given logs");
+    assert_eq!(s.client.drop_item(false).ok(), Some(true));
+    s.idle(10);
+    let dropped = s.probe(&ProbeRequest::default());
+    assert_eq!(
+        dropped.held_count, 15,
+        "Java's hotbar kept the dropped item"
+    );
+    assert!(
+        dropped.swings > before.swings,
+        "the drop did not swing Java's arm"
+    );
+    s.idle(10);
+    s.client.swing().expect("swing");
+    s.idle(2);
+    let swung = s.probe(&ProbeRequest::default());
+    assert!(
+        swung.swings > dropped.swings,
+        "Rust's attack swing did not reach Java"
+    );
+    assert_eq!(swung.held_count, 15);
+
     // Java's pause-menu disconnect closes Rust's socket.
     s.link.request_probe(&ProbeRequest {
         disconnect: true,

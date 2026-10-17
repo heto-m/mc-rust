@@ -14,7 +14,7 @@ use crate::sections::SectionShared;
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 14;
+pub const BRIDGE_VERSION: u32 = 16;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -218,6 +218,7 @@ pub const NET_OPEN: u16 = 2;
 pub const NET_CLOSE: u16 = 3;
 pub const NET_PLAYER: u16 = 4;
 pub const NET_PROBE: u16 = 5;
+pub const NET_ACTION: u16 = 6;
 
 pub const OUT_FRAME: u16 = 1;
 pub const OUT_CHAT: u16 = 2;
@@ -245,13 +246,39 @@ pub const PLAYER_FLAGS: usize = 96;
 pub const PLAYER_POSE: usize = 100;
 pub const PLAYER_SLOT: usize = 104;
 pub const PLAYER_VEHICLE: usize = 108;
-pub const PLAYER_SIZE: usize = 112;
+/// `INPUT_*` bits of the movement keys Rust's player moved with this tick.
+pub const PLAYER_INPUT: usize = 112;
+pub const PLAYER_SIZE: usize = 120;
 
 pub const PLAYER_ON_GROUND: u32 = 1;
 pub const PLAYER_SHIFT: u32 = 2;
 pub const PLAYER_SPRINT: u32 = 4;
 pub const PLAYER_SWIM: u32 = 8;
 pub const PLAYER_FALL_FLYING: u32 = 16;
+
+pub const INPUT_FORWARD: u32 = 1;
+pub const INPUT_BACKWARD: u32 = 2;
+pub const INPUT_LEFT: u32 = 4;
+pub const INPUT_RIGHT: u32 = 8;
+pub const INPUT_JUMP: u32 = 16;
+pub const INPUT_SHIFT: u32 = 32;
+pub const INPUT_SPRINT: u32 = 64;
+
+/// `NET_ACTION`: something Rust's player did that the server never echoes back to it.
+pub const ACTION_KIND: usize = 8;
+pub const ACTION_ARG: usize = 12;
+pub const ACTION_POS: usize = 16;
+pub const ACTION_VALUE: usize = 28;
+pub const ACTION_SIZE: usize = 32;
+/// Arm swing; `ACTION_ARG` holds `SWING_*` bits.
+pub const ACTION_SWING: u32 = 1;
+/// The held stack lost one item, or all of it when `ACTION_ARG` is 1.
+pub const ACTION_DROP: u32 = 2;
+/// Mining at `ACTION_POS`; `ACTION_VALUE` is 0 at the start, the progress, 1 when broken, -1 when aborted.
+pub const ACTION_DESTROY: u32 = 3;
+pub const ACTION_RESET_ATTACK: u32 = 4;
+pub const SWING_OFF_HAND: u32 = 1;
+pub const SWING_ATTACK: u32 = 2;
 
 pub const PROBE_REQUEST: usize = 8;
 pub const PROBE_CENTER_X: usize = 12;
@@ -276,7 +303,13 @@ pub const ANSWER_FEED_NANOS: usize = 80;
 pub const ANSWER_CHUNKS: usize = 88;
 pub const ANSWER_BLOCKS: usize = 92;
 pub const ANSWER_ENTITIES: usize = 96;
-pub const ANSWER_DATA: usize = 104;
+/// Count of Java's selected hotbar stack.
+pub const ANSWER_HELD_COUNT: usize = 100;
+/// Swings Java's player started for Rust's `ACTION_SWING`/`ACTION_DROP`.
+pub const ANSWER_SWINGS: usize = 104;
+/// `TutorialSteps` ordinal in Java's options.
+pub const ANSWER_TUTORIAL: usize = 108;
+pub const ANSWER_DATA: usize = 112;
 pub const ANSWER_LEVEL: u32 = 1;
 pub const ANSWER_PLAYER: u32 = 2;
 
@@ -828,6 +861,7 @@ mod tests {
             ("NET_CLOSE", NET_CLOSE.into()),
             ("NET_PLAYER", NET_PLAYER.into()),
             ("NET_PROBE", NET_PROBE.into()),
+            ("NET_ACTION", NET_ACTION.into()),
             ("OUT_FRAME", OUT_FRAME.into()),
             ("OUT_CHAT", OUT_CHAT.into()),
             ("OUT_DISCONNECT", OUT_DISCONNECT.into()),
@@ -848,12 +882,31 @@ mod tests {
             ("PLAYER_POSE", PLAYER_POSE as i64),
             ("PLAYER_SLOT", PLAYER_SLOT as i64),
             ("PLAYER_VEHICLE", PLAYER_VEHICLE as i64),
+            ("PLAYER_INPUT", PLAYER_INPUT as i64),
             ("PLAYER_SIZE", PLAYER_SIZE as i64),
             ("PLAYER_ON_GROUND", PLAYER_ON_GROUND.into()),
             ("PLAYER_SHIFT", PLAYER_SHIFT.into()),
             ("PLAYER_SPRINT", PLAYER_SPRINT.into()),
             ("PLAYER_SWIM", PLAYER_SWIM.into()),
             ("PLAYER_FALL_FLYING", PLAYER_FALL_FLYING.into()),
+            ("INPUT_FORWARD", INPUT_FORWARD.into()),
+            ("INPUT_BACKWARD", INPUT_BACKWARD.into()),
+            ("INPUT_LEFT", INPUT_LEFT.into()),
+            ("INPUT_RIGHT", INPUT_RIGHT.into()),
+            ("INPUT_JUMP", INPUT_JUMP.into()),
+            ("INPUT_SHIFT", INPUT_SHIFT.into()),
+            ("INPUT_SPRINT", INPUT_SPRINT.into()),
+            ("ACTION_KIND", ACTION_KIND as i64),
+            ("ACTION_ARG", ACTION_ARG as i64),
+            ("ACTION_POS", ACTION_POS as i64),
+            ("ACTION_VALUE", ACTION_VALUE as i64),
+            ("ACTION_SIZE", ACTION_SIZE as i64),
+            ("ACTION_SWING", ACTION_SWING.into()),
+            ("ACTION_DROP", ACTION_DROP.into()),
+            ("ACTION_DESTROY", ACTION_DESTROY.into()),
+            ("ACTION_RESET_ATTACK", ACTION_RESET_ATTACK.into()),
+            ("SWING_OFF_HAND", SWING_OFF_HAND.into()),
+            ("SWING_ATTACK", SWING_ATTACK.into()),
             ("PROBE_REQUEST", PROBE_REQUEST as i64),
             ("PROBE_CENTER_X", PROBE_CENTER_X as i64),
             ("PROBE_CENTER_Z", PROBE_CENTER_Z as i64),
@@ -875,6 +928,9 @@ mod tests {
             ("ANSWER_CHUNKS", ANSWER_CHUNKS as i64),
             ("ANSWER_BLOCKS", ANSWER_BLOCKS as i64),
             ("ANSWER_ENTITIES", ANSWER_ENTITIES as i64),
+            ("ANSWER_HELD_COUNT", ANSWER_HELD_COUNT as i64),
+            ("ANSWER_SWINGS", ANSWER_SWINGS as i64),
+            ("ANSWER_TUTORIAL", ANSWER_TUTORIAL as i64),
             ("ANSWER_DATA", ANSWER_DATA as i64),
             ("ANSWER_LEVEL", ANSWER_LEVEL.into()),
             ("ANSWER_PLAYER", ANSWER_PLAYER.into()),

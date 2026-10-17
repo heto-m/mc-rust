@@ -2,11 +2,16 @@ package dev.mcr.bridge.mixin;
 
 import dev.mcr.bridge.McrSections;
 import dev.mcr.bridge.McrWeather;
+import dev.mcr.bridge.world.BlockEntitySections;
+import dev.mcr.bridge.world.SectionUpdates;
+import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.SectionUpdateTracker;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.chunk.RenderRegionCache;
 import net.minecraft.client.renderer.chunk.RenderSectionRegion;
+import net.minecraft.client.renderer.chunk.SectionRenderDispatcher;
 import net.minecraft.client.renderer.culling.Frustum;
 import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.client.renderer.extract.LevelExtractor;
@@ -21,8 +26,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * Rust draws the block outline and destroy overlay, sections compile without a block copy, and
- * entities and block entities in sections mcr's visibility graph ruled out are not extracted.
+ * Rust draws the block outline and destroy overlay, sections compile without a block copy or neighbours,
+ * entities and block entities in sections mcr's visibility graph ruled out are not extracted, and vanilla's
+ * per-frame walks over the visible sections skip what did not change.
  */
 @Mixin(LevelExtractor.class)
 abstract class LevelExtractorMixin {
@@ -33,6 +39,9 @@ abstract class LevelExtractorMixin {
     @Shadow
     @Final
     private LevelRenderer levelRenderer;
+
+    @Shadow
+    private SectionUpdateTracker sectionUpdateTracker;
 
     @Inject(
             method = "extract",
@@ -69,6 +78,7 @@ abstract class LevelExtractorMixin {
             cir.setReturnValue(false);
         }
     }
+
     @Redirect(
             method = "extract",
             at = @At(
@@ -78,6 +88,36 @@ abstract class LevelExtractorMixin {
                             + "Lnet/minecraft/client/renderer/chunk/RenderSectionRegion;"))
     private RenderSectionRegion mcr$noSectionCopy(RenderRegionCache cache, ClientLevel level, long sectionNode) {
         return null;
+    }
+
+    @Redirect(
+            method = "extract",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/client/SectionUpdateTracker;hasAllNeighbors("
+                            + "Lnet/minecraft/client/multiplayer/ClientLevel;J)Z"))
+    private boolean mcr$meshlessSectionsNeedNoNeighbors(SectionUpdateTracker tracker, ClientLevel level, long sectionNode) {
+        return true;
+    }
+
+    @Redirect(
+            method = "extract",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/client/renderer/LevelRenderer;visibleSections()"
+                            + "Lit/unimi/dsi/fastutil/objects/ObjectArrayList;"))
+    private ObjectArrayList<SectionRenderDispatcher.RenderSection> mcr$sectionsToCheckForUpdates(LevelRenderer renderer) {
+        return SectionUpdates.toWalk(sectionUpdateTracker, renderer.visibleSections());
+    }
+
+    @Redirect(
+            method = "extractVisibleBlockEntities",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/client/renderer/LevelRenderer;visibleSections()"
+                            + "Lit/unimi/dsi/fastutil/objects/ObjectArrayList;"))
+    private ObjectArrayList<SectionRenderDispatcher.RenderSection> mcr$sectionsWithBlockEntities(LevelRenderer renderer) {
+        return BlockEntitySections.of(renderer.visibleSections());
     }
 
     @Inject(method = "extractBlockOutline", at = @At("HEAD"), cancellable = true)

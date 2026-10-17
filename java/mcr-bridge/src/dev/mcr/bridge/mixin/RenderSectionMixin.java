@@ -1,5 +1,6 @@
 package dev.mcr.bridge.mixin;
 
+import dev.mcr.bridge.world.BlockEntitySections;
 import dev.mcr.bridge.world.BridgeSectionMesh;
 import net.minecraft.client.renderer.chunk.RenderSectionRegion;
 import net.minecraft.client.renderer.chunk.SectionMesh;
@@ -9,6 +10,7 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /** Rust meshes terrain: a section "compiles" into its block entity list, on the render thread. */
 @Mixin(SectionRenderDispatcher.RenderSection.class)
@@ -36,5 +38,15 @@ abstract class RenderSectionMixin {
         cancelTasks();
         setSectionMesh(BridgeSectionMesh.scan(getSectionNode()));
         ci.cancel();
+    }
+
+    @Inject(method = "setSectionMesh", at = @At("HEAD"))
+    private void mcr$meshReplaced(SectionMesh sectionMesh, CallbackInfoReturnable<SectionMesh> cir) {
+        BlockEntitySections.invalidate();
+    }
+
+    @Inject(method = "reset", at = @At("HEAD"))
+    private void mcr$meshReset(CallbackInfo ci) {
+        BlockEntitySections.invalidate();
     }
 }

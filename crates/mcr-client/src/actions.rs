@@ -11,6 +11,7 @@ use mcr_protocol::types::{ItemStack, UntrustedItemStack, Vec3d, Vec3f};
 use crate::client::Client;
 use crate::error::Result;
 use crate::inventory::PLAYER_MENU_ID;
+use crate::relay::LocalAction;
 use crate::state::ClientState;
 
 #[derive(Debug, Clone)]
@@ -83,8 +84,28 @@ impl Client {
         }))
     }
 
+    /// The main hand's attack swing.
     pub fn swing(&mut self) -> Result<()> {
+        self.local_action(LocalAction::Swing {
+            hand: Hand::Main,
+            attack: true,
+        });
         self.send_play(&S::Punch(sb::Punch))
+    }
+
+    /// An attack or a miss reset the attack strength; only a mirror needs to hear it.
+    pub fn reset_attack_strength(&mut self) {
+        self.local_action(LocalAction::ResetAttackStrength);
+    }
+
+    /// Mining progress of the current dig, counted by the caller; only a mirror needs to hear it.
+    pub fn dig_progress(&mut self, progress: f32) {
+        if let Some(pos) = self.digging.as_ref().map(|d| d.pos) {
+            self.local_action(LocalAction::Destroy {
+                pos,
+                progress: progress.clamp(0.0, 1.0),
+            });
+        }
     }
 
     pub fn use_item(&mut self, hand: Hand) -> Result<()> {
@@ -135,6 +156,7 @@ impl Client {
             return Ok(false);
         }
         if self.state.player.instabuild {
+            self.local_action(LocalAction::Destroy { pos, progress: 1.0 });
             let sequence = self.next_sequence();
             self.destroy_block_local(pos, sequence);
             self.destroy_delay = 5;
@@ -154,6 +176,10 @@ impl Client {
             return Ok(true);
         }
         if let Some(old) = self.digging.take() {
+            self.local_action(LocalAction::Destroy {
+                pos: old.pos,
+                progress: -1.0,
+            });
             self.send_play(&S::PlayerAction(sb::PlayerAction {
                 action: sb::PlayerActionKind::AbortDestroyBlock,
                 pos: old.pos,
@@ -163,7 +189,12 @@ impl Client {
         }
         let sequence = self.next_sequence();
         let progress = self.state.destroy_progress(pos);
-        if progress.is_some_and(|p| p >= 1.0) {
+        let instant = progress.is_some_and(|p| p >= 1.0);
+        self.local_action(LocalAction::Destroy {
+            pos,
+            progress: if instant { 1.0 } else { 0.0 },
+        });
+        if instant {
             self.destroy_block_local(pos, sequence);
         } else {
             self.digging = Some(Digging {
@@ -191,6 +222,7 @@ impl Client {
             return Ok(true);
         }
         if self.state.player.instabuild && self.can_act_on_block(pos) {
+            self.local_action(LocalAction::Destroy { pos, progress: 1.0 });
             self.destroy_delay = 5;
             let sequence = self.next_sequence();
             self.destroy_block_local(pos, sequence);
@@ -218,7 +250,15 @@ impl Client {
         };
         d.progress += step;
         d.ticks += 1;
-        if d.progress >= 1.0 {
+        let (progress, turned) = (d.progress, d.face != face);
+        if turned {
+            d.face = face;
+        }
+        self.local_action(LocalAction::Destroy {
+            pos,
+            progress: progress.clamp(0.0, 1.0),
+        });
+        if progress >= 1.0 {
             self.digging = None;
             let sequence = self.next_sequence();
             self.destroy_block_local(pos, sequence);
@@ -229,8 +269,7 @@ impl Client {
                 face,
                 sequence,
             }))?;
-        } else if d.face != face {
-            d.face = face;
+        } else if turned {
             self.send_play(&S::PlayerAction(sb::PlayerAction {
                 action: sb::PlayerActionKind::ChangeDestroyDirection,
                 pos,
@@ -246,6 +285,10 @@ impl Client {
         let Some(d) = self.digging.take() else {
             return Ok(());
         };
+        self.local_action(LocalAction::Destroy {
+            pos: d.pos,
+            progress: -1.0,
+        });
         self.send_play(&S::PlayerAction(sb::PlayerAction {
             action: sb::PlayerActionKind::AbortDestroyBlock,
             pos: d.pos,
@@ -313,6 +356,10 @@ impl Client {
         let Some(d) = self.digging.take() else {
             return Ok(());
         };
+        self.local_action(LocalAction::Destroy {
+            pos: d.pos,
+            progress: 1.0,
+        });
         let sequence = self.next_sequence();
         self.destroy_block_local(d.pos, sequence);
         self.destroy_delay = 5;
@@ -358,6 +405,9 @@ impl Client {
         let Some(dropped) = self.state.predict_drop(whole_stack) else {
             return Ok(false);
         };
+        if dropped {
+            self.local_action(LocalAction::Drop { whole_stack });
+        }
         self.simple_action(if whole_stack {
             sb::PlayerActionKind::DropAllItems
         } else {

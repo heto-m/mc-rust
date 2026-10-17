@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use mcr_client::ClientHooks;
+use mcr_client::{ClientHooks, LocalAction};
 use mcr_jvm::{Ring, RingError, RingReader};
 use mcr_protocol::{Direction, PacketIds};
 
@@ -20,7 +20,10 @@ pub use phase::{NetPhase, PhaseTracker, TransitionIds};
 pub use relay::NetRelay;
 pub use wire::{MAX_PROBE_POSITIONS, PlayerState, ProbeRequest, WorldProbe};
 
-use crate::abi::{NET_HEADER, NET_OPEN, NET_PLAYER, NET_PROBE, OPEN_HOST, OPEN_PORT, PLAYER_SIZE};
+use crate::abi::{
+    ACTION_SIZE, NET_ACTION, NET_HEADER, NET_OPEN, NET_PLAYER, NET_PROBE, OPEN_HOST, OPEN_PORT,
+    PLAYER_SIZE,
+};
 use clientbound::{Clientbound, Placed};
 use wire::put_header;
 
@@ -189,6 +192,14 @@ impl NetShared {
             state.encode(buf);
         };
         self.push_message(NET_PLAYER, session, PLAYER_SIZE, false, &fill);
+    }
+
+    fn post_action(&self, session: u32, action: LocalAction) {
+        let fill = |buf: &mut [u8]| {
+            put_header(buf, 0, session);
+            wire::encode_action(action, buf);
+        };
+        self.push_message(NET_ACTION, session, ACTION_SIZE, false, &fill);
     }
 
     fn count_drop(&self, tag: u8, id: i32) {

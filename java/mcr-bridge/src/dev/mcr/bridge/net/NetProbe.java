@@ -110,6 +110,9 @@ public final class NetProbe {
         out.set(LONG, BridgeAbi.ANSWER_CHUNK_NANOS, chunkNanos);
         out.set(LONG, BridgeAbi.ANSWER_FRAMES, McrNet.framesFed);
         out.set(LONG, BridgeAbi.ANSWER_FEED_NANOS, McrNet.feedNanos);
+        out.set(INT, BridgeAbi.ANSWER_HELD_COUNT, player == null ? -1 : player.getInventory().getSelectedItem().getCount());
+        out.set(INT, BridgeAbi.ANSWER_SWINGS, PlayerShadow.swings);
+        out.set(INT, BridgeAbi.ANSWER_TUTORIAL, minecraft.options.tutorialStep.ordinal());
         out.set(INT, BridgeAbi.ANSWER_CHUNKS, chunkCount);
         out.set(INT, BridgeAbi.ANSWER_BLOCKS, count);
         out.set(INT, BridgeAbi.ANSWER_ENTITIES, entityCount);

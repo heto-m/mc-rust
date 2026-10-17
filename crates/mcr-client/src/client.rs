@@ -25,7 +25,7 @@ use crate::error::{ClientError, Result};
 use crate::events::{ClientEvent, DisconnectReason};
 use crate::handler::core_pack;
 use crate::packs::{PackReply, PackRequest};
-use crate::relay::{ClientHooks, Relay, Relayed};
+use crate::relay::{ClientHooks, LocalAction, Relay, Relayed};
 use crate::state::{ClientState, Outbox, resource_pack_responses};
 
 const MAX_FRAMES_PER_PUMP: usize = 8192;
@@ -271,6 +271,15 @@ impl Client {
         self.scratch.clear();
         let id = p.encode_into(self.ids, &mut self.scratch);
         self.send_raw(id)
+    }
+
+    /// Tells the mirror about a predicted action; call before its packet goes out.
+    pub(crate) fn local_action(&mut self, action: LocalAction) {
+        if self.phase == Phase::Play
+            && let Some(r) = self.relay.as_mut()
+        {
+            r.local_action(action);
+        }
     }
 
     pub fn send_play(&mut self, p: &PlayServerbound<'_>) -> Result<()> {

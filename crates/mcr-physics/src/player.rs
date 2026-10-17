@@ -218,6 +218,11 @@ impl PlayerPhysics {
         self.keys.sneak
     }
 
+    /// The movement keys of the last tick.
+    pub fn keys(&self) -> PlayerInput {
+        self.keys
+    }
+
     pub fn in_water(&self) -> bool {
         self.was_touching_water
     }

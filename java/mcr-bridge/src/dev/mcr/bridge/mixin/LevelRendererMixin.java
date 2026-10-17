@@ -2,6 +2,8 @@ package dev.mcr.bridge.mixin;
 
 import dev.mcr.bridge.BridgeAbi;
 import dev.mcr.bridge.gpu.FrameSlots;
+import dev.mcr.bridge.world.BlockEntitySections;
+import dev.mcr.bridge.world.SectionUpdates;
 import dev.mcr.bridge.world.WorldStats;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.state.level.LevelRenderState;
@@ -52,5 +54,11 @@ abstract class LevelRendererMixin {
     @Inject(method = "extractSectionDrawGroups", at = @At("HEAD"), cancellable = true)
     private void mcr$noTerrainDraws(CallbackInfoReturnable<Integer> cir) {
         cir.setReturnValue(0);
+    }
+
+    @Inject(method = "clearVisibleSections", at = @At("HEAD"))
+    private void mcr$visibleSectionsCleared(CallbackInfo ci) {
+        BlockEntitySections.invalidate();
+        SectionUpdates.changed();
     }
 }
