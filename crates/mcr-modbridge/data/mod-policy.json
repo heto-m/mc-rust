@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "http_hosts": ["api.modrinth.com", "meta.fabricmc.net"],
   "mods": [
     {"id": "sodium", "status": "blocked", "reason": "replaces the OpenGL renderer; mcr renders terrain natively"},
     {"id": "iris", "status": "blocked", "reason": "replaces the OpenGL renderer; mcr renders terrain natively"},

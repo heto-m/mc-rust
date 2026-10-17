@@ -17,6 +17,7 @@ pub const MOJANG_HOSTS: &[&str] = &[
     "sessionserver.mojang.com",
     "api.minecraftservices.com",
     "api.mojang.com",
+    "discovery.minecraftservices.com",
 ];
 
 const MAX_HOSTS: usize = 256;
