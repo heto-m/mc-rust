@@ -61,7 +61,13 @@ pub struct Stats {
     pub submits: AtomicU64,
     pub uploaded: AtomicU64,
     pub errors: AtomicU64,
+    /// Time and count of Java's GPU downcalls, while [`PROFILE`] is on.
+    pub ffi_ns: AtomicU64,
+    pub ffi_calls: AtomicU64,
 }
+
+/// Times every GPU downcall into [`Stats::ffi_ns`]; off unless the frame profile is.
+pub static PROFILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StatsSnapshot {
@@ -75,6 +81,8 @@ pub struct StatsSnapshot {
     pub submits: u64,
     pub uploaded: u64,
     pub errors: u64,
+    pub ffi_ns: u64,
+    pub ffi_calls: u64,
 }
 
 impl Stats {
@@ -91,6 +99,8 @@ impl Stats {
             submits: l(&self.submits),
             uploaded: l(&self.uploaded),
             errors: l(&self.errors),
+            ffi_ns: l(&self.ffi_ns),
+            ffi_calls: l(&self.ffi_calls),
         }
     }
 }
@@ -1679,11 +1689,18 @@ impl State {
     ) -> OpResult<bool> {
         let enc = self.encoder(encoder)?;
         let track = enc.track.clone();
-        if track.done.load(Ordering::Acquire) >= n {
+        let done = track.done.load(Ordering::Acquire);
+        if done >= n {
             return Ok(true);
         }
         if n > enc.submits || n > track.queued.load(Ordering::Acquire) {
             return Ok(false);
+        }
+        // Host writes reach the GPU as queue-ordered copies, so only a readback can observe completion.
+        if !enc.pending.iter().any(|rb| rb.submit <= n) {
+            let mut inflight = track.inflight();
+            inflight.retain(|(k, _)| *k > done);
+            return Ok(true);
         }
         let Some(index) = track
             .inflight()
@@ -1712,6 +1729,9 @@ impl State {
 
     /// Readback ids whose data is in place, in completion order.
     pub fn poll(&mut self, gpu: &Gpu, encoder: Handle) -> OpResult<Vec<u64>> {
+        if self.encoder(encoder)?.pending.is_empty() {
+            return Ok(Vec::new());
+        }
         let _ = gpu.device.poll(wgpu::PollType::Poll);
         let enc = self.encoder(encoder)?;
         let done = enc.track.done.load(Ordering::Acquire);

@@ -10,6 +10,7 @@ mod launch;
 pub mod manager;
 pub mod net;
 mod pacer;
+pub mod profile;
 pub mod proxy;
 mod sections;
 pub mod sound;
@@ -27,6 +28,7 @@ use mcr_jvm::{DestroyOutcome, HomeSearch, JavaVm, JvmConfig, JvmError, RingError
 pub use abi::{BRIDGE_VERSION, COMPOSE_PROPERTY, ENTRIES, FrameBegin, TABLE_PROPERTY};
 pub use compose::{ComposeStats, FrameLink, ModFrames};
 pub use events::BridgeEvent;
+pub use frame::Pipelining;
 pub use input::ModInput;
 pub use launch::{
     BOOT_JAR, BRIDGE_JAR, BridgeConfig, LAUNCH_MANIFEST, LaunchManifest, LaunchPlan, plan,

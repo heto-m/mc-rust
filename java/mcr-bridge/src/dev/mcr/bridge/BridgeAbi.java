@@ -4,7 +4,7 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 10;
+    public static final int VERSION = 12;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
     public static final String COMPOSE_PROPERTY = "mcr.compose";
 
@@ -98,7 +98,16 @@ public final class BridgeAbi {
     public static final int FSTATE_CAMERA_POS = 48;
     public static final int FSTATE_CAMERA_YAW = 72;
     public static final int FSTATE_CAMERA_PITCH = 76;
+    public static final int FSTATE_PROF = 80;
     public static final int FSTATE_SIZE = 128;
+    public static final int PROF_PRE = 0;
+    public static final int PROF_TICK = 1;
+    public static final int PROF_EXTRACT = 2;
+    public static final int PROF_RENDER = 3;
+    public static final int PROF_WORLD = 4;
+    public static final int PROF_GUI = 5;
+    public static final int PROF_FRAME = 6;
+    public static final int PROF_COUNT = 8;
     public static final int FSTATE_READY = 1;
     public static final int FSTATE_LOADED = 2;
     public static final int FSTATE_WEATHER = 4;
@@ -222,6 +231,7 @@ public final class BridgeAbi {
     public static final int D_SURFACE_PRESENT = 13;
     public static final int D_STATS = 14;
     public static final int D_SLOT = 15;
+    public static final int D_LEVEL_VIEW = 16;
     public static final int GPU_TEXTURE_VIRTUAL = 1073741824;
 
     public static final int E_CLEAR = 1;

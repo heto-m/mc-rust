@@ -94,6 +94,7 @@ public final class McrFrame {
         McrNet.init(Thread.currentThread());
         if (COMPOSE && !announced) {
             announced = true;
+            McrProfiler.start(Thread.currentThread());
             publish(bridge, minecraft, BridgeAbi.FSTATE_READY);
         }
         while (true) {
@@ -101,6 +102,8 @@ public final class McrFrame {
             if (drain(bridge, minecraft)) {
                 if (!stopping) {
                     frameStart = System.nanoTime();
+                    McrFrameTimes.reset();
+                    McrFrameTimes.begin(BridgeAbi.PROF_PRE);
                     McrParticles.reset();
                     if (lockstep()) {
                         FrameSlots.beginFrame(frameIndex);
@@ -111,6 +114,7 @@ public final class McrFrame {
                     if (lockstep()) {
                         McrInput.deliver(minecraft);
                     }
+                    McrFrameTimes.end(BridgeAbi.PROF_PRE);
                 }
                 return;
             }
@@ -207,6 +211,7 @@ public final class McrFrame {
         STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_HEIGHT, main == null ? 0 : main.height);
         STATE_INT.setRelease(state, (long) BridgeAbi.FSTATE_FOV_SCALE, Float.floatToRawIntBits(fovScale));
         McrCameraHandoff.publish(state);
+        McrFrameTimes.publish(state);
         if (frameIndex >= 0 && lockstep()) {
             STATE_LONG.setRelease(state, (long) BridgeAbi.FSTATE_DONE, frameIndex + 1);
         }

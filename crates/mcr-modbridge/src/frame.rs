@@ -8,8 +8,8 @@ use mcr_jvm::Doorbell;
 use crate::abi::{
     CAMERA_DETACHED, CAMERA_INPUT, CAMERA_MOD, FSTATE_CAMERA, FSTATE_CAMERA_PITCH,
     FSTATE_CAMERA_POS, FSTATE_CAMERA_YAW, FSTATE_DONE, FSTATE_FLAGS, FSTATE_FOV_SCALE,
-    FSTATE_HEIGHT, FSTATE_LOADED, FSTATE_NANOS, FSTATE_READY, FSTATE_SIZE, FSTATE_TICKS,
-    FSTATE_WEATHER, FSTATE_WIDTH,
+    FSTATE_HEIGHT, FSTATE_LOADED, FSTATE_NANOS, FSTATE_PROF, FSTATE_READY, FSTATE_SIZE,
+    FSTATE_TICKS, FSTATE_WEATHER, FSTATE_WIDTH, PROF_COUNT,
 };
 
 /// After loading, a Java frame slower than this detaches the bridge from rendering.
@@ -44,6 +44,7 @@ struct FrameState {
     camera_pos: [AtomicU64; 3],
     camera_yaw: AtomicU32,
     camera_pitch: AtomicU32,
+    prof: [AtomicU32; PROF_COUNT],
 }
 
 const _: () = {
@@ -58,6 +59,7 @@ const _: () = {
     assert!(std::mem::offset_of!(FrameState, camera_pos) == FSTATE_CAMERA_POS);
     assert!(std::mem::offset_of!(FrameState, camera_yaw) == FSTATE_CAMERA_YAW);
     assert!(std::mem::offset_of!(FrameState, camera_pitch) == FSTATE_CAMERA_PITCH);
+    assert!(std::mem::offset_of!(FrameState, prof) == FSTATE_PROF);
     assert!(std::mem::size_of::<FrameState>() == FSTATE_SIZE);
 };
 
@@ -83,6 +85,8 @@ pub struct JavaFrame {
     pub camera: Option<JavaCamera>,
     /// A mod replaced vanilla's rain and snow, so mcr must not draw its own.
     pub weather_replaced: bool,
+    /// Phase times of Java's last frame in microseconds, indexed by `abi::PROF_*`.
+    pub prof: [u32; PROF_COUNT],
 }
 
 /// A camera a mod set in Java, sane but not yet bounded to the loaded world.
@@ -194,6 +198,7 @@ impl FrameShared {
                 f32::from_bits(s.camera_pitch.load(Ordering::Acquire)),
             ),
             weather_replaced: flags & FSTATE_WEATHER != 0,
+            prof: s.prof.each_ref().map(|v| v.load(Ordering::Acquire)),
         }
     }
 
@@ -236,6 +241,13 @@ impl FrameShared {
     }
 
     #[cfg(test)]
+    pub fn simulate_prof(&self, prof: [u32; PROF_COUNT]) {
+        for (dst, v) in self.state.prof.iter().zip(prof) {
+            dst.store(v, Ordering::Release);
+        }
+    }
+
+    #[cfg(test)]
     pub fn simulate_camera(&self, flags: u32, pos: [f64; 3], yaw: f32, pitch: f32) {
         let s = &self.state;
         for (dst, v) in s.camera_pos.iter().zip(pos) {
@@ -244,6 +256,70 @@ impl FrameShared {
         s.camera_yaw.store(yaw.to_bits(), Ordering::Release);
         s.camera_pitch.store(pitch.to_bits(), Ordering::Release);
         s.camera.store(flags, Ordering::Release);
+    }
+}
+
+/// Chooses [`Pipelining`]: `lockstep`/`0`, `ahead`/`1`, anything else is automatic.
+pub const PIPELINE_ENV: &str = "MCR_MOD_PIPELINE";
+/// While mcr's frame rate is capped, Java runs ahead once its frames take longer than this...
+pub const AHEAD_ON: Duration = Duration::from_millis(8);
+/// ...and goes back to lockstep once they are shorter than this.
+pub const AHEAD_OFF: Duration = Duration::from_millis(4);
+
+/// How Java's frames line up with mcr's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pipelining {
+    /// Java renders the frame mcr posted at its start, composed in that same mcr frame: lowest
+    /// latency, but mcr waits for all of Java's frame.
+    Lockstep,
+    /// Java renders the next frame while mcr draws and presents this one; its frame is composed one
+    /// mcr frame later, its world redrawn from mcr's current camera.
+    Ahead,
+    /// Ahead while mcr's frame rate is uncapped or Java cannot keep up, lockstep otherwise.
+    Auto,
+}
+
+impl Pipelining {
+    pub fn parse(text: &str) -> Self {
+        match text.trim() {
+            "0" | "lockstep" => Self::Lockstep,
+            "1" | "ahead" => Self::Ahead,
+            _ => Self::Auto,
+        }
+    }
+
+    pub(crate) fn from_env() -> Self {
+        std::env::var(PIPELINE_ENV).map_or(Self::Auto, |v| Self::parse(&v))
+    }
+}
+
+/// Decides [`Pipelining::Auto`] from Java's mean frame time, with hysteresis.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AheadPolicy {
+    ahead: bool,
+    java_ms: f32,
+}
+
+impl AheadPolicy {
+    /// Java finished a frame that took `took`.
+    pub fn java_frame(&mut self, took: Duration) {
+        let ms = took.as_secs_f32() * 1000.0;
+        if ms.is_finite() {
+            self.java_ms += (ms - self.java_ms) * 0.1;
+        }
+    }
+
+    /// Whether Java's frames run one mcr frame ahead from now on.
+    pub fn decide(&mut self, mode: Pipelining, uncapped: bool) -> bool {
+        let ms = |d: Duration| d.as_secs_f32() * 1000.0;
+        self.ahead = match mode {
+            Pipelining::Lockstep => false,
+            Pipelining::Ahead => true,
+            Pipelining::Auto if uncapped => true,
+            Pipelining::Auto if self.ahead => self.java_ms > ms(AHEAD_OFF),
+            Pipelining::Auto => self.java_ms > ms(AHEAD_ON),
+        };
+        self.ahead
     }
 }
 
@@ -427,6 +503,57 @@ mod tests {
     use crate::pacer::TickClock;
 
     #[test]
+    fn pipelining_modes_parse() {
+        assert_eq!(Pipelining::parse("0"), Pipelining::Lockstep);
+        assert_eq!(Pipelining::parse(" lockstep\n"), Pipelining::Lockstep);
+        assert_eq!(Pipelining::parse("ahead"), Pipelining::Ahead);
+        assert_eq!(Pipelining::parse("1"), Pipelining::Ahead);
+        assert_eq!(Pipelining::parse("auto"), Pipelining::Auto);
+        assert_eq!(Pipelining::parse(""), Pipelining::Auto);
+    }
+
+    #[test]
+    fn auto_runs_ahead_when_uncapped_or_when_java_is_slow() {
+        let mut p = AheadPolicy::default();
+        assert!(
+            !p.decide(Pipelining::Auto, false),
+            "fast Java under vsync stays in lockstep"
+        );
+        assert!(
+            p.decide(Pipelining::Auto, true),
+            "uncapped frames run ahead"
+        );
+        assert!(!p.decide(Pipelining::Lockstep, true));
+        assert!(p.decide(Pipelining::Ahead, false));
+        let mut p = AheadPolicy::default();
+        for _ in 0..100 {
+            p.java_frame(Duration::from_millis(12));
+        }
+        assert!(
+            p.decide(Pipelining::Auto, false),
+            "slow Java runs ahead under vsync"
+        );
+        for _ in 0..100 {
+            p.java_frame(Duration::from_millis(6));
+        }
+        assert!(
+            p.decide(Pipelining::Auto, false),
+            "hysteresis keeps it ahead"
+        );
+        for _ in 0..100 {
+            p.java_frame(Duration::from_millis(2));
+        }
+        assert!(!p.decide(Pipelining::Auto, false), "fast again: lockstep");
+        for _ in 0..100 {
+            p.java_frame(Duration::from_millis(6));
+        }
+        assert!(
+            !p.decide(Pipelining::Auto, false),
+            "and stays there until slow"
+        );
+    }
+
+    #[test]
     fn fov_scale_is_sanitized() {
         assert_eq!(fov_scale(0), 1.0);
         assert_eq!(fov_scale(f32::NAN.to_bits()), 1.0);
@@ -596,8 +723,10 @@ mod tests {
         assert!(start.elapsed() >= Duration::from_millis(20));
         shared.simulate_done(1, 3, FSTATE_READY | FSTATE_LOADED);
         assert!(shared.wait_done(1, Instant::now() + Duration::from_secs(1)));
+        shared.simulate_prof([1, 2, 3, 4, 5, 6, 7, 8]);
         let f = shared.read();
         assert_eq!((f.done, f.ticks, f.ready, f.loaded), (1, 3, true, true));
+        assert_eq!(f.prof, [1, 2, 3, 4, 5, 6, 7, 8]);
         shared.java_gone();
         let start = Instant::now();
         assert!(!shared.wait_done(2, start + Duration::from_secs(5)));

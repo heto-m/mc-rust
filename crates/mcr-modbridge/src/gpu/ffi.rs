@@ -27,6 +27,9 @@ pub const D_SURFACE_PRESENT: i32 = 13;
 pub const D_STATS: i32 = 14;
 /// `[slot, frame]`: tags the following submits for the compositor.
 pub const D_SLOT: i32 = 15;
+/// `[frame, buffer, offset, x, y, z (f64 bits), 16 × f32 bits]`: the level projection Java's
+/// world slots read this frame, its camera and its inverse view rotation.
+pub const D_LEVEL_VIEW: i32 = 16;
 
 pub const E_CLEAR: i32 = 1;
 pub const E_CLEAR_REGION: i32 = 2;
@@ -73,6 +76,20 @@ fn record(e: &OpError) {
 }
 
 fn guarded(f: impl FnOnce() -> OpResult<i64>) -> i64 {
+    if !backend::PROFILE.load(Ordering::Relaxed) {
+        return run_guarded(f);
+    }
+    let start = std::time::Instant::now();
+    let v = run_guarded(f);
+    if let Ok(b) = backend::backend() {
+        let ns = start.elapsed().as_nanos() as u64;
+        b.stats.ffi_ns.fetch_add(ns, Ordering::Relaxed);
+        b.stats.ffi_calls.fetch_add(1, Ordering::Relaxed);
+    }
+    v
+}
+
+fn run_guarded(f: impl FnOnce() -> OpResult<i64>) -> i64 {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
@@ -204,6 +221,36 @@ fn stats(b: &Backend, out: u64, cap: u64) -> OpResult<i64> {
     Ok(values.len() as i64)
 }
 
+fn level_view(b: &Backend, a: &[u64]) -> OpResult<()> {
+    let (frame, handle, offset) = (arg(a, 0)?, arg(a, 1)?, arg(a, 2)?);
+    let camera = [arg(a, 3)?, arg(a, 4)?, arg(a, 5)?].map(f64::from_bits);
+    let mut inverse_rotation = [0.0f32; 16];
+    for (i, v) in inverse_rotation.iter_mut().enumerate() {
+        *v = f32_arg(a, 6 + i)?;
+    }
+    if !camera.iter().all(|v| v.is_finite()) || !inverse_rotation.iter().all(|v| v.is_finite()) {
+        return Err(OpError::Invalid("non-finite level view".into()));
+    }
+    let buffer = b
+        .lock()
+        .buffers
+        .get(handle)
+        .ok_or(OpError::Handle(super::slab::Kind::Buffer, handle))?
+        .buffer
+        .clone();
+    if !offset.is_multiple_of(4) || offset.checked_add(64).is_none_or(|e| e > buffer.size()) {
+        return Err(OpError::Invalid("level projection range".into()));
+    }
+    b.slots.report_level_view(super::slots::LevelView {
+        frame,
+        buffer,
+        offset,
+        camera,
+        inverse_rotation,
+    });
+    Ok(())
+}
+
 pub extern "C" fn gpu_device(op: i32, args: i64, count: i32) -> i64 {
     guarded(|| {
         // SAFETY: see `slots`.
@@ -261,6 +308,7 @@ pub extern "C" fn gpu_device(op: i32, args: i64, count: i32) -> i64 {
                 b.slots.set_slot(u32_arg(a, 0)?, arg(a, 1)?);
                 Ok(0)
             }
+            D_LEVEL_VIEW => level_view(b, a).map(|()| 0),
             other => Err(OpError::Invalid(format!("unknown device op {other}"))),
         }
     })
@@ -430,6 +478,10 @@ pub extern "C" fn gpu_encode(encoder: i64, op: i32, args: i64, count: i32) -> i6
             E_WAIT => {
                 let (n, timeout) = (arg(a, 0)?, arg(a, 1)?);
                 if n > s.fence_pending(e)? - 1 {
+                    // A poll of the open recording's fence is just not done yet.
+                    if timeout == 0 {
+                        return Ok(0);
+                    }
                     scoped(b, || s.submit(g, &b.stats, &b.slots, e))?;
                 }
                 let timeout = (timeout != u64::MAX).then(|| Duration::from_nanos(timeout));

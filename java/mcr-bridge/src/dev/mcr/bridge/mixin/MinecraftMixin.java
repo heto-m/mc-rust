@@ -1,7 +1,9 @@
 package dev.mcr.bridge.mixin;
 
+import dev.mcr.bridge.BridgeAbi;
 import dev.mcr.bridge.McrCrash;
 import dev.mcr.bridge.McrFrame;
+import dev.mcr.bridge.McrFrameTimes;
 import dev.mcr.bridge.McrInput;
 import dev.mcr.bridge.gpu.GpuSelfTest;
 import dev.mcr.bridge.net.GameplayKeys;
@@ -32,6 +34,22 @@ abstract class MinecraftMixin {
     @Inject(method = "tick", at = @At("HEAD"))
     private void mcr$countTick(CallbackInfo ci) {
         McrFrame.tickRan();
+        McrFrameTimes.begin(BridgeAbi.PROF_TICK);
+    }
+
+    @Inject(method = "tick", at = @At("RETURN"))
+    private void mcr$tickTime(CallbackInfo ci) {
+        McrFrameTimes.end(BridgeAbi.PROF_TICK);
+    }
+
+    @Inject(method = "renderFrame", at = @At("HEAD"))
+    private void mcr$frameStart(boolean advanceGameTime, CallbackInfo ci) {
+        McrFrameTimes.begin(BridgeAbi.PROF_FRAME);
+    }
+
+    @Inject(method = "renderFrame", at = @At("RETURN"))
+    private void mcr$frameEnd(boolean advanceGameTime, CallbackInfo ci) {
+        McrFrameTimes.end(BridgeAbi.PROF_FRAME);
     }
 
     @Inject(method = "handleKeybinds", at = @At("HEAD"))

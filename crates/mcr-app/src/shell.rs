@@ -525,6 +525,13 @@ impl Shell {
         self.play.as_ref().is_some_and(Play::wants_grab)
     }
 
+    /// mcr's frames are not paced by vsync or a cap, so Java's frames may run one ahead.
+    pub fn set_mod_uncapped(&self, uncapped: bool) {
+        if let Some(frames) = self.mod_frames() {
+            frames.lock().set_uncapped(uncapped);
+        }
+    }
+
     pub fn max_fps(&self) -> i32 {
         self.settings.borrow().file.options.max_fps
     }
@@ -758,7 +765,7 @@ impl Shell {
         }
     }
 
-    fn mod_frames(&self) -> Option<&ModFrames> {
+    pub(crate) fn mod_frames(&self) -> Option<&ModFrames> {
         self.cfg.mod_net.as_ref()?.frames.as_ref()
     }
 
@@ -769,6 +776,9 @@ impl Shell {
         };
         let (active, notice) = {
             let mut link = frames.lock();
+            if let Some(line) = link.take_profile_line() {
+                eprintln!("[mods] profile: {line}");
+            }
             (link.gui_active(), link.take_notice())
         };
         if let Some(message) = notice {

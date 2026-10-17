@@ -14,7 +14,7 @@ use crate::sections::SectionShared;
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 10;
+pub const BRIDGE_VERSION: u32 = 12;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -123,7 +123,23 @@ pub const FSTATE_CAMERA_POS: usize = 48;
 /// Radians in mcr's convention, like `FrameBegin`'s yaw and pitch.
 pub const FSTATE_CAMERA_YAW: usize = 72;
 pub const FSTATE_CAMERA_PITCH: usize = 76;
+/// `PROF_COUNT` microsecond counters (`u32`) of Java's last frame, indexed by `PROF_*`.
+pub const FSTATE_PROF: usize = 80;
 pub const FSTATE_SIZE: usize = 128;
+/// Leaving the frame wait to returning from it: packets, input and size.
+pub const PROF_PRE: usize = 0;
+/// Client ticks.
+pub const PROF_TICK: usize = 1;
+/// `GameRenderer.extract`: camera, level (entities) and GUI extraction, where HUD mods run.
+pub const PROF_EXTRACT: usize = 2;
+/// `GameRenderer.render`, which contains `PROF_WORLD` and `PROF_GUI`.
+pub const PROF_RENDER: usize = 3;
+pub const PROF_WORLD: usize = 4;
+/// `GuiRenderer.render`.
+pub const PROF_GUI: usize = 5;
+/// `Minecraft.renderFrame`, which contains `PROF_EXTRACT` and `PROF_RENDER`.
+pub const PROF_FRAME: usize = 6;
+pub const PROF_COUNT: usize = 8;
 pub const FSTATE_READY: u32 = 1;
 pub const FSTATE_LOADED: u32 = 2;
 /// A mod cancelled or redirected vanilla's weather extraction this frame.
@@ -709,7 +725,16 @@ mod tests {
             ("FSTATE_CAMERA_POS", FSTATE_CAMERA_POS as i64),
             ("FSTATE_CAMERA_YAW", FSTATE_CAMERA_YAW as i64),
             ("FSTATE_CAMERA_PITCH", FSTATE_CAMERA_PITCH as i64),
+            ("FSTATE_PROF", FSTATE_PROF as i64),
             ("FSTATE_SIZE", FSTATE_SIZE as i64),
+            ("PROF_PRE", PROF_PRE as i64),
+            ("PROF_TICK", PROF_TICK as i64),
+            ("PROF_EXTRACT", PROF_EXTRACT as i64),
+            ("PROF_RENDER", PROF_RENDER as i64),
+            ("PROF_WORLD", PROF_WORLD as i64),
+            ("PROF_GUI", PROF_GUI as i64),
+            ("PROF_FRAME", PROF_FRAME as i64),
+            ("PROF_COUNT", PROF_COUNT as i64),
             ("FSTATE_READY", FSTATE_READY.into()),
             ("FSTATE_LOADED", FSTATE_LOADED.into()),
             ("FSTATE_WEATHER", FSTATE_WEATHER.into()),
@@ -728,6 +753,7 @@ mod tests {
             ("SLOT_WORLD_AFTER", SLOT_WORLD_AFTER.into()),
             ("SLOT_POST_WORLD", SLOT_POST_WORLD.into()),
             ("D_SLOT", ffi::D_SLOT.into()),
+            ("D_LEVEL_VIEW", ffi::D_LEVEL_VIEW.into()),
             (
                 "GPU_TEXTURE_VIRTUAL",
                 gpu::resources::TEXTURE_VIRTUAL as i64,

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use mcr_jvm::PushError;
+use mcr_render::glam::{DVec3, Mat4, Vec3};
 use mcr_render::{Camera, ExternalCtx, ExternalSubmitter};
 
 use crate::abi::{
@@ -15,10 +16,11 @@ use crate::abi::{
     MSG_FRAME, Shared,
 };
 use crate::events::BridgeEvent;
-use crate::frame::{JavaCamera, JavaFrame, LinkState, Lockstep, TickBank};
+use crate::frame::{AheadPolicy, JavaCamera, JavaFrame, LinkState, Lockstep, Pipelining, TickBank};
 use crate::gpu::backend::Backend;
 use crate::input::ModInput;
 use crate::pacer::{self, SharedWriter};
+use crate::profile::{self, FrameProfiler, ProfileWindow};
 use crate::sync::{self, Pending};
 
 const SAMPLES: usize = 1 << 14;
@@ -40,6 +42,7 @@ pub struct ComposeStats {
     pub gui_us: Vec<u32>,
     pub java_size: (u32, u32),
     pub state: Option<LinkState>,
+    pub profile: ProfileWindow,
 }
 
 impl ComposeStats {
@@ -52,6 +55,27 @@ impl ComposeStats {
         v.sort_unstable();
         let at = |q: usize| v[(v.len() * q / 100).min(v.len() - 1)];
         (at(50), at(99), v[v.len() - 1])
+    }
+}
+
+impl ComposeStats {
+    /// One line: counts, then `p50/p99` in microseconds of each sampled timing.
+    pub fn summary(&self) -> String {
+        let p = |v: &[u32]| {
+            let (p50, p99, _) = Self::percentiles(v);
+            format!("{p50}/{p99}")
+        };
+        format!(
+            "composed {} late {} | wait {} us | java {} us | gui submit {} us | ticks java {} rust {} | {}",
+            self.composed,
+            self.late,
+            p(&self.waits_us),
+            p(&self.java_us),
+            p(&self.gui_us),
+            self.java_ticks,
+            self.rust_ticks,
+            self.profile.line(),
+        )
     }
 }
 
@@ -117,10 +141,24 @@ pub struct FrameLink {
     player_camera: Option<Camera>,
     /// The graph search last copied for Java, if it fit.
     sections: Option<u64>,
+    profiler: FrameProfiler,
+    pipelining: Pipelining,
+    /// mcr's frame rate has no cap or vsync, so throughput beats a frame of GUI latency.
+    uncapped: bool,
+    policy: AheadPolicy,
+    /// This mcr frame posts the next Java frame as soon as the current one finished.
+    ahead: bool,
+    /// A finished frame composed this mcr frame.
+    ready: Option<u64>,
+    /// The frame posted this mcr frame, which saw this frame's camera.
+    posted_now: Option<u64>,
 }
 
 impl FrameLink {
     pub(crate) fn new(writer: SharedWriter, shared: &'static Shared, input: ModInput) -> Self {
+        if profile::enabled() {
+            crate::gpu::backend::PROFILE.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         Self {
             writer,
             shared,
@@ -141,7 +179,45 @@ impl FrameLink {
             entity_scale: 0.0,
             player_camera: None,
             sections: None,
+            profiler: FrameProfiler::new(profile::enabled()),
+            pipelining: Pipelining::from_env(),
+            uncapped: false,
+            policy: AheadPolicy::default(),
+            ahead: false,
+            ready: None,
+            posted_now: None,
         }
+    }
+
+    /// mcr renders as fast as it can (no vsync, no frame cap); see [`Pipelining::Auto`].
+    pub fn set_uncapped(&mut self, uncapped: bool) {
+        self.uncapped = uncapped;
+    }
+
+    pub fn set_pipelining(&mut self, pipelining: Pipelining) {
+        self.pipelining = pipelining;
+    }
+
+    /// Once a second while `MCR_MOD_PROFILE` is set: where the last second's frames went.
+    pub fn take_profile_line(&mut self) -> Option<String> {
+        self.profiler.take_line()
+    }
+
+    /// Java finished frames up to `done`; feeds its phase times to the profile.
+    fn java_finished(&mut self, java: &JavaFrame) {
+        let gpu = Self::backend()
+            .map(|b| b.stats.snapshot())
+            .unwrap_or_default();
+        let total = (java.nanos / 1000).min(u64::from(u32::MAX)) as u32;
+        self.profiler.java_done(total, java.prof, gpu);
+    }
+
+    /// Runs a drain of Java's queued work and counts its time as this frame's submit time.
+    fn drain<T>(&mut self, f: impl FnOnce() -> T) -> T {
+        let start = Instant::now();
+        let out = f();
+        self.profiler.submitted(start.elapsed());
+        out
     }
 
     /// mcr renders this frame from a mod's camera (see [`Self::java_camera`]) and `player` is the
@@ -227,6 +303,7 @@ impl FrameLink {
             rust_ticks: self.ticks.posted(),
             java_size: java.size,
             state: Some(self.lockstep.state()),
+            profile: self.profiler.total().clone(),
             ..self.stats.clone()
         }
     }
@@ -234,6 +311,7 @@ impl FrameLink {
     /// Starts the timing samples and counters afresh (tick totals are kept).
     pub fn reset_stats(&mut self) {
         self.stats = ComposeStats::default();
+        self.profiler.reset();
     }
 
     /// The lockstep already detached; drops Java's GUI and tells the user.
@@ -330,6 +408,7 @@ impl FrameLink {
         match pushed {
             Ok(()) => {
                 self.stats.posted += 1;
+                self.posted_now = Some(index);
                 self.shared.bell.notify();
             }
             Err(e) => {
@@ -342,13 +421,23 @@ impl FrameLink {
         }
     }
 
+    /// The outstanding frame finished: profile it and keep its frame time for [`AheadPolicy`].
+    fn finished(&mut self, java: &JavaFrame) {
+        self.java_finished(java);
+        self.policy.java_frame(Duration::from_nanos(java.nanos));
+    }
+
     fn before_frame(&mut self, ctx: &ExternalCtx<'_>) {
         let Some(backend) = Self::backend() else {
             return;
         };
+        let gpu = backend.gpu;
+        self.profiler.begin_frame(Instant::now());
         self.composing = None;
         self.gui_pending = None;
         self.opaque_waited = false;
+        self.ready = None;
+        self.posted_now = None;
         backend.slots.set_scene(ctx.scene, ctx.depth);
         if self.shared.frame.is_gone() {
             self.detach_for_good("Java stopped");
@@ -360,10 +449,17 @@ impl FrameLink {
         if java.ready {
             self.lockstep.ready();
         }
-        let late = self.lockstep.outstanding();
-        if self.lockstep.complete(java.done, Instant::now()) {
-            // A frame that missed its compose still runs, onto Java's own target, before the next one.
-            backend.slots.drain_all(backend.gpu, late.unwrap_or(0));
+        self.ahead = self.policy.decide(self.pipelining, self.uncapped);
+        let outstanding = self.lockstep.outstanding();
+        if let Some(index) = outstanding
+            && self.lockstep.complete(java.done, Instant::now())
+        {
+            self.finished(&java);
+            if self.lockstep.state() == LinkState::Running {
+                self.ready = Some(index);
+            } else {
+                self.drain(|| backend.slots.drain_frame(gpu, index));
+            }
         }
         if self.lockstep.reattach() {
             tracing::info!("mod bridge re-attached to rendering");
@@ -371,32 +467,67 @@ impl FrameLink {
             abi::emit(BridgeEvent::RenderResumed);
         }
         match self.lockstep.state() {
-            LinkState::Running => backend.slots.drain_immediate(backend.gpu),
+            LinkState::Running => {
+                let upto = self.ready.or(outstanding).unwrap_or(u64::MAX);
+                self.drain(|| backend.slots.drain_immediate(gpu, upto));
+            }
             LinkState::Booting | LinkState::Detached => {
-                backend.slots.drain_all(backend.gpu, u64::MAX)
+                self.drain(|| backend.slots.drain_all(gpu));
             }
         };
-        self.post(ctx);
+        // In lockstep a frame composed late is followed by a fresh post next frame.
+        if self.ahead || self.ready.is_none() {
+            self.post(ctx);
+        }
     }
 
-    /// Waits for Java's frame and submits its work up to its translucent features, so they land
-    /// before mcr's translucent terrain.
-    fn after_opaque(&mut self, _ctx: &ExternalCtx<'_>) {
+    /// Submits Java's work up to its translucent features, so they land before mcr's translucent
+    /// terrain: the frame that finished already, or the outstanding one after a bounded wait.
+    fn after_opaque(&mut self, ctx: &ExternalCtx<'_>) {
         let Some(backend) = Self::backend() else {
-            return;
-        };
-        let Some(index) = self.lockstep.outstanding() else {
             return;
         };
         if self.lockstep.state() != LinkState::Running {
             return;
         }
-        self.opaque_waited = true;
-        if !self.wait(index) {
+        let index = match self.ready {
+            Some(index) => index,
+            None => {
+                let Some(index) = self.lockstep.outstanding() else {
+                    return;
+                };
+                self.opaque_waited = true;
+                if !self.wait(index) {
+                    return;
+                }
+                if self.ahead {
+                    self.post(ctx);
+                }
+                index
+            }
+        };
+        self.redraw_from(backend, index, ctx);
+        self.drain(|| backend.slots.drain_world(backend.gpu, index));
+        self.composing = Some(index);
+    }
+
+    /// A frame posted in an earlier mcr frame was recorded from that frame's camera: its level
+    /// projection is rewritten so its world lands on this frame's terrain.
+    fn redraw_from(&mut self, backend: &'static Backend, index: u64, ctx: &ExternalCtx<'_>) {
+        if self.posted_now == Some(index) {
             return;
         }
-        backend.slots.drain_world(backend.gpu);
-        self.composing = Some(index);
+        self.profiler.composed_ahead();
+        if let Some(view) = backend.slots.level_view(index) {
+            let matrix = level_projection(
+                ctx.proj,
+                ctx.view,
+                ctx.camera.position,
+                view.camera,
+                &view.inverse_rotation,
+            );
+            backend.slots.arm_patch(&view, &matrix);
+        }
     }
 
     /// Bounded wait for Java's frame `index`; on time-out it detaches or counts a late frame.
@@ -407,10 +538,18 @@ impl FrameLink {
             Some(deadline) => self.shared.frame.wait_done(index + 1, deadline),
             None => false,
         };
+        self.waited(start, done)
+    }
+
+    /// Books a wait that started at `start`; when Java finished, completes its frame.
+    fn waited(&mut self, start: Instant, done: bool) -> bool {
         let waited = start.elapsed();
-        let java = self.java();
+        self.profiler.waited(waited);
         if done {
-            self.lockstep.complete(java.done, Instant::now());
+            let java = self.java();
+            if self.lockstep.complete(java.done, Instant::now()) {
+                self.finished(&java);
+            }
             push_sample(&mut self.stats.waits_us, waited);
             push_sample(&mut self.stats.java_us, Duration::from_nanos(java.nanos));
         }
@@ -424,53 +563,57 @@ impl FrameLink {
         let gpu = backend.gpu;
         if let Some(index) = self.composing.take() {
             self.compose(backend, index);
-            self.stats.composed += 1;
             return;
         }
-        let Some(index) = self.lockstep.outstanding() else {
-            if self.lockstep.state() != LinkState::Running {
-                backend.slots.drain_all(gpu, u64::MAX);
+        if self.lockstep.state() != LinkState::Running {
+            if self.lockstep.complete(self.java().done, Instant::now()) {
+                let java = self.java();
+                self.finished(&java);
             }
+            self.drain(|| backend.slots.drain_all(gpu));
+            return;
+        }
+        let Some(index) = self.ready.or(self.lockstep.outstanding()) else {
             return;
         };
-        if self.lockstep.state() != LinkState::Running {
-            self.lockstep.complete(self.java().done, Instant::now());
-            backend.slots.drain_all(gpu, u64::MAX);
-            return;
-        }
         let start = Instant::now();
         let loaded = self.java().loaded;
-        let deadline = if self.opaque_waited {
-            Some(start)
+        let done = if self.ready.is_some() {
+            true
         } else {
-            self.lockstep.wait_until(start, loaded)
+            let deadline = if self.opaque_waited {
+                Some(start)
+            } else {
+                self.lockstep.wait_until(start, loaded)
+            };
+            let done = match deadline {
+                Some(deadline) => self.shared.frame.wait_done(index + 1, deadline),
+                None => false,
+            };
+            let done = self.waited(start, done);
+            if done && self.ahead {
+                self.post(ctx);
+            }
+            done
         };
-        let done = match deadline {
-            Some(deadline) => self.shared.frame.wait_done(index + 1, deadline),
-            None => false,
-        };
-        let waited = start.elapsed();
         let java = self.java();
         if done {
-            self.lockstep.complete(java.done, Instant::now());
-            push_sample(&mut self.stats.waits_us, waited);
-            push_sample(&mut self.stats.java_us, Duration::from_nanos(java.nanos));
+            self.redraw_from(backend, index, ctx);
             self.compose(backend, index);
-            self.stats.composed += 1;
         } else if self.shared.frame.is_gone() {
             self.detach_for_good("Java stopped");
-            backend.slots.drain_all(gpu, u64::MAX);
+            self.drain(|| backend.slots.drain_all(gpu));
         } else if self.lockstep.expire(Instant::now(), java.loaded) {
+            let waited = start.elapsed();
             self.report_detached(&format!(
                 "no frame for {:.1}s",
                 waited
                     .as_secs_f32()
                     .max(crate::frame::HANG_TIMEOUT.as_secs_f32())
             ));
-            backend.slots.drain_all(gpu, u64::MAX);
+            self.drain(|| backend.slots.drain_all(gpu));
         } else {
             self.stats.late += 1;
-            backend.slots.drain_immediate(gpu);
             // Loading screens stay up; in game the live world beats a frozen composite.
             if !java.loaded
                 && let Some(last) = &self.last
@@ -481,8 +624,9 @@ impl FrameLink {
     }
 
     fn compose(&mut self, backend: &'static Backend, index: u64) {
-        backend.slots.drain_before_gui(backend.gpu);
+        self.drain(|| backend.slots.drain_before_gui(backend.gpu, index));
         self.gui_pending = Some(index);
+        self.stats.composed += 1;
     }
 
     /// Java's GUI slot draws straight into the scene, top-down, when its main target matches it.
@@ -503,7 +647,7 @@ impl FrameLink {
                 "java main target does not match the scene; its GUI is skipped this frame"
             );
         }
-        backend.slots.drain_all(backend.gpu, index);
+        backend.slots.drain_frame(backend.gpu, index);
         if composed {
             self.size_mismatch_logged = false;
             self.shown = true;
@@ -518,7 +662,84 @@ impl FrameLink {
                 self.last = Some(last);
             }
         }
-        push_sample(&mut self.stats.gui_us, start.elapsed());
+        let elapsed = start.elapsed();
+        self.profiler.submitted(elapsed);
+        push_sample(&mut self.stats.gui_us, elapsed);
+    }
+}
+
+/// Java's level projection for a frame it recorded from `view.camera`, redrawn from mcr's camera at
+/// `camera` with mcr's `view` rotation and `proj`: Java's projection is `flip · proj · view · R⁻¹`
+/// with its own view rotation `R` in every model-view matrix, and its geometry is relative to its
+/// camera, so the camera move becomes a translation before `R⁻¹`.
+pub fn level_projection(
+    proj: Mat4,
+    view: Mat4,
+    camera: DVec3,
+    java_camera: [f64; 3],
+    inverse_rotation: &[f32; 16],
+) -> [f32; 16] {
+    let flip = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0));
+    let shift = (DVec3::from_array(java_camera) - camera).as_vec3();
+    let inverse_rotation = Mat4::from_cols_array(inverse_rotation);
+    (flip * proj * view * Mat4::from_translation(shift) * inverse_rotation).to_cols_array()
+}
+
+#[cfg(test)]
+mod tests {
+    use mcr_render::glam::{Quat, Vec4};
+
+    use super::*;
+
+    #[test]
+    fn a_late_frame_lands_where_the_current_camera_puts_it() {
+        let proj = Camera::default().projection(16.0 / 9.0);
+        let java_rotation = Mat4::from_quat(Quat::from_euler(
+            mcr_render::glam::EulerRot::YXZ,
+            0.7,
+            -0.2,
+            0.0,
+        ));
+        let java_camera = [100.25, 64.5, -30.75];
+        let now_camera = DVec3::new(100.75, 64.62, -30.5);
+        let now_view = Mat4::from_quat(Quat::from_euler(
+            mcr_render::glam::EulerRot::YXZ,
+            0.74,
+            -0.18,
+            0.0,
+        ));
+        let inverse = java_rotation.transpose().to_cols_array();
+        let patched = Mat4::from_cols_array(&level_projection(
+            proj,
+            now_view,
+            now_camera,
+            java_camera,
+            &inverse,
+        ));
+        let flip = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0));
+        for world in [
+            DVec3::new(103.0, 65.0, -36.0),
+            DVec3::new(90.0, 60.0, -20.0),
+        ] {
+            let java_local = (world - DVec3::from_array(java_camera)).as_vec3();
+            let java_clip = patched * java_rotation * Vec4::from((java_local, 1.0));
+            let mcr_local = (world - now_camera).as_vec3();
+            let mcr_clip = flip * proj * now_view * Vec4::from((mcr_local, 1.0));
+            let (a, b) = (java_clip / java_clip.w, mcr_clip / mcr_clip.w);
+            assert!((a - b).abs().max_element() < 1e-4, "{a} vs {b}");
+        }
+        let same = level_projection(
+            proj,
+            now_view,
+            now_camera,
+            now_camera.to_array(),
+            &now_view.transpose().to_cols_array(),
+        );
+        let identity = flip * proj * now_view * now_view.transpose();
+        assert!(
+            Mat4::from_cols_array(&same).abs_diff_eq(identity, 1e-5),
+            "a frame from this camera keeps Java's own projection"
+        );
     }
 }
 

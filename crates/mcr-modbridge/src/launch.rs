@@ -214,6 +214,9 @@ pub fn plan(
     if config.compose {
         properties.push(format!("-D{COMPOSE_PROPERTY}=true"));
     }
+    if crate::profile::per_mod() {
+        properties.push(format!("-D{}=true", crate::profile::PROFILE_PROPERTY));
+    }
     if let Some(port) = config.proxy_port {
         for scheme in ["http", "https"] {
             properties.push(format!("-D{scheme}.proxyHost=127.0.0.1"));

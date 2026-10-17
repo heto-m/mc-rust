@@ -19,6 +19,8 @@ use crate::abi::{
 pub const MAX_QUEUED: usize = 4096;
 const LOGGED_OVERFLOWS: u64 = 10;
 const POOLED_BUFFERS: usize = 64;
+/// Submits tracked per encoder for blocking fence waits.
+const MAX_INFLIGHT: usize = 256;
 const POOLED_CAPACITY: usize = 16 << 20;
 /// Idle capacity the pool may hold in all, so a burst of large submits is not kept for the session.
 const POOLED_TOTAL: usize = 64 << 20;
@@ -56,6 +58,31 @@ pub fn is_world_slot(slot: u32) -> bool {
     )
 }
 
+/// Immediate work of frames up to `upto`: what may run before mcr's own frame.
+pub fn immediate_upto(upto: u64) -> impl Fn(u32, u64) -> bool {
+    move |slot, frame| slot == SLOT_IMMEDIATE && frame <= upto
+}
+
+/// Work up to Java's translucent features, which lands before mcr's translucent terrain.
+pub fn world_upto(upto: u64) -> impl Fn(u32, u64) -> bool {
+    move |slot, frame| {
+        frame <= upto
+            && matches!(
+                slot,
+                SLOT_IMMEDIATE | SLOT_WORLD_SOLID | SLOT_WORLD_TRANSLUCENT
+            )
+    }
+}
+
+/// Work before the GUI: late world features, the hand and post effects.
+pub fn before_gui_upto(upto: u64) -> impl Fn(u32, u64) -> bool {
+    move |slot, frame| frame <= upto && slot != SLOT_GUI
+}
+
+pub fn frame_upto(upto: u64) -> impl Fn(u32, u64) -> bool {
+    move |_, frame| frame <= upto
+}
+
 pub(crate) const MAP_PENDING: u8 = 0;
 pub(crate) const MAP_OK: u8 = 1;
 pub(crate) const MAP_FAILED: u8 = 2;
@@ -82,7 +109,8 @@ impl SubmitTrack {
 
 /// Waits rarely prune: Java's fences mostly name submits the GPU already finished.
 fn push_pruned<T>(inflight: &mut VecDeque<(u64, T)>, done: u64, entry: (u64, T)) {
-    while inflight.front().is_some_and(|(k, _)| *k <= done) {
+    while inflight.front().is_some_and(|(k, _)| *k <= done) || inflight.len() >= MAX_INFLIGHT {
+        // A wait for a dropped submit waits for a later one, which is still correct.
         inflight.pop_front();
     }
     inflight.push_back(entry);
@@ -110,6 +138,15 @@ impl Submission {
         for (buffer, offset, data) in self.writes {
             gpu.queue.write_buffer(&buffer, offset, &data);
             recycle(data);
+        }
+        if self.cmd.is_none() && self.maps.is_empty() {
+            // Pending writes go out with the next submit, still ahead of any later command buffer.
+            let (done, n) = (self.track.done.clone(), self.n);
+            gpu.queue.on_submitted_work_done(move || {
+                done.fetch_max(n, Ordering::AcqRel);
+            });
+            self.track.queued.fetch_max(n, Ordering::AcqRel);
+            return;
         }
         let index = gpu.queue.submit(self.cmd);
         let (done, n) = (self.track.done.clone(), self.n);
@@ -156,15 +193,15 @@ impl<T> SlotQueue<T> {
         self.items.push_back((slot, frame, item));
     }
 
-    /// The leading run of immediate work: everything that may run before mcr's own frame.
-    pub fn pop_immediate(&mut self) -> Option<T> {
-        self.pop_while(|slot| slot == SLOT_IMMEDIATE)
+    /// The leading run of immediate work of frames up to `upto`: what may run before mcr's frame.
+    pub fn pop_immediate(&mut self, upto: u64) -> Option<T> {
+        self.pop_while(immediate_upto(upto)).map(|(_, _, t)| t)
     }
 
-    /// The next item if its slot passes `keep`; FIFO order is never broken.
-    pub fn pop_while(&mut self, keep: impl Fn(u32) -> bool) -> Option<T> {
+    /// The next item with its slot and frame if they pass `keep`; FIFO order is never broken.
+    pub fn pop_while(&mut self, keep: impl Fn(u32, u64) -> bool) -> Option<(u32, u64, T)> {
         match self.items.front() {
-            Some((slot, _, _)) if keep(*slot) => self.items.pop_front().map(|(_, _, t)| t),
+            Some((slot, frame, _)) if keep(*slot, *frame) => self.items.pop_front(),
             _ => None,
         }
     }
@@ -202,6 +239,31 @@ pub struct WorldTargets {
     pub gui: bool,
 }
 
+/// Where Java's world slots of one frame read their level projection, and the camera that frame
+/// was recorded with, so a frame composed late can be drawn from mcr's current camera.
+#[derive(Debug, Clone)]
+pub struct LevelView {
+    pub frame: u64,
+    pub buffer: wgpu::Buffer,
+    pub offset: u64,
+    /// Java's camera position: its world geometry is relative to it.
+    pub camera: [f64; 3],
+    /// The inverse of Java's view rotation (column-major), which its model-view matrices carry.
+    pub inverse_rotation: [f32; 16],
+}
+
+/// Level views kept for frames Java recorded but mcr has not composed yet.
+const KEPT_VIEWS: usize = 4;
+
+/// A level projection rewrite that lands just before a frame's first world-slot submit.
+#[derive(Debug)]
+struct Patch {
+    frame: u64,
+    buffer: wgpu::Buffer,
+    offset: u64,
+    bytes: [u8; 64],
+}
+
 #[derive(Debug, Default)]
 pub struct Slots {
     active: AtomicBool,
@@ -213,6 +275,10 @@ pub struct Slots {
     scene: Mutex<Option<SceneTargets>>,
     pub stale: AtomicU64,
     pub submitted: AtomicU64,
+    views: Mutex<VecDeque<LevelView>>,
+    patch: Mutex<Option<Patch>>,
+    /// Held while queued work is popped and submitted, so submits never reorder across threads.
+    exec: Mutex<()>,
 }
 
 impl Slots {
@@ -224,7 +290,7 @@ impl Slots {
     /// Java submits directly again (shutdown); whatever was queued is submitted first.
     pub fn deactivate(&self, gpu: &Gpu) {
         self.active.store(false, Ordering::Release);
-        self.drain_all(gpu, u64::MAX);
+        self.drain_all(gpu);
     }
 
     pub fn is_active(&self) -> bool {
@@ -260,6 +326,9 @@ impl Slots {
         }
         let mut q = self.lock();
         if q.len() >= MAX_QUEUED {
+            drop(q);
+            let _exec = self.exec.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut q = self.lock();
             let n = self.overflows.fetch_add(1, Ordering::Relaxed);
             if n < LOGGED_OVERFLOWS {
                 tracing::warn!("mod gpu slot queue full; submitting from the Java thread");
@@ -277,35 +346,97 @@ impl Slots {
         self.lock().len()
     }
 
-    /// Submits the immediate work queued ahead of any frame work.
-    pub fn drain_immediate(&self, gpu: &Gpu) -> usize {
-        self.drain_while(gpu, |slot| slot == SLOT_IMMEDIATE)
+    /// Submits the immediate work of frames up to `upto` queued ahead of any frame work.
+    pub fn drain_immediate(&self, gpu: &Gpu, upto: u64) -> usize {
+        self.drain_while(gpu, 0, immediate_upto(upto))
     }
 
     /// Submits the leading work up to Java's translucent features, at mcr's `after_opaque`.
-    pub fn drain_world(&self, gpu: &Gpu) -> usize {
-        self.drain_while(gpu, |slot| {
-            matches!(
-                slot,
-                SLOT_IMMEDIATE | SLOT_WORLD_SOLID | SLOT_WORLD_TRANSLUCENT
-            )
-        })
+    pub fn drain_world(&self, gpu: &Gpu, upto: u64) -> usize {
+        self.drain_while(gpu, 0, world_upto(upto))
     }
 
     /// Submits the leading work that comes before the GUI (late world features, hand, post effects).
-    pub fn drain_before_gui(&self, gpu: &Gpu) -> usize {
-        self.drain_while(gpu, |slot| slot != SLOT_GUI)
+    pub fn drain_before_gui(&self, gpu: &Gpu, upto: u64) -> usize {
+        self.drain_while(gpu, 0, before_gui_upto(upto))
     }
 
-    fn drain_while(&self, gpu: &Gpu, keep: impl Fn(u32) -> bool) -> usize {
-        let mut q = self.lock();
+    /// Submits everything of frames up to `frame`, in order; frame work of earlier frames is stale.
+    pub fn drain_frame(&self, gpu: &Gpu, frame: u64) -> usize {
+        self.drain_while(gpu, frame, frame_upto(frame))
+    }
+
+    /// Submits everything queued, in order.
+    pub fn drain_all(&self, gpu: &Gpu) -> usize {
+        self.drain_frame(gpu, u64::MAX)
+    }
+
+    fn drain_while(&self, gpu: &Gpu, stale_before: u64, keep: impl Fn(u32, u64) -> bool) -> usize {
+        let _exec = self.exec.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut patch = self
+            .patch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         let mut n = 0;
-        while let Some(s) = q.pop_while(&keep) {
+        // The queue lock is held per pop only, so Java keeps queueing while this submits.
+        while let Some((slot, frame, s)) = self.lock().pop_while(&keep) {
+            if slot != SLOT_IMMEDIATE && frame < stale_before && stale_before != u64::MAX {
+                let k = self.stale.fetch_add(1, Ordering::Relaxed);
+                if k < LOGGED_OVERFLOWS {
+                    tracing::warn!(frame, now = stale_before, "stale java frame work");
+                }
+            }
+            if is_world_slot(slot)
+                && let Some(p) = patch.take_if(|p| p.frame == frame)
+            {
+                gpu.queue.write_buffer(&p.buffer, p.offset, &p.bytes);
+            }
             run_scoped(gpu, s);
             n += 1;
         }
+        if patch.is_some() {
+            let mut slot = self.patch.lock().unwrap_or_else(PoisonError::into_inner);
+            if slot.is_none() {
+                *slot = patch;
+            }
+        }
         self.submitted.fetch_add(n as u64, Ordering::Relaxed);
         n
+    }
+
+    /// Java's level projection for `view.frame`; the oldest of [`KEPT_VIEWS`] is dropped.
+    pub fn report_level_view(&self, view: LevelView) {
+        let mut views = self.views.lock().unwrap_or_else(PoisonError::into_inner);
+        views.retain(|v| v.frame != view.frame);
+        if views.len() >= KEPT_VIEWS {
+            views.pop_front();
+        }
+        views.push_back(view);
+    }
+
+    pub fn level_view(&self, frame: u64) -> Option<LevelView> {
+        self.views
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|v| v.frame == frame)
+            .cloned()
+    }
+
+    /// Rewrites `view`'s projection with `matrix` (column-major) right before its frame's first
+    /// world-slot work is submitted.
+    pub fn arm_patch(&self, view: &LevelView, matrix: &[f32; 16]) {
+        let mut bytes = [0u8; 64];
+        for (dst, v) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(matrix) {
+            *dst = v.to_le_bytes();
+        }
+        *self.patch.lock().unwrap_or_else(PoisonError::into_inner) = Some(Patch {
+            frame: view.frame,
+            buffer: view.buffer.clone(),
+            offset: view.offset,
+            bytes,
+        });
     }
 
     /// mcr's scene for the frames Java records next; called by the render thread every frame.
@@ -377,24 +508,6 @@ impl Slots {
             .filter(|c| (c.width(), c.height()) == size)
     }
 
-    /// Submits everything queued, in order; `frame` is the one being composed.
-    pub fn drain_all(&self, gpu: &Gpu, frame: u64) -> usize {
-        let mut q = self.lock();
-        let mut n = 0;
-        while let Some((s, stale)) = q.pop_any(frame) {
-            if stale {
-                let k = self.stale.fetch_add(1, Ordering::Relaxed);
-                if k < LOGGED_OVERFLOWS {
-                    tracing::warn!(frame = s.frame, now = frame, "stale java gui buffer");
-                }
-            }
-            run_scoped(gpu, s);
-            n += 1;
-        }
-        self.submitted.fetch_add(n as u64, Ordering::Relaxed);
-        n
-    }
-
     pub fn set_main_color(&self, handle: Handle, texture: wgpu::Texture) {
         *self
             .main_color
@@ -453,6 +566,14 @@ fn run_scoped(gpu: &Gpu, sub: Submission) {
 mod tests {
     use super::*;
 
+    fn drain<T>(q: &mut SlotQueue<T>, keep: impl Fn(u32, u64) -> bool) -> Vec<T> {
+        let mut out = Vec::new();
+        while let Some((_, _, t)) = q.pop_while(&keep) {
+            out.push(t);
+        }
+        out
+    }
+
     #[test]
     fn the_byte_pool_holds_a_bounded_total() {
         for _ in 0..256 {
@@ -479,9 +600,9 @@ mod tests {
         q.push(SLOT_IMMEDIATE, 5, "pre-gui");
         q.push(SLOT_GUI, 5, "gui");
         q.push(SLOT_IMMEDIATE, 5, "end");
-        assert_eq!(q.pop_immediate(), Some("upload"));
-        assert_eq!(q.pop_immediate(), Some("pre-gui"));
-        assert_eq!(q.pop_immediate(), None, "gui work waits for its slot");
+        assert_eq!(q.pop_immediate(5), Some("upload"));
+        assert_eq!(q.pop_immediate(5), Some("pre-gui"));
+        assert_eq!(q.pop_immediate(5), None, "gui work waits for its slot");
         assert_eq!(q.pop_any(5), Some(("gui", false)));
         assert_eq!(q.pop_any(5), Some(("end", false)));
         assert!(q.is_empty());
@@ -497,27 +618,34 @@ mod tests {
         q.push(SLOT_POST_WORLD, 7, "hand");
         q.push(SLOT_GUI, 7, "hud");
         q.push(SLOT_IMMEDIATE, 7, "tail");
-        let world = |s| {
-            matches!(
-                s,
-                SLOT_IMMEDIATE | SLOT_WORLD_SOLID | SLOT_WORLD_TRANSLUCENT
-            )
-        };
-        let mut order = Vec::new();
-        while let Some(t) = q.pop_while(world) {
-            order.push(t);
-        }
         assert_eq!(
-            order,
+            drain(&mut q, world_upto(7)),
             ["lightmap", "solid entities", "translucent entities"]
         );
-        order.clear();
-        while let Some(t) = q.pop_while(|s| s != SLOT_GUI) {
-            order.push(t);
-        }
-        assert_eq!(order, ["outlines", "hand"]);
-        assert_eq!(q.pop_any(7), Some(("hud", false)));
-        assert_eq!(q.pop_any(7), Some(("tail", false)));
+        assert_eq!(drain(&mut q, before_gui_upto(7)), ["outlines", "hand"]);
+        assert_eq!(drain(&mut q, frame_upto(7)), ["hud", "tail"]);
+    }
+
+    #[test]
+    fn a_frame_recorded_ahead_waits_behind_the_one_being_composed() {
+        let mut q = SlotQueue::default();
+        q.push(SLOT_IMMEDIATE, 7, "lightmap 7");
+        q.push(SLOT_WORLD_TRANSLUCENT, 7, "entities 7");
+        q.push(SLOT_IMMEDIATE, 8, "upload 8");
+        q.push(SLOT_WORLD_SOLID, 8, "entities 8");
+        q.push(SLOT_GUI, 8, "hud 8");
+        assert_eq!(drain(&mut q, immediate_upto(7)), ["lightmap 7"]);
+        assert_eq!(
+            drain(&mut q, world_upto(7)),
+            ["entities 7"],
+            "frame 8 has no GUI cut yet but stays queued"
+        );
+        assert!(drain(&mut q, before_gui_upto(7)).is_empty());
+        assert!(drain(&mut q, frame_upto(7)).is_empty());
+        assert_eq!(
+            drain(&mut q, frame_upto(8)),
+            ["upload 8", "entities 8", "hud 8"]
+        );
     }
 
     #[test]
@@ -550,13 +678,8 @@ mod tests {
         let mut q = SlotQueue::default();
         q.push(SLOT_IMMEDIATE, 0, "reload texture upload");
         q.push(SLOT_GUI, 1, "draw with texture");
-        let mut order = Vec::new();
-        while let Some(t) = q.pop_immediate() {
-            order.push(t);
-        }
-        while let Some((t, _)) = q.pop_any(1) {
-            order.push(t);
-        }
+        let mut order = drain(&mut q, immediate_upto(1));
+        order.extend(drain(&mut q, frame_upto(1)));
         assert_eq!(order, ["reload texture upload", "draw with texture"]);
     }
 }

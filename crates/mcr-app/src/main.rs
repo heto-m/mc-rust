@@ -319,6 +319,7 @@ impl App {
             let want = shell.wants_grab();
             let cap = shell.max_fps();
             let vsync = shell.sync_vsync(self.opts.vsync);
+            shell.set_mod_uncapped(!vsync && !(10..260).contains(&cap));
             let java = shell.java_window();
             if want != self.grabbed {
                 self.set_grab(want);

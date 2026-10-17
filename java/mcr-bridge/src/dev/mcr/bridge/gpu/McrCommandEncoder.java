@@ -79,6 +79,10 @@ final class McrCommandEncoder implements CommandEncoderBackend {
     }
 
     boolean await(long submit, long timeoutNs) {
+        if (timeoutNs == 0 && submit >= submitIndex) {
+            // A poll of the open recording: not done, and nothing may rotate the transient memory.
+            return false;
+        }
         long r = op(BridgeAbi.E_WAIT, "fence wait", submit, timeoutNs < 0 ? -1L : timeoutNs);
         if (submit >= submitIndex) {
             submitIndex = Math.max(submitIndex, submit + 1);

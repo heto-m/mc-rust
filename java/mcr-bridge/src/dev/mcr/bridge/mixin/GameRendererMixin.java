@@ -1,16 +1,19 @@
 package dev.mcr.bridge.mixin;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import dev.mcr.bridge.BridgeAbi;
 import dev.mcr.bridge.McrCamera;
 import dev.mcr.bridge.McrCameraHandoff;
 import dev.mcr.bridge.McrFrame;
+import dev.mcr.bridge.McrFrameTimes;
 import dev.mcr.bridge.McrParticles;
 import dev.mcr.bridge.gpu.FrameSlots;
 import net.minecraft.client.Camera;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.Projection;
 import net.minecraft.client.renderer.ProjectionMatrixBuffer;
+import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.GameRenderState;
 import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Final;
@@ -51,6 +54,52 @@ abstract class GameRendererMixin {
             return camera.levelProjection(gameRenderState.levelRenderState.cameraRenderState.viewRotationMatrix);
         }
         return FrameSlots.inWorld() ? McrCamera.flipped(vanilla) : vanilla;
+    }
+
+    @Inject(method = "extract", at = @At("HEAD"))
+    private void mcr$extractStart(CallbackInfo ci) {
+        McrFrameTimes.begin(BridgeAbi.PROF_EXTRACT);
+    }
+
+    @Inject(method = "extract", at = @At("RETURN"))
+    private void mcr$extractEnd(CallbackInfo ci) {
+        McrFrameTimes.end(BridgeAbi.PROF_EXTRACT);
+    }
+
+    @Inject(method = "render", at = @At("HEAD"))
+    private void mcr$renderStart(CallbackInfo ci) {
+        McrFrameTimes.begin(BridgeAbi.PROF_RENDER);
+    }
+
+    @Inject(method = "render", at = @At("RETURN"))
+    private void mcr$renderEnd(CallbackInfo ci) {
+        McrFrameTimes.end(BridgeAbi.PROF_RENDER);
+    }
+
+    @Inject(method = "renderLevel", at = @At("HEAD"))
+    private void mcr$worldStart(CallbackInfo ci) {
+        McrFrameTimes.begin(BridgeAbi.PROF_WORLD);
+    }
+
+    @Inject(method = "renderLevel", at = @At("RETURN"))
+    private void mcr$worldEnd(CallbackInfo ci) {
+        McrFrameTimes.end(BridgeAbi.PROF_WORLD);
+    }
+
+    @Inject(
+            method = "renderLevel",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lcom/mojang/blaze3d/systems/RenderSystem;setProjectionMatrix("
+                            + "Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;Lcom/mojang/blaze3d/ProjectionType;)V",
+                    shift = At.Shift.AFTER))
+    private void mcr$levelView(CallbackInfo ci) {
+        GpuBufferSlice projection = RenderSystem.getProjectionMatrixBuffer();
+        if (McrFrame.camera() == null || projection == null) {
+            return;
+        }
+        CameraRenderState camera = gameRenderState.levelRenderState.cameraRenderState;
+        FrameSlots.levelView(projection, camera.pos.x, camera.pos.y, camera.pos.z, camera.viewRotationMatrix);
     }
 
     @Inject(method = "render3dHud", at = @At("HEAD"))

@@ -157,6 +157,43 @@ fn bench(engine: &mut Engine, opts: &crate::cli::Options, out: &Path) -> Result<
     Ok(())
 }
 
+/// Back-to-back shell frames with no pacing: offscreen fps and, in mod mode, the compose breakdown.
+/// `MCR_BENCH_TURN` turns the camera by that many degrees every frame, starting level and facing south.
+fn shell_bench(shell: &mut crate::shell::Shell, frames: u32) {
+    let turn: f32 = std::env::var("MCR_BENCH_TURN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v: &f32| v.is_finite())
+        .unwrap_or(0.0);
+    if turn != 0.0
+        && let Some(play) = &mut shell.play
+    {
+        (play.yaw, play.pitch) = (0.0, 0.0);
+    }
+    shell.set_mod_uncapped(true);
+    shell.reset_mod_stats();
+    let start = Instant::now();
+    let mut last = start;
+    for _ in 0..frames {
+        let now = Instant::now();
+        shell.advance((now - last).as_secs_f32());
+        last = now;
+        if let Some(play) = &mut shell.play {
+            play.look(turn, 0.0);
+        }
+        shell.frame();
+    }
+    let wall = start.elapsed().as_secs_f64();
+    println!(
+        "bench: {frames} frames in {wall:.2}s: {:.0} fps ({:.3} ms)",
+        f64::from(frames) / wall,
+        wall * 1000.0 / f64::from(frames)
+    );
+    if let Some(frames) = shell.mod_frames() {
+        println!("bench: {}", frames.lock().stats().summary());
+    }
+}
+
 const JAVA_FADE: Duration = Duration::from_secs(3);
 
 pub fn run_shell(opts: &crate::cli::Options, out: &Path) -> Result<()> {
@@ -282,6 +319,9 @@ fn shell_frames(
     }
     for _ in 0..3 {
         shell.frame();
+    }
+    if opts.bench_frames > 0 {
+        shell_bench(&mut shell, opts.bench_frames);
     }
     let pixels = shell.read_offscreen()?;
     write_png(out, width, height, &pixels)?;

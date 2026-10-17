@@ -72,16 +72,19 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
 ## Frame composition
 
 In mod mode mcr renders into an offscreen `Rgba8Unorm` + `Depth32Float` scene, which is vanilla's `MainTarget`
-format and gamma-space look, and blits it to the swapchain at the end. Java's frames run in lockstep with
-mcr's (`compose.rs`, `frame.rs`).
+format and gamma-space look, and blits it to the swapchain at the end. Java's frames are paced by mcr's
+(`compose.rs`, `frame.rs`). In lockstep, each frame is posted at the start of an mcr frame and composed in that
+frame. In ahead mode, Java renders frame N+1 while mcr composes and presents frame N (see *Pipelining* below).
 
 1. **Post.** The render thread posts `FrameBegin` with Rust's ticks, partial tick, size and camera. Java runs
    exactly those ticks through a `DeltaTracker.Timer` override, applies the size to `Window`, and renders.
 2. **Queue.** Java's submits are tagged with a slot and queued rather than submitted: `IMMEDIATE`;
    `WORLD_SOLID` from `LevelRenderer.render`, `WORLD_TRANSLUCENT` after `executeSolid`, `WORLD_AFTER` after the
    translucent features, `POST_WORLD` from `render3dHud` (hand, entity outline blit, post effects); `GUI` around
-   `GuiRenderer.render`. `E_SPLIT` cuts the encoder at each boundary; a render pass open across a cut continues
-   (`PASS_CONTINUES`/`PASS_RESUMES` in the pass descriptor restore pipeline, bindings and scissor).
+   `GuiRenderer.render`. `E_SPLIT` cuts the encoder where mcr's submit point changes. Solid and translucent
+   share one command buffer, and so do late features and `POST_WORLD`, unless a pass is open. A render pass open
+   across a cut continues (`PASS_CONTINUES`/`PASS_RESUMES` in the pass descriptor restore pipeline, bindings and
+   scissor).
 3. **World.** `mcr-render` ends its world pass after opaque terrain (`ExternalRenderer::after_opaque`). The render
    thread waits for Java's frame (bounded) and submits `IMMEDIATE`, `WORLD_SOLID` and `WORLD_TRANSLUCENT` there;
    then mcr draws translucent terrain and its world effects. In world slots Java's main color and depth are mcr's
@@ -102,10 +105,29 @@ Java keeps getting frames one at a time; after 30 frames in a row that each fini
 again (REI and JEI reloading their plugins on join stall Java for over 2 s). Three such recoveries per session;
 the next stall, Java stopping or Java losing its connection detach for good.
 
+**Pipelining.** The automatic mode runs Java one frame ahead when mcr's frames are uncapped (no vsync and no fps
+cap), or when Java's mean frame takes over 8 ms. It returns to lockstep under a cap once Java's mean frame falls
+below 4 ms. `MCR_MOD_PIPELINE=lockstep|ahead|auto` overrides the mode. Ahead mode posts the next frame as soon as
+Java finishes one. That happens at `before_frame` when Java is faster than mcr, and at `after_opaque` after the
+bounded wait when it is slower. One frame stays outstanding at most. Queued work carries its frame index, and
+drains stop at the composed frame, so the frame Java records ahead waits in FIFO order. A frame composed after
+the mcr frame that posted it saw the previous camera. Java reports its level projection slice, camera and
+inverse view rotation (`D_LEVEL_VIEW`), and mcr rewrites that projection to `flip · P · V · T(Cj − C) · R⁻¹` for
+its current camera, just before the frame's first world-slot submit. Entities therefore stay on the terrain
+while the camera turns. Java's GUI reacts to input one frame later, which is under a millisecond at uncapped
+rates. A frame that is late in lockstep is composed in the next mcr frame the same way, instead of being dropped.
+
+**Profiling.** `MCR_MOD_PROFILE=1` prints a line once a second. It shows fps, the render thread's wait for Java
+and its submits of Java's work, and Java's frame phases (pre, tick, extract, world, GUI and the rest, published
+in `FSTATE_PROF`). It also shows the Rust time in Java's GPU downcalls, and passes, draws, submits and uploads
+per Java frame. Java samples its render thread with JFR (`McrProfiler`) and logs each mod's share every 10
+seconds. `MCR_MOD_PROFILE=frame` skips the sampler, which slows Java down. `mcr --screenshot out.png --bench N`, alone or with `--mods` and `--connect … --after-ticks T`, runs N
+unpaced frames offscreen and prints the totals.
+
 Java's camera FOV over vanilla's (zoom mods, FOV effects mods add) reaches Rust as `FSTATE_FOV_SCALE`, clamped to
 0.02–4, and scales mcr's projection and mouse sensitivity while Java draws the world. The other way, `FrameBegin`
 carries mcr's render distance (the one its fog uses) and entity distance scaling: Java's
-`Options.getEffectiveRenderDistance` returns it while in lockstep, so Java's fog, entity view scale and culling
+`Options.getEffectiveRenderDistance` returns it while Rust paces Java, so Java's fog, entity view scale and culling
 match mcr's terrain.
 
 **Camera handoff.** Mods that move Java's camera (Freecam, camera tweaks, `Camera.update` mixins) keep working:
