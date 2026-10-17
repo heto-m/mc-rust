@@ -593,7 +593,7 @@ impl EntityLayer {
             let Some(sample) = t.display.sample(cx.partial) else {
                 continue;
             };
-            let pos = entity_pos(cx, data, e, t);
+            let pos = entity_pos(cx, data, e, t, *scale_attribute);
             if !display_visible(cx, pos, e) {
                 continue;
             }
@@ -655,7 +655,7 @@ impl EntityLayer {
                     .and_then(|a| e.attributes.get(&a))
                     .map_or(1.0, |s| s.value(None) as f32)
                     .clamp(0.0625, 16.0);
-                let pos = entity_pos(cx, data, e, t);
+                let pos = entity_pos(cx, data, e, t, *scale_attribute);
                 let in_view = match t.display_kind {
                     DisplayKind::None => {
                         visible(cx, state_chunks(cx.state), pos, w * scale, h * scale)
@@ -926,17 +926,27 @@ fn entity_pos(
     data: &'static mcr_data::Version,
     e: &Entity,
     t: &Track,
+    scale_attribute: Option<i32>,
 ) -> [f64; 3] {
     let pos = lerp3(t.prev_pos, t.pos, f64::from(cx.partial));
     let Some(vehicle) = e.vehicle.and_then(|v| cx.state.entities.get(v)) else {
         return pos;
     };
-    let (_, vh) = type_size(data, vehicle.kind);
-    let names = (
-        data.entity_type_name(vehicle.kind as u32).unwrap_or(""),
-        data.entity_type_name(e.kind as u32).unwrap_or(""),
+    let scale = |e: &Entity| {
+        scale_attribute
+            .and_then(|a| e.attributes.get(&a))
+            .map_or(1.0, |s| s.value(None) as f32)
+    };
+    let seat = vehicle
+        .passengers
+        .iter()
+        .position(|&p| p == e.id)
+        .unwrap_or(0);
+    let seat = mcr_client::attach::offset(
+        &mcr_client::attach::Vehicle::of(data, vehicle, scale(vehicle)),
+        seat,
+        &mcr_client::attach::Rider::of(data, e, scale(e)),
     );
-    let seat = crate::seats::offset(names.0, vh, vehicle.yaw, names.1);
     [
         vehicle.pos[0] + seat[0],
         vehicle.pos[1] + seat[1],

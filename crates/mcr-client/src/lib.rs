@@ -1,6 +1,7 @@
 //! Renderer-independent game client: connection driver, game state, 20 TPS tick and actions.
 
 mod actions;
+pub mod attach;
 #[cfg(test)]
 mod audit_tests;
 mod batch;

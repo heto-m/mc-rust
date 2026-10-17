@@ -8,6 +8,7 @@ use mcr_protocol::types::component::EquipmentSlot;
 use mcr_protocol::types::entity_data::EntityDataValue;
 use mcr_protocol::types::game::Hand;
 
+use crate::attach;
 use crate::client::Client;
 use crate::entity::Entity;
 use crate::error::Result;
@@ -137,6 +138,30 @@ impl Client {
             .registry("minecraft:attribute")?
             .id_of(&format!("minecraft:{name}"))?;
         e.attributes.get(&(id as i32)).map(|a| a.value(None))
+    }
+
+    fn passenger_feet(&self, vehicle: i32, fallback: [f64; 3]) -> [f64; 3] {
+        let Some(e) = self.state.entities.get(vehicle) else {
+            return fallback;
+        };
+        let data = self.state.data;
+        let seat = e
+            .passengers
+            .iter()
+            .position(|&p| p == self.state.player.entity_id)
+            .unwrap_or(0);
+        let vehicle_scale = self.entity_attribute(e, "scale").unwrap_or(1.0) as f32;
+        let player_scale = data
+            .registry("minecraft:attribute")
+            .and_then(|r| r.id_of("minecraft:scale"))
+            .and_then(|id| self.state.player.attributes.get(&(id as i32)))
+            .map_or(1.0, |a| a.value(None) as f32);
+        let o = attach::offset(
+            &attach::Vehicle::of(data, e, vehicle_scale),
+            seat,
+            &attach::Rider::player(player_scale),
+        );
+        [e.pos[0] + o[0], e.pos[1] + o[1], e.pos[2] + o[2]]
     }
 
     fn int_data(&self, e: &Entity, index: u8) -> i32 {
@@ -374,19 +399,10 @@ impl Client {
         } else {
             ride.written = entity.target_pos;
         }
-        let seat = self
-            .state
-            .entities
-            .get(vehicle)
-            .map_or(vehicle_pose.0, |e| e.pos);
+        let feet = self.passenger_feet(vehicle, vehicle_pose.0);
         let p = &mut self.state.player.physics;
         p.passenger = true;
-        p.snap_to(
-            [seat[0], seat[1] - 0.4, seat[2]],
-            [0.0; 3],
-            keys.yaw,
-            keys.pitch,
-        );
+        p.snap_to(feet, [0.0; 3], keys.yaw, keys.pitch);
         p.update_passenger_fluid(&self.state.chunks);
         let controlled_now = !matches!(ride.sim, Sim::Passive);
         let pose = controlled_now.then_some((vehicle_pose, on_ground));
