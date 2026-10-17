@@ -271,11 +271,12 @@ fn shell_frames(
         name: opts.name.clone(),
         render_distance: opts.render_distance_set.then_some(opts.render_distance),
         connect: opts.connect.clone(),
+        singleplayer: opts.singleplayer.clone(),
         mod_net,
         mods,
     };
     let mut shell = Shell::new(renderer, config)?;
-    let connecting = opts.connect.is_some();
+    let connecting = opts.connect.is_some() || opts.singleplayer.is_some();
     let mut scripted = false;
     if let Some(path) = &opts.autopilot {
         let text =

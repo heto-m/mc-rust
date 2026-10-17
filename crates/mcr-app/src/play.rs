@@ -86,6 +86,8 @@ fn music_volume(options: &Options) -> f32 {
 pub struct PlayConfig {
     pub render_distance: Option<i32>,
     pub game_dir: std::path::PathBuf,
+    /// Singleplayer: the pause screen pauses and offers Save and Quit.
+    pub local_server: bool,
 }
 
 /// What the shell lends to a session.
@@ -333,6 +335,7 @@ pub struct Play {
     death_message: Option<mcr_protocol::types::text::Component>,
     pub leave: bool,
     pub quit: bool,
+    local_server: bool,
     /// Set when the server sent us elsewhere; the shell reconnects there.
     pub transfer: Option<mcr_client::TransferTarget>,
     sky_factor: f32,
@@ -509,6 +512,7 @@ impl Play {
             death_message: None,
             leave: false,
             quit: false,
+            local_server: cfg.local_server,
             pack_answers: Vec::new(),
             conduct_answers: Vec::new(),
             dialog_replies: Vec::new(),
@@ -609,6 +613,11 @@ impl Play {
 
     pub fn screen_open(&self) -> bool {
         !self.stack.is_empty()
+    }
+
+    /// A pausing screen is open (only the singleplayer pause menu pauses).
+    pub fn pause_open(&self) -> bool {
+        self.stack.any_pauses_game()
     }
 
     pub fn ready(&self) -> bool {
@@ -1803,7 +1812,8 @@ impl Play {
 
     pub fn open_pause(&mut self) {
         if !self.busy() && self.closed.is_none() {
-            self.push_screen(Box::new(PauseScreen::new(false, false)));
+            let local = self.local_server;
+            self.push_screen(Box::new(PauseScreen::new(local, local)));
         }
     }
 

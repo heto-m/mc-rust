@@ -10,6 +10,8 @@ use mcr_ui::{Key, MouseButton};
 pub enum Step {
     Wait(u32),
     WaitReady,
+    /// Until no session, connection or local server is left (e.g. after Save and Quit).
+    WaitIdle,
     /// Until Java finished loading and its GUI is composed (mod mode).
     WaitMods,
     /// First step only: the script drives the menus itself instead of waiting for the join.
@@ -93,6 +95,7 @@ pub fn parse(text: &str) -> Result<Vec<Step>, String> {
         steps.push(match cmd {
             "wait" => Step::Wait(rest.parse().map_err(|_| err("wait needs ticks"))?),
             "wait_ready" => Step::WaitReady,
+            "wait_idle" => Step::WaitIdle,
             "wait_mods" => Step::WaitMods,
             "early" => Step::Early,
             "hold" => {
@@ -238,6 +241,12 @@ impl Autopilot {
                 Step::WaitReady => {
                     if !sh.ready() {
                         self.steps.push_front(Step::WaitReady);
+                        return;
+                    }
+                }
+                Step::WaitIdle => {
+                    if !sh.idle() {
+                        self.steps.push_front(Step::WaitIdle);
                         return;
                     }
                 }

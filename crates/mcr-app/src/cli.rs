@@ -19,6 +19,7 @@ pub struct Options {
     pub size: (u32, u32),
     pub autofly: Option<f64>,
     pub connect: Option<String>,
+    pub singleplayer: Option<String>,
     pub name: String,
     pub game_dir: PathBuf,
     pub assets_dir: PathBuf,
@@ -51,6 +52,7 @@ impl Default for Options {
             size: (1920, 1080),
             autofly: None,
             connect: None,
+            singleplayer: None,
             name: "Player".into(),
             game_dir: PathBuf::from("run/client"),
             assets_dir: PathBuf::from(DEFAULT_ASSETS),
@@ -97,6 +99,7 @@ pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect ho
            [--autofly blocks_per_s] [--bench frames [--bench-view x,y,z,yaw,pitch]... [--bench-modes]]
        connect mode: [--name <name>] [--game-dir dir] [--assets-dir dir] [--autopilot script]
            [--screenshot out.png [--after-ticks N] [--bench N] [--bench-timeline secs]]
+       singleplayer: --singleplayer <saves folder> starts that world's local server and joins it (game dir's saves/)
        soak: --connect host[:port] --soak secs runs offscreen, rejoins after kicks and prints soak-stats every 10 s
        mods: [--mods <dir>] uses <dir> instead of <game-dir>/mods; enabled mods boot under Fabric (needs `cargo xtask fabric-fetch`)
 camera angles are degrees; yaw 0 looks toward -Z, positive turns left";
@@ -150,6 +153,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
                 );
             }
             "--connect" => opts.connect = Some(value(&arg, &mut args)?),
+            "--singleplayer" => opts.singleplayer = Some(value(&arg, &mut args)?),
             "--name" => opts.name = value(&arg, &mut args)?,
             "--game-dir" => opts.game_dir = value(&arg, &mut args)?.into(),
             "--assets-dir" => opts.assets_dir = value(&arg, &mut args)?.into(),
@@ -210,6 +214,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             }
             other => return Err(format!("unknown argument {other}")),
         }
+    }
+    if opts.singleplayer.is_some() && opts.connect.is_some() {
+        return Err("--singleplayer and --connect exclude each other".into());
     }
     if opts.soak.is_some() && opts.connect.is_none() {
         return Err("--soak needs --connect".into());
@@ -295,5 +302,14 @@ mod tests {
         assert!(parse_str("--synthetic --screenshot o.png").is_err());
         assert!(parse_str("--connect").is_err());
         assert!(parse_str("--synthetic").is_ok());
+        assert!(parse_str("--singleplayer").is_err());
+        assert!(parse_str("--singleplayer w --connect h").is_err());
+        assert_eq!(
+            parse_str("--singleplayer w")
+                .unwrap()
+                .singleplayer
+                .as_deref(),
+            Some("w")
+        );
     }
 }

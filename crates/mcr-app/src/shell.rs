@@ -24,7 +24,8 @@ use mcr_settings::InputKey;
 use mcr_ui::{
     Clipboard, ConductScreen, ConfirmScreen, ConnectingScreen, Dialog, DialogScreen,
     DisconnectedScreen, Env, Modifiers, NoView, RenderCx, Screen, ScreenAction, ScreenStack,
-    SharedServers, TitleScreen, UiInput, vanilla_resources,
+    SelectWorldScreen, SharedServers, SharedWorlds, StatusHandle, TitleScreen, UiInput,
+    vanilla_resources,
 };
 
 use crate::assets::Assets;
@@ -37,6 +38,7 @@ use crate::play::{Parts, Play, PlayConfig, TICK_SECONDS};
 use crate::respacks::{PackAction, ResourceStack, ServerPacks, downloads_dir};
 use crate::servers::FileServers;
 use crate::settings::{OptionsScreen, Settings, SharedSettings};
+use crate::singleplayer::{EULA_URL, FileWorlds, Launch, LaunchInput, Session, Update};
 
 /// A join either lands, fails with a message, or is redirected by a `transfer` packet.
 enum ConnectFailure {
@@ -57,6 +59,8 @@ pub struct ShellConfig {
     pub name: String,
     pub render_distance: Option<i32>,
     pub connect: Option<String>,
+    /// A `saves` folder to play straight away.
+    pub singleplayer: Option<String>,
     /// Set in mod mode: every connection is mirrored to Java.
     pub mod_net: Option<crate::mods::ModNet>,
     pub mods: crate::mods_ui::ModsApp,
@@ -90,6 +94,9 @@ pub struct Shell {
     conduct: Option<ConductEnd>,
     route: route::Route,
     java_settings_seen: u64,
+    worlds: Rc<RefCell<FileWorlds>>,
+    sp: Option<Session>,
+    sp_status: Option<StatusHandle>,
 }
 
 impl std::fmt::Debug for Shell {
@@ -136,6 +143,9 @@ impl Shell {
             println!("audio: Java's sounds could not attach");
         }
         let servers = Rc::new(RefCell::new(FileServers::load(&cfg.game_dir)));
+        let worlds = Rc::new(RefCell::new(FileWorlds::new(
+            mcr_singleplayer::Layout::new(&cfg.game_dir),
+        )));
         let packs = ServerPacks::new(
             downloads_dir(&cfg.game_dir),
             &cfg.name,
@@ -180,6 +190,9 @@ impl Shell {
             conduct: None,
             route: route::Route::new(cfg.mod_net.as_ref().and_then(|n| n.input.clone())),
             java_settings_seen: 0,
+            worlds,
+            sp: None,
+            sp_status: None,
             cfg,
         };
         shell.show_title();
@@ -190,6 +203,9 @@ impl Shell {
             && let Some(addr) = shell.cfg.connect.take()
         {
             shell.connect(&addr, false);
+        }
+        if let Some(folder) = shell.cfg.singleplayer.take() {
+            shell.play_world(Launch::Existing(folder));
         }
         Ok(shell)
     }
@@ -476,7 +492,149 @@ impl Shell {
     fn show_title(&mut self) {
         self.stack.clear();
         let servers: SharedServers = self.servers.clone();
-        self.push(Box::new(TitleScreen::new("26.3", servers)));
+        let worlds: SharedWorlds = self.worlds.clone();
+        self.push(Box::new(
+            TitleScreen::new("26.3", servers).with_worlds(worlds),
+        ));
+    }
+
+    fn show_world_list(&mut self) {
+        self.show_title();
+        let worlds: SharedWorlds = self.worlds.clone();
+        self.push(Box::new(SelectWorldScreen::new(worlds)));
+    }
+
+    fn eula_prompt(&mut self, launch: Launch) {
+        let layout = self.worlds.borrow().layout().clone();
+        let screen = ConfirmScreen::new(
+            "Minecraft EULA",
+            &format!(
+                "Singleplayer runs Mojang's Minecraft server on this computer.\nBy continuing you agree to the Minecraft EULA:\n§9{EULA_URL}"
+            ),
+            vec![
+                (
+                    "I agree".into(),
+                    Box::new(move || match layout.accept_eula() {
+                        Ok(()) => vec![ScreenAction::Pop, launch.action()],
+                        Err(e) => {
+                            eprintln!("could not save the EULA agreement: {e}");
+                            vec![ScreenAction::Pop]
+                        }
+                    }),
+                ),
+                (
+                    "Read the EULA".into(),
+                    Box::new(|| vec![ScreenAction::OpenUrl(EULA_URL.into())]),
+                ),
+                (
+                    "lang:gui.cancel".into(),
+                    Box::new(|| vec![ScreenAction::Pop]),
+                ),
+            ],
+        );
+        self.push(Box::new(screen));
+    }
+
+    /// Starts a world's local server behind a progress screen; one at a time.
+    fn play_world(&mut self, launch: Launch) {
+        if self.sp.is_some() || self.play.is_some() {
+            eprintln!("singleplayer: a world is already open");
+            return;
+        }
+        let layout = self.worlds.borrow().layout().clone();
+        if !layout.eula_accepted() {
+            self.eula_prompt(launch);
+            return;
+        }
+        let options = self.settings.borrow().file.options.clone();
+        let input = LaunchInput {
+            layout,
+            launch,
+            player: self.cfg.name.clone(),
+            uuid: mcr_auth::offline::offline_uuid(&self.cfg.name)
+                .ok()
+                .map(|u| u.hyphenated().to_string()),
+            view_distance: self.cfg.render_distance.unwrap_or(options.render_distance),
+            simulation_distance: options.simulation_distance,
+            dev_cache: std::path::absolute(crate::mods::CACHE_DIR)
+                .unwrap_or_else(|_| PathBuf::from(crate::mods::CACHE_DIR)),
+        };
+        let (screen, status) = ConnectingScreen::with_text("lang:createWorld.preparing");
+        self.push(Box::new(screen));
+        self.sp_status = Some(status);
+        self.failure = None;
+        self.sp = Some(Session::start(input));
+    }
+
+    fn sp_failed(&mut self, message: String) {
+        eprintln!("singleplayer: {message}");
+        self.connecting = None;
+        if self.sp_status.take().is_some() {
+            self.close_connecting_screen();
+        }
+        self.failure = Some(message.clone());
+        self.push(Box::new(
+            DisconnectedScreen::new(Component::text(message))
+                .with_title(Component::text("The world could not be opened")),
+        ));
+    }
+
+    fn poll_singleplayer(&mut self) {
+        let paused = self.play.as_ref().is_some_and(Play::pause_open);
+        let updates = match &mut self.sp {
+            Some(sp) => {
+                sp.set_paused(paused);
+                sp.poll()
+            }
+            None => return,
+        };
+        for update in updates {
+            match update {
+                Update::Status(text) => {
+                    if let Some(status) = &self.sp_status {
+                        *status.borrow_mut() = text;
+                    }
+                }
+                Update::Ready(port) => {
+                    if let Some(status) = &self.sp_status {
+                        *status.borrow_mut() = "lang:connect.joining".into();
+                    }
+                    let folder = self.sp.as_ref().and_then(|s| s.folder.clone());
+                    self.worlds.borrow_mut().set_busy(folder);
+                    self.connect(&format!("127.0.0.1:{port}"), false);
+                }
+                Update::Failed(message) => {
+                    self.sp = None;
+                    self.worlds.borrow_mut().set_busy(None);
+                    self.sp_failed(message);
+                }
+                Update::Exited { requested, reason } => {
+                    let to_list = self.sp.as_ref().is_some_and(|s| s.return_to_list);
+                    self.sp = None;
+                    self.worlds.borrow_mut().set_busy(None);
+                    let text = match reason.filter(|r| !r.trim().is_empty()) {
+                        Some(r) => format!("The local server stopped:\n{}", sanitize_for_log(&r)),
+                        None => "The local server stopped".to_owned(),
+                    };
+                    if let Some(play) = &mut self.play {
+                        if !requested {
+                            play.force_close(text);
+                        }
+                    } else if requested {
+                        self.sp_status = None;
+                        if to_list {
+                            self.show_world_list();
+                        }
+                    } else {
+                        self.sp_failed(text);
+                    }
+                }
+            }
+        }
+        if self.sp.as_ref().is_some_and(Session::is_done) {
+            self.sp = None;
+            self.worlds.borrow_mut().set_busy(None);
+        }
     }
 
     /// The native Mods screen, from the main menu and from Java's "mcr" button.
@@ -627,7 +785,9 @@ impl Shell {
                 let cfg = PlayConfig {
                     render_distance: self.cfg.render_distance,
                     game_dir: self.cfg.game_dir.clone(),
+                    local_server: self.sp.is_some(),
                 };
+                self.sp_status = None;
                 self.play = Some(Play::new(parts, &cfg, client));
                 self.close_dialog_screens();
                 self.stack.pop();
@@ -638,6 +798,10 @@ impl Shell {
                 self.follow_transfer(target);
             }
             Err(ConnectFailure::Message(message)) => {
+                if let Some(sp) = &mut self.sp {
+                    sp.stop();
+                    self.sp_status = None;
+                }
                 self.end_pack_session();
                 self.failure = Some(message.clone());
                 self.close_connecting_screen();
@@ -654,6 +818,17 @@ impl Shell {
         self.parts = Some(play.finish());
         self.end_pack_session();
         self.update_menu_size();
+        if let Some(sp) = &mut self.sp {
+            sp.stop();
+            sp.return_to_list = reason.is_none();
+            if reason.is_none() {
+                self.show_world_list();
+                let (screen, status) = ConnectingScreen::with_text("lang:menu.savingLevel");
+                self.push(Box::new(screen.without_cancel()));
+                self.sp_status = Some(status);
+                return;
+            }
+        }
         match reason {
             Some(reason) => {
                 self.failure = Some(reason.clone());
@@ -671,6 +846,7 @@ impl Shell {
         let now = Instant::now();
         self.last_frame = now;
         self.poll_connect();
+        self.poll_singleplayer();
         self.poll_mod_connects();
         self.sync_java_settings();
         self.poll_packs();
@@ -875,7 +1051,13 @@ impl Shell {
                 ScreenAction::CancelConnect => {
                     self.connecting = None;
                     self.end_pack_session();
+                    if let Some(sp) = &mut self.sp {
+                        sp.stop();
+                        self.sp_status = None;
+                    }
                 }
+                ScreenAction::PlayWorld(folder) => self.play_world(Launch::Existing(folder)),
+                ScreenAction::CreateWorld(settings) => self.play_world(Launch::New(*settings)),
                 ScreenAction::ResourcePackAnswer(accepted) => self.pack_answer(accepted),
                 ScreenAction::ConductAnswer {
                     accept,
@@ -1192,7 +1374,7 @@ impl Shell {
     }
 
     pub fn idle(&self) -> bool {
-        self.play.is_none() && self.connecting.is_none()
+        self.play.is_none() && self.connecting.is_none() && self.sp.is_none()
     }
 
     pub fn rejoin(&mut self) -> bool {

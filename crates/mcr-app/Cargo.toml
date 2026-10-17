@@ -29,6 +29,7 @@ mcr-modbridge = { path = "../mcr-modbridge" }
 mcr-physics = { path = "../mcr-physics" }
 mcr-protocol = { path = "../mcr-protocol" }
 mcr-settings = { path = "../mcr-settings" }
+mcr-singleplayer = { path = "../mcr-singleplayer" }
 mcr-ui = { path = "../mcr-ui" }
 bytemuck = { version = "1", features = ["derive"] }
 serde_json.workspace = true

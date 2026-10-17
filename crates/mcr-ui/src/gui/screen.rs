@@ -67,6 +67,9 @@ pub enum ScreenAction {
     Disconnect,
     Connect(String),
     CancelConnect,
+    /// Play the world in this `saves` folder.
+    PlayWorld(String),
+    CreateWorld(Box<super::world_list::CreateWorldSettings>),
     OpenOptions,
     OpenMods,
     OpenAdvancements,
@@ -156,6 +159,8 @@ impl std::fmt::Debug for ScreenAction {
             Self::Disconnect => f.write_str("Disconnect"),
             Self::Connect(a) => f.debug_tuple("Connect").field(a).finish(),
             Self::CancelConnect => f.write_str("CancelConnect"),
+            Self::PlayWorld(w) => f.debug_tuple("PlayWorld").field(w).finish(),
+            Self::CreateWorld(s) => f.debug_tuple("CreateWorld").field(s).finish(),
             Self::OpenOptions => f.write_str("OpenOptions"),
             Self::OpenMods => f.write_str("OpenMods"),
             Self::OpenAdvancements => f.write_str("OpenAdvancements"),
@@ -309,6 +314,11 @@ impl ScreenStack {
 
     pub fn pauses_game(&self) -> bool {
         self.top().is_some_and(Screen::pauses_game)
+    }
+
+    /// A pausing screen anywhere on the stack, e.g. options opened from the pause menu.
+    pub fn any_pauses_game(&self) -> bool {
+        self.screens.iter().any(|s| s.pauses_game())
     }
 
     pub fn credits_music(&self) -> bool {

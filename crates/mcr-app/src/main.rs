@@ -40,6 +40,7 @@ mod screenshot;
 mod servers;
 mod settings;
 mod shell;
+mod singleplayer;
 mod skins;
 mod soak;
 mod source;
@@ -520,6 +521,7 @@ fn shell_config(
         name: opts.name.clone(),
         render_distance: opts.render_distance_set.then_some(opts.render_distance),
         connect: opts.connect.clone(),
+        singleplayer: opts.singleplayer.clone(),
         mod_net,
         mods,
     }

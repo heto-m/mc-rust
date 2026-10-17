@@ -9,6 +9,7 @@ use super::input::{Key, UiInput};
 use super::screen::{Screen, ScreenAction};
 use super::server_list::{ServerListScreen, SharedServers};
 use super::widgets::{Button, WidgetEvent, WidgetEventKind, WidgetSet};
+use super::world_list::{SelectWorldScreen, SharedWorlds};
 
 pub(super) const WHITE: u32 = 0xFFFF_FFFF;
 const MAX_LINES: usize = 40;
@@ -674,6 +675,7 @@ pub struct ConnectingScreen {
     widgets: WidgetSet,
     gui: (i32, i32),
     status: StatusHandle,
+    cancel: bool,
 }
 
 impl ConnectingScreen {
@@ -682,7 +684,14 @@ impl ConnectingScreen {
             widgets: WidgetSet::default(),
             gui: (0, 0),
             status,
+            cancel: true,
         }
+    }
+
+    /// No Cancel button and Escape does nothing, e.g. while a world saves.
+    pub fn without_cancel(mut self) -> Self {
+        self.cancel = false;
+        self
     }
 
     pub fn with_text(text: &str) -> (Self, StatusHandle) {
@@ -695,18 +704,21 @@ impl Screen for ConnectingScreen {
     fn init(&mut self, width: i32, height: i32) {
         self.gui = (width, height);
         self.widgets.clear();
-        self.widgets.add(Button::new(
-            1,
-            [width / 2 - 100, height / 4 + 120 + 12, 200, 20],
-            "lang:gui.cancel",
-        ));
+        if self.cancel {
+            self.widgets.add(Button::new(
+                1,
+                [width / 2 - 100, height / 4 + 120 + 12, 200, 20],
+                "lang:gui.cancel",
+            ));
+        }
     }
 
     fn render(&mut self, cx: &mut RenderCx<'_, '_>) {
         draw_menu_background(cx);
         let status = self.status.borrow().clone();
-        let text = match status.strip_prefix("lang:") {
-            Some(key) => cx.lang(key),
+        let text = match status.strip_prefix("lang:").map(|s| s.split_once('|')) {
+            Some(Some((key, arg))) => cx.lang_fmt(key, &[arg]),
+            Some(None) => cx.lang(&status[5..]),
             None => status,
         };
         cx.centered_text(&text, self.gui.0 / 2, self.gui.1 / 2 - 50, WHITE, true);
@@ -714,6 +726,9 @@ impl Screen for ConnectingScreen {
     }
 
     fn input(&mut self, env: &mut Env<'_>, input: &UiInput, out: &mut Vec<ScreenAction>) -> bool {
+        if !self.cancel {
+            return true;
+        }
         if let UiInput::Key {
             key: Key::Escape, ..
         } = input
@@ -744,6 +759,7 @@ pub struct TitleScreen {
     gui: (i32, i32),
     version: String,
     servers: SharedServers,
+    worlds: Option<SharedWorlds>,
 }
 
 impl std::fmt::Debug for TitleScreen {
@@ -759,7 +775,14 @@ impl TitleScreen {
             gui: (0, 0),
             version: version.to_owned(),
             servers,
+            worlds: None,
         }
+    }
+
+    /// Enables Singleplayer, which opens the world list over `worlds`.
+    pub fn with_worlds(mut self, worlds: SharedWorlds) -> Self {
+        self.worlds = Some(worlds);
+        self
     }
 }
 
@@ -769,8 +792,12 @@ impl Screen for TitleScreen {
         self.widgets.clear();
         let y = height / 4 + 48;
         let x = width / 2 - 100;
-        self.widgets
-            .add(Button::new(TITLE_SINGLE, [x, y, 200, 20], "lang:menu.singleplayer").disabled());
+        let single = Button::new(TITLE_SINGLE, [x, y, 200, 20], "lang:menu.singleplayer");
+        self.widgets.add(if self.worlds.is_some() {
+            single
+        } else {
+            single.disabled()
+        });
         self.widgets.add(Button::new(
             TITLE_MULTI,
             [x, y + 24, 200, 20],
@@ -818,6 +845,13 @@ impl Screen for TitleScreen {
             }
             out.push(ScreenAction::ClickSound);
             match id {
+                TITLE_SINGLE => {
+                    if let Some(worlds) = &self.worlds {
+                        out.push(ScreenAction::Push(Box::new(SelectWorldScreen::new(
+                            worlds.clone(),
+                        ))));
+                    }
+                }
                 TITLE_MULTI => out.push(ScreenAction::Push(Box::new(ServerListScreen::new(
                     self.servers.clone(),
                 )))),
