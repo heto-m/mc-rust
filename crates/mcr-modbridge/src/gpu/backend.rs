@@ -24,6 +24,7 @@ const KEPT_RING_BLOCKS: usize = 2;
 const FRAMES_IN_FLIGHT: u64 = 2;
 const SUBMIT_WAIT: Duration = Duration::from_secs(5);
 const MAX_PENDING_READBACKS: usize = 256;
+const MAX_PENDING_CLEARS: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpError {
@@ -64,6 +65,73 @@ pub struct Stats {
     /// Time and count of Java's GPU downcalls, while [`PROFILE`] is on.
     pub ffi_ns: AtomicU64,
     pub ffi_calls: AtomicU64,
+    /// Time and count per [`cost`] bucket, while [`PROFILE`] is on.
+    pub cost_ns: [AtomicU64; cost::COUNT],
+    pub cost_calls: [AtomicU64; cost::COUNT],
+}
+
+/// Where the Rust time of Java's GPU work goes: downcalls by kind on Java's thread, then the
+/// render thread's replay of the queued work.
+pub mod cost {
+    /// Every `gpu_device` call.
+    pub const DEVICE: usize = 0;
+    // 1..=15 are the encoder ops (`E_*`).
+    pub const PASS: usize = 16;
+    /// `CommandEncoder::finish` inside a split or submit.
+    pub const FINISH: usize = 17;
+    /// Copying dirty transient ranges and staged bytes out for a submit.
+    pub const STAGE: usize = 18;
+    /// Render thread: `queue.write_buffer` of queued work.
+    pub const QUEUE_WRITE: usize = 19;
+    /// Render thread: `queue.submit` and completion callbacks of queued work.
+    pub const QUEUE_SUBMIT: usize = 20;
+    /// Render thread: error scopes and queue bookkeeping around queued work.
+    pub const QUEUE_OTHER: usize = 21;
+    pub const COUNT: usize = 22;
+
+    pub const NAMES: [&str; COUNT] = [
+        "device",
+        "clear",
+        "region-clear",
+        "write",
+        "copy",
+        "write-tex",
+        "buf-to-tex",
+        "readback",
+        "tex-copy",
+        "flush",
+        "blit",
+        "dirty",
+        "submit",
+        "poll",
+        "wait",
+        "split",
+        "pass",
+        "finish",
+        "stage",
+        "q-write",
+        "q-submit",
+        "q-other",
+    ];
+}
+
+/// Adds the time since `start` to `bucket`; `start` is `None` while profiling is off.
+pub fn add_cost(bucket: usize, start: Option<std::time::Instant>) {
+    let (Some(start), Some(b)) = (start, BACKEND.get()) else {
+        return;
+    };
+    if bucket < cost::COUNT {
+        let ns = start.elapsed().as_nanos() as u64;
+        b.stats.cost_ns[bucket].fetch_add(ns, Ordering::Relaxed);
+        b.stats.cost_calls[bucket].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A start time for [`add_cost`] while profiling.
+pub fn cost_start() -> Option<std::time::Instant> {
+    PROFILE
+        .load(Ordering::Relaxed)
+        .then(std::time::Instant::now)
 }
 
 /// Times every GPU downcall into [`Stats::ffi_ns`]; off unless the frame profile is.
@@ -83,6 +151,8 @@ pub struct StatsSnapshot {
     pub errors: u64,
     pub ffi_ns: u64,
     pub ffi_calls: u64,
+    pub cost_ns: [u64; cost::COUNT],
+    pub cost_calls: [u64; cost::COUNT],
 }
 
 impl Stats {
@@ -101,6 +171,8 @@ impl Stats {
             errors: l(&self.errors),
             ffi_ns: l(&self.ffi_ns),
             ffi_calls: l(&self.ffi_calls),
+            cost_ns: self.cost_ns.each_ref().map(l),
+            cost_calls: self.cost_calls.each_ref().map(l),
         }
     }
 }
@@ -145,6 +217,8 @@ struct RingBlock {
     buffer: wgpu::Buffer,
     data: Vec<u8>,
     used: usize,
+    /// Bytes already handed to the queue in this submit.
+    flushed: usize,
     used_last: bool,
 }
 
@@ -189,6 +263,7 @@ impl UploadRing {
                     }),
                     data: vec![0; size],
                     used: 0,
+                    flushed: 0,
                     used_last: false,
                 });
                 self.blocks.len() - 1
@@ -205,31 +280,45 @@ impl UploadRing {
         )
     }
 
-    /// Writes the staged bytes now, or hands copies to `deferred` to write with the submit.
+    /// Writes the bytes staged since the last upload now, or hands copies to `deferred` to write with
+    /// the submit. Blocks are reused only from the next submit on (`end_submit`), so splits of one
+    /// submit never overwrite each other's staging.
     fn upload(
         &mut self,
         queue: &wgpu::Queue,
         mut deferred: Option<&mut Vec<(wgpu::Buffer, u64, Vec<u8>)>>,
+        end_submit: bool,
     ) -> u64 {
         let mut bytes = 0;
         for b in &mut self.blocks {
-            b.used_last = b.used > 0;
-            if b.used > 0 {
-                let end = align(b.used as u64, 4) as usize;
+            let end = align(b.used as u64, 4) as usize;
+            if end > b.flushed {
+                let range = b.flushed..end;
                 match deferred.as_deref_mut() {
-                    Some(out) => out.push((b.buffer.clone(), 0, pooled_copy(&b.data[..end]))),
-                    None => queue.write_buffer(&b.buffer, 0, &b.data[..end]),
+                    Some(out) => out.push((
+                        b.buffer.clone(),
+                        b.flushed as u64,
+                        pooled_copy(&b.data[range]),
+                    )),
+                    None => queue.write_buffer(&b.buffer, b.flushed as u64, &b.data[range]),
                 }
-                bytes += end as u64;
-                b.used = 0;
+                bytes += (end - b.flushed) as u64;
+                b.flushed = end;
             }
         }
-        let mut i = 0;
-        self.blocks.retain(|b| {
-            i += 1;
-            keep_ring_block(i, b.data.len(), b.used_last)
-        });
-        self.current = 0;
+        if end_submit {
+            for b in &mut self.blocks {
+                b.used_last = b.used > 0;
+                b.used = 0;
+                b.flushed = 0;
+            }
+            let mut i = 0;
+            self.blocks.retain(|b| {
+                i += 1;
+                keep_ring_block(i, b.data.len(), b.used_last)
+            });
+            self.current = 0;
+        }
         bytes
     }
 }
@@ -268,18 +357,124 @@ pub struct Encoder {
     track: Arc<SubmitTrack>,
     /// State of a pass cut at a slot boundary, for its continuation.
     pub resume: Option<super::pass::PassState>,
+    /// Full clears not recorded yet: the next pass that renders to them clears as it loads.
+    pub clears: Vec<PendingClear>,
+}
+
+/// A full clear of mip 0 of a single-layer texture. It is recorded only once something uses the
+/// texture, so a clear nobody observes before the next one costs nothing.
+#[derive(Debug)]
+pub struct PendingClear {
+    pub texture: wgpu::Texture,
+    /// The view to clear through; mip 0, layer 0 of `texture` when `None`.
+    pub view: Option<wgpu::TextureView>,
+    pub value: ClearValue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClearValue {
+    Color([f32; 4]),
+    /// Depth, and whether the format has a stencil aspect (cleared to 0).
+    Depth(f32, bool),
+}
+
+impl ClearValue {
+    pub fn is_color(self) -> bool {
+        matches!(self, Self::Color(_))
+    }
+}
+
+/// Records `clears` as clear passes, a color clear and a depth clear of the same size sharing one.
+pub fn record_clears(
+    cmd: &mut wgpu::CommandEncoder,
+    clears: impl IntoIterator<Item = PendingClear>,
+) {
+    let view = |c: &PendingClear| {
+        c.view.clone().unwrap_or_else(|| {
+            c.texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("java clear"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                mip_level_count: Some(1),
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        })
+    };
+    let mut clears = clears.into_iter().peekable();
+    while let Some(c) = clears.next() {
+        let (color, depth) = match c.value {
+            ClearValue::Color(rgba) => {
+                let depth = clears.next_if(|d| {
+                    matches!(d.value, ClearValue::Depth(..)) && d.texture.size() == c.texture.size()
+                });
+                (Some((view(&c), rgba)), depth.map(|d| (view(&d), d.value)))
+            }
+            ClearValue::Depth(..) => (None, Some((view(&c), c.value))),
+        };
+        let color_att = color
+            .as_ref()
+            .map(|(v, c)| wgpu::RenderPassColorAttachment {
+                view: v,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: f64::from(c[0]),
+                        g: f64::from(c[1]),
+                        b: f64::from(c[2]),
+                        a: f64::from(c[3]),
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            });
+        let depth_att = depth.as_ref().map(|(v, value)| {
+            let (d, stencil) = match *value {
+                ClearValue::Depth(d, stencil) => (d, stencil),
+                ClearValue::Color(_) => (0.0, false),
+            };
+            wgpu::RenderPassDepthStencilAttachment {
+                view: v,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(d.clamp(0.0, 1.0)),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: stencil.then_some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(0),
+                    store: wgpu::StoreOp::Store,
+                }),
+            }
+        });
+        drop(cmd.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("java clear"),
+            color_attachments: &[color_att],
+            depth_stencil_attachment: depth_att,
+            ..Default::default()
+        }));
+    }
 }
 
 impl Encoder {
     fn new() -> Self {
         Self {
             resume: None,
+            clears: Vec::new(),
             cmd: None,
             ring: UploadRing::default(),
             recorded: Vec::new(),
             pending: Vec::new(),
             submits: 0,
             track: Arc::default(),
+        }
+    }
+
+    /// Holds back a full clear; an earlier pending clear of the same aspect is overwritten by it.
+    fn defer_clear(&mut self, device: &wgpu::Device, clear: PendingClear) {
+        self.clears
+            .retain(|c| c.texture != clear.texture || c.value.is_color() != clear.value.is_color());
+        self.clears.push(clear);
+        if self.clears.len() > MAX_PENDING_CLEARS {
+            let clears = std::mem::take(&mut self.clears);
+            record_clears(self.cmd(device), clears);
         }
     }
 
@@ -815,7 +1010,10 @@ impl State {
         offset: u64,
         len: u64,
     ) -> OpResult<()> {
-        let b = self.buffer(buffer)?;
+        let b = self
+            .buffers
+            .get(buffer)
+            .ok_or(OpError::Handle(Kind::Buffer, buffer))?;
         let shadow = b
             .shadow
             .as_ref()
@@ -828,32 +1026,22 @@ impl State {
         }
         let start = offset & !3;
         let end = align(offset + len, 4).min(b.buffer.size());
-        let mut bytes = vec![0u8; (end - start) as usize];
+        if end <= start {
+            return Ok(());
+        }
+        let dst = b.buffer.clone();
         let src = shadow.bytes();
-        let avail = (src.len() as u64).min(end) - start;
-        bytes[..avail as usize].copy_from_slice(&src[start as usize..(start + avail) as usize]);
-        self.stage_copy_raw(gpu, encoder, buffer, start, &bytes)
-    }
-
-    fn stage_copy_raw(
-        &mut self,
-        gpu: &Gpu,
-        encoder: Handle,
-        dest: Handle,
-        offset: u64,
-        data: &[u8],
-    ) -> OpResult<()> {
-        let dst_buffer = self.buffer(dest)?.buffer.clone();
-        let enc = self.encoder(encoder)?;
-        let (src, src_offset, staging) = enc.ring.alloc(&gpu.device, data.len(), 4);
-        staging.copy_from_slice(data);
-        enc.cmd(&gpu.device).copy_buffer_to_buffer(
-            &src,
-            src_offset,
-            &dst_buffer,
-            offset,
-            data.len() as u64,
-        );
+        let avail = ((src.len() as u64).min(end).saturating_sub(start)) as usize;
+        let enc = self
+            .encoders
+            .get_mut(encoder)
+            .ok_or(OpError::Handle(Kind::Encoder, encoder))?;
+        let size = (end - start) as usize;
+        let (ring, ring_offset, staging) = enc.ring.alloc(&gpu.device, size, 4);
+        staging[..avail].copy_from_slice(&src[start as usize..start as usize + avail]);
+        staging[avail..].fill(0);
+        enc.cmd(&gpu.device)
+            .copy_buffer_to_buffer(&ring, ring_offset, &dst, start, size as u64);
         Ok(())
     }
 
@@ -907,6 +1095,7 @@ impl State {
         w: u32,
         h: u32,
     ) -> OpResult<()> {
+        self.flush_clears(gpu, encoder)?;
         let tex = self.texture(dest)?;
         region(tex, mip, layer, x, y, w, h)?;
         if tex.format.is_depth_stencil_format() {
@@ -977,6 +1166,7 @@ impl State {
         mip: u32,
         layer: u32,
     ) -> OpResult<()> {
+        self.flush_clears(gpu, encoder)?;
         let tex = self.texture(dest)?;
         region(tex, mip, layer, x, y, w, h)?;
         let bs = u64::from(tex.block_size());
@@ -1048,6 +1238,7 @@ impl State {
         encoder: Handle,
         src: Handle,
     ) -> OpResult<()> {
+        self.flush_clears(gpu, encoder)?;
         let t = self.texture(src)?;
         if !t.virtual_main || !t.format.has_color_aspect() {
             return Ok(());
@@ -1085,6 +1276,7 @@ impl State {
         w: u32,
         h: u32,
     ) -> OpResult<()> {
+        self.flush_clears(gpu, encoder)?;
         let tex = self.texture(src)?;
         region(tex, mip, 0, x, y, w, h)?;
         let bs = tex.block_size();
@@ -1185,6 +1377,7 @@ impl State {
         w: u32,
         h: u32,
     ) -> OpResult<()> {
+        self.flush_clears(gpu, encoder)?;
         let s = self.texture(src)?;
         let d = self.texture(dst)?;
         region(s, mip, 0, src_x, src_y, w, h)?;
@@ -1259,20 +1452,15 @@ impl State {
                 self.clear(gpu, encoder, color, None, None)?;
             }
             if !w.scene_depth {
-                let cmd = self.encoder(encoder)?.cmd(&gpu.device);
-                drop(cmd.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("java post-world depth clear"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &w.depth,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(d.clamp(0.0, 1.0)),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    ..Default::default()
-                }));
+                let depth_has_stencil = w.depth.texture().format().has_stencil_aspect();
+                self.encoder(encoder)?.defer_clear(
+                    &gpu.device,
+                    PendingClear {
+                        texture: w.depth.texture().clone(),
+                        view: Some(w.depth.clone()),
+                        value: ClearValue::Depth(d, depth_has_stencil),
+                    },
+                );
             }
             return Ok(());
         }
@@ -1299,6 +1487,30 @@ impl State {
             .map(|(t, _)| t.layers)
             .or(depth_tex.map(|(t, _)| t.layers))
             .unwrap_or(0);
+        if color_tex.is_none_or(|(t, _)| t.layers == 1)
+            && depth_tex.is_none_or(|(t, _)| t.layers == 1)
+        {
+            let mut pending = Vec::with_capacity(2);
+            if let Some((t, c)) = color_tex {
+                pending.push(PendingClear {
+                    texture: t.texture.clone(),
+                    view: None,
+                    value: ClearValue::Color(c),
+                });
+            }
+            if let Some((t, d)) = depth_tex {
+                pending.push(PendingClear {
+                    texture: t.texture.clone(),
+                    view: None,
+                    value: ClearValue::Depth(d, t.format.has_stencil_aspect()),
+                });
+            }
+            let enc = self.encoder(encoder)?;
+            for c in pending {
+                enc.defer_clear(&gpu.device, c);
+            }
+            return Ok(());
+        }
         let mut passes = Vec::with_capacity(layers as usize);
         for layer in 0..layers {
             let cv = color_tex
@@ -1309,6 +1521,7 @@ impl State {
             });
             passes.push((cv, dv));
         }
+        self.flush_clears(gpu, encoder)?;
         let cmd = self.encoder(encoder)?.cmd(&gpu.device);
         for (cv, dv) in &passes {
             let color_att = cv.as_ref().map(|(v, c)| wgpu::RenderPassColorAttachment {
@@ -1348,6 +1561,17 @@ impl State {
         Ok(())
     }
 
+    /// Records the clears no pass took over, in order.
+    pub fn flush_clears(&mut self, gpu: &Gpu, encoder: Handle) -> OpResult<()> {
+        let enc = self.encoder(encoder)?;
+        if enc.clears.is_empty() {
+            return Ok(());
+        }
+        let clears = std::mem::take(&mut enc.clears);
+        record_clears(enc.cmd(&gpu.device), clears);
+        Ok(())
+    }
+
     /// A scissored clear of one mip: a full-screen triangle carrying the clear values.
     #[allow(clippy::too_many_arguments)]
     pub fn clear_region(
@@ -1363,6 +1587,7 @@ impl State {
         mip: u32,
         world: bool,
     ) -> OpResult<()> {
+        self.flush_clears(gpu, encoder)?;
         let ct = self.texture(color.0)?;
         let dt = self.texture(depth.0)?;
         if world && (ct.virtual_main || dt.virtual_main) {
@@ -1495,6 +1720,7 @@ impl State {
         surface: Handle,
         view: Handle,
     ) -> OpResult<()> {
+        self.flush_clears(gpu, encoder)?;
         let v = self
             .views
             .get(view)
@@ -1567,9 +1793,9 @@ impl State {
         encoder: Handle,
     ) -> OpResult<u64> {
         let defer = slots.is_active();
-        let (writes, uploaded) = self.stage(gpu, encoder, defer)?;
+        let (writes, uploaded) = self.stage(gpu, encoder, defer, true)?;
         let enc = self.encoder(encoder)?;
-        let cmd = enc.cmd.take().map(|c| c.finish());
+        let (cmd, failed) = finish_valid(gpu, enc.cmd.take());
         enc.submits += 1;
         let n = enc.submits;
         let mut maps = Vec::new();
@@ -1592,6 +1818,7 @@ impl State {
             maps,
             track: enc.track.clone(),
             n,
+            epoch: n,
         };
         if defer {
             slots.defer(gpu, sub);
@@ -1605,7 +1832,7 @@ impl State {
         }
         let destroyed = std::mem::take(&mut self.destroyed);
         self.binds.purge(&destroyed);
-        Ok(n)
+        failed.map_or(Ok(n), Err)
     }
 
     /// While composing, queues what was recorded so far under the current slot, so a slot change
@@ -1621,11 +1848,11 @@ impl State {
             self.encoder(encoder)?;
             return Ok(());
         }
-        let (writes, uploaded) = self.stage(gpu, encoder, true)?;
+        let (writes, uploaded) = self.stage(gpu, encoder, true, false)?;
         let enc = self.encoder(encoder)?;
-        let cmd = enc.cmd.take().map(|c| c.finish());
+        let (cmd, failed) = finish_valid(gpu, enc.cmd.take());
         if cmd.is_none() && writes.is_empty() {
-            return Ok(());
+            return failed.map_or(Ok(()), Err);
         }
         let (slot, frame) = slots.current();
         slots.defer(
@@ -1638,10 +1865,11 @@ impl State {
                 maps: Vec::new(),
                 track: enc.track.clone(),
                 n: enc.submits,
+                epoch: enc.submits + 1,
             },
         );
         stats.uploaded.fetch_add(uploaded, Ordering::Relaxed);
-        Ok(())
+        failed.map_or(Ok(()), Err)
     }
 
     /// Collects the dirty host ranges and staged ring bytes for the next queue write; with `defer`
@@ -1652,7 +1880,9 @@ impl State {
         gpu: &Gpu,
         encoder: Handle,
         defer: bool,
+        end_submit: bool,
     ) -> OpResult<(Vec<(wgpu::Buffer, u64, Vec<u8>)>, u64)> {
+        let start = cost_start();
         let mut writes = Vec::new();
         for block in std::mem::take(&mut self.dirty_blocks) {
             let Some(b) = self.buffers.get_mut(block) else {
@@ -1674,7 +1904,10 @@ impl State {
         }
         let dirty: u64 = writes.iter().map(|(_, _, d)| d.len() as u64).sum();
         let enc = self.encoder(encoder)?;
-        let ring = enc.ring.upload(&gpu.queue, defer.then_some(&mut writes));
+        let ring = enc
+            .ring
+            .upload(&gpu.queue, defer.then_some(&mut writes), end_submit);
+        add_cost(cost::STAGE, start);
         Ok((writes, dirty + ring))
     }
 
@@ -1783,6 +2016,26 @@ impl State {
     }
 }
 
+/// Finishes `cmd`, or drops it when its recording failed: an invalid buffer would sink mcr's whole
+/// frame batch.
+fn finish_valid(
+    gpu: &Gpu,
+    cmd: Option<wgpu::CommandEncoder>,
+) -> (Option<wgpu::CommandBuffer>, Option<OpError>) {
+    let Some(cmd) = cmd else {
+        return (None, None);
+    };
+    let start = cost_start();
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let buffer = cmd.finish();
+    let error = pollster::block_on(scope.pop());
+    add_cost(cost::FINISH, start);
+    match error {
+        None => (Some(buffer), None),
+        Some(e) => (None, Some(OpError::Wgpu(e.to_string()))),
+    }
+}
+
 /// Shared `u32` indices turning a triangle fan of up to `vertices` vertices into a list.
 pub fn ensure_fan(
     slot: &mut Option<(wgpu::Buffer, u32)>,
@@ -1828,6 +2081,26 @@ struct V { @builtin(position) pos: vec4f, @location(0) color: vec4f }
 #[cfg(test)]
 mod ring_tests {
     use super::*;
+
+    #[test]
+    fn splits_of_one_submit_upload_disjoint_ranges() {
+        let Ok(gpu) = context::gpu() else {
+            eprintln!("skipped: no gpu");
+            return;
+        };
+        let mut ring = UploadRing::default();
+        let mut writes = Vec::new();
+        ring.alloc(&gpu.device, 8, 4).2.fill(1);
+        assert_eq!(ring.upload(&gpu.queue, Some(&mut writes), false), 8);
+        let (_, offset, _) = ring.alloc(&gpu.device, 8, 4);
+        assert_eq!(offset, 8, "a split keeps earlier staging");
+        assert_eq!(ring.upload(&gpu.queue, Some(&mut writes), false), 8);
+        let ranges: Vec<_> = writes.iter().map(|(_, o, d)| (*o, d.len())).collect();
+        assert_eq!(ranges, [(0, 8), (8, 8)]);
+        assert_eq!(ring.upload(&gpu.queue, Some(&mut writes), true), 0);
+        let (_, offset, _) = ring.alloc(&gpu.device, 8, 4);
+        assert_eq!(offset, 0, "the next submit reuses the block");
+    }
 
     #[test]
     fn idle_oversized_ring_blocks_are_released() {

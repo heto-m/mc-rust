@@ -86,16 +86,18 @@ fn push_sample(v: &mut Vec<u32>, d: Duration) {
     v.push(d.as_micros().min(u128::from(u32::MAX)) as u32);
 }
 
-/// Copies `src` into `dst` when both have the same size and format.
-fn copy_same(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Texture, dst: &wgpu::Texture) {
+/// Copies `src` into `dst` in the frame's order when both have the same size and format.
+fn copy_same(ctx: &ExternalCtx<'_>, src: &wgpu::Texture, dst: &wgpu::Texture) {
     if src.size() != dst.size() || src.format() != dst.format() {
         return;
     }
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("mcr-modbridge composite copy"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mcr-modbridge composite copy"),
+        });
     encoder.copy_texture_to_texture(src.as_image_copy(), dst.as_image_copy(), src.size());
-    queue.submit([encoder.finish()]);
+    ctx.batch.push(encoder.finish());
 }
 
 /// A texture to hold a copy of `like`.
@@ -473,7 +475,7 @@ impl FrameLink {
             if self.lockstep.state() == LinkState::Running {
                 self.ready = Some(index);
             } else {
-                self.drain(|| backend.slots.drain_frame(gpu, index));
+                self.drain(|| backend.slots.drain_frame(gpu, Some(ctx.batch), index));
             }
         }
         if self.lockstep.reattach() {
@@ -484,10 +486,10 @@ impl FrameLink {
         match self.lockstep.state() {
             LinkState::Running => {
                 let upto = self.ready.or(outstanding).unwrap_or(u64::MAX);
-                self.drain(|| backend.slots.drain_immediate(gpu, upto));
+                self.drain(|| backend.slots.drain_immediate(gpu, Some(ctx.batch), upto));
             }
             LinkState::Booting | LinkState::Detached => {
-                self.drain(|| backend.slots.drain_all(gpu));
+                self.drain(|| backend.slots.drain_all(gpu, Some(ctx.batch)));
             }
         };
         // In lockstep a frame composed late is followed by a fresh post next frame.
@@ -522,7 +524,11 @@ impl FrameLink {
             }
         };
         self.redraw_from(backend, index, ctx);
-        self.drain(|| backend.slots.drain_world(backend.gpu, index));
+        self.drain(|| {
+            backend
+                .slots
+                .drain_world(backend.gpu, Some(ctx.batch), index)
+        });
         self.composing = Some(index);
     }
 
@@ -577,7 +583,7 @@ impl FrameLink {
         };
         let gpu = backend.gpu;
         if let Some(index) = self.composing.take() {
-            self.compose(backend, index);
+            self.compose(backend, index, ctx);
             return;
         }
         if self.lockstep.state() != LinkState::Running {
@@ -585,7 +591,7 @@ impl FrameLink {
                 let java = self.java();
                 self.finished(&java);
             }
-            self.drain(|| backend.slots.drain_all(gpu));
+            self.drain(|| backend.slots.drain_all(gpu, Some(ctx.batch)));
             return;
         }
         let Some(index) = self.ready.or(self.lockstep.outstanding()) else {
@@ -614,10 +620,10 @@ impl FrameLink {
         let java = self.java();
         if done {
             self.redraw_from(backend, index, ctx);
-            self.compose(backend, index);
+            self.compose(backend, index, ctx);
         } else if self.shared.frame.is_gone() {
             self.detach_for_good("Java stopped");
-            self.drain(|| backend.slots.drain_all(gpu));
+            self.drain(|| backend.slots.drain_all(gpu, Some(ctx.batch)));
         } else if self.lockstep.expire(Instant::now(), java.loaded) {
             let waited = start.elapsed();
             self.report_detached(&format!(
@@ -626,20 +632,24 @@ impl FrameLink {
                     .as_secs_f32()
                     .max(crate::frame::HANG_TIMEOUT.as_secs_f32())
             ));
-            self.drain(|| backend.slots.drain_all(gpu));
+            self.drain(|| backend.slots.drain_all(gpu, Some(ctx.batch)));
         } else {
             self.stats.late += 1;
             // Loading screens stay up; in game the live world beats a frozen composite.
             if !java.loaded
                 && let Some(last) = &self.last
             {
-                copy_same(ctx.device, ctx.queue, last, ctx.scene);
+                copy_same(ctx, last, ctx.scene);
             }
         }
     }
 
-    fn compose(&mut self, backend: &'static Backend, index: u64) {
-        self.drain(|| backend.slots.drain_before_gui(backend.gpu, index));
+    fn compose(&mut self, backend: &'static Backend, index: u64, ctx: &ExternalCtx<'_>) {
+        self.drain(|| {
+            backend
+                .slots
+                .drain_before_gui(backend.gpu, Some(ctx.batch), index)
+        });
         self.gui_pending = Some(index);
         self.stats.composed += 1;
     }
@@ -662,7 +672,9 @@ impl FrameLink {
                 "java main target does not match the scene; its GUI is skipped this frame"
             );
         }
-        backend.slots.drain_frame(backend.gpu, index);
+        backend
+            .slots
+            .drain_frame(backend.gpu, Some(ctx.batch), index);
         if composed {
             self.size_mismatch_logged = false;
             self.shown = true;
@@ -673,7 +685,7 @@ impl FrameLink {
                     Some(t) if t.size() == ctx.scene.size() => t,
                     _ => composite_copy(ctx.device, ctx.scene),
                 };
-                copy_same(ctx.device, ctx.queue, ctx.scene, &last);
+                copy_same(ctx, ctx.scene, &last);
                 self.last = Some(last);
             }
         }
@@ -787,6 +799,12 @@ impl ExternalSubmitter for ModFrames {
 
     fn before_ui(&mut self, ctx: &ExternalCtx<'_>) {
         self.lock().before_ui(ctx);
+    }
+
+    fn submitted(&mut self, index: &wgpu::SubmissionIndex, rejected: bool) {
+        if let Some(b) = FrameLink::backend() {
+            b.slots.submitted(b.gpu, index, rejected);
+        }
     }
 }
 

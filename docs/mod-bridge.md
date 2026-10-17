@@ -115,6 +115,22 @@ frame. In ahead mode, Java renders frame N+1 while mcr composes and presents fra
    wait until the GUI slot ran. If the wait at `after_opaque` timed out, it does not wait again.
 5. **Native overlays.** These draw after, then the frame is presented.
 
+**One submit per frame.** "Submits" above means "appends to the frame batch" (`mcr_render::FrameBatch`): mcr's
+command buffers and Java's queued ones keep their order, and the frame ends with a single `queue.submit`. mcr's
+own encoder stays open across a hook that adds nothing, so the title screen records mcr's frame in one command
+buffer. Java's staged bytes still go out with `queue.write_buffer`, which lands before the whole batch, so the
+upload ring is reused only per Java submit, and a queued item with writes from another Java submit (or another
+encoder) first sends the batch. The late-camera rewrite is a 64-byte copy command buffer in the batch. A Java
+command buffer whose recording failed is dropped at `finish`; if a batch is still rejected, Java's work goes back
+to its own submits for the session. Readback maps, fence progress and `on_submitted_work_done` are armed in
+`Slots::submitted`, after the batch reached the queue.
+
+**Clears.** A full clear of a single-layer texture is not recorded at once. The next pass that renders to it
+clears as it loads, a later clear of the same texture replaces it, and ops that read or write the texture
+otherwise (copies, readbacks, region clears, a pass sampling it) record it first. A clear that nothing reads
+before the next clear of the same texture therefore costs nothing; on the title screen that removes the two
+depth-clear passes Java records every frame.
+
 Clears of the main target's color, and of the scene depth in world slots, are dropped. A Java frame that misses
 the 2 s deadline detaches the bridge from rendering: mcr's native HUD and entities return and a toast says so.
 Java keeps getting frames one at a time; after 30 frames in a row that each finish within 250 ms it is composed
@@ -136,7 +152,10 @@ rates. A frame that is late in lockstep is composed in the next mcr frame the sa
 **Profiling.** `MCR_MOD_PROFILE=1` prints a line once a second. It shows fps, the render thread's wait for Java
 and its submits of Java's work, and Java's frame phases (pre, tick, extract, world, GUI and the rest, published
 in `FSTATE_PROF`). It also shows the Rust time in Java's GPU downcalls, and passes, draws, submits and uploads
-per Java frame. Java samples its render thread with JFR (`McrProfiler`) and logs each mod's share every 10
+per Java frame, and that Rust time split by kind: each encoder op, pass replay, command-buffer `finish`,
+staging, and the render thread's queue writes and batch bookkeeping (`gpu::backend::cost`). The render thread's
+submit time includes finishing mcr's held encoder when a hook adds Java work after it. Java samples its render
+thread with JFR (`McrProfiler`) and logs each mod's share every 10
 seconds. `MCR_MOD_PROFILE=frame` skips the sampler, which slows Java down. `mcr --screenshot out.png --bench N`, alone or with `--mods` and `--connect … --after-ticks T`, runs N
 unpaced frames offscreen and prints the totals. `--bench-timeline S` instead runs unpaced frames until S seconds
 after joining (or after Java's title screen appears) and prints the frame rate of every second; with `--mods`

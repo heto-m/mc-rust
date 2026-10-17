@@ -8,12 +8,14 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use super::backend::{add_cost, cost, cost_start};
 use super::context::Gpu;
 use super::slab::Handle;
 use crate::abi::{
     SLOT_GUI, SLOT_IMMEDIATE, SLOT_POST_WORLD, SLOT_WORLD_AFTER, SLOT_WORLD_SOLID,
     SLOT_WORLD_TRANSLUCENT,
 };
+use mcr_render::FrameBatch;
 
 /// Bounds memory if Java submits while the render thread is not draining (a stalled window).
 pub const MAX_QUEUED: usize = 4096;
@@ -126,6 +128,9 @@ pub struct Submission {
     pub maps: Vec<(wgpu::Buffer, Arc<AtomicU8>)>,
     pub track: Arc<SubmitTrack>,
     pub n: u64,
+    /// The Java submit this work belongs to: its transient memory and upload ring are only reused
+    /// by later submits.
+    pub epoch: u64,
 }
 
 impl Submission {
@@ -135,10 +140,13 @@ impl Submission {
 
     /// Writes, submits and arms the completion and readback callbacks.
     pub fn execute(self, gpu: &Gpu) {
+        let start = cost_start();
         for (buffer, offset, data) in self.writes {
             gpu.queue.write_buffer(&buffer, offset, &data);
             recycle(data);
         }
+        add_cost(cost::QUEUE_WRITE, start);
+        let start = cost_start();
         if self.cmd.is_none() && self.maps.is_empty() {
             // Pending writes go out with the next submit, still ahead of any later command buffer.
             let (done, n) = (self.track.done.clone(), self.n);
@@ -146,6 +154,7 @@ impl Submission {
                 done.fetch_max(n, Ordering::AcqRel);
             });
             self.track.queued.fetch_max(n, Ordering::AcqRel);
+            add_cost(cost::QUEUE_SUBMIT, start);
             return;
         }
         let index = gpu.queue.submit(self.cmd);
@@ -163,6 +172,7 @@ impl Submission {
                 );
             });
         }
+        add_cost(cost::QUEUE_SUBMIT, start);
     }
 }
 
@@ -264,6 +274,27 @@ struct Patch {
     bytes: [u8; 64],
 }
 
+/// Queued work moved into mcr's frame batch, finished once the batch is on the queue.
+#[derive(Debug)]
+struct Batched {
+    track: Arc<SubmitTrack>,
+    n: u64,
+    maps: Vec<(wgpu::Buffer, Arc<AtomicU8>)>,
+}
+
+#[derive(Debug, Default)]
+struct BatchState {
+    /// `(encoder track, epoch)` of every Java command buffer in the open batch.
+    keys: Vec<(usize, u64)>,
+    pending: Vec<Batched>,
+}
+
+/// Rotating 256-byte slots the level projection patch is copied from.
+const PATCH_SLOTS: u64 = 4;
+const PATCH_STRIDE: u64 = 256;
+/// How long Java's overflow path waits for an open frame batch before submitting anyway.
+const OVERFLOW_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[derive(Debug, Default)]
 pub struct Slots {
     active: AtomicBool,
@@ -279,6 +310,13 @@ pub struct Slots {
     patch: Mutex<Option<Patch>>,
     /// Held while queued work is popped and submitted, so submits never reorder across threads.
     exec: Mutex<()>,
+    batch: Mutex<BatchState>,
+    /// Drained work waits in mcr's frame batch, not yet on the queue.
+    batch_open: AtomicBool,
+    /// A frame batch was rejected: Java's work is submitted on its own from then on.
+    unbatched: AtomicBool,
+    patch_source: Mutex<Option<wgpu::Buffer>>,
+    patch_slot: AtomicU64,
 }
 
 impl Slots {
@@ -290,7 +328,7 @@ impl Slots {
     /// Java submits directly again (shutdown); whatever was queued is submitted first.
     pub fn deactivate(&self, gpu: &Gpu) {
         self.active.store(false, Ordering::Release);
-        self.drain_all(gpu);
+        self.drain_all(gpu, None);
     }
 
     pub fn is_active(&self) -> bool {
@@ -327,6 +365,10 @@ impl Slots {
         let mut q = self.lock();
         if q.len() >= MAX_QUEUED {
             drop(q);
+            let start = std::time::Instant::now();
+            while self.batch_open.load(Ordering::Acquire) && start.elapsed() < OVERFLOW_WAIT {
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
             let _exec = self.exec.lock().unwrap_or_else(PoisonError::into_inner);
             let mut q = self.lock();
             let n = self.overflows.fetch_add(1, Ordering::Relaxed);
@@ -347,37 +389,47 @@ impl Slots {
     }
 
     /// Submits the immediate work of frames up to `upto` queued ahead of any frame work.
-    pub fn drain_immediate(&self, gpu: &Gpu, upto: u64) -> usize {
-        self.drain_while(gpu, 0, immediate_upto(upto))
+    pub fn drain_immediate(&self, gpu: &Gpu, batch: Option<&FrameBatch>, upto: u64) -> usize {
+        self.drain_while(gpu, batch, 0, immediate_upto(upto))
     }
 
     /// Submits the leading work up to Java's translucent features, at mcr's `after_opaque`.
-    pub fn drain_world(&self, gpu: &Gpu, upto: u64) -> usize {
-        self.drain_while(gpu, 0, world_upto(upto))
+    pub fn drain_world(&self, gpu: &Gpu, batch: Option<&FrameBatch>, upto: u64) -> usize {
+        self.drain_while(gpu, batch, 0, world_upto(upto))
     }
 
     /// Submits the leading work that comes before the GUI (late world features, hand, post effects).
-    pub fn drain_before_gui(&self, gpu: &Gpu, upto: u64) -> usize {
-        self.drain_while(gpu, 0, before_gui_upto(upto))
+    pub fn drain_before_gui(&self, gpu: &Gpu, batch: Option<&FrameBatch>, upto: u64) -> usize {
+        self.drain_while(gpu, batch, 0, before_gui_upto(upto))
     }
 
     /// Submits everything of frames up to `frame`, in order; frame work of earlier frames is stale.
-    pub fn drain_frame(&self, gpu: &Gpu, frame: u64) -> usize {
-        self.drain_while(gpu, frame, frame_upto(frame))
+    pub fn drain_frame(&self, gpu: &Gpu, batch: Option<&FrameBatch>, frame: u64) -> usize {
+        self.drain_while(gpu, batch, frame, frame_upto(frame))
     }
 
     /// Submits everything queued, in order.
-    pub fn drain_all(&self, gpu: &Gpu) -> usize {
-        self.drain_frame(gpu, u64::MAX)
+    pub fn drain_all(&self, gpu: &Gpu, batch: Option<&FrameBatch>) -> usize {
+        self.drain_frame(gpu, batch, u64::MAX)
     }
 
-    fn drain_while(&self, gpu: &Gpu, stale_before: u64, keep: impl Fn(u32, u64) -> bool) -> usize {
+    /// Pops work while `keep` allows; with a `batch`, its command buffers join mcr's frame batch
+    /// instead of going to the queue one by one.
+    fn drain_while(
+        &self,
+        gpu: &Gpu,
+        batch: Option<&FrameBatch>,
+        stale_before: u64,
+        keep: impl Fn(u32, u64) -> bool,
+    ) -> usize {
         let _exec = self.exec.lock().unwrap_or_else(PoisonError::into_inner);
+        let batch = batch.filter(|_| !self.unbatched.load(Ordering::Acquire));
         let mut patch = self
             .patch
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+        let scope = batch.map(|_| gpu.device.push_error_scope(wgpu::ErrorFilter::Validation));
         let mut n = 0;
         // The queue lock is held per pop only, so Java keeps queueing while this submits.
         while let Some((slot, frame, s)) = self.lock().pop_while(&keep) {
@@ -387,13 +439,24 @@ impl Slots {
                     tracing::warn!(frame, now = stale_before, "stale java frame work");
                 }
             }
-            if is_world_slot(slot)
-                && let Some(p) = patch.take_if(|p| p.frame == frame)
-            {
-                gpu.queue.write_buffer(&p.buffer, p.offset, &p.bytes);
+            let item_patch = is_world_slot(slot)
+                .then(|| patch.take_if(|p| p.frame == frame))
+                .flatten();
+            match batch {
+                Some(batch) => self.batch_one(gpu, batch, s, item_patch),
+                None => {
+                    if let Some(p) = item_patch {
+                        gpu.queue.write_buffer(&p.buffer, p.offset, &p.bytes);
+                    }
+                    run_scoped(gpu, s);
+                }
             }
-            run_scoped(gpu, s);
             n += 1;
+        }
+        if let Some(scope) = scope
+            && let Some(e) = pollster::block_on(scope.pop())
+        {
+            tracing::warn!("java work rejected by wgpu: {e}");
         }
         if patch.is_some() {
             let mut slot = self.patch.lock().unwrap_or_else(PoisonError::into_inner);
@@ -403,6 +466,109 @@ impl Slots {
         }
         self.submitted.fetch_add(n as u64, Ordering::Relaxed);
         n
+    }
+
+    /// Writes `sub`'s staged bytes now and moves its command buffer into `batch`. Writes land before
+    /// the whole batch, so the batch goes to the queue first when it holds another Java submit's work.
+    fn batch_one(&self, gpu: &Gpu, batch: &FrameBatch, sub: Submission, patch: Option<Patch>) {
+        let key = (Arc::as_ptr(&sub.track) as usize, sub.epoch);
+        let conflict = writes_conflict(
+            &self
+                .batch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .keys,
+            key,
+            !sub.writes.is_empty(),
+        );
+        if conflict {
+            let (index, error) = batch.submit(&gpu.device, &gpu.queue);
+            self.submitted(gpu, &index, error.is_some());
+        }
+        self.batch_open.store(true, Ordering::Release);
+        if let Some(p) = patch {
+            batch.push(self.patch_buffer(gpu, &p));
+        }
+        let start = cost_start();
+        for (buffer, offset, data) in sub.writes {
+            gpu.queue.write_buffer(&buffer, offset, &data);
+            recycle(data);
+        }
+        add_cost(cost::QUEUE_WRITE, start);
+        let mut state = self.batch.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(cmd) = sub.cmd {
+            batch.push(cmd);
+            state.keys.push(key);
+        }
+        state.pending.push(Batched {
+            track: sub.track,
+            n: sub.n,
+            maps: sub.maps,
+        });
+    }
+
+    /// A command buffer copying `patch` over the level projection, between the batched work around it.
+    fn patch_buffer(&self, gpu: &Gpu, patch: &Patch) -> wgpu::CommandBuffer {
+        let source = self
+            .patch_source
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(|| {
+                gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("mcr-modbridge projection patch"),
+                    size: PATCH_SLOTS * PATCH_STRIDE,
+                    usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .clone();
+        let offset = self.patch_slot.fetch_add(1, Ordering::Relaxed) % PATCH_SLOTS * PATCH_STRIDE;
+        gpu.queue.write_buffer(&source, offset, &patch.bytes);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("mcr-modbridge projection patch"),
+            });
+        encoder.copy_buffer_to_buffer(&source, offset, &patch.buffer, patch.offset, 64);
+        encoder.finish()
+    }
+
+    /// mcr submitted its frame batch as `index`: the Java work in it is now on the queue.
+    pub fn submitted(&self, gpu: &Gpu, index: &wgpu::SubmissionIndex, rejected: bool) {
+        let start = cost_start();
+        let mut state = self.batch.lock().unwrap_or_else(PoisonError::into_inner);
+        state.keys.clear();
+        let mut last: Option<(Arc<SubmitTrack>, u64)> = None;
+        for b in state.pending.drain(..) {
+            b.track.record(b.n, index.clone());
+            b.track.queued.fetch_max(b.n, Ordering::AcqRel);
+            for (staging, flag) in b.maps {
+                staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                    flag.store(
+                        if r.is_ok() { MAP_OK } else { MAP_FAILED },
+                        Ordering::Release,
+                    );
+                });
+            }
+            if let Some((t, n)) = &mut last
+                && Arc::ptr_eq(t, &b.track)
+            {
+                *n = (*n).max(b.n);
+            } else if let Some((t, n)) = last.replace((b.track, b.n)) {
+                notify_done(gpu, &t, n);
+            }
+        }
+        if let Some((t, n)) = last {
+            notify_done(gpu, &t, n);
+        }
+        drop(state);
+        self.batch_open.store(false, Ordering::Release);
+        if rejected && !self.unbatched.swap(true, Ordering::AcqRel) {
+            tracing::error!(
+                "a frame batch with Java's work was rejected; Java's work is submitted on its own from now on"
+            );
+        }
+        add_cost(cost::QUEUE_SUBMIT, start);
     }
 
     /// Java's level projection for `view.frame`; the oldest of [`KEPT_VIEWS`] is dropped.
@@ -553,13 +719,30 @@ fn private_depth(device: &wgpu::Device, (width, height): (u32, u32)) -> wgpu::Te
         .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+/// Writes land before the whole batch, so they may only join one holding command buffers of the same
+/// Java submit: its transient memory and upload ring are not reused before it ends.
+fn writes_conflict(batched: &[(usize, u64)], key: (usize, u64), writes: bool) -> bool {
+    writes && batched.iter().any(|k| *k != key)
+}
+
+fn notify_done(gpu: &Gpu, track: &SubmitTrack, n: u64) {
+    let done = track.done.clone();
+    gpu.queue.on_submitted_work_done(move || {
+        done.fetch_max(n, Ordering::AcqRel);
+    });
+}
+
 /// Invalid Java buffers must not reach mcr's uncaptured-error handler on the render thread.
 fn run_scoped(gpu: &Gpu, sub: Submission) {
+    let start = cost_start();
     let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    add_cost(cost::QUEUE_OTHER, start);
     sub.execute(gpu);
+    let start = cost_start();
     if let Some(e) = pollster::block_on(scope.pop()) {
         tracing::warn!("java submission rejected by wgpu: {e}");
     }
+    add_cost(cost::QUEUE_OTHER, start);
 }
 
 #[cfg(test)]
@@ -572,6 +755,22 @@ mod tests {
             out.push(t);
         }
         out
+    }
+
+    #[test]
+    fn writes_of_another_submit_flush_the_batch() {
+        let batched = [(1, 7), (1, 7)];
+        assert!(!writes_conflict(&batched, (1, 7), true), "same submit");
+        assert!(
+            writes_conflict(&batched, (1, 8), true),
+            "next submit reuses memory"
+        );
+        assert!(writes_conflict(&batched, (2, 7), true), "another encoder");
+        assert!(
+            !writes_conflict(&batched, (1, 8), false),
+            "no writes to hoist"
+        );
+        assert!(!writes_conflict(&[], (1, 8), true));
     }
 
     #[test]

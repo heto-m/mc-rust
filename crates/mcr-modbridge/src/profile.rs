@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::abi::{
     PROF_COUNT, PROF_EXTRACT, PROF_FRAME, PROF_GUI, PROF_PRE, PROF_RENDER, PROF_TICK, PROF_WORLD,
 };
-use crate::gpu::backend::StatsSnapshot;
+use crate::gpu::backend::{StatsSnapshot, cost};
 
 /// Set to print a frame profile line every second and a per-mod Java breakdown every ten.
 pub const PROFILE_ENV: &str = "MCR_MOD_PROFILE";
@@ -71,6 +71,10 @@ fn add(a: &mut StatsSnapshot, d: &StatsSnapshot) {
     a.errors += d.errors;
     a.ffi_ns += d.ffi_ns;
     a.ffi_calls += d.ffi_calls;
+    for i in 0..cost::COUNT {
+        a.cost_ns[i] += d.cost_ns[i];
+        a.cost_calls[i] += d.cost_calls[i];
+    }
 }
 
 /// `now - before`, counter by counter.
@@ -89,6 +93,8 @@ pub fn delta(now: &StatsSnapshot, before: &StatsSnapshot) -> StatsSnapshot {
         errors: d(now.errors, before.errors),
         ffi_ns: d(now.ffi_ns, before.ffi_ns),
         ffi_calls: d(now.ffi_calls, before.ffi_calls),
+        cost_ns: std::array::from_fn(|i| d(now.cost_ns[i], before.cost_ns[i])),
+        cost_calls: std::array::from_fn(|i| d(now.cost_calls[i], before.cost_calls[i])),
     }
 }
 
@@ -167,6 +173,18 @@ impl ProfileWindow {
             g.submits as f64 / j,
             g.uploaded as f64 / 1024.0 / j,
         );
+        if g.cost_calls.iter().any(|&c| c > 0) {
+            out += " | rust us per java frame:";
+            for (i, name) in cost::NAMES.iter().enumerate() {
+                if g.cost_calls[i] > 0 {
+                    out += &format!(
+                        " {name} {:.1} ({:.1})",
+                        g.cost_ns[i] as f64 / 1e3 / j,
+                        g.cost_calls[i] as f64 / j
+                    );
+                }
+            }
+        }
         out
     }
 }

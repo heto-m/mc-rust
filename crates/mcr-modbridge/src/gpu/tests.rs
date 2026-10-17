@@ -579,3 +579,58 @@ fn projected_pipelines_get_a_top_down_variant() {
         "only projected pipelines have a top-down vertex stage"
     );
 }
+
+#[test]
+fn a_pending_clear_becomes_the_next_pass_load() {
+    let Some(sc) = scene() else { return };
+    let mut s = sc.b.lock();
+    s.clear(
+        sc.b.gpu,
+        sc.enc,
+        Some((sc.target, [1.0, 0.0, 0.0, 1.0])),
+        None,
+        None,
+    )
+    .unwrap();
+    s.clear(
+        sc.b.gpu,
+        sc.enc,
+        Some((sc.target, [0.0, 0.0, 1.0, 1.0])),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        s.encoders.get(sc.enc).unwrap().clears.len(),
+        1,
+        "superseded"
+    );
+    sc.pass(&mut s, &sc.desc(None), &StreamWriter::default());
+    assert!(
+        s.encoders.get(sc.enc).unwrap().clears.is_empty(),
+        "taken over"
+    );
+    drop(s);
+    assert!(sc.read().iter().all(|p| *p == [0, 0, 255, 255]));
+}
+
+#[test]
+fn a_pass_sampling_a_cleared_texture_sees_the_clear() {
+    let Some(sc) = scene() else { return };
+    let mut s = sc.b.lock();
+    s.clear(
+        sc.b.gpu,
+        sc.enc,
+        Some((sc.tex, [0.0, 1.0, 0.0, 1.0])),
+        None,
+        None,
+    )
+    .unwrap();
+    let mut w = StreamWriter::default();
+    sc.bind(&mut w, sc.fan, 0);
+    w.draw(4, 1, 0, 0);
+    sc.pass(&mut s, &sc.desc(Some([0.0; 4])), &w);
+    assert!(s.encoders.get(sc.enc).unwrap().clears.is_empty());
+    drop(s);
+    assert!(sc.read().iter().all(|p| *p == [0, 255, 0, 255]));
+}

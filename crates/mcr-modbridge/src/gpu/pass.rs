@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use rustc_hash::FxHashMap;
 
-use super::backend::{Backend, OpError, OpResult, State};
+use super::backend::{Backend, ClearValue, OpError, OpResult, PendingClear, State};
 use super::pipeline::{Layout, Pipeline, Slot, TextureSample, VariantKey};
 use super::resources::SampleClass;
 use super::slab::{Handle, Kind};
@@ -356,37 +356,47 @@ pub fn encode_pass(
         .world_targets(&gpu.device, backend.slots.current().0);
 
     // Virtual main targets resolve to mcr's scene (and scene or private depth) in world slots.
-    let attachment =
-        |h: Handle| -> OpResult<(wgpu::TextureView, wgpu::TextureFormat, u32, u32, bool)> {
-            let v = views.get(h).ok_or(OpError::Handle(Kind::View, h))?;
-            let t = textures
-                .get(v.texture)
-                .ok_or(OpError::Handle(Kind::Texture, v.texture))?;
-            if let (true, Some(w)) = (t.virtual_main && v.base_mip == 0, world.as_ref()) {
-                let view = if v.format.has_color_aspect() {
-                    if v.format != w.color_texture.format() {
-                        return Err(OpError::Invalid(
-                            "main color format differs from the scene".into(),
-                        ));
-                    }
-                    w.color.clone()
-                } else {
-                    if v.format != w.depth.texture().format() {
-                        return Err(OpError::Invalid(
-                            "main depth format differs from the scene".into(),
-                        ));
-                    }
-                    w.depth.clone()
-                };
-                return Ok((view, v.format, w.size.0, w.size.1, true));
-            }
-            let view = v
-                .attachment
-                .clone()
-                .ok_or_else(|| OpError::Invalid("view cannot be a render attachment".into()))?;
-            Ok((view, v.format, v.width, v.height, t.virtual_main))
-        };
+    #[allow(clippy::type_complexity)]
+    let attachment = |h: Handle| -> OpResult<(
+        wgpu::TextureView,
+        wgpu::TextureFormat,
+        u32,
+        u32,
+        bool,
+        Option<wgpu::Texture>,
+    )> {
+        let v = views.get(h).ok_or(OpError::Handle(Kind::View, h))?;
+        let t = textures
+            .get(v.texture)
+            .ok_or(OpError::Handle(Kind::Texture, v.texture))?;
+        if let (true, Some(w)) = (t.virtual_main && v.base_mip == 0, world.as_ref()) {
+            let view = if v.format.has_color_aspect() {
+                if v.format != w.color_texture.format() {
+                    return Err(OpError::Invalid(
+                        "main color format differs from the scene".into(),
+                    ));
+                }
+                w.color.clone()
+            } else {
+                if v.format != w.depth.texture().format() {
+                    return Err(OpError::Invalid(
+                        "main depth format differs from the scene".into(),
+                    ));
+                }
+                w.depth.clone()
+            };
+            let texture = view.texture().clone();
+            return Ok((view, v.format, w.size.0, w.size.1, true, Some(texture)));
+        }
+        let view = v
+            .attachment
+            .clone()
+            .ok_or_else(|| OpError::Invalid("view cannot be a render attachment".into()))?;
+        let texture = (v.base_mip == 0).then(|| t.texture.clone());
+        Ok((view, v.format, v.width, v.height, t.virtual_main, texture))
+    };
     let mut colors = Vec::with_capacity(desc.colors.len());
+    let mut targets: [Option<wgpu::Texture>; MAX_COLOR_ATTACHMENTS + 1] = Default::default();
     let mut key = VariantKey {
         colors: [None; MAX_COLOR_ATTACHMENTS],
         color_count: desc.colors.len() as u8,
@@ -414,7 +424,8 @@ pub fn encode_pass(
             colors.push(None);
             continue;
         };
-        let (view, format, w, h, virtual_main) = attachment(c.view)?;
+        let (view, format, w, h, virtual_main, texture) = attachment(c.view)?;
+        targets[i] = texture.filter(|_| !virtual_main);
         if !format.has_color_aspect() {
             return Err(OpError::Invalid(
                 "depth view used as a color attachment".into(),
@@ -431,7 +442,7 @@ pub fn encode_pass(
     }
     let depth = match desc.depth {
         Some((h, clear)) => {
-            let (view, format, w, ht, virtual_main) = attachment(h)?;
+            let (view, format, w, ht, virtual_main, texture) = attachment(h)?;
             if !format.has_depth_aspect() {
                 return Err(OpError::Invalid(
                     "color view used as a depth attachment".into(),
@@ -443,6 +454,7 @@ pub fn encode_pass(
             if virtual_main && world.is_some() {
                 virtual_targets.extend(views.get(h).map(|v| v.texture));
             }
+            targets[MAX_COLOR_ATTACHMENTS] = texture.filter(|_| !scene_depth);
             let clear = clear.filter(|_| !scene_depth && resumed.is_none());
             Some((view, clear, format.has_stencil_aspect()))
         }
@@ -450,6 +462,21 @@ pub fn encode_pass(
     };
     let (width, height) =
         size.ok_or_else(|| OpError::Invalid("pass without attachments".into()))?;
+
+    let mut depth = depth;
+    let leftover = if enc.clears.is_empty() {
+        Vec::new()
+    } else {
+        let sampled = sampled_textures(stream, views, textures, world.as_ref());
+        take_clears(
+            &mut enc.clears,
+            resumed.is_some(),
+            sampled.as_deref(),
+            &targets,
+            &mut colors,
+            depth.as_mut().map(|(_, clear, _)| clear),
+        )
+    };
 
     let color_atts: Vec<Option<wgpu::RenderPassColorAttachment>> = colors
         .iter()
@@ -514,6 +541,9 @@ pub fn encode_pass(
     };
 
     let cmd = enc.cmd(&gpu.device);
+    if !leftover.is_empty() {
+        super::backend::record_clears(cmd, leftover);
+    }
     let mut sampled = Vec::new();
     if let Some(r) = &resumed {
         sampled.extend(r.uniforms.iter().filter_map(|u| match *u {
@@ -918,7 +948,12 @@ pub fn encode_pass(
             match op {
                 P_PIPELINE => {
                     let h = r.u64()?;
-                    match backend.pipeline(h) {
+                    let found = if pipeline.is_some() && h == pipeline_handle {
+                        pipeline.clone()
+                    } else {
+                        backend.pipeline(h)
+                    };
+                    match found {
                         Some(p) => {
                             if p.slots.len() > MAX_UNIFORMS {
                                 return Err(OpError::Invalid(
@@ -959,6 +994,9 @@ pub fn encode_pass(
                 P_SCISSOR => {
                     let s = r.take(4)?;
                     let s = [s[0] as i32, s[1] as i32, s[2] as i32, s[3] as i32];
+                    if scissor == Some(s) {
+                        continue;
+                    }
                     let (x, y, w, h) = clamp_rect(
                         i64::from(s[0]),
                         i64::from(s[1]),
@@ -969,8 +1007,10 @@ pub fn encode_pass(
                     scissor = Some(s);
                 }
                 P_NO_SCISSOR => {
-                    pass.set_scissor_rect(area.0, area.1, area.2, area.3);
-                    scissor = None;
+                    if scissor.is_some() {
+                        pass.set_scissor_rect(area.0, area.1, area.2, area.3);
+                        scissor = None;
+                    }
                 }
                 P_VERTEX => {
                     let (slot, h, off) = (r.u32()? as usize, r.u64()?, r.u64()?);
@@ -980,6 +1020,9 @@ pub fn encode_pass(
                     }
                     if h == 0 {
                         vertex[slot] = None;
+                        continue;
+                    }
+                    if vertex[slot] == Some((h, off)) {
                         continue;
                     }
                     match buffers.get(h) {
@@ -1007,8 +1050,12 @@ pub fn encode_pass(
                     } else {
                         wgpu::IndexFormat::Uint32
                     };
-                    index = Some((h, f));
-                    bound_index = Bound::None;
+                    if index != Some((h, f)) {
+                        index = Some((h, f));
+                        if bound_index == Bound::User {
+                            bound_index = Bound::None;
+                        }
+                    }
                 }
                 P_DRAW => {
                     let a = r.take(4)?;
@@ -1141,6 +1188,85 @@ pub fn encode_pass(
         .encode_ns
         .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     result.map(|()| report)
+}
+
+/// The textures the pass samples, resolved like its attachments, when clears are pending; `None`
+/// when the stream cannot be read, so every pending clear must run first.
+fn sampled_textures(
+    stream: &[u32],
+    views: &super::slab::Slab<super::resources::View>,
+    textures: &super::slab::Slab<super::resources::Texture>,
+    world: Option<&super::slots::WorldTargets>,
+) -> Option<Vec<wgpu::Texture>> {
+    let mut out = Vec::new();
+    sampled_views(stream, |vh| {
+        let Some((v, t)) = views
+            .get(vh)
+            .and_then(|v| textures.get(v.texture).map(|t| (v, t)))
+        else {
+            return;
+        };
+        out.push(match world.filter(|_| t.virtual_main) {
+            Some(w) if v.format.has_color_aspect() => w.color_texture.clone(),
+            Some(w) => w.depth.texture().clone(),
+            None => t.texture.clone(),
+        });
+    })
+    .ok()?;
+    Some(out)
+}
+
+type ResolvedColor = Option<(wgpu::TextureView, Option<[f32; 4]>)>;
+
+/// Moves pending clears of this pass's attachments into their load ops and returns the ones that
+/// must run before the pass: of textures it samples, or of its attachments when it resumes. Others
+/// stay pending.
+fn take_clears(
+    pending: &mut Vec<PendingClear>,
+    resumed: bool,
+    sampled: Option<&[wgpu::Texture]>,
+    targets: &[Option<wgpu::Texture>; MAX_COLOR_ATTACHMENTS + 1],
+    colors: &mut [ResolvedColor],
+    mut depth: Option<&mut Option<f32>>,
+) -> Vec<PendingClear> {
+    let mut before = Vec::new();
+    let mut i = 0;
+    while i < pending.len() {
+        let c = &pending[i];
+        let is = |t: &Option<wgpu::Texture>| t.as_ref() == Some(&c.texture);
+        if sampled.is_none_or(|s| s.contains(&c.texture)) {
+            before.push(pending.remove(i));
+            continue;
+        }
+        // A clear the pass itself asks for comes later and wins.
+        let target: Option<&mut Option<_>> = match c.value {
+            ClearValue::Color(_) => colors
+                .iter_mut()
+                .zip(targets)
+                .find(|(slot, t)| slot.is_some() && is(t))
+                .and_then(|(slot, _)| slot.as_mut())
+                .map(|(_, clear)| clear),
+            ClearValue::Depth(..) => None,
+        };
+        let depth_target = match c.value {
+            ClearValue::Depth(..) if is(&targets[MAX_COLOR_ATTACHMENTS]) => depth.as_deref_mut(),
+            _ => None,
+        };
+        match (c.value, target, depth_target) {
+            (_, None, None) => i += 1,
+            _ if resumed => before.push(pending.remove(i)),
+            (ClearValue::Color(rgba), Some(clear), _) => {
+                clear.get_or_insert(rgba);
+                pending.remove(i);
+            }
+            (ClearValue::Depth(d, _), _, Some(clear)) => {
+                clear.get_or_insert(d);
+                pending.remove(i);
+            }
+            _ => i += 1,
+        }
+    }
+    before
 }
 
 /// A Java scissor or render area clamped to the target; Java counts rows from the bottom, so a

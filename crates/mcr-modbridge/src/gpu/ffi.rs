@@ -8,7 +8,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use super::backend::{self, Backend, MAX_TRANSFER, OpError, OpResult};
+use super::backend::{self, Backend, MAX_TRANSFER, OpError, OpResult, cost};
 use super::pass::{self, PassDesc};
 
 pub const D_INFO: i32 = 1;
@@ -75,7 +75,7 @@ fn record(e: &OpError) {
     LAST_ERROR.with(|l| *l.borrow_mut() = e.to_string());
 }
 
-fn guarded(f: impl FnOnce() -> OpResult<i64>) -> i64 {
+fn guarded(bucket: usize, f: impl FnOnce() -> OpResult<i64>) -> i64 {
     if !backend::PROFILE.load(Ordering::Relaxed) {
         return run_guarded(f);
     }
@@ -85,6 +85,7 @@ fn guarded(f: impl FnOnce() -> OpResult<i64>) -> i64 {
         let ns = start.elapsed().as_nanos() as u64;
         b.stats.ffi_ns.fetch_add(ns, Ordering::Relaxed);
         b.stats.ffi_calls.fetch_add(1, Ordering::Relaxed);
+        backend::add_cost(bucket, Some(start));
     }
     v
 }
@@ -252,7 +253,7 @@ fn level_view(b: &Backend, a: &[u64]) -> OpResult<()> {
 }
 
 pub extern "C" fn gpu_device(op: i32, args: i64, count: i32) -> i64 {
-    guarded(|| {
+    guarded(cost::DEVICE, || {
         // SAFETY: see `slots`.
         let a = unsafe { slots(args, count) }?;
         let b = backend::backend()?;
@@ -315,7 +316,11 @@ pub extern "C" fn gpu_device(op: i32, args: i64, count: i32) -> i64 {
 }
 
 pub extern "C" fn gpu_encode(encoder: i64, op: i32, args: i64, count: i32) -> i64 {
-    guarded(|| {
+    let bucket = usize::try_from(op)
+        .ok()
+        .filter(|&b| (1..cost::PASS).contains(&b))
+        .unwrap_or(cost::DEVICE);
+    guarded(bucket, || {
         // SAFETY: see `slots`.
         let a = unsafe { slots(args, count) }?;
         let b = backend::backend()?;
@@ -499,7 +504,7 @@ pub extern "C" fn gpu_pass(
     stream: i64,
     stream_bytes: i32,
 ) -> i64 {
-    guarded(|| {
+    guarded(cost::PASS, || {
         // SAFETY: see `slots`.
         let d = unsafe { slots(desc, desc_count) }?;
         let desc = PassDesc::parse(d)?;

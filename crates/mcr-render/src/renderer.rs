@@ -13,7 +13,7 @@ use crate::effects::{
     CloudSettings, DestroyDecal, EffectAssets, Effects, WeatherSource, WorldBorderVisual,
 };
 use crate::environment::{Environment, Skybox};
-use crate::external::{ExternalCtx, ExternalSubmitter, PresentBlit};
+use crate::external::{ExternalCtx, ExternalSubmitter, FrameBatch, PresentBlit};
 use crate::graph::VisibilityGraph;
 use crate::mesh::SectionMesh;
 use crate::mesh::TINT_TABLE_WORDS;
@@ -279,6 +279,7 @@ pub struct Renderer {
     /// Mod mode with a window: the frame renders here and is blitted to the surface.
     scene: Option<(wgpu::Texture, PresentBlit)>,
     external: Option<Box<dyn ExternalSubmitter + Send>>,
+    batch: FrameBatch,
     post: PostStack,
     post_chains: Vec<PostChain>,
     menu_blur: u32,
@@ -1018,6 +1019,7 @@ impl Renderer {
             offscreen,
             scene,
             external: None,
+            batch: FrameBatch::default(),
             post,
             post_chains: Vec::new(),
             menu_blur: 5,
@@ -1877,6 +1879,7 @@ impl Renderer {
                 view: cam.view_rotation(),
                 proj: cam.projection(aspect),
                 sections: self.reached_sections(),
+                batch: &self.batch,
             });
         }
         let mut encoder = self
@@ -2018,7 +2021,7 @@ impl Renderer {
         }
 
         if let (true, Some(ext), Some(scene)) = (split, external.as_mut(), self.scene_texture()) {
-            self.queue.submit([encoder.finish()]);
+            self.batch.hold(encoder);
             ext.after_opaque(&ExternalCtx {
                 device: &self.device,
                 queue: &self.queue,
@@ -2029,12 +2032,9 @@ impl Renderer {
                 view: cam.view_rotation(),
                 proj: cam.projection(aspect),
                 sections: self.reached_sections(),
+                batch: &self.batch,
             });
-            encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("frame after opaque"),
-                });
+            encoder = self.batch.resume(&self.device, "frame after opaque");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terrain translucent"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2077,7 +2077,7 @@ impl Renderer {
             });
         }
         if let (Some(ext), Some(scene)) = (external.as_mut(), self.scene_texture()) {
-            self.queue.submit([encoder.finish()]);
+            self.batch.hold(encoder);
             ext.after_world(&ExternalCtx {
                 device: &self.device,
                 queue: &self.queue,
@@ -2088,12 +2088,9 @@ impl Renderer {
                 view: cam.view_rotation(),
                 proj: cam.projection(aspect),
                 sections: self.reached_sections(),
+                batch: &self.batch,
             });
-            encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("frame after external"),
-                });
+            encoder = self.batch.resume(&self.device, "frame after external");
         }
         let post_main = self
             .post_window
@@ -2113,14 +2110,7 @@ impl Renderer {
             );
         }
         if let (Some(ext), Some(scene)) = (external.as_mut(), self.scene_texture()) {
-            if post_main.is_some() {
-                self.queue.submit([encoder.finish()]);
-                encoder = self
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("frame after post"),
-                    });
-            }
+            self.batch.hold(encoder);
             ext.before_ui(&ExternalCtx {
                 device: &self.device,
                 queue: &self.queue,
@@ -2131,9 +2121,10 @@ impl Renderer {
                 view: cam.view_rotation(),
                 proj: cam.projection(aspect),
                 sections: self.reached_sections(),
+                batch: &self.batch,
             });
+            encoder = self.batch.resume(&self.device, "frame after ui hook");
         }
-        self.external = external;
         if let Some(overlay) = overlay {
             overlay.record_ui(&mut OverlayCtx {
                 device: &self.device,
@@ -2179,7 +2170,15 @@ impl Renderer {
             );
         }
 
-        self.queue.submit([encoder.finish()]);
+        self.batch.push(encoder.finish());
+        let (index, error) = self.batch.submit(&self.device, &self.queue);
+        if let Some(e) = &error {
+            tracing::error!("frame submit rejected by wgpu: {e}");
+        }
+        if let Some(ext) = external.as_mut() {
+            ext.submitted(&index, error.is_some());
+        }
+        self.external = external;
         if let Some(i) = slot {
             self.readback_cursor = (i + 1) % READBACK_SLOTS;
             let rb = &mut self.readbacks[i];
