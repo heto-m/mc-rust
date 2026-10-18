@@ -275,6 +275,19 @@ impl Decode<'_> for EntityDataValues {
             if index == END_MARKER {
                 return Ok(Self { entries });
             }
+            let mut peek = *input;
+            let serializer = read_varint(&mut peek)?;
+            if serializer >= SERIALIZER_COUNT {
+                // Rust has no use for a modded serializer's value; its shape only lets the rest decode.
+                super::modded::skip_modded(
+                    |t| &t.entity_data,
+                    "entity data serializer",
+                    serializer,
+                    &mut peek,
+                )?;
+                *input = peek;
+                continue;
+            }
             entries.push(EntityDataEntry {
                 index,
                 value: EntityDataValue::decode(input)?,

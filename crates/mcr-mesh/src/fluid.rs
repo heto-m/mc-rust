@@ -3,7 +3,7 @@
 use mcr_render::{Face, ModelQuadDesc, SectionMesh, TintTable, model_ao, pack_light};
 
 use crate::cache::{
-    ATTR_HALF_TRANSPARENT, ATTR_SOLID, FluidKind, MASK_EMPTY, MASK_FULL, StateModel,
+    ATTR_HALF_TRANSPARENT, ATTR_SOLID, FluidKind, LAYER_NONE, MASK_EMPTY, MASK_FULL, StateModel,
 };
 use crate::mesher::{Ctx, Mesher};
 use crate::tint::{TINT_NONE, TINT_WATER};
@@ -170,12 +170,26 @@ pub(crate) fn mesh_fluid(
 ) -> bool {
     let kind = sm.fluid.kind;
     let sprites = ctx.cache.fluid_sprites;
-    let (still, flow_sprite) = match kind {
-        FluidKind::Water => (sprites.water_still, sprites.water_flow),
-        _ => (sprites.lava_still, sprites.lava_flow),
+    let (still, flow_sprite, overlay_sprite, translucent, tint) = match kind {
+        FluidKind::Water => (
+            sprites.water_still,
+            sprites.water_flow,
+            sprites.water_overlay,
+            true,
+            TINT_WATER,
+        ),
+        FluidKind::Other(i) => match ctx.cache.modded_fluids.get(usize::from(i)) {
+            Some(f) => (f.still, f.flow, f.overlay, f.translucent, f.tint),
+            None => return false,
+        },
+        _ => (
+            sprites.lava_still,
+            sprites.lava_flow,
+            LAYER_NONE,
+            false,
+            TINT_NONE,
+        ),
     };
-    let translucent = kind == FluidKind::Water;
-    let tint = if translucent { TINT_WATER } else { TINT_NONE };
     let neighbor = |d: [i32; 3]| add(cell, d);
     let up_cell = neighbor(UP);
     let down_cell = neighbor(DOWN);
@@ -325,12 +339,8 @@ pub(crate) fn mesh_fluid(
         if occluded(ctx, *face, h0.max(h1), ncell) {
             continue;
         }
-        let overlay = translucent && ctx.attr(ncell) & ATTR_HALF_TRANSPARENT != 0;
-        let layer = if overlay {
-            sprites.water_overlay
-        } else {
-            flow_sprite
-        };
+        let overlay = overlay_sprite != LAYER_NONE && ctx.attr(ncell) & ATTR_HALF_TRANSPARENT != 0;
+        let layer = if overlay { overlay_sprite } else { flow_sprite };
         emit(
             [
                 [x0, cy + h0, z0],
@@ -352,7 +362,7 @@ pub(crate) fn mesh_fluid(
     }
     drop(emit);
     mesher.fluid_tops.extend(top);
-    translucent
+    (1..=TINT_WATER).contains(&tint)
 }
 
 /// Largest merged top surface edge: model quad corners reach `-1..3` blocks around the anchor cell.
@@ -698,6 +708,39 @@ mod tests {
             .map(footprint)
             .sum();
         assert_eq!(still_area, 2.0 * (7.0 * 16.0 + 7.0 * 16.0));
+    }
+
+    #[test]
+    fn modded_fluid_uses_its_own_sprites_layer_and_tint() {
+        let mut cache = test_cache();
+        cache.modded_fluids.push(crate::cache::ModdedFluid {
+            still: 30,
+            flow: 31,
+            overlay: LAYER_NONE,
+            translucent: false,
+            tint: 40,
+        });
+        let water = WATER as usize;
+        cache.states[water].fluid.kind = FluidKind::Other(0);
+        let colors = crate::tint::BiomeColors::from_climates(
+            &[crate::tint::BiomeClimate::default()],
+            &crate::tint::ColorMaps::flat(0x112233, 0x445566, 0x778899),
+        );
+        let mut mesher = Mesher::new(Arc::new(cache), Arc::new(colors));
+        let input = input_from(ocean);
+        let mut out = SectionMesh::default();
+        mesher.mesh(&input, &mut out);
+        assert!(
+            out.translucent.is_empty(),
+            "an opaque modded fluid stays out of the translucent pass"
+        );
+        let quads: Vec<_> = out.model.iter().map(|q| q.decode()).collect();
+        let tops: Vec<_> = quads
+            .iter()
+            .filter(|q| q.shade_face == Face::PosY)
+            .collect();
+        assert!(!tops.is_empty());
+        assert!(tops.iter().all(|q| q.layer == 30 && q.tint == 40));
     }
 
     fn top(x: u8, z: u8) -> FluidTop {

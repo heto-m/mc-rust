@@ -1,4 +1,4 @@
-use mcr_buf::{BlockPos, Decode, DecodeError, Encode, Result, read_varint, write_varint};
+use mcr_buf::{BlockPos, Decode, Encode, Result, read_varint, write_varint};
 
 use super::{item::ItemStackTemplate, math::Vec3d};
 
@@ -146,6 +146,11 @@ pub enum Particle {
     Shriek {
         delay: i32,
     },
+    /// A modded particle type's options, carried as their wire bytes.
+    Modded {
+        id: i32,
+        data: Vec<u8>,
+    },
 }
 
 impl Particle {
@@ -165,6 +170,7 @@ impl Particle {
             Self::Vibration { .. } => VIBRATION,
             Self::Trail { .. } => TRAIL,
             Self::Shriek { .. } => SHRIEK,
+            Self::Modded { id, .. } => *id,
         }
     }
 }
@@ -218,6 +224,7 @@ impl Encode for Particle {
                 write_varint(out, *duration);
             }
             Self::Shriek { delay } => write_varint(out, *delay),
+            Self::Modded { data, .. } => out.extend_from_slice(data),
         }
     }
 }
@@ -294,12 +301,11 @@ impl Particle {
                 delay: read_varint(input)?,
             },
             0..PARTICLE_TYPE_COUNT => Self::Simple(id),
-            _ => {
-                return Err(DecodeError::InvalidValue {
-                    what: "particle type",
-                    value: id.into(),
-                });
-            }
+            _ => Self::Modded {
+                id,
+                data: super::modded::skip_modded(|t| &t.particles, "particle type", id, input)?
+                    .to_vec(),
+            },
         })
     }
 }

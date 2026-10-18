@@ -24,6 +24,15 @@ fn icon_id(icon: &Icon) -> u64 {
     hash
 }
 
+/// The heap Java starts with for this settings file and mod set.
+fn heap_for(settings: &ModSettings, report: &Report) -> u32 {
+    let total = mcr_singleplayer::memory::total_memory_mib();
+    match settings.heap_mib() {
+        Some(mib) => mib.min(mcr_settings::mods::max_heap_mib(total)),
+        None => mcr_settings::mods::auto_heap_mib(report.active_ids().len(), total),
+    }
+}
+
 fn row(entry: &ModEntry) -> ModRow {
     let policy = entry
         .policy
@@ -139,7 +148,11 @@ impl ModsModel for Controller {
     }
 
     fn heap_mib(&self) -> u32 {
-        self.settings.heap_mib()
+        heap_for(&self.settings, &self.report)
+    }
+
+    fn heap_automatic(&self) -> bool {
+        self.settings.heap_mib().is_none()
     }
 
     fn set_heap_mib(&mut self, mib: u32) {
@@ -150,13 +163,12 @@ impl ModsModel for Controller {
     fn heap_range(&self) -> (u32, u32) {
         (
             mcr_settings::mods::MIN_HEAP_MIB,
-            mcr_settings::mods::MAX_HEAP_MIB,
+            mcr_settings::mods::max_heap_mib(mcr_singleplayer::memory::total_memory_mib()),
         )
     }
 
     fn restart_required(&self) -> bool {
-        let heap_changed =
-            !self.running.is_empty() && self.settings.heap_mib() != self.running_heap;
+        let heap_changed = !self.running.is_empty() && self.heap_mib() != self.running_heap;
         self.report.active_ids() != self.running || heap_changed
     }
 
@@ -217,8 +229,8 @@ impl ModsApp {
         previous: SessionRecord,
         prompt: bool,
     ) -> Self {
-        let running_heap = settings.heap_mib();
         let report = manager.scan(&settings);
+        let running_heap = heap_for(&settings, &report);
         let prompt = prompt.then(|| previous.clone());
         Self {
             model: Rc::new(RefCell::new(Controller {

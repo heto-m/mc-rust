@@ -73,7 +73,12 @@ pub trait ModsModel {
     /// Rescans and returns the rows.
     fn refresh(&mut self) -> Vec<ModRow>;
     fn set_enabled(&mut self, id: &str, on: bool);
+    /// The heap Java starts with: the chosen one, or the automatic one for the enabled mods.
     fn heap_mib(&self) -> u32;
+    /// No heap was chosen; [`Self::heap_mib`] follows the mod count.
+    fn heap_automatic(&self) -> bool {
+        false
+    }
     fn set_heap_mib(&mut self, mib: u32);
     fn heap_range(&self) -> (u32, u32);
     /// The enabled set or the heap differs from what the running Java started with.
@@ -161,8 +166,12 @@ impl ModsScreen {
         self.sync_list();
     }
 
-    fn heap_label(mib: u32) -> String {
-        format!("JVM heap: {mib} MiB")
+    fn heap_label(mib: u32, automatic: bool) -> String {
+        if automatic {
+            format!("JVM heap: {mib} MiB (auto)")
+        } else {
+            format!("JVM heap: {mib} MiB")
+        }
     }
 
     fn heap_from_slider(&self, value: f32) -> u32 {
@@ -298,7 +307,7 @@ impl ModsScreen {
                     let mib = self.heap_from_slider(value);
                     self.model.borrow_mut().set_heap_mib(mib);
                     if let Some(s) = self.widgets.slider_mut(HEAP) {
-                        s.label = Self::heap_label(mib);
+                        s.label = Self::heap_label(mib, false);
                     }
                 }
                 (FOLDER, WidgetEventKind::Pressed) => {
@@ -319,12 +328,15 @@ impl Screen for ModsScreen {
     fn init(&mut self, width: i32, height: i32) {
         self.gui = (width, height);
         self.widgets.clear();
-        let heap = self.model.borrow().heap_mib();
+        let (heap, auto) = {
+            let model = self.model.borrow();
+            (model.heap_mib(), model.heap_automatic())
+        };
         let y = height - FOOTER + 6;
         self.widgets.add(Slider::new(
             HEAP,
             [width / 2 - 155, y, 150, 20],
-            Self::heap_label(heap),
+            Self::heap_label(heap, auto),
             self.slider_value(),
         ));
         self.widgets.add(Button::new(

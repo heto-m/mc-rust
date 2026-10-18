@@ -21,12 +21,15 @@ pub use predicate::*;
 use super::Component;
 use super::entity_data::PaintingVariantData;
 use super::item::ItemStackTemplate;
+use super::modded;
 
 macro_rules! components {
     ($($id:literal $name:literal $variant:ident($ty:ty);)*) => {
         #[derive(Debug, Clone, PartialEq)]
         pub enum DataComponent {
             $($variant($ty),)*
+            /// A modded component type's value, carried as its wire bytes.
+            Modded(ModdedComponent),
         }
 
         /// Registry names indexed by type id.
@@ -36,12 +39,14 @@ macro_rules! components {
             pub fn type_id(&self) -> i32 {
                 match self {
                     $(Self::$variant(_) => $id,)*
+                    Self::Modded(m) => m.type_id,
                 }
             }
 
             fn encode_value(&self, out: &mut Vec<u8>) {
                 match self {
                     $(Self::$variant(v) => Encode::encode(v, out),)*
+                    Self::Modded(m) => out.extend_from_slice(&m.bytes),
                 }
             }
 
@@ -49,7 +54,8 @@ macro_rules! components {
                 let _depth = common::DepthGuard::enter()?;
                 match id {
                     $($id => Ok(Self::$variant(Decode::decode(input)?)),)*
-                    _ => Err(unknown_type(id)),
+                    _ => modded::skip_modded(|t| &t.components, "data component type", id, input)
+                        .map(|bytes| Self::Modded(ModdedComponent { type_id: id, bytes: bytes.to_vec() })),
                 }
             }
         }
@@ -190,8 +196,16 @@ fn unknown_type(id: i32) -> DecodeError {
     }
 }
 
+/// A value of a modded data component type: the bridge reported its wire shape, so its bytes were
+/// stepped over and kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModdedComponent {
+    pub type_id: i32,
+    pub bytes: Vec<u8>,
+}
+
 fn check_type(id: i32) -> Result<i32> {
-    if (0..COMPONENT_COUNT as i32).contains(&id) {
+    if (0..COMPONENT_COUNT as i32).contains(&id) || modded::is_modded(|t| &t.components, id) {
         Ok(id)
     } else {
         Err(unknown_type(id))
@@ -208,8 +222,13 @@ pub fn component_type_id(name: &str) -> Option<i32> {
 }
 
 impl DataComponent {
+    /// Vanilla's registry name, or `modded` for a modded type.
     pub fn name(&self) -> &'static str {
-        COMPONENT_NAMES[self.type_id() as usize]
+        usize::try_from(self.type_id())
+            .ok()
+            .and_then(|i| COMPONENT_NAMES.get(i))
+            .copied()
+            .unwrap_or("modded")
     }
 }
 
@@ -278,7 +297,17 @@ impl DataComponentPatch {
                 check_type(id)?;
                 let len = read_len(input, input.len())?;
                 let mut payload = take(input, len)?;
-                added.push(DataComponent::decode_value(id, &mut payload)?);
+                if id >= COMPONENT_COUNT as i32 {
+                    if payload.len() > super::modded::MAX_VALUE_BYTES {
+                        return Err(DecodeError::Other("modded value too large".into()));
+                    }
+                    added.push(DataComponent::Modded(ModdedComponent {
+                        type_id: id,
+                        bytes: payload.to_vec(),
+                    }));
+                } else {
+                    added.push(DataComponent::decode_value(id, &mut payload)?);
+                }
             } else {
                 added.push(DataComponent::decode_value(id, input)?);
             }

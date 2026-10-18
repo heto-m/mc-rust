@@ -4,7 +4,7 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 21;
+    public static final int VERSION = 22;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
     public static final String COMPOSE_PROPERTY = "mcr.compose";
 
@@ -27,6 +27,7 @@ public final class BridgeAbi {
     public static final int MSG_KEYS = 4;
     public static final int MSG_PACKS = 5;
     public static final int MSG_WORLD = 6;
+    public static final int MSG_MODELS = 7;
     public static final int WORLD_STATUS = 1;
     public static final int WORLD_EULA = 2;
     public static final int WORLD_READY = 3;
@@ -139,6 +140,7 @@ public final class BridgeAbi {
     public static final int FSTATE_WEATHER = 4;
     public static final int FSTATE_STEPS = 8;
     public static final int FSTATE_TURN = 16;
+    public static final int FSTATE_WAITING = 32;
     public static final int CAMERA_MOD = 1;
     public static final int CAMERA_DETACHED = 2;
     public static final int CAMERA_INPUT = 4;
@@ -389,7 +391,8 @@ public final class BridgeAbi {
         SOUND_STREAM_PUSH("sound_stream_push", "(IIJI)I", Flavour.NORMAL),
         CLIPBOARD_GET("clipboard_get", "(JI)I", Flavour.NORMAL),
         CLIPBOARD_SET("clipboard_set", "(JI)V", Flavour.NORMAL),
-        REGISTRY_REPORT("registry_report", "(JI)V", Flavour.NORMAL);
+        REGISTRY_REPORT("registry_report", "(JI)V", Flavour.NORMAL),
+        RENDER_REPORT("render_report", "(JI)V", Flavour.NORMAL);
 
         public final String symbol;
         public final String descriptor;

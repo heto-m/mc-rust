@@ -381,9 +381,16 @@ vanilla does.
 Measured with 29 mods at 1920x1080, render distance 32 (Ryzen 7 5800X, RX 6800 XT): mcr's own frame about 0.6 ms,
 Java's frame 0.6 to 1.0 ms with the ahead pipeline, about 1100 to 1200 fps offscreen and in a headless gamescope
 window alike. BetterF3's overlay nearly doubles Java's frame (1.5 to 1.8 ms; gui 0.09 to 0.42, extract up 0.35,
-four times the upload), so read frame rates with F3 closed or from `MCR_MOD_PROFILE=frame`. ZGC with the default
-2048 MiB heap keeps a 0.7 to 0.9 GB live set, pauses under 0.1 ms and has no allocation stalls; 1536 MiB doubles the
-collection rate and leaves little headroom at join, more than 3 GiB buys nothing.
+four times the upload), so read frame rates with F3 closed or from `MCR_MOD_PROFILE=frame`. ZGC with a 2048 MiB
+heap keeps a 0.7 to 0.9 GB live set, pauses under 0.1 ms and has no allocation stalls; 1536 MiB doubles the
+collection rate and leaves little headroom at join, more than 3 GiB buys nothing for this set.
+
+The heap follows the mod set unless one is chosen (`--heap-mib`, the launcher profile or the Mods screen;
+`mcr_settings::mods::auto_heap_mib`): 2.3 times an estimated live heap of 510 MiB plus 4.8 MiB per enabled client
+mod (Echoes of the Sift, 12 mods: 568 MB live; Medieval Immersed, 102 mods: about 1 GB), in 256 MiB steps, at least
+2048 MiB. It stays under 12288 MiB, three quarters of RAM and RAM less 4.5 GiB for mcr's own process and the system;
+a chosen heap is capped the same way except for the last rule. Files from before write `heap_mib: 2048` without
+`heap_explicit` and read as automatic. The boot log and the Mods screen show the heap and whether it is automatic.
 
 ## Policies
 
@@ -429,10 +436,31 @@ A modded server renumbers block states (mods add properties to vanilla blocks), 
 end of configuration. Rust rebuilds its tables from the report (`mcr_data::rebuild`, block state ids are 32-bit),
 holds `FinishConfiguration` until then (10 s cap), and its configuration pongs follow Java's so Fabric's channel
 registration reaches the server first. Mod jars join Rust's resource stack, so modded blocks bake with mcr's own
-baker; code-generated models and modded fluids stay unbaked and are logged by name. Undecodable play packets are
-skipped in mod mode. Measurements of two real packs, the FerriteCore result and the deny-list are in the
-`modpacks-1` change's design; `tools/official-launcher/measure_pack.py` measures the same pack in the real Java
-client under Prism Launcher (the official launcher behind `--launcher official`).
+baker, and so do the resource packs Java selected inside the game dir.
+
+What Rust cannot read comes from Java (ABI 22):
+
+- **Wire shapes.** Clientbound data component patches are not length-delimited, so the registry report carries a
+  structural description of every modded data component, particle and entity data codec built from vanilla's
+  factories (`McrCodecs`, e.g. `seq 2 vi opt str`). Rust skips values by shape (`mcr_protocol::types::modded`,
+  bounded in tokens, depth, steps and bytes) and keeps the bytes (`DataComponent::Modded`, `Particle::Modded`).
+  Codecs written as a mod's own class have no shape; their packets are skipped and counted, as all undecodable
+  play packets are in mod mode.
+- **Render report** (`McrRenderExport`, `RENDER_REPORT` downcall). At the title Java reports every fluid's
+  `FluidModel` (sprites, layer, tint) and its selected packs; Rust meshes modded fluids as their own families. For
+  blocks Rust's baker cannot bake (code-generated models), Rust sends their names (`MSG_MODELS`) and Java answers with
+  each state's baked quads, AO, particle and tint sources, which Rust compiles and caches like its own. Liquid
+  blocks (invisible render shape) report no quads.
+- **Prebake.** At the title Rust bakes the model cache for Java's title registries in the background and, at the
+  join, re-indexes it for the server's (`ModelCache::remap`, Fabric's registry sync only renumbers), so the join
+  does not bake. Java's later answers rebake in the background.
+
+Frames Java draws under loading screens are flagged (`FSTATE_WAITING`): a long one (JEI starts in one 2 s frame on
+join) keeps the last composite instead of detaching. Identical quad runs share storage in the model cache, and
+sprites of sizes past the renderer's four texture groups are resampled. Measurements are in the `modpacks-1` and
+`modpacks-2` designs; `tools/official-launcher/measure_pack.py` measures the same pack in the real Java
+client under Prism Launcher (the official launcher behind `--launcher official`); results are in
+`docs/bench-real-minecraft.md`.
 
 Prism comparison, in order (Prism needs an account once; an offline one is enough for the bench server):
 
@@ -548,6 +576,6 @@ detach and no late frame.
 
 `mod-jvm-host` → `mod-fabric-boot` → `mod-net-bridge` → `mod-render-backend` → `mod-frame-compose` →
 `mod-input-screens` → `mod-entity-render-hooks` → `mod-sound-bridge` → `mod-manager-ui`, later `mod-neoforge-1`,
-`mod-neoforge-2`, `mod-dynamic-lights` and `modpacks-1`.
+`mod-neoforge-2`, `mod-dynamic-lights`, `modpacks-1` and `modpacks-2`.
 Spikes first: SPIR-V combined samplers through naga, SDL3 offscreen video driver off the main thread, and the
 `EmbeddedChannel` behaviour of `Connection.setupInboundProtocol`.

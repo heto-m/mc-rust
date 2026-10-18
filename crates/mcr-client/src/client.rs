@@ -721,7 +721,15 @@ impl Client {
             Err(e) if self.relay.is_some() => {
                 self.skipped_play += 1;
                 if self.skipped_play <= MAX_SKIP_LOGS {
-                    eprintln!("[mods] skipping play packet {id:#04x} Rust cannot decode: {e}");
+                    let head: String = payload
+                        .iter()
+                        .take(32)
+                        .map(|b| format!("{b:02x}"))
+                        .collect();
+                    eprintln!(
+                        "[mods] skipping play packet {id:#04x} Rust cannot decode: {e} ({} bytes: {head})",
+                        payload.len()
+                    );
                 }
                 return Ok(());
             }

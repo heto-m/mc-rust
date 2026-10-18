@@ -313,6 +313,11 @@ impl<'a> ModelBaker<'a> {
         &self.sprites
     }
 
+    /// For sprites that models from elsewhere (Java's baked quads) use.
+    pub fn sprites_mut(&mut self) -> &mut SpriteTable {
+        &mut self.sprites
+    }
+
     pub fn into_sprites(self) -> SpriteTable {
         self.sprites
     }

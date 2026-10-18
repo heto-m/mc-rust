@@ -1841,6 +1841,10 @@ impl Play {
     }
 
     /// Swaps in assets rebuilt from a new resource stack without restarting the session.
+    pub fn assets(&self) -> &Arc<Assets> {
+        &self.assets
+    }
+
     pub fn reload_resources(&mut self, assets: Arc<Assets>) -> anyhow::Result<()> {
         self.gui.reload(&assets.resources)?;
         self.hud.rebind(&self.gui.ui, self.data);

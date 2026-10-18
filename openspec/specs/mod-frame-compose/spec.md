@@ -147,3 +147,10 @@ mcr SHALL record each look the mouse produces with its time, and after each fram
 #### Scenario: Bench through the mouse path
 - **WHEN** `mcr --screenshot out.png --bench N` runs in game with `MCR_BENCH_MOUSE=3`
 - **THEN** every frame turns the player through mcr's mouse handling, Java receives the motion, and the bench prints the turn latency percentiles, the handoff frames and the stale frames
+
+### Requirement: Loading screens keep the last frame
+Java SHALL flag frames drawn under loading, connecting, message and progress screens and mcr's world screen. While Java's frames are flagged, a late Java frame SHALL keep the last composed image as while Java loads, and SHALL not detach the bridge before the loading limit.
+
+#### Scenario: JEI starts on join
+- **WHEN** a modded join spends 2.3 seconds in one Java frame under the level loading screen
+- **THEN** mcr keeps showing the last composed frame and does not report that mods stopped drawing

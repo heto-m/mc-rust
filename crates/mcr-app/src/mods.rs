@@ -161,13 +161,26 @@ pub fn startup(opts: &Options) -> Result<Startup> {
         jars,
         server_jars: report.server_jars(&manager.policy),
         active_ids: report.active_ids(),
-        heap_mib: opts.heap_mib.unwrap_or_else(|| settings.heap_mib()),
+        heap_mib: boot_heap_mib(opts, &settings, report.active_ids().len()),
         session,
         explicit: opts.mods.is_some(),
         http_hosts: manager.policy.http_hosts().to_vec(),
     });
     let app = ModsApp::new(manager, settings, previous, prompt);
     Ok(Startup { boot, app })
+}
+
+/// The CLI's or profile's heap, else the Mods screen's choice, else the automatic one for `mods`
+/// client mods; never above what the machine holds.
+fn boot_heap_mib(opts: &Options, settings: &mcr_settings::ModSettings, mods: usize) -> u32 {
+    let total = mcr_singleplayer::memory::total_memory_mib();
+    let max = mcr_settings::mods::max_heap_mib(total);
+    let (mib, how) = match opts.heap_mib.or(settings.heap_mib()) {
+        Some(mib) => (mib.min(max), "chosen"),
+        None => (mcr_settings::mods::auto_heap_mib(mods, total), "automatic"),
+    };
+    eprintln!("[mods] Java heap {mib} MiB ({how}; {mods} client mods, at most {max} MiB here)");
+    mib
 }
 
 /// One line per mod that is not loaded, or loaded with a policy caveat; a mixed set gets one line.

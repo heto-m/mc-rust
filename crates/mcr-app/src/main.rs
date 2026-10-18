@@ -19,6 +19,7 @@ mod gui;
 mod hand;
 mod hud;
 mod input;
+mod java_models;
 mod language;
 mod latency;
 mod launcher;

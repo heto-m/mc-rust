@@ -206,9 +206,10 @@ fn fabric_boot() {
     assert!(bridge_loader.contains("Knot"), "{bridge_loader}");
     let boot_loader = seen.last("boot_loader").unwrap_or_default();
     assert!(boot_loader.contains("AppClassLoader"), "{boot_loader}");
+    let sockets = tcp_sockets();
     assert!(
-        tcp_sockets().is_empty(),
-        "TCP sockets open at the title screen"
+        sockets.is_empty(),
+        "TCP sockets open at the title screen: {sockets:?}"
     );
 
     let tid = render_thread().expect("render thread");

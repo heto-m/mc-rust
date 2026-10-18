@@ -36,7 +36,8 @@ pub struct LaunchPlan {
     pub game_dir: PathBuf,
     /// `None` keeps mod mode off.
     pub mods: Option<PathBuf>,
-    pub heap_mib: u32,
+    /// `None` is automatic.
+    pub heap_mib: Option<u32>,
     pub resolution: Option<Resolution>,
     pub account: LaunchAccount,
 }
@@ -118,12 +119,12 @@ mod tests {
         p.version = GAME_VERSION.into();
         p.game_dir = Some("/games/m".into());
         p.mods = Some("/games/m/mods".into());
-        p.heap_mib = 3072;
+        p.heap_mib = Some(3072);
         let plan =
             LaunchPlan::new(&p, &VersionList::builtin(), Path::new("/d"), offline()).unwrap();
         assert_eq!(plan.game_dir, Path::new("/games/m"));
         assert_eq!(plan.mods.as_deref(), Some(Path::new("/games/m/mods")));
-        assert_eq!(plan.heap_mib, 3072);
+        assert_eq!(plan.heap_mib, Some(3072));
         p.version = "1.8.9".into();
         assert_eq!(
             LaunchPlan::new(&p, &VersionList::builtin(), Path::new("/d"), offline()).unwrap_err(),

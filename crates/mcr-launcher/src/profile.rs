@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use mcr_settings::mods::{DEFAULT_HEAP_MIB, MAX_HEAP_MIB, MIN_HEAP_MIB};
+use mcr_settings::mods::{MAX_HEAP_MIB, MIN_HEAP_MIB, stored_heap_mib};
 use serde_json::{Value, json};
 
 use crate::clean;
@@ -72,7 +72,8 @@ pub struct Profile {
     pub game_dir: Option<PathBuf>,
     /// `None` is vanilla: mod mode stays off.
     pub mods: Option<PathBuf>,
-    pub heap_mib: u32,
+    /// `None` is automatic, from the enabled mod count.
+    pub heap_mib: Option<u32>,
     pub resolution: Option<Resolution>,
     pub last_played: u64,
 }
@@ -86,7 +87,7 @@ impl Profile {
             version: LATEST_RELEASE.to_owned(),
             game_dir: None,
             mods: None,
-            heap_mib: DEFAULT_HEAP_MIB,
+            heap_mib: None,
             resolution: None,
             last_played: 0,
         }
@@ -122,7 +123,7 @@ impl Profile {
         if !valid_version_id(&self.version) {
             self.version = LATEST_RELEASE.to_owned();
         }
-        self.heap_mib = self.heap_mib.clamp(MIN_HEAP_MIB, MAX_HEAP_MIB);
+        self.heap_mib = self.heap_mib.map(|h| h.clamp(MIN_HEAP_MIB, MAX_HEAP_MIB));
         self.game_dir = self.game_dir.take().filter(|p| valid_path(p));
         self.mods = self.mods.take().filter(|p| valid_path(p));
     }
@@ -138,9 +139,7 @@ impl Profile {
         }
         profile.game_dir = path_field(&v["game_dir"]);
         profile.mods = path_field(&v["mods"]);
-        if let Some(heap) = v["heap_mib"].as_u64() {
-            profile.heap_mib = u32::try_from(heap).unwrap_or(u32::MAX);
-        }
+        profile.heap_mib = stored_heap_mib(v);
         profile.resolution = v["width"]
             .as_u64()
             .zip(v["height"].as_u64())
@@ -156,9 +155,12 @@ impl Profile {
             "name": self.name,
             "icon": self.icon,
             "version": self.version,
-            "heap_mib": self.heap_mib,
             "last_played": self.last_played,
         });
+        if let Some(heap) = self.heap_mib {
+            v["heap_mib"] = json!(heap);
+            v["heap_explicit"] = json!(true);
+        }
         if let Some(dir) = &self.game_dir {
             v["game_dir"] = json!(dir.to_string_lossy());
         }
@@ -220,7 +222,7 @@ mod tests {
         p.version = "26.3".into();
         p.game_dir = Some("/games/survival".into());
         p.mods = Some("/games/mods".into());
-        p.heap_mib = 3072;
+        p.heap_mib = Some(3072);
         p.resolution = Resolution::new(1280, 720);
         p.last_played = 42;
         assert_eq!(Profile::from_json(&p.to_json()), Some(p));
@@ -243,7 +245,9 @@ mod tests {
         assert_eq!(p.icon, ICONS[0]);
         assert_eq!(p.version, LATEST_RELEASE);
         assert_eq!(p.game_dir, None);
-        assert_eq!(p.heap_mib, MAX_HEAP_MIB);
+        assert_eq!(p.heap_mib, Some(MAX_HEAP_MIB));
+        let legacy = Profile::from_json(&json!({"id": "x", "heap_mib": 2048})).unwrap();
+        assert_eq!(legacy.heap_mib, None, "the old default reads as automatic");
         assert_eq!(p.resolution, None);
         assert!(Profile::from_json(&json!({"id": "a b"})).is_none());
         assert!(Profile::from_json(&json!({"id": "x".repeat(33)})).is_none());

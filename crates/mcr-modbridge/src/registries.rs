@@ -11,11 +11,14 @@ use mcr_data::{
     Aabb, Export, ExportBlock, ExportEntityType, ExportFluid, ExportFluidState, ExportItem,
     ExportState, ExportTool, Version,
 };
+use mcr_protocol::types::modded::{ModdedCodecs, Shape};
 use serde_json::Value;
 
 /// Java's report for a 134-mod pack is a few MiB.
 pub const MAX_REPORT_BYTES: usize = 64 << 20;
 const MAX_PROBLEMS: usize = 64;
+/// A directory where every report Java sends is written, for debugging.
+pub const DUMP_ENV: &str = "MCR_REGISTRY_DUMP";
 
 #[derive(Debug, Default)]
 pub(crate) struct RegistryShared {
@@ -45,10 +48,51 @@ pub(crate) extern "C" fn registry_report(ptr: i64, len: i32) {
         }
         // SAFETY: Java passes a live confined-arena segment of `len` bytes for the duration of this downcall.
         let bytes = unsafe { std::slice::from_raw_parts(ptr as usize as *const u8, len) }.to_vec();
+        if let Some(dir) = std::env::var_os(DUMP_ENV) {
+            let name = if is_configuration(&bytes) {
+                "configuration"
+            } else {
+                "title"
+            };
+            let _ = std::fs::write(
+                std::path::Path::new(&dir).join(format!("registries-{name}.json")),
+                &bytes,
+            );
+        }
         if let Some(shared) = crate::abi::shared_now() {
             shared.registries.store(bytes);
         }
     }));
+}
+
+/// Java's render report (fluid models, and the quads of blocks Rust asked for with `MSG_MODELS`).
+pub(crate) extern "C" fn render_report(ptr: i64, len: i32) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let Ok(len) = usize::try_from(len) else {
+            return;
+        };
+        if ptr == 0 || len == 0 || len > MAX_REPORT_BYTES {
+            tracing::warn!(len, "render report refused");
+            return;
+        }
+        // SAFETY: Java passes a live confined-arena segment of `len` bytes for the duration of this downcall.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr as usize as *const u8, len) }.to_vec();
+        if let Some(shared) = crate::abi::shared_now() {
+            shared.render.store(bytes);
+        }
+    }));
+}
+
+/// The newest render report and its generation (counts every report Java sent).
+pub fn render_latest() -> Option<(u64, Arc<Vec<u8>>)> {
+    let shared = crate::abi::shared_now()?;
+    let latest = shared
+        .render
+        .latest
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()?;
+    Some((shared.render.generation.load(Ordering::Acquire), latest))
 }
 
 /// How many reports Java has sent this process.
@@ -80,6 +124,8 @@ pub struct Report {
     pub state_count: usize,
     pub export: Export,
     pub problems: Vec<String>,
+    /// Wire shapes of modded data component types, particle types and entity data serializers.
+    pub codecs: ModdedCodecs,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -345,6 +391,7 @@ pub fn parse(bytes: &[u8]) -> Result<Report, ReportError> {
             .collect(),
         state_count: usize::try_from(u(&root, "state_count")?).map_err(|_| shape("state_count"))?,
         export,
+        codecs: codecs(&root["codecs"]),
         problems: root["problems"]
             .as_array()
             .map(|a| {
@@ -374,6 +421,31 @@ fn is_vanilla(export: &Export, vanilla: &Version) -> bool {
                     && info.default_state - info.states.0 == b.default_state
             })
         })
+}
+
+/// Modded registry ids above the vanilla ones a report may describe per registry.
+const MAX_MODDED_CODECS: usize = 1 << 16;
+
+fn codecs(v: &Value) -> ModdedCodecs {
+    let table = |key: &str| -> HashMap<i32, Option<Shape>> {
+        v[key]
+            .as_object()
+            .map(|o| {
+                o.iter()
+                    .take(MAX_MODDED_CODECS)
+                    .filter_map(|(id, shape)| {
+                        let id = id.parse::<i32>().ok().filter(|&i| i >= 0)?;
+                        Some((id, shape.as_str().and_then(|t| Shape::parse(t).ok())))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    ModdedCodecs {
+        components: table("data_component_type"),
+        particles: table("particle_type"),
+        entity_data: table("entity_data_serializer"),
+    }
 }
 
 static INSTALLED: Mutex<Option<HashMap<u64, &'static Version>>> = Mutex::new(None);
@@ -410,6 +482,10 @@ pub fn install(bytes: &[u8]) -> Result<(&'static Version, Report), ReportError> 
         });
     }
     mcr_data::activate(version);
+    let modded = !(report.codecs.components.is_empty()
+        && report.codecs.particles.is_empty()
+        && report.codecs.entity_data.is_empty());
+    mcr_protocol::types::modded::install(modded.then(|| report.codecs.clone()));
     Ok((version, report))
 }
 

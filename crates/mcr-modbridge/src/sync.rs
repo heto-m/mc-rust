@@ -8,6 +8,8 @@ use crate::abi::SYNC_MAX_LINES;
 pub const MAX_SYNC_BYTES: usize = 16 << 10;
 /// Longer pack paths are left out rather than truncated.
 const MAX_PATH_BYTES: usize = 1024;
+/// A model request names at most this many bytes of blocks.
+const MAX_MODELS_BYTES: usize = 64 << 10;
 
 /// `name\tkey` lines; pairs with a tab, a newline or an empty side are skipped.
 pub fn encode_keys<'a>(bindings: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<u8> {
@@ -46,6 +48,22 @@ pub fn encode_packs(paths: &[PathBuf]) -> Vec<u8> {
     out
 }
 
+/// Block names for `MSG_MODELS`, one per line; names with a newline are left out.
+pub fn encode_models<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<u8> {
+    let mut out = Vec::new();
+    for name in names {
+        if name.is_empty()
+            || name.contains(['\n', '\r'])
+            || out.len() + name.len() + 1 > MAX_MODELS_BYTES
+        {
+            continue;
+        }
+        out.extend_from_slice(name.as_bytes());
+        out.push(b'\n');
+    }
+    out
+}
+
 fn absolute(path: &Path) -> Option<String> {
     let abs = std::path::absolute(path).ok()?;
     let text = abs.to_str()?;
@@ -58,6 +76,7 @@ pub(crate) struct Pending {
     keys: Option<Vec<u8>>,
     sent_keys: Option<Vec<u8>>,
     packs: Option<Vec<u8>>,
+    models: Option<Vec<u8>>,
     world: crate::world::WorldQueue,
 }
 
@@ -71,6 +90,10 @@ impl Pending {
 
     pub fn packs(&mut self, encoded: Vec<u8>) {
         self.packs = Some(encoded);
+    }
+
+    pub fn models(&mut self, encoded: Vec<u8>) {
+        self.models = Some(encoded);
     }
 
     pub fn world(&mut self, event: crate::world::WorldEvent) {
@@ -91,6 +114,11 @@ impl Pending {
         {
             self.packs = Some(packs);
         }
+        if let Some(models) = self.models.take()
+            && !push(crate::abi::MSG_MODELS, &models)
+        {
+            self.models = Some(models);
+        }
         while let Some(event) = self.world.front() {
             if !push(crate::abi::MSG_WORLD, &event.encode()) {
                 break;
@@ -102,7 +130,10 @@ impl Pending {
     /// Nothing waits to be sent.
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.keys.is_none() && self.packs.is_none() && self.world.is_empty()
+        self.keys.is_none()
+            && self.packs.is_none()
+            && self.models.is_none()
+            && self.world.is_empty()
     }
 }
 

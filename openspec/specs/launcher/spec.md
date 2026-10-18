@@ -133,3 +133,10 @@ The native title screen SHALL have a Launcher button, and in mod mode the "mcr" 
 #### Scenario: Mod mode
 - **WHEN** the user picks Launcher in the "mcr" menu on Java's title screen
 - **THEN** Java shuts down cleanly and a new mcr process shows the launcher with the same data dir
+
+### Requirement: Automatic profile heap
+A profile's JVM heap SHALL be automatic until the user moves its heap slider; an automatic heap SHALL show as "Auto" in the profile editor and leave the heap to the mod manager's automatic heap. A profile stored with `heap_mib` 2048 and no `heap_explicit` SHALL read as automatic.
+
+#### Scenario: New profile
+- **WHEN** a profile is created without touching the heap slider
+- **THEN** it is saved without a heap and the mod set decides the heap at launch

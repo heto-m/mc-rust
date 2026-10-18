@@ -18,6 +18,8 @@ const DARK: u32 = 0xFF70_7070;
 const RED: u32 = 0xFFFF_5555;
 const GREEN: u32 = 0xFF55_FF55;
 const YELLOW: u32 = 0xFFFF_FF55;
+/// Where the heap slider sits while the profile's heap is automatic.
+const AUTO_HEAP_SHOWN_AT: u32 = 2048;
 const MAX_ROWS: usize = 4096;
 
 /// A profile as the launcher lists it.
@@ -47,7 +49,8 @@ pub struct ProfileDraft {
     pub version: String,
     pub game_dir: String,
     pub mods: String,
-    pub heap_mib: u32,
+    /// `None` is automatic, from the enabled mod count.
+    pub heap_mib: Option<u32>,
     pub resolution: String,
 }
 
@@ -528,13 +531,17 @@ impl ProfileEditScreen {
         }
     }
 
-    fn heap_label(mib: u32) -> String {
-        format!("JVM heap (mods only): {mib} MiB")
+    fn heap_label(mib: Option<u32>) -> String {
+        match mib {
+            Some(mib) => format!("JVM heap (mods only): {mib} MiB"),
+            None => "JVM heap (mods only): Auto".to_owned(),
+        }
     }
 
     fn heap_value(&self) -> f32 {
         let (lo, hi) = self.model.borrow().heap_range();
-        self.draft.heap_mib.saturating_sub(lo) as f32 / hi.saturating_sub(lo).max(1) as f32
+        let mib = self.draft.heap_mib.unwrap_or(AUTO_HEAP_SHOWN_AT);
+        mib.saturating_sub(lo) as f32 / hi.saturating_sub(lo).max(1) as f32
     }
 
     fn heap_from(&self, value: f32) -> u32 {
@@ -590,7 +597,7 @@ impl ProfileEditScreen {
                     ))));
                 }
                 (E_HEAP, WidgetEventKind::SliderChanged(v)) => {
-                    self.draft.heap_mib = self.heap_from(v);
+                    self.draft.heap_mib = Some(self.heap_from(v));
                     if let Some(s) = self.widgets.slider_mut(E_HEAP) {
                         s.label = Self::heap_label(self.draft.heap_mib);
                     }
@@ -1429,7 +1436,7 @@ mod tests {
                 name: "Draft".into(),
                 icon: "grass_block".into(),
                 version: "latest-release".into(),
-                heap_mib: 2048,
+                heap_mib: Some(2048),
                 ..ProfileDraft::default()
             }
         }

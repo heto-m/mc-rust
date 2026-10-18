@@ -160,6 +160,19 @@ impl Relay for NetRelay {
                     version.items().len(),
                     version.entity_types().len()
                 );
+                let c = &report.codecs;
+                let shaped = |t: &std::collections::HashMap<i32, Option<_>>| {
+                    t.values().filter(|s| s.is_some()).count()
+                };
+                eprintln!(
+                    "[mods] modded wire shapes: {}/{} data component types, {}/{} particle types, {}/{} entity data serializers",
+                    shaped(&c.components),
+                    c.components.len(),
+                    shaped(&c.particles),
+                    c.particles.len(),
+                    shaped(&c.entity_data),
+                    c.entity_data.len()
+                );
                 for p in &report.problems {
                     eprintln!("[mods] registry export: {p}");
                 }

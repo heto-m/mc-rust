@@ -5,6 +5,7 @@ mod cache;
 mod faces;
 mod fluid;
 mod input;
+pub mod java;
 mod mesher;
 mod pool;
 mod random;
@@ -17,8 +18,8 @@ pub use biome_zoom::zoom_biome;
 pub use cache::{
     ATTR_AIR, ATTR_EMISSIVE, ATTR_FULL_COLLISION, ATTR_HALF_TRANSPARENT, ATTR_LEAVES,
     ATTR_LIGHT_OPAQUE, ATTR_SOLID, ATTR_SOLID_RENDER, CubeFace, FaceMask, FluidInfo, FluidKind,
-    FluidSprites, LAYER_NONE, MASK_EMPTY, MASK_FULL, ModelCache, NO_CULL, QuadDef, RenderLayer,
-    Shape, StateModel,
+    FluidSprites, LAYER_NONE, MASK_EMPTY, MASK_FULL, ModdedFluid, ModelCache, NO_CULL, QuadDef,
+    RenderLayer, Shape, StateModel,
 };
 pub use input::{MeshInput, PAD, PADDED, UNLIT_LIGHT, pidx, quart_index};
 pub use mesher::{MeshOptions, Mesher, Shading};

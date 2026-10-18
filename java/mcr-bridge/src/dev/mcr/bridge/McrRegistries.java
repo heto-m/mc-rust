@@ -17,6 +17,7 @@ import net.minecraft.core.component.DataComponentMap;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.component.TypedDataComponent;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
@@ -41,6 +42,8 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 public final class McrRegistries {
     private static final String[] EQUIP_SLOTS = {"head", "chest", "legs", "feet", "body", "saddle", "mainhand", "offhand"};
     private static final int MAX_BOXES = 256;
+    /** Vanilla 26.3 registers this many entity data serializers; mods append theirs. */
+    private static final int VANILLA_SERIALIZERS = 44;
     private static boolean titleSent;
     private static int problemsLogged;
 
@@ -112,6 +115,9 @@ public final class McrRegistries {
         writeFluids(w);
         w.append("],\"shapes\":[").append(String.join(",", shapeList));
         w.append("],\"fluid_states\":[").append(String.join(",", fluidList)).append("]");
+        w.append(",\"codecs\":{");
+        writeCodecs(w, problems);
+        w.append('}');
         unregisteredStates(problems);
         w.append(",\"problems\":[");
         for (int i = 0; i < Math.min(problems.size(), 64); i++) {
@@ -349,6 +355,49 @@ public final class McrRegistries {
             }
             w.append("]}");
         }
+    }
+
+    /** Wire shapes of the stream codecs of every non-vanilla data component type, particle type and entity data serializer. */
+    private static void writeCodecs(StringBuilder w, List<String> problems) {
+        w.append("\"data_component_type\":{");
+        boolean first = true;
+        for (var type : BuiltInRegistries.DATA_COMPONENT_TYPE) {
+            var key = BuiltInRegistries.DATA_COMPONENT_TYPE.getKey(type);
+            if (key == null || key.getNamespace().equals("minecraft")) continue;
+            first = codec(w, first, BuiltInRegistries.DATA_COMPONENT_TYPE.getId(type), key.toString(), () -> type.streamCodec(), problems);
+        }
+        w.append("},\"particle_type\":{");
+        first = true;
+        for (var type : BuiltInRegistries.PARTICLE_TYPE) {
+            var key = BuiltInRegistries.PARTICLE_TYPE.getKey(type);
+            if (key == null || key.getNamespace().equals("minecraft")) continue;
+            first = codec(w, first, BuiltInRegistries.PARTICLE_TYPE.getId(type), key.toString(), () -> type.streamCodec(), problems);
+        }
+        w.append("},\"entity_data_serializer\":{");
+        first = true;
+        for (int id = VANILLA_SERIALIZERS; id < VANILLA_SERIALIZERS + 1024; id++) {
+            var serializer = EntityDataSerializers.getSerializer(id);
+            if (serializer == null) break;
+            first = codec(w, first, id, serializer.getClass().getName(), serializer::codec, problems);
+        }
+        w.append('}');
+    }
+
+    private static boolean codec(StringBuilder w, boolean first, int id, String name, java.util.function.Supplier<Object> codec,
+            List<String> problems) {
+        Object c;
+        try {
+            c = codec.get();
+        } catch (RuntimeException | LinkageError e) {
+            c = null;
+        }
+        String shape = c == null ? null : McrCodecs.describe(c);
+        if (shape == null) {
+            problem(problems, "no wire shape for " + name + " (" + id + "): " + McrCodecs.explain(c));
+        }
+        if (!first) w.append(',');
+        w.append('"').append(id).append("\":").append(shape == null ? "null" : str(shape));
+        return false;
     }
 
     private static Collection<String> ruleBlocks(Tool.Rule rule) {

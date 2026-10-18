@@ -8,6 +8,8 @@ use crate::error::{AssetError, Result};
 use crate::resources::ResourceManager;
 
 pub const DEFAULT_MIP_LEVELS: u32 = 4;
+/// Sprite size classes the renderer binds; sprites of other sizes are resampled into one of these.
+pub const MAX_TEXTURE_GROUPS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Transparency {
@@ -488,6 +490,8 @@ pub struct TextureArrays {
     pub groups: Vec<TextureGroup>,
     slots: Vec<Option<SpriteSlot>>,
     animations: HashMap<SpriteId, Animation>,
+    /// Sprites resampled into another size class.
+    pub resized: u32,
 }
 
 impl TextureArrays {
@@ -521,6 +525,7 @@ pub struct TextureArrayBuilder {
     by_size: HashMap<(u32, u32), usize>,
     slots: Vec<Option<SpriteSlot>>,
     animations: HashMap<SpriteId, Animation>,
+    resized: u32,
 }
 
 impl Default for TextureArrayBuilder {
@@ -537,6 +542,7 @@ impl TextureArrayBuilder {
             by_size: HashMap::new(),
             slots: Vec::new(),
             animations: HashMap::new(),
+            resized: 0,
         }
     }
 
@@ -599,15 +605,18 @@ impl TextureArrayBuilder {
         slot
     }
 
+    /// Adds every sprite of `sprites`, resampling sizes beyond the [`MAX_TEXTURE_GROUPS`] most used
+    /// into the nearest kept one; returns the sprites that could not be loaded.
     pub fn add_from_resources(
         &mut self,
         resources: &ResourceManager,
         sprites: &SpriteTable,
     ) -> Result<Vec<SpriteId>> {
         let mut missing = Vec::new();
+        let mut loaded = Vec::new();
         for (id, name) in sprites.iter() {
             if name.path() == "missingno" {
-                self.add(id, &missing_sprite());
+                loaded.push((id, missing_sprite()));
                 continue;
             }
             let path = name.resource_path("textures", ".png");
@@ -618,6 +627,15 @@ impl TextureArrayBuilder {
                     missing_sprite()
                 }
             };
+            loaded.push((id, sprite));
+        }
+        let kept = kept_sizes(loaded.iter().map(|(_, s)| (s.width, s.height)));
+        for (id, mut sprite) in loaded {
+            if !kept.contains(&(sprite.width, sprite.height)) {
+                let to = nearest_size(&kept, (sprite.width, sprite.height));
+                sprite = resample(sprite, to);
+                self.resized += 1;
+            }
             self.add(id, &sprite);
         }
         Ok(missing)
@@ -668,7 +686,72 @@ impl TextureArrayBuilder {
             groups,
             slots: self.slots,
             animations: self.animations,
+            resized: self.resized,
         }
+    }
+}
+
+/// The most used sprite sizes, 16x16 always among them.
+fn kept_sizes(sizes: impl Iterator<Item = (u32, u32)>) -> Vec<(u32, u32)> {
+    let mut count: HashMap<(u32, u32), usize> = HashMap::new();
+    for size in sizes {
+        *count.entry(size).or_default() += 1;
+    }
+    let mut by_use: Vec<_> = count.into_iter().filter(|(s, _)| *s != (16, 16)).collect();
+    by_use.sort_by_key(|&((w, h), n)| (std::cmp::Reverse(n), w * h, w));
+    std::iter::once((16, 16))
+        .chain(by_use.into_iter().map(|(s, _)| s))
+        .take(MAX_TEXTURE_GROUPS)
+        .collect()
+}
+
+fn nearest_size(kept: &[(u32, u32)], (w, h): (u32, u32)) -> (u32, u32) {
+    let off = |a: u32, b: u32| (f64::from(a) / f64::from(b)).log2().abs();
+    kept.iter()
+        .copied()
+        .min_by(|&(aw, ah), &(bw, bh)| {
+            let (da, db) = (off(aw, w) + off(ah, h), off(bw, w) + off(bh, h));
+            da.total_cmp(&db).then((bw * bh).cmp(&(aw * ah)))
+        })
+        .unwrap_or((16, 16))
+}
+
+/// Every frame of `sprite` scaled to `to`: box-averaged where the size divides, nearest texel otherwise.
+fn resample(sprite: Sprite, (tw, th): (u32, u32)) -> Sprite {
+    let (sw, sh) = (sprite.width, sprite.height);
+    let (bx, by) = if sw % tw == 0 && sh % th == 0 {
+        (sw / tw, sh / th)
+    } else {
+        (1, 1)
+    };
+    let frames = sprite
+        .frames
+        .iter()
+        .map(|src| {
+            let mut out = Vec::with_capacity((tw * th * 4) as usize);
+            for y in 0..th {
+                for x in 0..tw {
+                    let (x0, y0) = (x * sw / tw, y * sh / th);
+                    let mut sum = [0u32; 4];
+                    for dy in 0..by {
+                        for dx in 0..bx {
+                            let i = (((y0 + dy) * sw + x0 + dx) * 4) as usize;
+                            for (c, total) in sum.iter_mut().enumerate() {
+                                *total += u32::from(src[i + c]);
+                            }
+                        }
+                    }
+                    out.extend(sum.map(|t| (t / (bx * by)) as u8));
+                }
+            }
+            out
+        })
+        .collect();
+    Sprite {
+        width: tw,
+        height: th,
+        frames,
+        ..sprite
     }
 }
 
@@ -676,6 +759,36 @@ impl TextureArrayBuilder {
 mod tests {
     use super::*;
     use crate::testutil::{png_bytes, solid_png};
+
+    #[test]
+    fn sizes_beyond_the_renderers_groups_are_resampled_into_kept_ones() {
+        let sizes = [
+            (16, 16),
+            (16, 16),
+            (32, 32),
+            (32, 32),
+            (64, 64),
+            (8, 8),
+            (256, 256),
+        ];
+        let kept = kept_sizes(sizes.into_iter());
+        assert_eq!(kept, vec![(16, 16), (32, 32), (8, 8), (64, 64)]);
+        assert_eq!(nearest_size(&kept, (256, 256)), (64, 64));
+        assert_eq!(nearest_size(&kept, (24, 24)), (32, 32));
+        let sprite = Sprite {
+            width: 4,
+            height: 2,
+            frames: vec![[[0, 0, 0, 255], [255, 255, 255, 255]].repeat(4).concat()],
+            animation: None,
+            mip: MipSettings::default(),
+        };
+        let small = resample(sprite, (2, 1));
+        assert_eq!((small.width, small.height), (2, 1));
+        assert_eq!(
+            small.frames[0],
+            vec![127, 127, 127, 255, 127, 127, 127, 255]
+        );
+    }
 
     fn strands() -> Vec<u8> {
         (0..16 * 16)

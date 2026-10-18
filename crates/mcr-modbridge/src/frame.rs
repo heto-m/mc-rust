@@ -10,8 +10,8 @@ use crate::abi::{
     FSTATE_CAMERA_POS, FSTATE_CAMERA_ROLL, FSTATE_CAMERA_YAW, FSTATE_DONE, FSTATE_FLAGS,
     FSTATE_FOV_SCALE, FSTATE_HEIGHT, FSTATE_LOADED, FSTATE_NANOS, FSTATE_PERSPECTIVE, FSTATE_PROF,
     FSTATE_READY, FSTATE_SIZE, FSTATE_STEPS, FSTATE_TICKS, FSTATE_TURN, FSTATE_VIEW_ROLL,
-    FSTATE_WEATHER, FSTATE_WIDTH, PERSPECTIVE_FIRST, PERSPECTIVE_NONE, PERSPECTIVE_THIRD_BACK,
-    PERSPECTIVE_THIRD_FRONT, PROF_COUNT,
+    FSTATE_WAITING, FSTATE_WEATHER, FSTATE_WIDTH, PERSPECTIVE_FIRST, PERSPECTIVE_NONE,
+    PERSPECTIVE_THIRD_BACK, PERSPECTIVE_THIRD_FRONT, PROF_COUNT,
 };
 
 /// After loading, a Java frame slower than this detaches the bridge from rendering.
@@ -86,6 +86,8 @@ pub struct JavaFrame {
     pub nanos: u64,
     pub ready: bool,
     pub loaded: bool,
+    /// Java shows a loading-type screen ([`FSTATE_WAITING`]).
+    pub waiting: bool,
     /// Java's main render target size.
     pub size: (u32, u32),
     /// The factor mods applied to Java's field of view, within [`FOV_SCALE_RANGE`]; 1 when none did.
@@ -104,6 +106,13 @@ pub struct JavaFrame {
     pub view_roll: f32,
     /// Phase times of Java's last frame in microseconds, indexed by `abi::PROF_*`.
     pub prof: [u32; PROF_COUNT],
+}
+
+impl JavaFrame {
+    /// Loaded and not on a loading-type screen: a late frame then counts against the hang deadline.
+    pub fn settled(&self) -> bool {
+        self.loaded && !self.waiting
+    }
 }
 
 /// Java's camera type, which mcr's perspective follows while Java draws the world.
@@ -241,6 +250,7 @@ impl FrameShared {
             nanos: s.nanos.load(Ordering::Acquire),
             ready: flags & FSTATE_READY != 0,
             loaded: flags & FSTATE_LOADED != 0,
+            waiting: flags & FSTATE_WAITING != 0,
             size: (
                 s.width.load(Ordering::Acquire),
                 s.height.load(Ordering::Acquire),

@@ -9,6 +9,11 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.VarHandle;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.ConnectScreen;
+import net.minecraft.client.gui.screens.GenericMessageScreen;
+import net.minecraft.client.gui.screens.LevelLoadingScreen;
+import net.minecraft.client.gui.screens.ProgressScreen;
+import net.minecraft.client.gui.screens.Screen;
 import org.lwjgl.sdl.SDLVideo;
 
 /** Paces the render thread on Rust's frame messages. Only the render thread calls in here. */
@@ -142,6 +147,7 @@ public final class McrFrame {
                 case BridgeAbi.MSG_KEYS -> McrSync.applyKeys(payload);
                 case BridgeAbi.MSG_PACKS -> McrSync.applyPacks(minecraft, payload);
                 case BridgeAbi.MSG_WORLD -> McrWorlds.receive(payload);
+                case BridgeAbi.MSG_MODELS -> McrRenderExport.request(payload);
                 case BridgeAbi.MSG_SHUTDOWN -> {
                     stopping = true;
                     woke = true;
@@ -199,12 +205,19 @@ public final class McrFrame {
         }
         FrameSlots.runDeferred();
         boolean loaded = minecraft.isGameLoadFinished() && minecraft.gui.overlay() == null;
+        int waiting = waitingScreen(minecraft.gui.screen()) ? BridgeAbi.FSTATE_WAITING : 0;
         McrInput.publish(minecraft);
         int weather = McrWeather.takeReplaced() ? BridgeAbi.FSTATE_WEATHER : 0;
         int steps = McrSteps.replaced() ? BridgeAbi.FSTATE_STEPS : 0;
         int turn = McrTurn.captured() ? BridgeAbi.FSTATE_TURN : 0;
         McrDynamicLights.publish(minecraft);
-        publish(Bridge.get(), minecraft, BridgeAbi.FSTATE_READY | (loaded ? BridgeAbi.FSTATE_LOADED : 0) | weather | steps | turn);
+        McrRenderExport.frame(minecraft);
+        publish(Bridge.get(), minecraft, BridgeAbi.FSTATE_READY | (loaded ? BridgeAbi.FSTATE_LOADED : 0) | waiting | weather | steps | turn);
+    }
+
+    private static boolean waitingScreen(Screen screen) {
+        return screen instanceof LevelLoadingScreen || screen instanceof ConnectScreen || screen instanceof GenericMessageScreen
+            || screen instanceof ProgressScreen || screen instanceof McrWorldScreen;
     }
 
     private static void publish(Bridge bridge, Minecraft minecraft, int stateFlags) {

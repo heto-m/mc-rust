@@ -283,7 +283,7 @@ impl LauncherModel for LauncherApp {
         profile.version = draft.version;
         profile.game_dir = path_field(&draft.game_dir);
         profile.mods = mods;
-        profile.heap_mib = draft.heap_mib;
+        profile.heap_mib = draft.heap_mib.map(|h| h.clamp(MIN_HEAP_MIB, MAX_HEAP_MIB));
         profile.resolution = resolution;
         let ok = if draft.id.is_some() {
             self.store.file.update_profile(profile)
@@ -354,7 +354,8 @@ impl LauncherModel for LauncherApp {
     }
 
     fn heap_range(&self) -> (u32, u32) {
-        (MIN_HEAP_MIB, MAX_HEAP_MIB)
+        let total = mcr_singleplayer::memory::total_memory_mib();
+        (MIN_HEAP_MIB, mcr_settings::mods::max_heap_mib(total))
     }
 
     fn default_game_dir(&self) -> String {
@@ -525,7 +526,7 @@ pub fn apply(opts: &mut Options, plan: LaunchPlan) -> Result<()> {
         opts.vanilla = plan.mods.is_none();
     }
     if opts.mods.is_some() {
-        opts.heap_mib = Some(plan.heap_mib);
+        opts.heap_mib = plan.heap_mib.or(opts.heap_mib);
     }
     if !opts.jar_set {
         opts.jar = plan.client_jar(crate::mods::cache_dir());
@@ -694,7 +695,7 @@ mod tests {
         let mut p = Profile::new("p1", "P");
         p.game_dir = Some("/games/p".into());
         p.mods = mods.map(PathBuf::from);
-        p.heap_mib = 3072;
+        p.heap_mib = Some(3072);
         p.resolution = Resolution::new(1280, 720);
         LaunchPlan::new(
             &p,

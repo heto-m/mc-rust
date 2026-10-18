@@ -1,15 +1,17 @@
 //! Per-state render data, baked once from the resource packs.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use mcr_assets::{
-    BakedQuad, Identifier, ModelBaker, ResourceManager, SpriteId, TextureArrayBuilder,
+    BakedModel, BakedQuad, Identifier, ModelBaker, ResourceManager, SpriteId, TextureArrayBuilder,
     TextureArrays, Transparency,
 };
 use mcr_data::Version;
 use mcr_render::{SpriteAnimation, SpriteFrame};
 
 use crate::faces::{self, VANILLA_TO_RENDER};
+use crate::java::{JavaModels, JavaState, JavaTint};
 use crate::random::{OffsetSpec, offset_spec};
 use crate::tint::{self, TINT_NONE, constant_palette, tint_kinds};
 
@@ -98,6 +100,8 @@ pub enum FluidKind {
     None,
     Water,
     Lava,
+    /// A modded fluid: index into [`ModelCache::modded_fluids`].
+    Other(u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -188,6 +192,23 @@ pub struct QuadDef {
     pub flat: bool,
 }
 
+/// Sprites, layer and tint of a modded fluid, from Java's fluid model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModdedFluid {
+    pub still: u16,
+    pub flow: u16,
+    /// `LAYER_NONE` when the fluid has no overlay sprite.
+    pub overlay: u16,
+    pub translucent: bool,
+    pub tint: u8,
+}
+
+/// Modded fluid families a cache distinguishes.
+pub const MAX_MODDED_FLUIDS: usize = 255;
+/// Tint kinds past vanilla's constants that modded constant colours take (the quad field holds 6 bits).
+const MODDED_TINT_FIRST: u8 = tint::TINT_CONST_BASE + tint::PALETTE_LEN as u8;
+const MODDED_TINT_LAST: u8 = 62;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FluidSprites {
     pub water_still: u16,
@@ -210,11 +231,19 @@ pub struct ModelCache {
     pub(crate) parts: Vec<PartSpan>,
     pub(crate) alts: Vec<Alt>,
     pub fluid_sprites: FluidSprites,
+    pub modded_fluids: Vec<ModdedFluid>,
+    /// Constant tint colours (`r | g << 8 | b << 16`) of modded fluids and Java-baked models, after
+    /// vanilla's palette.
+    pub modded_tints: Vec<u32>,
     pub textures: TextureArrays,
     pub missing_sprites: Vec<String>,
     pub unbaked_states: usize,
     /// The first few blocks with unbaked states.
     pub unbaked_blocks: Vec<String>,
+    /// Every block with states neither Rust nor Java's report could bake, for asking Java.
+    pub java_requests: Vec<String>,
+    /// States meshed from Java's baked quads.
+    pub java_states: usize,
 }
 
 fn compute_meta(attr: u8, occ: u8, partial: u8, emission: u8) -> u32 {
@@ -229,8 +258,33 @@ impl ModelCache {
         self.states.len()
     }
 
+    /// Approximate heap bytes: per-state tables, quads and the texture arrays.
+    pub fn heap_bytes(&self) -> (usize, usize) {
+        use std::mem::size_of_val;
+        let tables = size_of_val(&self.states[..])
+            + size_of_val(&self.quads[..])
+            + size_of_val(&self.attrs[..])
+            + size_of_val(&self.occlusion[..])
+            + size_of_val(&self.meta[..])
+            + size_of_val(&self.masks[..])
+            + size_of_val(&self.face_masks[..])
+            + size_of_val(&self.alts[..]);
+        let textures = self
+            .textures
+            .groups
+            .iter()
+            .flat_map(|g| g.mips.iter())
+            .map(Vec::len)
+            .sum();
+        (tables, textures)
+    }
+
     pub fn state(&self, id: u32) -> &StateModel {
         self.states.get(id as usize).unwrap_or(&StateModel::EMPTY)
+    }
+
+    pub fn quad_count(&self) -> usize {
+        self.quads.len()
     }
 
     pub fn quads(&self, state: &StateModel) -> &[QuadDef] {
@@ -354,8 +408,11 @@ impl ModelCache {
         out
     }
 
-    pub fn palette(&self) -> [u32; tint::PALETTE_LEN] {
-        constant_palette()
+    /// Vanilla's constant tints, then the modded ones.
+    pub fn palette(&self) -> Vec<u32> {
+        let mut p = constant_palette().to_vec();
+        p.extend_from_slice(&self.modded_tints);
+        p
     }
 
     pub fn from_parts(
@@ -379,10 +436,14 @@ impl ModelCache {
             parts: Vec::new(),
             alts: Vec::new(),
             fluid_sprites: FluidSprites::default(),
+            modded_fluids: Vec::new(),
+            modded_tints: Vec::new(),
             textures: TextureArrays::default(),
             missing_sprites: Vec::new(),
             unbaked_states: 0,
             unbaked_blocks: Vec::new(),
+            java_requests: Vec::new(),
+            java_states: 0,
         }
     }
 
@@ -405,16 +466,36 @@ impl ModelCache {
         resources: &ResourceManager,
         version: &Version,
     ) -> Result<Self, mcr_assets::AssetError> {
+        Self::build_with(resources, version, &JavaModels::default())
+    }
+
+    /// [`Self::build`], meshing states Rust cannot bake from Java's quads and modded fluids from
+    /// Java's fluid models where `java` has them.
+    pub fn build_with(
+        resources: &ResourceManager,
+        version: &Version,
+        java: &JavaModels,
+    ) -> Result<Self, mcr_assets::AssetError> {
         let count = version.state_count();
         let mut baker = ModelBaker::new(resources);
         let mut baked = Vec::with_capacity(count);
         let mut multipart_of: HashMap<u16, bool> = HashMap::new();
         let mut unbaked = 0;
         let mut unbaked_blocks: Vec<String> = Vec::new();
+        let mut java_requests: Vec<String> = Vec::new();
+        let mut java_tints: HashMap<u32, [JavaTint; 2]> = HashMap::new();
         for id in 0..count as u32 {
             let name = version.state_block_name(id).unwrap_or("minecraft:air");
             let props: Vec<(&str, &str)> = version.state_properties(id).collect();
-            match baker.bake_block_state(name, &props) {
+            let rust = baker.bake_block_state(name, &props);
+            if rust.is_err()
+                && let Some(state) = java.state(name, &props)
+            {
+                java_tints.insert(id, state.tints);
+                baked.push(Some(java_model(&mut baker, state)));
+                continue;
+            }
+            match rust {
                 Ok(model) => {
                     if let Some(info) = version.block_state(id)
                         && let std::collections::hash_map::Entry::Vacant(e) =
@@ -435,12 +516,39 @@ impl ModelCache {
                     {
                         unbaked_blocks.push(name.to_owned());
                     }
+                    if !java.has_block(name)
+                        && java_requests.len() < MAX_JAVA_REQUESTS
+                        && java_requests.last().is_none_or(|b| b != name)
+                    {
+                        java_requests.push(name.to_owned());
+                    }
                     baked.push(None);
                 }
             }
         }
 
+        let mut modded_fluid_ids = Vec::new();
+        let mut families: Vec<&str> = Vec::new();
+        let mut java_fluids: Vec<_> = java.fluids.iter().collect();
+        java_fluids.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        for (fluid, info) in java_fluids {
+            if is_vanilla_fluid(fluid) || families.len() >= MAX_MODDED_FLUIDS {
+                continue;
+            }
+            if !families.contains(&info.family.as_str()) {
+                families.push(info.family.as_str());
+                modded_fluid_ids.push(info);
+            }
+        }
         let mut sprites = baker.into_sprites();
+        let modded_fluid_sprites: Vec<[SpriteId; 3]> = modded_fluid_ids
+            .iter()
+            .map(|f| {
+                let overlay = f.overlay.as_deref().unwrap_or("missingno");
+                [&f.still, &f.flow, &Arc::from(overlay)]
+                    .map(|n| sprites.intern(&Identifier::parse(n)))
+            })
+            .collect();
         let fluid_ids = [
             "block/water_still",
             "block/water_flow",
@@ -482,7 +590,23 @@ impl ModelCache {
 
         let mut cache = Self::from_parts(Vec::new(), Vec::new(), Vec::new(), Vec::new());
         cache.masks = vec![[0; 4], FULL_MASK];
+        for (info, ids) in modded_fluid_ids.iter().zip(&modded_fluid_sprites) {
+            let tint = cache.java_tint_kind(info.tint);
+            cache.modded_fluids.push(ModdedFluid {
+                still: layer_of(ids[0]),
+                flow: layer_of(ids[1]),
+                overlay: if info.overlay.is_some() {
+                    layer_of(ids[2])
+                } else {
+                    LAYER_NONE
+                },
+                translucent: info.translucent,
+                tint,
+            });
+        }
         let mut mask_ids: HashMap<FaceMask, u16> = HashMap::new();
+        let mut runs = QuadRuns::default();
+        let mut run: Vec<QuadDef> = Vec::new();
         mask_ids.insert([0; 4], MASK_EMPTY);
         mask_ids.insert(FULL_MASK, MASK_FULL);
 
@@ -537,7 +661,14 @@ impl ModelCache {
                 }
                 if let Some(f) = info.fluid {
                     let fname = version.fluid_name(f.fluid).unwrap_or("");
-                    let kind = if fname.contains("water") {
+                    let modded = java
+                        .fluids
+                        .get(fname)
+                        .filter(|_| !is_vanilla_fluid(fname))
+                        .and_then(|j| families.iter().position(|&fam| fam == j.family));
+                    let kind = if let Some(i) = modded {
+                        FluidKind::Other(i as u8)
+                    } else if fname.contains("water") {
                         FluidKind::Water
                     } else if fname.contains("lava") {
                         FluidKind::Lava
@@ -586,7 +717,10 @@ impl ModelCache {
             sm.offset = offset_spec(name);
             if let Some(model) = model {
                 let props: Vec<(&str, &str)> = version.state_properties(id).collect();
-                let kinds = tint_kinds(name, &props);
+                let kinds = match java_tints.get(&id) {
+                    Some(t) => [cache.java_tint_kind(t[0]), cache.java_tint_kind(t[1])],
+                    None => tint_kinds(name, &props),
+                };
                 let tint_of = |q: &BakedQuad| match q.tint {
                     0 => kinds[0],
                     1 => kinds[1],
@@ -665,16 +799,17 @@ impl ModelCache {
                             let (cube, quad_start, quad_count) = match &as_cubes {
                                 Some(a) => (a[v].0, 0, 0),
                                 None => {
-                                    let start = cache.quads.len() as u32;
-                                    for q in &lists[p][v] {
-                                        cache.quads.push(compile_quad(
+                                    run.clear();
+                                    run.extend(lists[p][v].iter().map(|q| {
+                                        compile_quad(
                                             q,
                                             layer_of(q.sprite),
                                             tint_of(q),
                                             quad_layer(q),
-                                        ));
-                                    }
-                                    ([CubeFace::NONE; 6], start, lists[p][v].len() as u32)
+                                        )
+                                    }));
+                                    let start = runs.push(&mut cache.quads, &run);
+                                    ([CubeFace::NONE; 6], start, run.len() as u32)
                                 }
                             };
                             cache.alts.push(Alt {
@@ -697,18 +832,14 @@ impl ModelCache {
                     });
                     sm.random = cache.randoms.len() as u32;
                 } else if sm.shape == Shape::Model {
-                    sm.quad_start = cache.quads.len() as u32;
+                    run.clear();
                     for part in &lists {
-                        for q in &part[0] {
-                            cache.quads.push(compile_quad(
-                                q,
-                                layer_of(q.sprite),
-                                tint_of(q),
-                                quad_layer(q),
-                            ));
-                        }
+                        run.extend(part[0].iter().map(|q| {
+                            compile_quad(q, layer_of(q.sprite), tint_of(q), quad_layer(q))
+                        }));
                     }
-                    sm.quad_count = cache.quads.len() as u32 - sm.quad_start;
+                    sm.quad_start = runs.push(&mut cache.quads, &run);
+                    sm.quad_count = run.len() as u32;
                 }
             }
             cache.states.push(sm);
@@ -719,7 +850,159 @@ impl ModelCache {
         cache.missing_sprites = missing_sprites;
         cache.unbaked_states = unbaked;
         cache.unbaked_blocks = unbaked_blocks;
+        cache.java_requests = java_requests;
+        cache.java_states = java_tints.len();
         Ok(cache)
+    }
+
+    /// This cache, baked for `from`, re-indexed for `to`: the same blocks with the same states in
+    /// another id order (a loader's registry sync renumbers modded blocks); `None` when `to` differs in
+    /// anything the bake read.
+    pub fn remap(mut self, from: &Version, to: &Version) -> Option<Self> {
+        let n = to.state_count();
+        if from.state_count() != n || self.states.len() != n || self.face_masks.len() != n {
+            return None;
+        }
+        let mut old_of = Vec::with_capacity(n);
+        let mut block_of = Vec::with_capacity(n);
+        for block in 0..to.block_count() as u32 {
+            let (name, new) = (to.block_name(block)?, to.block_info(block)?);
+            let old = from.block_by_name(name).and_then(|b| from.block_info(b))?;
+            if new.states.1 - new.states.0 != old.states.1 - old.states.0
+                || new.states.0 as usize != old_of.len()
+            {
+                return None;
+            }
+            for i in 0..new.states.1 - new.states.0 {
+                let (o, t) = (old.states.0 + i, new.states.0 + i);
+                if !same_render_inputs(from, o, to, t) {
+                    return None;
+                }
+                old_of.push(o as usize);
+                block_of.push(block as u16);
+            }
+        }
+        if old_of.len() != n {
+            return None;
+        }
+        fn pick<T: Copy>(v: &[T], old_of: &[usize]) -> Vec<T> {
+            old_of.iter().map(|&o| v[o]).collect()
+        }
+        let mut states = pick(&self.states, &old_of);
+        for (s, &b) in states.iter_mut().zip(&block_of) {
+            s.block = b;
+        }
+        self.states = states;
+        self.attrs = pick(&self.attrs, &old_of);
+        self.occlusion = pick(&self.occlusion, &old_of);
+        self.meta = pick(&self.meta, &old_of);
+        self.face_masks = pick(&self.face_masks, &old_of);
+        Some(self)
+    }
+
+    /// The tint kind of a tint Java reported; constant colours take modded palette slots, the nearest
+    /// existing slot once they run out.
+    fn java_tint_kind(&mut self, tint: JavaTint) -> u8 {
+        match tint {
+            JavaTint::None => TINT_NONE,
+            JavaTint::Grass => tint::TINT_GRASS,
+            JavaTint::Foliage => tint::TINT_FOLIAGE,
+            JavaTint::DryFoliage => tint::TINT_DRY_FOLIAGE,
+            JavaTint::Water => tint::TINT_WATER,
+            JavaTint::Rgb(rgb) => {
+                let packed = (rgb >> 16 & 255) | (rgb & 0xff00) | (rgb & 255) << 16;
+                if let Some(i) = self.modded_tints.iter().position(|&c| c == packed) {
+                    return MODDED_TINT_FIRST + i as u8;
+                }
+                if usize::from(MODDED_TINT_FIRST) + self.modded_tints.len()
+                    <= usize::from(MODDED_TINT_LAST)
+                {
+                    self.modded_tints.push(packed);
+                    return MODDED_TINT_FIRST + (self.modded_tints.len() - 1) as u8;
+                }
+                let distance = |c: u32| {
+                    (0..3)
+                        .map(|k| {
+                            (i32::from((c >> (8 * k)) as u8) - i32::from((packed >> (8 * k)) as u8))
+                                .abs()
+                        })
+                        .sum::<i32>()
+                };
+                self.modded_tints
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, c)| distance(**c))
+                    .map_or(TINT_NONE, |(i, _)| MODDED_TINT_FIRST + i as u8)
+            }
+        }
+    }
+}
+
+/// Whether state `a` of `from` and state `b` of `to` bake alike: same properties, flags, light,
+/// fluid and shapes.
+fn same_render_inputs(from: &Version, a: u32, to: &Version, b: u32) -> bool {
+    let (Some(mut x), Some(y)) = (from.block_state(a), to.block_state(b)) else {
+        return false;
+    };
+    x.block = y.block;
+    let fluid = |v: &Version, info: &mcr_data::BlockStateInfo| {
+        info.fluid.map(|f| v.fluid_name(f.fluid).map(str::to_owned))
+    };
+    x == y
+        && fluid(from, &x) == fluid(to, &y)
+        && from.state_properties(a).eq(to.state_properties(b))
+        && from.collision_shape(a) == to.collision_shape(b)
+        && from.occlusion_shape(a) == to.occlusion_shape(b)
+}
+
+/// Blocks with unbaked states a cache asks Java about at most.
+const MAX_JAVA_REQUESTS: usize = 4096;
+
+fn is_vanilla_fluid(name: &str) -> bool {
+    matches!(
+        name,
+        "minecraft:water"
+            | "minecraft:flowing_water"
+            | "minecraft:lava"
+            | "minecraft:flowing_lava"
+            | "minecraft:empty"
+    )
+}
+
+/// One part, one variant: Java already picked the weighted variants.
+fn java_model(baker: &mut ModelBaker, state: &JavaState) -> BakedModel {
+    let sprites = baker.sprites_mut();
+    let quads: Vec<BakedQuad> = state
+        .quads
+        .iter()
+        .map(|q| BakedQuad {
+            vertices: std::array::from_fn(|v| mcr_assets::Vertex {
+                pos: q.pos[v],
+                uv: q.uv[v],
+            }),
+            sprite: sprites.intern(&Identifier::parse(&q.sprite)),
+            normal: q.normal,
+            cull: q.cull,
+            tint: q.tint,
+            shade_dir: q.shade,
+            light_emission: q.emission,
+            force_translucent: q.translucent,
+        })
+        .collect();
+    let particle = state
+        .particle
+        .as_deref()
+        .map(|p| sprites.intern(&Identifier::parse(p)));
+    BakedModel {
+        parts: vec![mcr_assets::ModelPart {
+            variants: vec![mcr_assets::BakedVariant {
+                weight: 1,
+                ambient_occlusion: state.ao,
+                particle,
+                quads: quads.into(),
+            }],
+            total_weight: 1,
+        }],
     }
 }
 
@@ -848,6 +1131,60 @@ fn face_rotation(q: &BakedQuad, face: usize) -> Option<u8> {
         return None;
     }
     candidates.iter().position(|&c| c).map(|k| k as u8)
+}
+
+fn quad_bits(q: &QuadDef) -> [u32; 22] {
+    let mut bits = [0; 22];
+    for (i, v) in q
+        .pos
+        .iter()
+        .flatten()
+        .chain(q.uv.iter().flatten())
+        .enumerate()
+    {
+        bits[i] = v.to_bits();
+    }
+    bits[20] = u32::from(q.layer) << 16 | u32::from(q.tint) << 8 | u32::from(q.cull);
+    bits[21] = u32::from(q.normal) << 16
+        | u32::from(q.shade) << 8
+        | u32::from(q.translucent) << 2
+        | u32::from(q.boundary) << 1
+        | u32::from(q.flat);
+    bits
+}
+
+/// Shares one copy of identical compiled quad runs between states and variants.
+#[derive(Default)]
+struct QuadRuns {
+    starts: HashMap<u64, Vec<u32>>,
+}
+
+impl QuadRuns {
+    fn push(&mut self, quads: &mut Vec<QuadDef>, run: &[QuadDef]) -> u32 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        run.len().hash(&mut h);
+        for q in run {
+            quad_bits(q).hash(&mut h);
+        }
+        let starts = self.starts.entry(h.finish()).or_default();
+        let same = |&start: &u32| {
+            let s = start as usize;
+            quads.get(s..s + run.len()).is_some_and(|stored| {
+                stored
+                    .iter()
+                    .zip(run)
+                    .all(|(a, b)| quad_bits(a) == quad_bits(b))
+            })
+        };
+        if let Some(&start) = starts.iter().find(|s| same(s)) {
+            return start;
+        }
+        let start = quads.len() as u32;
+        quads.extend_from_slice(run);
+        starts.push(start);
+        start
+    }
 }
 
 fn compile_quad(q: &BakedQuad, layer: u16, tint: u8, rl: RenderLayer) -> QuadDef {

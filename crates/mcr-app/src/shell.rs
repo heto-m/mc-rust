@@ -127,6 +127,7 @@ pub struct Shell {
     sp_java_failure: Option<String>,
     /// The local world was pausing last frame (a capture for its icon is taken when it starts).
     sp_was_paused: bool,
+    java_render: crate::java_models::JavaRender,
     builtin: mcr_client::BuiltinData,
     text_renderer: mcr_client::TextRenderer,
 }
@@ -202,6 +203,7 @@ impl Shell {
             assets_dir: cfg.assets_dir.clone(),
             index: index.clone(),
             mods: mod_jars,
+            user: Vec::new(),
         };
         let now = Instant::now();
         let builtin = assets.builtin.clone();
@@ -249,6 +251,7 @@ impl Shell {
             pending_launch: None,
             sp_java_failure: None,
             sp_was_paused: false,
+            java_render: Default::default(),
             cfg,
         };
         shell.show_title();
@@ -498,7 +501,7 @@ impl Shell {
         let built = self
             .resource_stack
             .build(paths)
-            .and_then(|r| Assets::from_resources(&self.cfg.jar, r));
+            .and_then(|r| Assets::from_resources(&self.cfg.jar, r, &self.java_render.models()));
         let assets = match built {
             Ok(assets) => Arc::new(assets),
             Err(e) => {
@@ -1084,12 +1087,29 @@ impl Shell {
                 let data = mcr_data::v26_3();
                 if !std::ptr::eq(parts.assets.data, data) {
                     let started = Instant::now();
-                    match parts.assets.for_data(data) {
-                        Ok(assets) => {
+                    let assets = match self.java_render.take_cache_for(data) {
+                        Some(cache) => {
+                            crate::assets::report_bake(&cache);
+                            Ok((parts.assets.with_cache(data, cache), "prebaked"))
+                        }
+                        None => parts
+                            .assets
+                            .for_data_with(data, &self.java_render.models())
+                            .map(|a| (a, "baked")),
+                    };
+                    match assets {
+                        Ok((assets, how)) => {
                             println!(
-                                "assets: models baked for {} block states in {:?}",
+                                "assets: models {how} for {} block states in {:?}",
                                 data.state_count(),
                                 started.elapsed()
+                            );
+                            if how == "baked" {
+                                self.java_render.baked_live();
+                            }
+                            self.java_render.request(
+                                &assets.cache,
+                                self.cfg.mod_net.as_ref().and_then(|n| n.frames.as_ref()),
                             );
                             parts.assets = Arc::new(assets);
                         }
@@ -1181,6 +1201,7 @@ impl Shell {
         self.update_route();
         let now = Instant::now();
         self.last_frame = now;
+        self.poll_java_render();
         self.poll_connect();
         self.poll_singleplayer();
         self.poll_mod_worlds();
@@ -1308,6 +1329,43 @@ impl Shell {
         let mut settings = self.settings.borrow_mut();
         if settings.dynamic_lights_provider != provider {
             settings.dynamic_lights_provider = provider;
+        }
+    }
+
+    /// Java's render reports, the title prebake, and an in-game rebake once Java answered.
+    fn poll_java_render(&mut self) {
+        let Some(frames) = self.cfg.mod_net.as_ref().and_then(|n| n.frames.as_ref()) else {
+            return;
+        };
+        let resources = match (&self.play, &self.parts) {
+            (Some(play), _) => play.assets().resources.clone(),
+            (None, Some(parts)) => parts.assets.resources.clone(),
+            (None, None) => return,
+        };
+        let at_title = self.play.is_none();
+        self.java_render.poll(&resources, Some(frames), at_title);
+        let user = self.java_render.user_packs(&self.cfg.game_dir);
+        if user != self.resource_stack.user.as_slice() {
+            let user = user.to_vec();
+            println!("resource packs: Java selected {} pack(s)", user.len());
+            self.resource_stack.user = user;
+            let server = self.packs.applied();
+            if self.reload_resources(&server) {
+                self.java_render.resources_changed();
+            }
+            return;
+        }
+        let Some(play) = &mut self.play else { return };
+        let assets = play.assets().clone();
+        if let Some(cache) = self
+            .java_render
+            .poll_rebake(&resources, assets.data, &assets.cache)
+        {
+            crate::assets::report_bake(&cache);
+            let assets = Arc::new(assets.with_cache(assets.data, cache));
+            if let Err(e) = play.reload_resources(assets) {
+                eprintln!("assets: applying Java's models failed: {e:#}");
+            }
         }
     }
 

@@ -313,6 +313,12 @@ impl FrameLink {
     }
 
     /// The server pack files mcr applied, first pushed first; Java loads the same set.
+    /// Asks Java for the baked quads of `blocks` (Rust's baker could not bake them); the answer is
+    /// the next [`crate::registries::render_latest`].
+    pub fn request_models<'a>(&mut self, blocks: impl IntoIterator<Item = &'a str>) {
+        self.pending.models(sync::encode_models(blocks));
+    }
+
     pub fn set_server_packs(&mut self, paths: &[std::path::PathBuf]) {
         self.pending.packs(sync::encode_packs(paths));
     }
@@ -608,7 +614,7 @@ impl FrameLink {
     /// Bounded wait for Java's frame `index`; on time-out it detaches or counts a late frame.
     fn wait(&mut self, index: u64) -> bool {
         let start = Instant::now();
-        let loaded = self.java().loaded;
+        let loaded = self.java().settled();
         let done = match self.lockstep.wait_until(start, loaded) {
             Some(deadline) => self.shared.frame.wait_done(index + 1, deadline),
             None => false,
@@ -652,7 +658,7 @@ impl FrameLink {
             return;
         };
         let start = Instant::now();
-        let loaded = self.java().loaded;
+        let loaded = self.java().settled();
         let done = if self.ready.is_some() {
             true
         } else {
@@ -678,7 +684,7 @@ impl FrameLink {
         } else if self.shared.frame.is_gone() {
             self.detach_for_good("Java stopped");
             self.drain(|| backend.slots.drain_all(gpu, Some(ctx.batch)));
-        } else if self.lockstep.expire(Instant::now(), java.loaded) {
+        } else if self.lockstep.expire(Instant::now(), java.settled()) {
             let waited = start.elapsed();
             self.report_detached(&format!(
                 "no frame for {:.1}s",
@@ -690,7 +696,7 @@ impl FrameLink {
         } else {
             self.stats.late += 1;
             // Loading screens stay up; in game the live world beats a frozen composite.
-            if !java.loaded
+            if !java.settled()
                 && let Some(last) = &self.last
             {
                 copy_same(ctx, last, ctx.scene);
@@ -732,7 +738,7 @@ impl FrameLink {
         if composed {
             self.size_mismatch_logged = false;
             self.shown = true;
-            if self.java().loaded {
+            if self.java().settled() {
                 self.last = None;
             } else {
                 let last = match self.last.take() {

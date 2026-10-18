@@ -15,7 +15,7 @@ use crate::sections::SectionShared;
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 21;
+pub const BRIDGE_VERSION: u32 = 22;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -44,6 +44,8 @@ pub const MSG_KEYS: u16 = 4;
 pub const MSG_PACKS: u16 = 5;
 /// `[u32 kind][utf8 text]`: the local world session's progress for Java's world screens.
 pub const MSG_WORLD: u16 = 6;
+/// Block names, one per line, whose Java-baked quads Rust wants in a `render_report`.
+pub const MSG_MODELS: u16 = 7;
 pub const WORLD_STATUS: u32 = 1;
 pub const WORLD_EULA: u32 = 2;
 pub const WORLD_READY: u32 = 3;
@@ -184,6 +186,9 @@ pub const FSTATE_WEATHER: u32 = 4;
 pub const FSTATE_STEPS: u32 = 8;
 /// A mod consumes the mouse's turning (Freelook), so mcr must not turn its player.
 pub const FSTATE_TURN: u32 = 16;
+/// Java shows a screen that waits on the game (level loading, connecting, saving), where one frame may
+/// take seconds (JEI starting on join), so mcr keeps the last composite up instead of detaching.
+pub const FSTATE_WAITING: u32 = 32;
 /// A mod moved Java's camera or made another entity the camera entity.
 pub const CAMERA_MOD: u32 = 1;
 /// The camera shows the local player: third person, or a camera entity other than the player.
@@ -418,6 +423,11 @@ pub const ENTRIES: &[EntryDesc] = &[
         descriptor: "(JI)V",
         flavour: Flavour::Normal,
     },
+    EntryDesc {
+        name: "render_report",
+        descriptor: "(JI)V",
+        flavour: Flavour::Normal,
+    },
 ];
 
 /// One `MSG_FRAME`: what Java's next frame runs with.
@@ -549,6 +559,7 @@ pub(crate) struct Shared {
     pub sections: SectionShared,
     pub lights: LightShared,
     pub registries: crate::registries::RegistryShared,
+    pub render: crate::registries::RegistryShared,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -574,6 +585,7 @@ pub(crate) fn shared() -> Result<&'static Shared, RingError> {
         sections: SectionShared::new(),
         lights: LightShared::new(),
         registries: crate::registries::RegistryShared::new(),
+        render: crate::registries::RegistryShared::new(),
     }))
 }
 
@@ -584,7 +596,7 @@ pub(crate) fn shared_now() -> Option<&'static Shared> {
 pub(crate) fn table() -> &'static ExtensionTable {
     TABLE.get_or_init(|| {
         use crate::gpu::ffi;
-        let fns: [*const c_void; 13] = [
+        let fns: [*const c_void; 14] = [
             shared_address as *const c_void,
             report as *const c_void,
             ffi::gpu_device as *const c_void,
@@ -598,6 +610,7 @@ pub(crate) fn table() -> &'static ExtensionTable {
             input::clipboard_get as *const c_void,
             input::clipboard_set as *const c_void,
             crate::registries::registry_report as *const c_void,
+            crate::registries::render_report as *const c_void,
         ];
         let entries: Vec<_> = ENTRIES.iter().copied().zip(fns).collect();
         ExtensionTable::leak(BRIDGE_VERSION, &entries)
@@ -764,6 +777,7 @@ mod tests {
             ("MSG_KEYS", MSG_KEYS.into()),
             ("MSG_PACKS", MSG_PACKS.into()),
             ("MSG_WORLD", MSG_WORLD.into()),
+            ("MSG_MODELS", MSG_MODELS.into()),
             ("WORLD_STATUS", WORLD_STATUS.into()),
             ("WORLD_EULA", WORLD_EULA.into()),
             ("WORLD_READY", WORLD_READY.into()),
@@ -877,6 +891,7 @@ mod tests {
             ("FSTATE_WEATHER", FSTATE_WEATHER.into()),
             ("FSTATE_STEPS", FSTATE_STEPS.into()),
             ("FSTATE_TURN", FSTATE_TURN.into()),
+            ("FSTATE_WAITING", FSTATE_WAITING.into()),
             ("CAMERA_MOD", CAMERA_MOD.into()),
             ("CAMERA_DETACHED", CAMERA_DETACHED.into()),
             ("CAMERA_INPUT", CAMERA_INPUT.into()),

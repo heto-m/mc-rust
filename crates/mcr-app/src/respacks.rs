@@ -59,6 +59,8 @@ pub struct ResourceStack {
     pub index: Option<String>,
     /// Mod jars whose resources sit between vanilla and the server's packs.
     pub mods: Vec<PathBuf>,
+    /// The packs Java selected from its pack folder, above the mods, lowest priority first.
+    pub user: Vec<PathBuf>,
 }
 
 impl ResourceStack {
@@ -72,6 +74,11 @@ impl ResourceStack {
         )
         .context("opening vanilla resources")?;
         crate::assets::push_mod_jars(&mut resources, &self.mods);
+        for path in &self.user {
+            if let Err(e) = resources.push_path(path) {
+                eprintln!("resource packs: skipping {}: {e}", path.display());
+            }
+        }
         for path in packs.iter().rev() {
             resources
                 .push_untrusted_zip(path)
@@ -175,6 +182,11 @@ impl ServerPacks {
             last_reload: Vec::new(),
             reloading: Reloading::No,
         }
+    }
+
+    /// The server packs the last successful reload applied.
+    pub fn applied(&self) -> Vec<PathBuf> {
+        self.active.clone()
     }
 
     pub fn is_active(&self) -> bool {
