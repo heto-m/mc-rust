@@ -79,8 +79,8 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
   the AOT cache. Java loads a marker class (`McrPreload$Mark<k>`) at four milestones: the game's `main`, the
   first game-loop frame, the title screen and the login packet; the markers cut the list into segments. When a
   list exists, the `mcr-preload` daemon thread starts at `main`, after every `preLaunch` entrypoint added its
-  mixin configs, and loads each listed class with `Class.forName(name, false, knot)` once this session reached
-  the milestone the class followed last time. Classes are read, mixin-transformed and defined off the render
+  mixin configs, and loads each listed class with `Class.forName(name, false, knot)` (FML's loader under
+  NeoForge) once this session reached the milestone the class followed last time. Classes are read, mixin-transformed and defined off the render
   thread, never initialized. Left to the game: Mixin and its extensions (MixinExtras), which Mixin loads while
   holding its transformer lock, so a preload holding one of their class locks deadlocks against a transform on
   the render thread; classes in mixin packages; and the targets and mod packages of plugins whose `preApply` or
@@ -417,7 +417,7 @@ frames, net, sound, input) is loader-agnostic.
   mixin config. FML runs the same sponge-mixin build (0.17.4+mixin.0.8.7) and bundles MixinExtras. The entry
   classes fill `Loaders` (mod list, loader name) and run `BridgeInit`: `McrBridge` for Fabric and
   `neoforge.McrBridgeNeoForge` (`@Mod`, built from `src-neoforge`) for NeoForge. Fabric-only calls live in
-  `dev.mcr.bridge.fabric`, loaded only when preloading. `deps.txt` marks `neoforge-launch optional`: without
+  `dev.mcr.bridge.fabric`, loaded only under Fabric. `deps.txt` marks `neoforge-launch optional`: without
   `.cache/neoforge/launch.json` java-build leaves the NeoForge sources and `resources-neoforge` out and says
   so, and a NeoForge boot then fails early naming the two commands.
 - **Patched classes.** NeoForge recompiles every vanilla class from patched sources. A mixin that names a method
@@ -425,18 +425,67 @@ frames, net, sound, input) is loader-agnostic.
   and `compileAsync` gained `List<AdditionalSectionRenderer>` overloads, which NeoForge's `LevelRenderer`
   calls: `RenderSectionMixin` handles both (`require = 0` on NeoForge's), or real meshing would run and the
   level loading screen would wait for the player's section forever.
-- **Warm-up.** The AOT cache and class preloading stay Fabric-only: their key and exclusions are written
-  against Knot, and FML's module layer has not been measured. NeoForge reaches the title in about 7–8 s
-  with seven mods.
+- **Warm-up.** The AOT cache and preloading run under NeoForge too. The key also hashes the patched game jar
+  (FML takes it from the library directory, not the class path) and names the loader and its version. The
+  preloader reads the game's loader through `GameClasses`: Knot under Fabric, FML's `TransformingClassLoader`
+  under NeoForge (already-loaded probe through its `getLoadedClass`). Besides Mixin and MixinExtras it leaves
+  out the packages of FML's class processors (`sortedProcessors`: Mixin, access transformers, enum extensions);
+  if those cannot be read, it stops and reports `preload_stopped`. With 14 mods (median of three, alternating):
+  title 10.45 s with neither, 9.33 s AOT only, 8.47 s preload only, 7.81 s both; ready in the world 11.99 s
+  against 9.07 s. Without warm-up JEI's join stall detached Java once on every run, with it never. The recording
+  session is about 1 s slower; the 146 MB cache served 16,310 of the 32,766 classes a warm session loaded.
+  The 2-strike switch-off is unchanged.
+- **No dialogs.** FML reports a fatal load error with a Swing dialog (an SDL message box when AWT is headless)
+  and then exits with 1. `McrBoot` asks AWT `isHeadless()` before the game's `main`, which pins it headless,
+  and for NeoForge (`-Dmcr.boot.sdlOffscreen`) sets SDL's video driver hint to `offscreen`, which has no
+  message box. A mod that throws while constructing therefore ends the VM with code 1 and a crash report, and
+  mcr carries on natively with a toast, as when Java exits for any other reason. Under NeoForge that throw is a
+  crash on the main thread, not FML's loading error screen.
+- **Client commands.** The bridge sends chat and commands to Rust at the head of `ClientPacketListener.sendCommand`,
+  ahead of NeoForge's patch there, so the NeoForge entry hands `Loaders` its `ClientCommandHandler.runCommand`
+  and the mixin tries it first (spark's `/sparkc`).
+- **Multi-loader jars.** A jar with both `fabric.mod.json` and `neoforge.mods.toml` keeps both readings. It
+  does not decide the loader: in a NeoForge set it is evaluated as a NeoForge mod, alone or with Fabric mods as
+  a Fabric one.
+- **Config screens** from NeoForge's mod list save and reopen with the new value: AppleSkin (NeoForge's
+  `ConfigurationScreen`), Jade, BetterF3 (Cloth Config). JEI registers no config screen factory, so its Config
+  button is disabled as on stock NeoForge; its in-game wrench needs MezzConfig GUI, and with it the setting
+  lands in `jei-client.ini`.
+- **Singleplayer** works as under Fabric: Create World, play, pause (the server logs the tick freeze), Save
+  and Quit, the world back in the list with its icon, reopened at the same spot, and Open to LAN.
 - **Results** (26.3.0.90, Ryzen 7 5800X): title screen composed in mcr, join of a vanilla 26.3 server through
-  the net bridge, Java's HUD, inventory and creative screens, F3, F5 and chat. Seen working: JEI (+ MezzConfig)
-  ingredient list, Jade's block tooltip, AppleSkin's hunger overlay, BetterF3, Chat Heads. Loaded through the
-  join without errors: Mouse Tweaks, Controlling (+ Searchables), Cloth Config, 3D Skin Layers, Freecam,
-  EntityCulling, FerriteCore. The singleplayer world screens open; creating a world was not tried.
+  the net bridge, Java's HUD, inventory and creative screens, F3, F5 and chat. First sweep (`mod-neoforge-1`):
+  JEI (+ MezzConfig), Jade, AppleSkin, BetterF3 and Chat Heads work; Mouse Tweaks, Controlling (+ Searchables),
+  Cloth Config, 3D Skin Layers, Freecam, EntityCulling and FerriteCore load through the join without errors.
+
+Second sweep (`mod-neoforge-2`, October 2026): each mod alone with its dependencies, joining a vanilla 26.3
+server in offline mode, offscreen at 1920x1080. All except Cherished Worlds, Zoomify and the two blocked ones
+then ran together with the first sweep's 14: 32 mods, title in 8.6 s and in the world in 9.6 s once warm, no
+detach and no late frame.
+
+| Mod | Version | Status | Checked |
+|---|---|---|---|
+| MezzConfig GUI | 0.5.11 | works | JEI's wrench opens its config; a change saves and reopens |
+| Shulker Box Tooltip | 5.4.2 | works | contents preview on a shulker box tooltip |
+| Better Advancements | 0.6.0.78 | works | its advancement screen with the Minecraft tab |
+| Inventory Profiles Next | 2.3.8 | works | sort button regroups the inventory, kept by the server; needs libIPN 6.9.0 and KotlinLangForge 2.15.0 |
+| Highlighter | 1.2.3 | works | new-item star in the inventory and on the hotbar after a pickup; needs Iceberg 1.4.3.2 |
+| AmbientSounds | 6.3.10 | works | its bird, cricket and water sounds play through the bridge; needs CreativeCore 2.14.21, which logs "Could not load default style" at construction |
+| spark | 1.10.187 | works | `/sparkc tps` answers (after the client command fix) |
+| No Chat Reports | 2.21.0 | works | chat sends, the "can't be verified" toast is gone; signing is mcr's anyway |
+| Entity Texture Features | 7.2.6 | loads | entities render; its variant and emissive textures need a resource pack, not tried |
+| Not Enough Animations | 1.12.6 | loads | third person renders the player; animations not judged from stills |
+| WaveyCapes | 1.11.3 | loads | joins; an offline player has no cape to wave |
+| LambDynamicLights | 4.13.0 | partial | multi-loader jar, joins; a held torch lights nothing, because mcr meshes and lights the terrain, not Java |
+| Cherished Worlds | 18.0.0 | partial | favourite star toggles and persists; cannot join vanilla servers: its SpectreLib registers a required payload, so NeoForge itself refuses, as on stock |
+| Zoomify | 2.17.0 | broken | needs YACL 3.9.7+26.3-neoforge, whose `neoforge.mods.toml` asks for Minecraft and NeoForge `[26.2,26.3)`; excluded as FML would |
+| Dynamic FPS | 3.11.10 | blocked | policy: frame pacing and the window are mcr's |
+| Sound Physics Remastered | 1.5.1 | blocked | policy: OpenAL effects on the vanilla sound device |
 
 ## Change sequence
 
 `mod-jvm-host` → `mod-fabric-boot` → `mod-net-bridge` → `mod-render-backend` → `mod-frame-compose` →
-`mod-input-screens` → `mod-entity-render-hooks` → `mod-sound-bridge` → `mod-manager-ui`, later `mod-neoforge-1`.
+`mod-input-screens` → `mod-entity-render-hooks` → `mod-sound-bridge` → `mod-manager-ui`, later `mod-neoforge-1` and
+`mod-neoforge-2`.
 Spikes first: SPIR-V combined samplers through naga, SDL3 offscreen video driver off the main thread, and the
 `EmbeddedChannel` behaviour of `Connection.setupInboundProtocol`.

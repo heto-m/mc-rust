@@ -245,6 +245,8 @@ fn utf8(p: &Path) -> Result<&str, BridgeError> {
 }
 
 pub const MOD_FOLDERS_PROPERTY: &str = "fml.modFolders";
+/// `McrBoot` sets SDL's video driver hint before FML runs, so FML's fatal error message box cannot open.
+pub const SDL_OFFSCREEN_PROPERTY: &str = "mcr.boot.sdlOffscreen";
 
 /// `${…}` placeholders of a launcher profile's JVM arguments.
 fn substitute(arg: &str, manifest: &LaunchManifest) -> Result<String, BridgeError> {
@@ -322,6 +324,7 @@ pub fn plan(
             format!("-D{MOD_FOLDERS_PROPERTY}={}", mod_folders(&mods)?),
             "--illegal-native-access=allow".into(),
             "-Dio.netty.transport.noNative=true".into(),
+            format!("-D{SDL_OFFSCREEN_PROPERTY}=true"),
         ],
     };
     properties.extend([

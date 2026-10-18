@@ -74,7 +74,30 @@ fn loader_name(kind: &ModKind) -> Option<String> {
 }
 
 /// Classifies every scanned jar against the policy, the user's choices and the dependency pre-check.
+/// Multi-loader jars are read as Fabric mods unless the other active mods need NeoForge.
 pub fn evaluate(
+    mods: Vec<ModInfo>,
+    policy: &Policy,
+    settings: &ModSettings,
+    host: &HostEnv,
+) -> Report {
+    let report = evaluate_as(mods.clone(), policy, settings, host);
+    if report.loader() != Some(crate::Loader::NeoForge)
+        || !mods.iter().any(ModInfo::is_multi_loader)
+    {
+        return report;
+    }
+    let mods = mods
+        .into_iter()
+        .map(|m| match m.neoforge {
+            Some(neoforge) => *neoforge,
+            None => m,
+        })
+        .collect();
+    evaluate_as(mods, policy, settings, host)
+}
+
+fn evaluate_as(
     mods: Vec<ModInfo>,
     policy: &Policy,
     settings: &ModSettings,

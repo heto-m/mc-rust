@@ -258,12 +258,6 @@ impl ModHost {
             .with_context(|| format!("starting the {} bridge", plan.loader))
             .map_err(fail)?;
         let recording = bridge.aot_plan().is_some_and(|p| p.records());
-        if plan.loader != Loader::Fabric {
-            eprintln!(
-                "[mods] {}: JVM AOT cache and class preload are off (Fabric only)",
-                plan.loader
-            );
-        }
         if let Some(line) = bridge.aot_plan().map(aot_line) {
             eprintln!("[mods] {line}");
         }

@@ -10,7 +10,7 @@ use crate::checksum::Checksum;
 use crate::net::{download_to, get_text};
 use crate::paths::Layout;
 
-pub const LOADER_VERSION: &str = "0.19.5";
+pub use crate::pins::LOADER_VERSION;
 const META_URL: &str = "https://meta.fabricmc.net/v2/versions/loader";
 const LAUNCH_FORMAT: u32 = 1;
 

@@ -8,7 +8,7 @@ with the previous session's classes preloaded on a background thread.
 ## Requirements
 
 ### Requirement: AOT cache per configuration
-Mod mode SHALL start Java from a JDK AOT cache when one exists for the current key. The key SHALL cover the JDK (release file and libjvm), the JVM options except `-D` properties, every class path entry by size and modification time, every mod jar by content, and the bridge ABI version. Caches SHALL live under `<game dir>/cache/jvm-aot`, never in the repository.
+Mod mode SHALL start Java from a JDK AOT cache when one exists for the current key, under Fabric and NeoForge alike. The key SHALL cover the JDK (release file and libjvm), the JVM options except `-D` properties, every class path entry by size and modification time, every mod jar by content, and the bridge ABI version. Caches SHALL live under `<game dir>/cache/jvm-aot`, never in the repository.
 
 #### Scenario: Changed mod
 - **WHEN** one mod jar's bytes change between two launches
@@ -17,6 +17,13 @@ Mod mode SHALL start Java from a JDK AOT cache when one exists for the current k
 #### Scenario: Cache in use
 - **WHEN** a cache exists for the current key
 - **THEN** Java starts with `-XX:AOTCache` pointing at it and mcr logs that it uses it
+
+### Requirement: NeoForge key inputs
+Under NeoForge the AOT key SHALL also cover the patched game jar by size and modification time and the NeoForge version, which FML reads from its library directory instead of the class path.
+
+#### Scenario: Re-patched NeoForge game jar
+- **WHEN** `cargo xtask neoforge-fetch` rewrites the patched client jar between two NeoForge launches
+- **THEN** the second launch computes a different key
 
 ### Requirement: Transparent training
 Without a cache, a session SHALL record one (`-XX:AOTMode=record`) unless a recording waits for its build or a build runs. After a clean JVM shutdown mcr SHALL keep the recording and start a detached, lower-priority helper that builds the cache and publishes it by rename. A recording from an unclean shutdown SHALL be dropped.
@@ -74,7 +81,7 @@ When a class list exists for the current key and preloading is on, Java SHALL lo
 - **THEN** this session preloads it only after its own login packet
 
 ### Requirement: Preloading respects Mixin
-Classes of Mixin and its registered extensions (which Mixin loads while holding its transformer lock), classes in mixin packages, and the targets and mod packages of mixin plugins whose `preApply` or `postApply` does anything SHALL be left to the game. Preloading SHALL stop for the session when the mixin configurations change after `main` or a class load fails with anything other than a missing class or a linkage error.
+Classes of Mixin and its registered extensions (which Mixin loads while holding its transformer lock), classes in mixin packages, and the targets and mod packages of mixin plugins whose `preApply` or `postApply` does anything SHALL be left to the game. Preloading SHALL stop for the session when the mixin configurations change after `main`, or when a class load fails with anything other than a missing class or a linkage error.
 
 #### Scenario: Plugin that acts at transform time
 - **WHEN** a mixin config's plugin has a non-empty `postApply`
@@ -83,6 +90,13 @@ Classes of Mixin and its registered extensions (which Mixin loads while holding 
 #### Scenario: Transform on the render thread
 - **WHEN** the render thread transforms a class and MixinExtras loads one of its classes that the list also holds
 - **THEN** the preload thread holds no lock on that class, and neither thread deadlocks
+
+### Requirement: Preloading under FML
+Under NeoForge the preloader SHALL load through FML's transforming class loader and SHALL leave the packages of FML's class processors to the game. It SHALL stop for the session when those processors cannot be read.
+
+#### Scenario: NeoForge session with a class list
+- **WHEN** a NeoForge mod set with a class list boots
+- **THEN** Java reports per segment how many classes it preloaded through FML's loader, and no class processor's package is among them
 
 ### Requirement: Preloading never sticks
 A session that preloads SHALL count as a strike until it ends cleanly without a `preload_stopped` report; a key with two strikes SHALL stop preloading. `MCR_JVM_PRELOAD=off` SHALL disable recording and preloading, and `MCR_JVM_PRELOAD=on` SHALL preload where the default would not.

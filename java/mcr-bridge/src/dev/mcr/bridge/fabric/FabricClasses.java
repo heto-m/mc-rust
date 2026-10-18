@@ -3,7 +3,7 @@ package dev.mcr.bridge.fabric;
 import net.fabricmc.loader.impl.launch.FabricLauncher;
 import net.fabricmc.loader.impl.launch.FabricLauncherBase;
 
-/** Knot's class loader for the preloader; only loaded when a preload list is set, which happens under Fabric only. */
+/** Knot's class loader for the preloader; only loaded under Fabric. */
 public final class FabricClasses {
     private static final FabricLauncher LAUNCHER = FabricLauncherBase.getLauncher();
 

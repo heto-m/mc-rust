@@ -3,14 +3,12 @@ use std::collections::HashMap;
 use super::scan::{Dependency, ModInfo};
 use super::version::{Range, Version};
 
+pub use crate::pins::{FML_VERSION, LOADER_VERSION, NEOFORGE_VERSION};
+
 pub const GAME_VERSION: &str = "26.3";
-pub const LOADER_VERSION: &str = "0.19.5";
 /// Bundled with the pinned loader under its own mod id.
 pub const MIXINEXTRAS_VERSION: &str = "0.5.5";
 pub const JAVA_VERSION: &str = "25";
-/// The NeoForge build `cargo xtask neoforge-fetch` pins, and its FancyModLoader.
-pub const NEOFORGE_VERSION: &str = "26.3.0.90";
-pub const FML_VERSION: &str = "12.0.12";
 pub const BRIDGE_ID: &str = "mcr_bridge";
 pub const BRIDGE_VERSION: &str = "0.1.0";
 
@@ -203,6 +201,7 @@ mod tests {
             provides: Vec::new(),
             nested: Vec::new(),
             warnings: Vec::new(),
+            neoforge: None,
         }
     }
 

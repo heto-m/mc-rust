@@ -11,6 +11,7 @@ mod loader;
 pub mod manager;
 pub mod net;
 mod pacer;
+pub mod pins;
 pub mod profile;
 pub mod proxy;
 mod sections;
@@ -175,8 +176,7 @@ impl Bridge {
         let warmup = config
             .aot
             .as_ref()
-            .filter(|_| config.loader == Loader::Fabric)
-            .and_then(|settings| warmup(settings, &home, &plan));
+            .and_then(|settings| warmup(settings, &home, &plan, &manifest));
         if let Some(w) = &warmup {
             options.extra.extend(w.plan.options());
             options.extra.extend(w.preload.options());
@@ -388,7 +388,12 @@ impl Bridge {
 }
 
 /// Picks this session's AOT plan; any failure only means starting without the cache.
-fn warmup(settings: &AotSettings, home: &mcr_jvm::JavaHome, plan: &LaunchPlan) -> Option<Warmup> {
+fn warmup(
+    settings: &AotSettings,
+    home: &mcr_jvm::JavaHome,
+    plan: &LaunchPlan,
+    manifest: &LaunchManifest,
+) -> Option<Warmup> {
     let started = Instant::now();
     let options: Vec<String> = match plan.jvm_options().to_strings() {
         Ok(all) => all.into_iter().filter(|o| !o.starts_with("-D")).collect(),
@@ -397,12 +402,28 @@ fn warmup(settings: &AotSettings, home: &mcr_jvm::JavaHome, plan: &LaunchPlan) -
             return None;
         }
     };
+    // FML reads the patched game and NeoForge's jar from its library directory, off the class path.
+    let (key_files, extra) = match manifest.loader {
+        Loader::Fabric => (
+            plan.options_class_path.clone(),
+            format!("bridge {BRIDGE_VERSION}"),
+        ),
+        Loader::NeoForge => {
+            let mut files = plan.options_class_path.clone();
+            files.push(manifest.game_jar.clone());
+            let extra = format!(
+                "bridge {BRIDGE_VERSION} {} {}",
+                manifest.loader, manifest.loader_version
+            );
+            (files, extra)
+        }
+    };
     let inputs = aot::KeyInputs {
         java_home: home.path(),
         options: &options,
-        class_path: &plan.options_class_path,
+        class_path: &key_files,
         jars: &plan.mod_jars,
-        extra: &format!("bridge {BRIDGE_VERSION}"),
+        extra: &extra,
     };
     let result = aot::AotCache::new(&settings.dir, &inputs).and_then(|cache| {
         let plan_now = cache.plan();

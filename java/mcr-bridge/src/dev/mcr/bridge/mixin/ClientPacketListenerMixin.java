@@ -1,6 +1,7 @@
 package dev.mcr.bridge.mixin;
 
 import dev.mcr.bridge.BridgeAbi;
+import dev.mcr.bridge.Loaders;
 import dev.mcr.bridge.McrCameraHandoff;
 import dev.mcr.bridge.McrPreload;
 import dev.mcr.bridge.net.McrNet;
@@ -29,7 +30,10 @@ abstract class ClientPacketListenerMixin {
     @Inject(method = "sendCommand", at = @At("HEAD"), cancellable = true)
     private void mcr$command(String command, CallbackInfo ci) {
         if (McrNet.bridged()) {
-            McrNet.sendChat(BridgeAbi.CHAT_COMMAND, command);
+            // This runs ahead of NeoForge's patch in sendCommand, so its client commands go first here.
+            if (!Loaders.runClientCommand(command)) {
+                McrNet.sendChat(BridgeAbi.CHAT_COMMAND, command);
+            }
             ci.cancel();
         }
     }

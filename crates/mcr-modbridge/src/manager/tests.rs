@@ -157,6 +157,36 @@ fn neoforge_sets_resolve_with_jar_in_jar_and_loader_ids() {
 }
 
 #[test]
+fn multi_loader_jars_take_the_sets_loader() {
+    let dir = temp_dir("multi-loader");
+    Jar::fabric_with(
+        "lights",
+        "4.13.0",
+        r#""depends":{"fabric-lifecycle-events-v1":"*"}"#,
+    )
+    .file(
+        "META-INF/neoforge.mods.toml",
+        b"modLoader=\"javafml\"\nloaderVersion=\"[1,)\"\nlicense=\"MIT\"\n[[mods]]\nmodId=\"lights\"\n\
+          version=\"4.13.0\"\n",
+    )
+    .write(&dir, "lights.jar");
+    let alone = Manager::new(&dir, &dir).scan(&ModSettings::default());
+    assert_eq!(
+        alone.loader(),
+        None,
+        "read as Fabric, it misses its dependency"
+    );
+    assert!(matches!(status(&alone, "lights"), ModStatus::Excluded(_)));
+
+    Jar::neoforge("jade", "26.3.5").write(&dir, "jade.jar");
+    let report = Manager::new(&dir, &dir).scan(&ModSettings::default());
+    assert_eq!(report.loader(), Some(crate::Loader::NeoForge));
+    assert_eq!(status(&report, "lights"), &ModStatus::Active);
+    assert!(report.mixed.is_none());
+    assert_eq!(report.jars().len(), 2);
+}
+
+#[test]
 fn recognises_other_loaders_and_unreadable_jars() {
     let neo = Jar::new().file(
         "META-INF/neoforge.mods.toml",

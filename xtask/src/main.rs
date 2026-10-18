@@ -11,6 +11,9 @@ mod manifest;
 mod neoforge;
 mod net;
 mod paths;
+#[allow(dead_code)]
+#[path = "../../crates/mcr-modbridge/src/pins.rs"]
+mod pins;
 mod server;
 mod setup;
 mod soak;

@@ -1,6 +1,7 @@
 package dev.mcr.bridge.mixin;
 
 import dev.mcr.bridge.BridgeAbi;
+import dev.mcr.bridge.BridgeInit;
 import dev.mcr.bridge.McrCrash;
 import dev.mcr.bridge.McrFrame;
 import dev.mcr.bridge.McrFrameTimes;
@@ -51,6 +52,7 @@ abstract class MinecraftMixin {
     private void mcr$countTick(CallbackInfo ci) {
         McrFrame.tickRan();
         McrFrameTimes.begin(BridgeAbi.PROF_TICK);
+        BridgeInit.onTick((Minecraft) (Object) this);
     }
 
     @Inject(method = "tick", at = @At("RETURN"))

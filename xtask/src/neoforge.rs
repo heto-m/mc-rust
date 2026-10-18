@@ -11,7 +11,7 @@ use crate::checksum::{Checksum, sha1_hex};
 use crate::fabric::{self, Download, Host};
 use crate::paths::{Layout, java_bin};
 
-pub const NEOFORGE_VERSION: &str = "26.3.0.90";
+pub use crate::pins::NEOFORGE_VERSION;
 const INSTALLER_SHA512: &str = "318b0c9006cb23820a5beea72bfaf0fdcce5c039d2f3f63bb1fe65d99dfec168\
                                 4c10d6610c95c6b7a68aa3843f4f1e50a61a2f8b6293fd05b722d1affbeef7a8";
 const MAVEN: &str = "https://maven.neoforged.net/releases";

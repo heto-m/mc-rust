@@ -413,6 +413,13 @@ fn shell_frames(
         if connecting && shell.play.is_none() && shell.failure.is_some() {
             bail!("disconnected: {}", shell.failure.take().unwrap_or_default());
         }
+        if settled_at.is_none() && shell.mods_gone() {
+            settled_at = Some(Instant::now());
+            println!(
+                "title: Java stopped {:.2}s after launch; native from here",
+                launched.elapsed().as_secs_f32()
+            );
+        }
         if settled_at.is_none() && shell.mods_settled() {
             settled_at = Some(Instant::now());
             if opts.mods.is_some() {

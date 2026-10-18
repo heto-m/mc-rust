@@ -1,6 +1,5 @@
 package dev.mcr.bridge;
 
-import dev.mcr.bridge.fabric.FabricClasses;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Method;
@@ -106,12 +105,16 @@ public final class McrPreload {
             Bridge.info("preload_stopped", "unreadable class list: " + e);
             return;
         }
-        Exclusions exclusions = exclusions();
+        GameClasses classes = GameClasses.current();
+        if (classes.processorPackages == null) {
+            Bridge.info("preload_stopped", "FML's class processors are unreadable");
+            return;
+        }
+        Exclusions exclusions = exclusions(classes.processorPackages);
         if (!exclusions.acting.isEmpty()) {
             Bridge.info("preload_plugins", "left to the game: " + exclusions.acting);
         }
         int configs = Mixins.getConfigs().size();
-        ClassLoader loader = FabricClasses.loader();
         Counts counts = new Counts();
         String stopped = null;
         for (int seg = 0; seg < segments.size() && stopped == null; seg++) {
@@ -129,7 +132,7 @@ public final class McrPreload {
                 if (exclusions.skips(name)) {
                     counts.skipped++;
                 } else {
-                    stopped = load(name, loader, counts);
+                    stopped = load(name, classes, counts);
                 }
             }
             long ms = (System.nanoTime() - started) / 1_000_000;
@@ -151,13 +154,13 @@ public final class McrPreload {
     }
 
     /** Returns why preloading must stop, or null. */
-    private static String load(String name, ClassLoader loader, Counts counts) {
-        if (FabricClasses.isLoaded(name)) {
+    private static String load(String name, GameClasses classes, Counts counts) {
+        if (classes.isLoaded(name)) {
             counts.present++;
             return null;
         }
         try {
-            Class.forName(name, false, loader);
+            Class.forName(name, false, classes.loader);
             counts.loaded++;
         } catch (ClassNotFoundException e) {
             counts.missing++;
@@ -214,7 +217,8 @@ public final class McrPreload {
 
     /**
      * Left to the game: Mixin's extensions, which it loads while holding its lock (a preload holding one of their
-     * class locks would deadlock), mixin packages, and targets and mod packages of plugins acting in pre/postApply.
+     * class locks would deadlock), FML's class processors for the same reason, mixin packages, and targets and mod
+     * packages of plugins acting in pre/postApply.
      */
     private record Exclusions(Set<String> targets, List<String> packages, List<String> acting) {
         boolean skips(String name) {
@@ -230,11 +234,12 @@ public final class McrPreload {
         }
     }
 
-    private static Exclusions exclusions() {
+    private static Exclusions exclusions(List<String> processorPackages) {
         Set<String> targets = new HashSet<>();
         List<String> packages = new ArrayList<>();
         List<String> acting = new ArrayList<>();
         packages.addAll(List.of(MIXIN_EXTENSIONS));
+        packages.addAll(processorPackages);
         if (MixinEnvironment.getCurrentEnvironment().getActiveTransformer() instanceof IMixinTransformer transformer
                 && transformer.getExtensions() instanceof Extensions extensions) {
             for (IExtension extension : extensions.getExtensions()) {

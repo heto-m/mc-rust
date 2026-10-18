@@ -141,3 +141,6 @@ and the creative inventory, toggled F3 and third person and chatted. Change `mod
 | Freecam | 1.5.0 | loads | boots and joins; not toggled |
 | EntityCulling | 1.11.3 | loads | boots and joins |
 | FerriteCore | 9.0.0 | loads | boots and joins |
+
+The second NeoForge sweep (16 more mods, change `mod-neoforge-2`) is scored in
+[mod-bridge.md](mod-bridge.md#neoforge).

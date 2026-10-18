@@ -1240,6 +1240,11 @@ impl Shell {
         })
     }
 
+    /// Java stopped for good, before or after its GUI showed.
+    pub fn mods_gone(&self) -> bool {
+        self.mod_frames().is_some_and(|f| f.lock().java_gone())
+    }
+
     /// Starts Java's compose timings afresh (e.g. once in game).
     pub fn reset_mod_stats(&self) {
         if let Some(f) = self.mod_frames() {

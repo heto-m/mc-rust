@@ -326,6 +326,11 @@ impl FrameLink {
         self.lockstep.state() == LinkState::Running && self.shown
     }
 
+    /// Java exited, crashed or finished; it never renders again this process.
+    pub fn java_gone(&self) -> bool {
+        self.shared.frame.is_gone()
+    }
+
     /// A one-time message for the user when Java stopped rendering.
     pub fn take_notice(&mut self) -> Option<String> {
         self.notice.take()

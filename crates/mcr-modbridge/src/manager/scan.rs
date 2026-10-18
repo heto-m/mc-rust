@@ -86,6 +86,8 @@ pub struct ModInfo {
     pub provides: Vec<String>,
     pub nested: Vec<Nested>,
     pub warnings: Vec<String>,
+    /// The NeoForge reading of a jar that also carries `neoforge.mods.toml` (multi-loader builds).
+    pub neoforge: Option<Box<ModInfo>>,
 }
 
 impl ModInfo {
@@ -106,11 +108,17 @@ impl ModInfo {
             provides: Vec::new(),
             nested: Vec::new(),
             warnings: Vec::new(),
+            neoforge: None,
         }
     }
 
     pub fn is_fabric(&self) -> bool {
         self.kind == ModKind::Fabric
+    }
+
+    /// Carries a manifest for each loader, so it fits a set of either.
+    pub fn is_multi_loader(&self) -> bool {
+        self.neoforge.is_some()
     }
 
     /// A jar of a loader mcr can boot.
@@ -195,10 +203,16 @@ pub fn scan_reader<R: Read + Seek>(path: &Path, file_name: &str, reader: R) -> M
         Err(e) => return invalid(path, file_name, &e.to_string()),
     };
     let mut info = ModInfo::bare(path, file_name, ModKind::Fabric);
-    match fill_fabric(&mut zip, &text, &mut info) {
-        Ok(()) => info,
-        Err(e) => invalid(path, file_name, &e.to_string()),
+    if let Err(e) = fill_fabric(&mut zip, &text, &mut info) {
+        return invalid(path, file_name, &e.to_string());
     }
+    if let Ok(Some(toml)) = read_text(&mut zip, NEOFORGE, MAX_TOML_BYTES) {
+        let mut neoforge = ModInfo::bare(path, file_name, ModKind::NeoForge);
+        if fill_neoforge(&mut zip, &toml, &mut neoforge).is_ok() {
+            info.neoforge = Some(Box::new(neoforge));
+        }
+    }
+    info
 }
 
 fn open_zip<R: Read + Seek>(reader: R) -> Result<ZipArchive<R>, ScanError> {

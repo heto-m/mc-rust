@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use mcr_modbridge::{Bridge, BridgeConfig, BridgeEvent, LaunchManifest};
+use mcr_modbridge::{Bridge, BridgeConfig, BridgeEvent, LaunchManifest, Loader};
 
 pub const DEADLINE: Duration = Duration::from_secs(300);
 
@@ -30,6 +30,44 @@ pub fn config(tag: &str, extra: &[String]) -> BridgeConfig {
     let mut mods = manifest.test_mods.clone();
     mods.push(cache.join("java/mcr-testmod.jar"));
     let mut cfg = BridgeConfig::new(cache, game_dir, mods);
+    cfg.max_heap = "1536m".into();
+    cfg.extra_jvm = extra.to_vec();
+    cfg
+}
+
+/// NeoForge with the bridge alone in a fresh game dir; `MCR_NEOFORGE_MODS=<dir>` adds every jar in that folder.
+pub fn neoforge_config(tag: &str, extra: &[String]) -> BridgeConfig {
+    let game_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("neoforge-{tag}"));
+    let _ = std::fs::remove_dir_all(&game_dir);
+    neoforge_config_in(&game_dir, extra)
+}
+
+/// [`neoforge_config`] keeping what `game_dir` holds.
+pub fn neoforge_config_in(game_dir: &Path, extra: &[String]) -> BridgeConfig {
+    let cache = mcr_jvm::dev_cache_dir();
+    for module in ["mcr-boot", "mcr-bridge"] {
+        let jar = cache.join(format!("java/{module}.jar"));
+        if let Some(newer) = mcr_jvm::stale_java_jar(&repo().join("java").join(module), &jar) {
+            panic!(
+                "{} is missing or older than {}: run `cargo xtask java-build`",
+                jar.display(),
+                newer.display()
+            );
+        }
+    }
+    LaunchManifest::load_for(&cache, Loader::NeoForge).expect("run `cargo xtask neoforge-fetch`");
+    let mut mods: Vec<PathBuf> = match std::env::var("MCR_NEOFORGE_MODS") {
+        Ok(dir) => std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("MCR_NEOFORGE_MODS={dir}: {e}"))
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "jar"))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    mods.sort();
+    let mut cfg = BridgeConfig::new(cache, game_dir.to_path_buf(), mods);
+    cfg.loader = Loader::NeoForge;
     cfg.max_heap = "1536m".into();
     cfg.extra_jvm = extra.to_vec();
     cfg

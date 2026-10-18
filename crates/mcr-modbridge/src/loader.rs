@@ -59,12 +59,17 @@ impl Loader {
         }
     }
 
-    /// The loader the mods need: `None` for no loadable mod, an error when they need both.
+    /// The loader the mods need: `None` for no loadable mod, an error when they need both. Multi-loader jars
+    /// fit either and only count as Fabric when nothing else decides.
     pub fn for_mods<'a>(
         mods: impl IntoIterator<Item = &'a ModInfo>,
     ) -> Result<Option<Self>, MixedLoaders> {
-        let (mut fabric, mut neoforge) = (None, None);
+        let (mut fabric, mut neoforge, mut multi) = (None, None, false);
         for m in mods {
+            if m.is_multi_loader() {
+                multi = true;
+                continue;
+            }
             match Self::of_kind(&m.kind) {
                 Some(Self::Fabric) => fabric = fabric.or(Some(m)),
                 Some(Self::NeoForge) => neoforge = neoforge.or(Some(m)),
@@ -78,6 +83,7 @@ impl Loader {
             }),
             (Some(_), None) => Ok(Some(Self::Fabric)),
             (None, Some(_)) => Ok(Some(Self::NeoForge)),
+            (None, None) if multi => Ok(Some(Self::Fabric)),
             (None, None) => Ok(None),
         }
     }
@@ -121,6 +127,22 @@ mod tests {
         assert_eq!(Loader::for_mods([&neo]), Ok(Some(Loader::NeoForge)));
         assert_eq!(Loader::for_mods(std::iter::empty()), Ok(None));
     }
+
+    #[test]
+    fn multi_loader_jars_follow_the_others() {
+        let both = info(
+            "c.jar",
+            fabric_jar("gamma").file("META-INF/neoforge.mods.toml", NEO_TOML),
+        );
+        assert!(both.is_multi_loader());
+        let neo = info("b.jar", neoforge_jar("beta"));
+        let fabric = info("a.jar", fabric_jar("alpha"));
+        assert_eq!(Loader::for_mods([&both, &neo]), Ok(Some(Loader::NeoForge)));
+        assert_eq!(Loader::for_mods([&both, &fabric]), Ok(Some(Loader::Fabric)));
+        assert_eq!(Loader::for_mods([&both]), Ok(Some(Loader::Fabric)));
+    }
+
+    const NEO_TOML: &[u8] = b"modLoader=\"javafml\"\nloaderVersion=\"[1,)\"\nlicense=\"MIT\"\n[[mods]]\nmodId=\"gamma\"\nversion=\"1.0.0\"\n";
 
     #[test]
     fn mixed_sets_are_refused_naming_both() {
