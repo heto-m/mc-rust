@@ -68,7 +68,7 @@ pub enum Height {
 
 /// What the scan asks of the loaded level. Unloaded positions answer `None` or the defaults.
 pub trait AnimateWorld {
-    fn state(&self, x: i32, y: i32, z: i32) -> Option<u16>;
+    fn state(&self, x: i32, y: i32, z: i32) -> Option<u32>;
 
     /// `(block, sky)` light levels, 0 to 15.
     fn light(&self, _x: i32, _y: i32, _z: i32) -> (u8, u8) {

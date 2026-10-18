@@ -16,6 +16,10 @@ pub trait MeshWorld {
     }
     /// Names indexed by the biome ids used in the stored columns; may grow while columns arrive.
     fn biome_names(&self) -> Vec<String>;
+    /// The climate the server sent for each biome, by id; `None` (or a short list) falls back to the jar's.
+    fn biome_climates(&self) -> Vec<Option<mcr_mesh::BiomeClimate>> {
+        Vec::new()
+    }
     /// Hashed world seed used for biome zoom.
     fn biome_seed(&self) -> i64 {
         0

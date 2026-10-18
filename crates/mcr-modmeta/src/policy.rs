@@ -4,8 +4,10 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::scan::{ModInfo, Side};
+
 pub const POLICY_FILE: &str = "mod-policy.json";
-const BUILTIN: &str = include_str!("../../data/mod-policy.json");
+const BUILTIN: &str = include_str!("../data/mod-policy.json");
 const MAX_BYTES: u64 = 1 << 20;
 const MAX_ENTRIES: usize = 4096;
 const MAX_REASON: usize = 200;
@@ -19,6 +21,8 @@ pub enum PolicyStatus {
     Unsupported,
     /// Loads, but some features are inert.
     Partial,
+    /// Runs on servers only; mcr's client leaves it out.
+    Server,
 }
 
 impl PolicyStatus {
@@ -27,6 +31,7 @@ impl PolicyStatus {
             "blocked" => Some(Self::Blocked),
             "unsupported" => Some(Self::Unsupported),
             "partial" => Some(Self::Partial),
+            "server" => Some(Self::Server),
             _ => None,
         }
     }
@@ -150,6 +155,19 @@ impl Policy {
     pub fn http_hosts(&self) -> &[String] {
         &self.http_hosts
     }
+
+    /// Whether a dedicated server for this mod set runs `info`: Fabric mods that are not client-only,
+    /// except two-sided ones mcr's client refuses, which the server would then not match.
+    pub fn runs_on_server(&self, info: &ModInfo) -> bool {
+        info.is_fabric()
+            && match info.side {
+                Side::Client => false,
+                Side::Server => true,
+                Side::Both => self.get(&info.id).is_none_or(|e| {
+                    !matches!(e.status, PolicyStatus::Blocked | PolicyStatus::Unsupported)
+                }),
+            }
+    }
 }
 
 #[cfg(test)]
@@ -191,8 +209,11 @@ mod tests {
         for id in ["voicechat", "litematica", "dynamic_fps"] {
             assert_eq!(p.get(id).unwrap().status, PolicyStatus::Unsupported, "{id}");
         }
-        for id in ["continuity", "moreculling", "c2me", "bobby", "krypton"] {
+        for id in ["continuity", "moreculling", "bobby"] {
             assert_eq!(p.get(id).unwrap().status, PolicyStatus::Partial, "{id}");
+        }
+        for id in ["lithium", "c2me", "krypton"] {
+            assert_eq!(p.get(id).unwrap().status, PolicyStatus::Server, "{id}");
         }
         for id in ["fabric-api", "freecam", "particlerain", "lambdynlights"] {
             assert!(p.get(id).is_none(), "{id}");

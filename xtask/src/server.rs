@@ -105,6 +105,10 @@ pub fn run(layout: &Layout, ver: &str, port: u16, nogui: bool) -> Result<()> {
 
 /// A runaway JVM in its own capped scope dies alone instead of tripping systemd-oomd on the caller's.
 pub(crate) fn memory_capped(program: &std::path::Path) -> Command {
+    memory_capped_to(program, "2560M")
+}
+
+pub(crate) fn memory_capped_to(program: &std::path::Path, limit: &str) -> Command {
     let capped = cfg!(target_os = "linux")
         && Command::new("systemd-run")
             .args(["--user", "--scope", "-q", "true"])
@@ -119,7 +123,7 @@ pub(crate) fn memory_capped(program: &std::path::Path) -> Command {
         "--scope",
         "-q",
         "-p",
-        "MemoryMax=2560M",
+        &format!("MemoryMax={limit}"),
         "-p",
         "MemorySwapMax=0",
     ])

@@ -12,13 +12,15 @@ mod loader;
 pub mod manager;
 pub mod net;
 mod pacer;
-pub mod pins;
 pub mod profile;
 pub mod proxy;
+pub mod registries;
 mod sections;
 pub mod sound;
 pub mod sync;
 pub mod world;
+
+pub use mcr_modmeta::pins;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -39,7 +41,8 @@ pub use frame::{Perspective, Pipelining};
 pub use input::ModInput;
 pub use launch::{
     AotSettings, BOOT_JAR, BRIDGE_JAR, BridgeConfig, FML_CONFIG, LAUNCH_MANIFEST, LaunchManifest,
-    LaunchPlan, MOD_FOLDERS_PROPERTY, plan, prepare_fml_config, prepare_game_dir,
+    LaunchPlan, MOD_FOLDERS_PROPERTY, egress_properties, plan, prepare_fml_config,
+    prepare_game_dir,
 };
 pub use loader::{Loader, MixedLoaders};
 pub use mcr_jvm::{aot, preload};
@@ -133,6 +136,11 @@ pub const PRELOAD_PROPERTY: &str = "mcr.preload";
 pub const PRELOAD_BY_DEFAULT: bool = true;
 
 impl Bridge {
+    /// The allow-list proxy Java's HTTP goes through; other mod JVMs of this session share it.
+    pub fn proxy_port(&self) -> u16 {
+        self._proxy.port()
+    }
+
     /// Moves the process into `config.game_dir`: mods open `config/…` through java.io, which
     /// ignores `user.dir`.
     pub fn start(mut config: BridgeConfig) -> Result<Self, BridgeError> {

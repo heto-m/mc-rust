@@ -260,7 +260,7 @@ fn sample_chunk(cfg: &WorldConfig) -> ChunkData {
     let sections = (0..cfg.section_count())
         .map(|s| {
             let mut sec = ChunkSection::empty(cfg);
-            sec.set_block(1, 2, 3, mcr_world::BlockState(s as u16 + 1), cfg);
+            sec.set_block(1, 2, 3, mcr_world::BlockState(s as u32 + 1), cfg);
             sec
         })
         .collect();

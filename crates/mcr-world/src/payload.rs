@@ -291,7 +291,7 @@ mod tests {
                     i % 16,
                     (i / 16) % 16,
                     (i / 7) % 16,
-                    BlockState(i as u16 + 1),
+                    BlockState(i as u32 + 1),
                     cfg,
                 );
             }

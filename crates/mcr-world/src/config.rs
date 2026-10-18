@@ -2,7 +2,7 @@ use crate::container::Limits;
 use crate::{Result, WorldError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct BlockState(pub u16);
+pub struct BlockState(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Biome(pub u16);
@@ -23,11 +23,13 @@ pub struct WorldConfig {
 
 impl WorldConfig {
     pub const MAX_IDS: u32 = 1 << 16;
+    /// Modded registries go past 65536 block states (a mod adding a property to every waterloggable block).
+    pub const MAX_BLOCK_STATES: u32 = 1 << 20;
 
     pub fn new(block_states: u32, biomes: u32, min_y: i32, height: u32) -> Result<Self> {
-        if block_states == 0 || block_states > Self::MAX_IDS {
+        if block_states == 0 || block_states > Self::MAX_BLOCK_STATES {
             return Err(WorldError::InvalidConfig(
-                "block state count must be 1..=65536",
+                "block state count must be 1..=1048576",
             ));
         }
         if biomes == 0 || biomes > Self::MAX_IDS {
@@ -95,9 +97,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_registries_that_do_not_fit_u16() {
-        assert!(WorldConfig::new(65537, 10, -64, 384).is_err());
-        assert!(WorldConfig::new(65536, 10, -64, 384).is_ok());
+    fn rejects_registries_past_the_limits() {
+        assert!(WorldConfig::new(WorldConfig::MAX_BLOCK_STATES + 1, 10, -64, 384).is_err());
+        assert!(WorldConfig::new(70472, 10, -64, 384).is_ok());
+        assert!(WorldConfig::new(10, 65537, -64, 384).is_err());
         assert!(WorldConfig::new(0, 10, -64, 384).is_err());
     }
 

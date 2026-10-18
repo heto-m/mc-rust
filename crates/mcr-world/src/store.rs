@@ -203,7 +203,13 @@ impl ChunkStore {
     ) -> usize {
         let mut applied = 0;
         for entry in entries {
-            let state = BlockState((entry >> 12) as u16);
+            let Ok(state) = u32::try_from(entry >> 12) else {
+                continue;
+            };
+            if state >= self.cfg.block_state_count() {
+                continue;
+            }
+            let state = BlockState(state);
             let (lx, lz, ly) = (
                 ((entry >> 8) & 15) as i32,
                 ((entry >> 4) & 15) as i32,
@@ -386,7 +392,7 @@ mod tests {
         let mut s = store_with(&[(0, 0)]);
         let entry = (42u64 << 12) | (3 << 8) | (4 << 4) | 5;
         let n = s.apply_section_updates(SectionPos::new(0, 2, 0), [entry, entry | (1 << 40)]);
-        assert_eq!(n, 2);
+        assert_eq!(n, 1, "a state past the registry is dropped");
         assert_eq!(s.block(3, 37, 4), Some(BlockState(42)));
         let none = s.apply_section_updates(SectionPos::new(5, 2, 0), [entry]);
         assert_eq!(none, 0);

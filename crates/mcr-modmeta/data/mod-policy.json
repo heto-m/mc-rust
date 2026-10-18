@@ -20,8 +20,9 @@
     {"id": "continuity", "status": "partial", "reason": "terrain is rendered by mcr; no visible effect"},
     {"id": "moreculling", "status": "partial", "reason": "terrain is rendered by mcr; no visible effect"},
     {"id": "badoptimizations", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
-    {"id": "c2me", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
     {"id": "bobby", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
-    {"id": "krypton", "status": "partial", "reason": "the socket and its pipeline are mcr's; no effect"}
+    {"id": "lithium", "status": "server", "reason": "speeds up the server's tick; mcr's shadow client barely runs those paths"},
+    {"id": "c2me", "status": "server", "reason": "speeds up chunk generation and storage, which are the server's"},
+    {"id": "krypton", "status": "server", "reason": "speeds up the server's network stack; mcr's client owns its socket"}
   ]
 }

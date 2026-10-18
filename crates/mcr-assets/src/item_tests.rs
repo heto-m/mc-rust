@@ -113,13 +113,27 @@ fn select_range_and_condition_nodes_evaluate() {
 
 #[test]
 fn unknown_node_type_is_an_error_naming_the_file() {
-    let rm = manager(&[(
-        "items/bad.json",
+    let err = ItemModelDef::parse(
         br#"{"model":{"type":"minecraft:nonsense"}}"#,
-    )]);
-    let err = ItemModels::load(&rm).unwrap_err().to_string();
+        "assets/minecraft/items/bad.json",
+    )
+    .unwrap_err()
+    .to_string();
     assert!(
         err.contains("items/bad.json") && err.contains("nonsense"),
         "{err}"
     );
+}
+
+#[test]
+fn an_unreadable_definition_skips_only_that_item() {
+    let rm = manager(&[
+        ("items/bad.json", br#"{"model":{"type":"mod:backpack"}}"#),
+        (
+            "items/good.json",
+            br#"{"model":{"type":"minecraft:model","model":"item/a"}}"#,
+        ),
+    ]);
+    let items = ItemModels::load(&rm).unwrap();
+    assert_eq!(items.len(), 1);
 }

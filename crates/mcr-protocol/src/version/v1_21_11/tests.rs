@@ -811,7 +811,7 @@ fn chunk_sections_gain_fluid_counts() {
     assert_eq!(counts, [4096, 2048, 4, 0]);
     assert_eq!(
         chunk.sections[1].block(1, 0, 0).0,
-        new_state("minecraft:water") as u16
+        new_state("minecraft:water") as u32
     );
 }
 

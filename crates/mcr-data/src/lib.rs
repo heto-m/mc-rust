@@ -1,13 +1,19 @@
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod generated {
     pub mod v26_3;
 }
 pub mod game_rules;
+pub mod rebuild;
 pub mod tables;
 mod version;
 
-pub use tables::{Aabb, DecodeError};
+pub use rebuild::{
+    Export, ExportBlock, ExportEntityType, ExportFluid, ExportFluidState, ExportItem, ExportState,
+    ExportTool, RebuildError,
+};
+pub use tables::{Aabb, DecodeError, flag};
 pub use version::{
     BlockId, BlockInfo, BlockStateInfo, Direction, EntityTypeId, EntityTypeInfo, FluidId,
     FluidStateInfo, ItemId, ItemInfo, ProtocolState, RegistryView, StateId, StateProperties,
@@ -21,11 +27,85 @@ pub const FEATURE_PACKS_26_3: &[&str] = &[
     "trade_rebalance",
 ];
 
+/// The 26.3 tables mcr plays with: vanilla's, or those rebuilt from a modded client's registries once a
+/// mod session installed them with [`activate`].
 pub fn v26_3() -> &'static Version {
+    version_at(ACTIVE.load(Ordering::Acquire))
+}
+
+fn version_at(index: usize) -> &'static Version {
+    match index {
+        0 => vanilla_26_3(),
+        n => INSTALLED[n - 1].get().copied().unwrap_or_else(vanilla_26_3),
+    }
+}
+
+/// Data derived from the tables, built once for each version that becomes active.
+pub struct PerVersion<T> {
+    built: [OnceLock<T>; SLOTS + 1],
+}
+
+impl<T> PerVersion<T> {
+    pub const fn new() -> Self {
+        Self {
+            built: [const { OnceLock::new() }; SLOTS + 1],
+        }
+    }
+
+    /// `build`'s result for the tables [`v26_3`] returns now.
+    pub fn get(&self, build: impl FnOnce(&'static Version) -> T) -> &T {
+        let index = ACTIVE.load(Ordering::Acquire);
+        self.built[index].get_or_init(|| build(version_at(index)))
+    }
+}
+
+impl<T> std::fmt::Debug for PerVersion<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PerVersion").finish_non_exhaustive()
+    }
+}
+
+impl<T> Default for PerVersion<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Vanilla 26.3 as generated, whatever is active.
+pub fn vanilla_26_3() -> &'static Version {
     static VERSION: OnceLock<Version> = OnceLock::new();
     VERSION.get_or_init(|| {
         Version::from_blob(generated::v26_3::BLOB).expect("generated v26_3 blob is valid")
     })
+}
+
+const SLOTS: usize = 16;
+static INSTALLED: [OnceLock<&'static Version>; SLOTS] = [const { OnceLock::new() }; SLOTS];
+static NEXT_SLOT: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("{SLOTS} extended tables are installed already")]
+pub struct SlotsFull;
+
+/// Keeps `version` for the rest of the process and returns it; at most 16 per process.
+pub fn install(version: Version) -> Result<&'static Version, SlotsFull> {
+    let slot = NEXT_SLOT.fetch_add(1, Ordering::AcqRel);
+    if slot >= SLOTS {
+        return Err(SlotsFull);
+    }
+    let leaked: &'static Version = Box::leak(Box::new(version));
+    let _ = INSTALLED[slot].set(leaked);
+    Ok(leaked)
+}
+
+/// Makes `version` (vanilla's or one returned by [`install`]) what [`v26_3`] returns from now on.
+pub fn activate(version: &'static Version) {
+    let index = INSTALLED
+        .iter()
+        .position(|s| s.get().is_some_and(|v| std::ptr::eq(*v, version)))
+        .map_or(0, |i| i + 1);
+    ACTIVE.store(index, Ordering::Release);
 }
 
 /// Creative tab contents dumped by `tools/extractor/run-creative.sh`: `tab` header lines followed by

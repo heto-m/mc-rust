@@ -8,7 +8,7 @@ use mcr_animate::{
     MAX_SOUNDS_PER_TICK, Sink, VaultPlayer, Visual, tag,
 };
 use mcr_client::{ClientState, RegistryItem};
-use mcr_mesh::BiomeColors;
+use mcr_mesh::{BiomeClimate, BiomeColors};
 use mcr_protocol::types::Particle;
 use mcr_protocol::types::game::GameType;
 use mcr_render::{Precipitation, WeatherSource};
@@ -142,7 +142,7 @@ impl View<'_> {
 }
 
 impl AnimateWorld for View<'_> {
-    fn state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+    fn state(&self, x: i32, y: i32, z: i32) -> Option<u32> {
         self.state.chunks.block(x, y, z).map(|s| s.0)
     }
 
@@ -264,7 +264,15 @@ impl BlockAnimation {
             let names: Vec<String> = biomes
                 .map(|r| r.entries.iter().map(|e| e.id.to_string()).collect())
                 .unwrap_or_default();
-            self.colors = Some(self.assets.biome_colors(&names));
+            let climates: Vec<_> = biomes
+                .map(|r| {
+                    r.entries
+                        .iter()
+                        .map(|e| e.data.as_ref().and_then(BiomeClimate::from_nbt))
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.colors = Some(self.assets.biome_colors(&names, &climates));
         }
         self.biomes = biomes
             .map(|r| {
@@ -490,7 +498,7 @@ mod tests {
     struct Void;
 
     impl AnimateWorld for Void {
-        fn state(&self, _: i32, _: i32, _: i32) -> Option<u16> {
+        fn state(&self, _: i32, _: i32, _: i32) -> Option<u32> {
             None
         }
     }

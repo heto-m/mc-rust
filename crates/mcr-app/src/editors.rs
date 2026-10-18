@@ -20,7 +20,7 @@ use mcr_ui::{
 use mcr_world::ChunkPos;
 
 fn block_name_at(state: &ClientState, pos: BlockPos) -> Option<(u32, &'static str)> {
-    let id = u32::from(state.chunks.block(pos.x, pos.y, pos.z)?.0);
+    let id = state.chunks.block(pos.x, pos.y, pos.z)?.0;
     let name = mcr_data::v26_3().state_block_name(id)?;
     Some((id, name.strip_prefix("minecraft:").unwrap_or(name)))
 }

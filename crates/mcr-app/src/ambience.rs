@@ -518,7 +518,7 @@ mod tests {
         store.insert(ChunkPos::new(0, 0), ChunkColumn::empty(&cfg));
         let state = |name| {
             let id = data.block_by_name(name).unwrap();
-            BlockState(data.block_info(id).unwrap().default_state as u16)
+            BlockState(data.block_info(id).unwrap().default_state)
         };
         for x in 0..16 {
             for z in 0..16 {

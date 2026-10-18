@@ -153,7 +153,7 @@ fn raycast_shapes(
     let limit = (max * 3.0).ceil() as usize + 4;
     for _ in 0..limit {
         if let Some(state) = store.block(cell[0], cell[1], cell[2]) {
-            let state = u32::from(state.0);
+            let state = state.0;
             let local = [
                 origin[0] - f64::from(cell[0]),
                 origin[1] - f64::from(cell[1]),
@@ -327,7 +327,7 @@ mod tests {
         store.insert(ChunkPos::new(0, 0), ChunkColumn::empty(&cfg));
         let id = data.block_by_name(name).unwrap();
         let state = data.block_info(id).unwrap().default_state;
-        store.set_block(block.0, block.1, block.2, BlockState(state as u16));
+        store.set_block(block.0, block.1, block.2, BlockState(state as u32));
         (store, state)
     }
 
@@ -357,7 +357,7 @@ mod tests {
                 .unwrap()
         };
         let (mut store, _) = world_with((0, 0, 0), "minecraft:air");
-        store.set_block(5, 64, 5, BlockState(slab_state as u16));
+        store.set_block(5, 64, 5, BlockState(slab_state as u32));
         assert!(raycast_block(&store, data, [5.5, 64.75, 2.5], [0.0, 0.0, 1.0], 4.5).is_none());
         let top = raycast_block(&store, data, [5.5, 66.0, 5.5], [0.0, -1.0, 0.0], 4.5).unwrap();
         assert_eq!(top.face, Facing::Up);

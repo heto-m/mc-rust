@@ -1958,9 +1958,9 @@ impl BlockEntityScene {
 }
 
 fn spawner_entity(id: &str) -> &'static str {
-    static NAMES: std::sync::OnceLock<FxHashMap<String, &'static str>> = std::sync::OnceLock::new();
-    let names = NAMES.get_or_init(|| {
-        let v = mcr_data::v26_3();
+    static NAMES: mcr_data::PerVersion<FxHashMap<String, &'static str>> =
+        mcr_data::PerVersion::new();
+    let names = NAMES.get(|v| {
         v.entity_types()
             .iter()
             .map(|(_, n)| (n.to_owned(), n))

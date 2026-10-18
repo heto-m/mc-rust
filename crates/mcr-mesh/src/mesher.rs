@@ -94,7 +94,7 @@ impl Shading {
 
 pub(crate) struct Ctx<'a> {
     pub cache: &'a ModelCache,
-    pub states: &'a [u16; PADDED],
+    pub states: &'a [u32; PADDED],
     pub light: &'a [u8; PADDED],
     pub meta: &'a [u32; PADDED],
     pub origin: [i32; 3],
@@ -107,7 +107,7 @@ fn in_pad(c: [i32; 3]) -> bool {
 
 impl Ctx<'_> {
     #[inline]
-    pub fn state(&self, c: [i32; 3]) -> u16 {
+    pub fn state(&self, c: [i32; 3]) -> u32 {
         if in_pad(c) {
             self.states[pidx(c[0], c[1], c[2])]
         } else {
@@ -167,7 +167,7 @@ impl Ctx<'_> {
     }
 
     /// Whether the face of `state` towards `neighbor` (the cell at `cell + normal[face]`) is drawn.
-    pub fn face_visible(&self, state: u16, neighbor: [i32; 3], face: usize) -> bool {
+    pub fn face_visible(&self, state: u32, neighbor: [i32; 3], face: usize) -> bool {
         let m = self.meta(neighbor);
         let opp = face ^ 1;
         if m >> (META_FULL_SHIFT + opp as u32) & 1 != 0 {
@@ -521,7 +521,7 @@ impl Mesher {
         &mut self,
         ctx: &Ctx,
         cell: [i32; 3],
-        id: u16,
+        id: u32,
         sm: &StateModel,
         out: &mut SectionMesh,
     ) -> bool {
@@ -704,7 +704,7 @@ impl Mesher {
         &mut self,
         ctx: &Ctx,
         cell: [i32; 3],
-        id: u16,
+        id: u32,
         sm: &StateModel,
         out: &mut SectionMesh,
     ) -> bool {
@@ -857,7 +857,7 @@ impl Mesher {
 struct ModelState<'a, 'b> {
     ctx: &'a Ctx<'b>,
     cell: [i32; 3],
-    id: u16,
+    id: u32,
     sm: &'a StateModel,
     offset: [f32; 3],
     visible: [Option<bool>; 6],
@@ -867,7 +867,7 @@ struct ModelState<'a, 'b> {
 
 /// Whether faces of a glass-like block against neighbour state `nid` are hidden because both are the
 /// same block.
-fn skips_same(attr: u8, block: u16, cache: &ModelCache, nid: u16) -> bool {
+fn skips_same(attr: u8, block: u16, cache: &ModelCache, nid: u32) -> bool {
     attr & ATTR_HALF_TRANSPARENT != 0
         && attr & ATTR_LEAVES == 0
         && cache.attr(nid) & ATTR_HALF_TRANSPARENT != 0
@@ -895,7 +895,7 @@ mod tests {
         )
     }
 
-    fn run(greedy: bool, f: impl Fn(i32, i32, i32) -> u16) -> SectionMesh {
+    fn run(greedy: bool, f: impl Fn(i32, i32, i32) -> u32) -> SectionMesh {
         let mut out = SectionMesh::default();
         mesher(greedy).mesh(&input_from(f), &mut out);
         out
@@ -943,7 +943,7 @@ mod tests {
         assert_eq!(mesh.cube_count(), 5);
     }
 
-    fn terrain(x: i32, y: i32, z: i32) -> u16 {
+    fn terrain(x: i32, y: i32, z: i32) -> u32 {
         if !inside(x, y, z) && y > 0 {
             return AIR;
         }
@@ -1261,7 +1261,7 @@ mod tests {
         assert_eq!((covering.width, covering.height), (1, 1));
     }
 
-    fn pair(a: u16, b: u16) -> SectionMesh {
+    fn pair(a: u32, b: u32) -> SectionMesh {
         run(false, move |x, y, z| match (x, y, z) {
             (3, 3, 3) => a,
             (4, 3, 3) => b,

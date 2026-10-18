@@ -124,7 +124,7 @@ impl AppParticleAssets {
 impl ParticleAssets for AppParticleAssets {
     fn block_texture(&self, state: i32) -> Option<(EffectImage, [f32; 3])> {
         let cache = &self.assets.cache;
-        let model = cache.state(u16::try_from(state).ok()?);
+        let model = cache.state(u32::try_from(state).ok()?);
         let quads = cache.quads(model);
         let (face_layer, tinted) = match model.cube.iter().find(|f| f.layer != mcr_mesh::LAYER_NONE)
         {
@@ -188,7 +188,7 @@ impl ParticleWorld for ClientParticleWorld<'_> {
         let Some(state) = self.0.chunks.block(x, y, z) else {
             return;
         };
-        for b in mcr_data::v26_3().collision_shape(u32::from(state.0)) {
+        for b in mcr_data::v26_3().collision_shape(state.0) {
             out.push([b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]]);
         }
     }
@@ -200,7 +200,7 @@ impl ParticleWorld for ClientParticleWorld<'_> {
     fn fluid(&self, x: i32, y: i32, z: i32) -> Option<(Fluid, f32)> {
         let data: &Version = mcr_data::v26_3();
         let state = self.0.chunks.block(x, y, z)?;
-        let fluid = data.block_state(u32::from(state.0))?.fluid?;
+        let fluid = data.block_state(state.0)?.fluid?;
         let name = data.fluid_name(fluid.fluid)?;
         let kind = if name.contains("lava") {
             Fluid::Lava
@@ -438,7 +438,7 @@ impl WorldEffects {
                 .chunks
                 .block(pos.x, pos.y, pos.z)
                 .map(|s| {
-                    data.outline_shape(u32::from(s.0))
+                    data.outline_shape(s.0)
                         .iter()
                         .map(|b| [b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]])
                         .collect()
@@ -1192,7 +1192,7 @@ fn is_air(state: &ClientState, at: [f64; 3]) -> bool {
     let [x, y, z] = at.map(|v| v.floor() as i32);
     state.chunks.block(x, y, z).is_none_or(|b| {
         mcr_data::v26_3()
-            .block_state(u32::from(b.0))
+            .block_state(b.0)
             .is_none_or(|s| s.is_air())
     })
 }

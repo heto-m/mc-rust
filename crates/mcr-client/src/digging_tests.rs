@@ -9,13 +9,13 @@ use uuid::Uuid;
 use crate::config::ClientConfig;
 use crate::state::ClientState;
 
-fn state() -> (ClientState, BlockPos, u16) {
+fn state() -> (ClientState, BlockPos, u32) {
     let mut s = ClientState::new(&ClientConfig::default(), Uuid::nil());
     let cfg = *s.chunks.config();
     s.chunks
         .insert(ChunkPos::new(0, 0), ChunkColumn::empty(&cfg));
     let stone = s.data.block_by_name("minecraft:stone").unwrap();
-    let state = s.data.block_info(stone).unwrap().default_state as u16;
+    let state = s.data.block_info(stone).unwrap().default_state;
     s.chunks.set_block(1, 64, 1, BlockState(state));
     s.player.physics.on_ground = true;
     (s, BlockPos::new(1, 64, 1), state)
@@ -31,7 +31,7 @@ fn bare_hand_on_stone_is_slow() {
 #[test]
 fn tool_rule_speed_and_drops_apply() {
     let (mut s, pos, state) = state();
-    let block = s.data.block_state(u32::from(state)).unwrap().block as i32;
+    let block = s.data.block_state(state).unwrap().block as i32;
     let pick = s.data.item_by_name("minecraft:iron_pickaxe").unwrap() as i32;
     let mut stack = ItemStack::new(pick, 1);
     stack.components = DataComponentPatch {

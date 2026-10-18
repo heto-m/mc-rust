@@ -37,7 +37,7 @@ fn live_translated_session() {
     );
 
     let stairs = data.block_by_name("minecraft:oak_stairs").unwrap();
-    let stairs = data.block_info(stairs).unwrap().default_state as u16;
+    let stairs = data.block_info(stairs).unwrap().default_state;
     let at = BlockPos::new(x + 2, y, z);
     live.console(&format!("setblock {} {y} {z} minecraft:oak_stairs", at.x));
     live.until("block update", 100, |l| l.block(at) == stairs);
@@ -47,7 +47,7 @@ fn live_translated_session() {
     live.console("clear Xlate");
     live.console("give Xlate minecraft:diamond_pickaxe[enchantments={efficiency:5}]");
     let dirt = data.block_by_name("minecraft:dirt").unwrap();
-    let dirt = data.block_info(dirt).unwrap().default_state as u16;
+    let dirt = data.block_info(dirt).unwrap().default_state;
     live.console(&format!("setblock {} {y} {z} minecraft:dirt", at.x));
     live.until("dirt", 100, |l| l.block(at) == dirt);
     live.idle(20);

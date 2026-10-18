@@ -3,17 +3,16 @@ mod checksum;
 mod datagen;
 mod decompile;
 mod fabric;
+mod fabric_server;
 mod fetch;
 mod golden;
 mod java;
 mod jdk;
 mod manifest;
+mod modpack;
 mod neoforge;
 mod net;
 mod paths;
-#[allow(dead_code)]
-#[path = "../../crates/mcr-modbridge/src/pins.rs"]
-mod pins;
 mod server;
 mod setup;
 mod soak;
@@ -24,6 +23,7 @@ mod version_tables;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use mcr_modmeta::pins;
 
 use paths::Layout;
 
@@ -139,6 +139,38 @@ enum Command {
         #[arg(long, default_value = "26.3")]
         canonical: String,
     },
+    /// Download a CurseForge modpack's files into .cache/packs/<slug> and install its overrides
+    ModpackFetch {
+        /// The pack zip (manifest.json, overrides/)
+        zip: std::path::PathBuf,
+        /// mcr game dir that receives the overrides under java/ (default run/packs/<slug>)
+        #[arg(long)]
+        game_dir: Option<std::path::PathBuf>,
+        /// Download again and overwrite installed overrides
+        #[arg(long)]
+        force: bool,
+    },
+    /// Run a Fabric dedicated server with a fetched pack's server jars (or a mods dir) on loopback (dev only: no egress fence)
+    FabricServer {
+        #[arg(long)]
+        version: Option<String>,
+        /// A pack slug under .cache/packs
+        #[arg(long)]
+        pack: Option<String>,
+        /// A mods dir instead of a pack (the jars a server runs)
+        #[arg(long)]
+        mods: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = 25576)]
+        port: u16,
+        /// Server directory (default run/fabric-server-<slug>)
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = 3072)]
+        heap_mib: u32,
+        /// Memory cap of the server's scope
+        #[arg(long, default_value = "4G")]
+        memory: String,
+    },
     /// Run fetch, jdk, datagen and decompile in order
     Setup {
         #[arg(long)]
@@ -181,6 +213,7 @@ fn main() -> Result<()> {
         Command::FabricFetch { version, force } => {
             let ver = fetch::resolve_version(version.as_deref())?;
             fabric::run(&layout, &ver, force)?;
+            fabric_server::ensure_profile(&layout, &ver)?;
         }
         Command::NeoforgeFetch { version, force } => {
             let ver = fetch::resolve_version(version.as_deref())?;
@@ -222,6 +255,43 @@ fn main() -> Result<()> {
         }
         Command::VersionTables { version, canonical } => {
             version_tables::run(&layout, &version, &canonical)?;
+        }
+        Command::ModpackFetch {
+            zip,
+            game_dir,
+            force,
+        } => {
+            modpack::run(
+                &layout,
+                &modpack::FetchOptions {
+                    zip,
+                    game_dir,
+                    force,
+                },
+            )?;
+        }
+        Command::FabricServer {
+            version,
+            pack,
+            mods,
+            port,
+            dir,
+            heap_mib,
+            memory,
+        } => {
+            let ver = version.unwrap_or_else(|| mcr_modmeta::resolve::GAME_VERSION.to_owned());
+            fabric_server::run(
+                &layout,
+                &ver,
+                &fabric_server::Options {
+                    pack,
+                    mods,
+                    port,
+                    dir,
+                    heap_mib,
+                    memory,
+                },
+            )?;
         }
         Command::Setup { version, force } => {
             let ver = fetch::resolve_version(version.as_deref())?;

@@ -755,7 +755,7 @@ impl EntityEvents {
             return;
         };
         let visible = data
-            .block_state(u32::from(state.0))
+            .block_state(state.0)
             .is_some_and(|s| !s.is_air() && s.fluid.is_none());
         if !visible {
             return;
@@ -766,7 +766,7 @@ impl EntityEvents {
             (b.pos[2] + (self.rng.unit() - 0.5) * b.width).clamp(f64::from(z), f64::from(z) + 1.0);
         let p = Particle::BlockState {
             kind: BlockParticleKind::Block,
-            state: i32::from(state.0),
+            state: state.0 as i32,
         };
         cx.effects.add_particle(
             &p,

@@ -222,10 +222,7 @@ impl ClientState {
             P::BlockChangedAck(p) => {
                 self.block_ack_sequence = self.block_ack_sequence.max(p.sequence);
                 for (pos, state) in self.finish_predictions(p.sequence) {
-                    out.event(ClientEvent::BlockChanged {
-                        pos,
-                        state: u32::from(state),
-                    });
+                    out.event(ClientEvent::BlockChanged { pos, state });
                 }
                 out.event(ClientEvent::BlockAckReceived(p.sequence));
             }
@@ -1320,7 +1317,7 @@ impl ClientState {
         if state >= self.chunks.config().block_state_count() {
             return;
         }
-        let new = mcr_world::BlockState(state as u16);
+        let new = mcr_world::BlockState(state);
         if self.predictions.hold(pos, new.0) {
             return;
         }

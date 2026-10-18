@@ -9,7 +9,9 @@ publish.workspace = true
 mcr-audio = { path = "../mcr-audio" }
 mcr-buf.workspace = true
 mcr-client = { path = "../mcr-client" }
+mcr-data = { path = "../mcr-data" }
 mcr-jvm = { path = "../mcr-jvm" }
+mcr-modmeta = { path = "../mcr-modmeta" }
 mcr-physics = { path = "../mcr-physics" }
 mcr-settings = { path = "../mcr-settings" }
 mcr-protocol = { path = "../mcr-protocol" }

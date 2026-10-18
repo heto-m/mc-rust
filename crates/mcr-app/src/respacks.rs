@@ -57,6 +57,8 @@ pub struct ResourceStack {
     pub jar: PathBuf,
     pub assets_dir: PathBuf,
     pub index: Option<String>,
+    /// Mod jars whose resources sit between vanilla and the server's packs.
+    pub mods: Vec<PathBuf>,
 }
 
 impl ResourceStack {
@@ -69,6 +71,7 @@ impl ResourceStack {
                 .map(|i| (self.assets_dir.as_path(), i)),
         )
         .context("opening vanilla resources")?;
+        crate::assets::push_mod_jars(&mut resources, &self.mods);
         for path in packs.iter().rev() {
             resources
                 .push_untrusted_zip(path)

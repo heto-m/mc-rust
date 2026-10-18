@@ -88,6 +88,8 @@ pub struct ModInfo {
     pub warnings: Vec<String>,
     /// The NeoForge reading of a jar that also carries `neoforge.mods.toml` (multi-loader builds).
     pub neoforge: Option<Box<ModInfo>>,
+    /// Ships blocks (blockstate definitions) or game data other than tags, so a server must run it too.
+    pub content: bool,
 }
 
 impl ModInfo {
@@ -109,6 +111,7 @@ impl ModInfo {
             nested: Vec::new(),
             warnings: Vec::new(),
             neoforge: None,
+            content: false,
         }
     }
 
@@ -206,6 +209,7 @@ pub fn scan_reader<R: Read + Seek>(path: &Path, file_name: &str, reader: R) -> M
     if let Err(e) = fill_fabric(&mut zip, &text, &mut info) {
         return invalid(path, file_name, &e.to_string());
     }
+    info.content = zip.file_names().any(|n| n.is_ok_and(|n| is_content(&n)));
     if let Ok(Some(toml)) = read_text(&mut zip, NEOFORGE, MAX_TOML_BYTES) {
         let mut neoforge = ModInfo::bare(path, file_name, ModKind::NeoForge);
         if fill_neoforge(&mut zip, &toml, &mut neoforge).is_ok() {
@@ -213,6 +217,16 @@ pub fn scan_reader<R: Read + Seek>(path: &Path, file_name: &str, reader: R) -> M
         }
     }
     info
+}
+
+/// `assets/<ns>/blockstates/…` or `data/<ns>/<kind>/…` other than tags.
+fn is_content(name: &str) -> bool {
+    let mut parts = name.split('/');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("assets"), Some(_), Some("blockstates"), Some(f)) => !f.is_empty(),
+        (Some("data"), Some(_), Some(kind), Some(f)) => kind != "tags" && !f.is_empty(),
+        _ => false,
+    }
 }
 
 fn open_zip<R: Read + Seek>(reader: R) -> Result<ZipArchive<R>, ScanError> {
@@ -716,4 +730,29 @@ pub fn decode_icon(bytes: &[u8]) -> Option<Icon> {
         height: h,
         rgba,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_is_blocks_or_game_data_but_not_tags() {
+        for yes in [
+            "assets/m/blockstates/lamp.json",
+            "data/m/recipe/lamp.json",
+            "data/m/worldgen/biome/x.json",
+        ] {
+            assert!(is_content(yes), "{yes}");
+        }
+        for no in [
+            "assets/m/textures/block/lamp.png",
+            "assets/m/blockstates/",
+            "data/c/tags/item/ingots.json",
+            "data/m/pack.mcmeta",
+            "m/Mod.class",
+        ] {
+            assert!(!is_content(no), "{no}");
+        }
+    }
 }

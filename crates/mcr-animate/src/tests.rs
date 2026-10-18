@@ -57,7 +57,7 @@ fn data() -> &'static Version {
     mcr_data::v26_3()
 }
 
-fn state(block: &str, props: &[(&str, &str)]) -> u16 {
+fn state(block: &str, props: &[(&str, &str)]) -> u32 {
     let data = data();
     let id = data
         .block_by_name(&format!("minecraft:{block}"))
@@ -68,7 +68,7 @@ fn state(block: &str, props: &[(&str, &str)]) -> u16 {
             let have: Vec<_> = data.state_properties(*s).collect();
             props.iter().all(|p| have.contains(p))
         })
-        .unwrap_or_else(|| panic!("{block} {props:?}")) as u16
+        .unwrap_or_else(|| panic!("{block} {props:?}"))
 }
 
 fn block_id(block: &str) -> u16 {
@@ -76,8 +76,8 @@ fn block_id(block: &str) -> u16 {
 }
 
 struct World {
-    blocks: HashMap<[i32; 3], u16>,
-    fill: u16,
+    blocks: HashMap<[i32; 3], u32>,
+    fill: u32,
     queries: Cell<u32>,
     raining: bool,
     thundering: bool,
@@ -106,14 +106,14 @@ impl World {
         }
     }
 
-    fn set(&mut self, p: [i32; 3], s: u16) -> &mut Self {
+    fn set(&mut self, p: [i32; 3], s: u32) -> &mut Self {
         self.blocks.insert(p, s);
         self
     }
 }
 
 impl AnimateWorld for World {
-    fn state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+    fn state(&self, x: i32, y: i32, z: i32) -> Option<u32> {
         self.queries.set(self.queries.get() + 1);
         Some(self.blocks.get(&[x, y, z]).copied().unwrap_or(self.fill))
     }
@@ -198,7 +198,7 @@ fn near(a: f64, b: f64, tol: f64) -> bool {
 
 const AT: [i32; 3] = [4, 70, 4];
 
-fn world_with(s: u16) -> World {
+fn world_with(s: u32) -> World {
     let mut w = World::new();
     w.set(AT, s);
     w
@@ -208,7 +208,7 @@ fn world_with(s: u16) -> World {
 fn table_covers_every_kind_and_names_resolve() {
     let a = animator();
     let mut seen = std::collections::HashSet::new();
-    for s in 0..a.table().states() as u16 {
+    for s in 0..a.table().states() as u32 {
         seen.insert(a.table().info(s).kind);
     }
     use Kind::*;
@@ -1326,7 +1326,7 @@ fn marker_target_spawns_block_markers_only_for_that_block() {
         *particle,
         Particle::BlockState {
             kind: mcr_protocol::types::particle::BlockParticleKind::BlockMarker,
-            state: i32::from(barrier),
+            state: barrier as i32,
         }
     );
     assert_eq!((*pos, *vel), ([2.5, 3.5, 4.5], [0.0; 3]));
@@ -1387,7 +1387,7 @@ fn campfire_states_know_their_facing() {
 struct Timed(i64);
 
 impl AnimateWorld for Timed {
-    fn state(&self, _: i32, _: i32, _: i32) -> Option<u16> {
+    fn state(&self, _: i32, _: i32, _: i32) -> Option<u32> {
         None
     }
 

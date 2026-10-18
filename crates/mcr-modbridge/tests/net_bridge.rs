@@ -382,7 +382,7 @@ fn net_bridge() {
                     .state
                     .chunks
                     .block(x, y, z)
-                    .map_or(-1, |b| i32::from(b.0))
+                    .map_or(-1, |b| b.0 as i32)
             })
             .collect();
         let mut rust_entities: BTreeSet<i32> =

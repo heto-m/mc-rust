@@ -840,7 +840,7 @@ impl EntityLayer {
 fn ground_top(chunks: &ChunkStore, x: i32, y: i32, z: i32) -> Option<f32> {
     let state = chunks.block(x, y, z)?;
     mcr_data::v26_3()
-        .collision_shape(u32::from(state.0))
+        .collision_shape(state.0)
         .iter()
         .map(|b| b.max[1])
         .reduce(f32::max)

@@ -66,6 +66,12 @@ pub struct ModNet {
     pub frames: Option<ModFrames>,
     /// Java's input while its GUI is composed.
     pub input: Option<ModInput>,
+    /// The enabled mod jars, whose client resources mcr bakes too.
+    pub jars: Vec<PathBuf>,
+    /// What a singleplayer world's Fabric server loads; empty runs the vanilla server.
+    pub server_jars: Vec<PathBuf>,
+    /// The bridge's allow-list proxy, which that server's mods share with the client's.
+    pub proxy_port: u16,
     connects: Arc<Mutex<Vec<String>>>,
     keys: Arc<Mutex<Vec<(String, String)>>>,
     worlds: Arc<Mutex<Vec<WorldRequest>>>,
@@ -104,6 +110,7 @@ pub struct Startup {
 pub struct BootPlan {
     loader: Loader,
     jars: Vec<PathBuf>,
+    server_jars: Vec<PathBuf>,
     active_ids: Vec<String>,
     heap_mib: u32,
     session: SessionStore,
@@ -152,6 +159,7 @@ pub fn startup(opts: &Options) -> Result<Startup> {
     let boot = (would_boot && !prompt).then(|| BootPlan {
         loader: loader.unwrap_or_default(),
         jars,
+        server_jars: report.server_jars(&manager.policy),
         active_ids: report.active_ids(),
         heap_mib: opts.heap_mib.unwrap_or_else(|| settings.heap_mib()),
         session,
@@ -280,6 +288,9 @@ impl ModHost {
             sound: SoundLink::get().ok(),
             frames,
             input,
+            jars: plan.jars.clone(),
+            server_jars: plan.server_jars.clone(),
+            proxy_port: bridge.proxy_port(),
             connects: Arc::new(Mutex::new(Vec::new())),
             keys: Arc::new(Mutex::new(Vec::new())),
             worlds: Arc::new(Mutex::new(Vec::new())),

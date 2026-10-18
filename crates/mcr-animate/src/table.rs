@@ -759,30 +759,30 @@ impl Table {
         }
     }
 
-    pub fn info(&self, state: u16) -> &Info {
-        self.info.get(usize::from(state)).unwrap_or(&Info::AIR)
+    pub fn info(&self, state: u32) -> &Info {
+        self.info.get(state as usize).unwrap_or(&Info::AIR)
     }
 
     /// Whether the state is a lit campfire, and whether its signal fire is on.
-    pub fn campfire(&self, state: u16) -> Option<bool> {
+    pub fn campfire(&self, state: u32) -> Option<bool> {
         let info = self.info(state);
         (info.kind == Kind::Campfire).then_some(info.aux & 1 != 0)
     }
 
     /// `Direction.get2DDataValue` (south 0, west 1, north 2, east 3) of a lit campfire's facing.
-    pub fn campfire_rotation(&self, state: u16) -> Option<u8> {
+    pub fn campfire_rotation(&self, state: u32) -> Option<u8> {
         let info = self.info(state);
         (info.kind == Kind::Campfire).then_some((info.aux >> 1 & 3) as u8)
     }
 
     /// A vault state's keyhole direction (an index into [`DIRS`]) and whether it is ominous.
-    pub fn vault(&self, state: u16) -> Option<(usize, bool)> {
+    pub fn vault(&self, state: u32) -> Option<(usize, bool)> {
         let info = self.info(state);
         (info.kind == Kind::Vault).then_some((usize::from(info.aux), info.arg != 0))
     }
 
     /// A trial spawner state's `trial_spawner_state` and whether it is ominous.
-    pub fn trial_spawner(&self, state: u16) -> Option<(TrialState, bool)> {
+    pub fn trial_spawner(&self, state: u32) -> Option<(TrialState, bool)> {
         let info = self.info(state);
         (info.kind == Kind::TrialSpawner).then(|| (TrialState::from_index(info.aux), info.arg != 0))
     }

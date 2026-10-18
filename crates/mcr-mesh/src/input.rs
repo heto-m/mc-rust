@@ -19,7 +19,7 @@ pub const UNLIT_LIGHT: u8 = 0xf0;
 #[derive(Debug, Clone)]
 pub struct MeshInput {
     pub pos: SectionPos,
-    pub states: Box<[u16; PADDED]>,
+    pub states: Box<[u32; PADDED]>,
     /// `sky << 4 | block`.
     pub light: Box<[u8; PADDED]>,
     /// Biome ids on the quart grid around the section: x and z quarts `-3..=6`, y quarts `-1..=4`,
@@ -48,7 +48,7 @@ impl MeshInput {
         let radius = blend_radius.min(MAX_BLEND_RADIUS);
         Self {
             pos,
-            states: vec![0u16; PADDED]
+            states: vec![0u32; PADDED]
                 .into_boxed_slice()
                 .try_into()
                 .expect("size"),
@@ -62,11 +62,11 @@ impl MeshInput {
         }
     }
 
-    pub fn set_state(&mut self, x: i32, y: i32, z: i32, state: u16) {
+    pub fn set_state(&mut self, x: i32, y: i32, z: i32, state: u32) {
         self.states[pidx(x, y, z)] = state;
     }
 
-    pub fn state(&self, x: i32, y: i32, z: i32) -> u16 {
+    pub fn state(&self, x: i32, y: i32, z: i32) -> u32 {
         self.states[pidx(x, y, z)]
     }
 
@@ -86,7 +86,7 @@ impl MeshInput {
         let center = column.section(index)?;
         let mut input = Self::blank(pos, blend_radius);
 
-        let mut blocks = [0u16; 4096];
+        let mut blocks = [0u32; 4096];
         center.unpack_blocks(&mut blocks);
         for y in 0..16 {
             for z in 0..16 {
@@ -156,7 +156,7 @@ impl MeshInput {
     }
 
     fn fill_biomes(&mut self, store: &ChunkStore, pos: SectionPos) {
-        let mut cache: [Option<[u16; 64]>; 27] = [None; 27];
+        let mut cache: [Option<[u32; 64]>; 27] = [None; 27];
         for (slot, entry) in cache.iter_mut().enumerate() {
             let (cx, cy, cz) = (
                 slot as i32 % 3 - 1,
@@ -167,7 +167,7 @@ impl MeshInput {
                 .column(ChunkPos::new(pos.x + cx, pos.z + cz))
                 .and_then(|c| {
                     let index = usize::try_from(pos.y + cy - (c.min_y() >> 4)).ok()?;
-                    let mut out = [0u16; 64];
+                    let mut out = [0u32; 64];
                     c.section(index)?.unpack_biomes(&mut out);
                     Some(out)
                 });
@@ -193,7 +193,7 @@ impl MeshInput {
                     );
                     self.biomes
                         [(qy as usize * QUART_SPAN + qz as usize) * QUART_SPAN + qx as usize] =
-                        table[ly << 4 | lz << 2 | lx];
+                        table[ly << 4 | lz << 2 | lx] as u16;
                 }
             }
         }

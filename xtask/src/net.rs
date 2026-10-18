@@ -4,8 +4,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+/// Sent with every request; nothing that identifies the user.
+pub const USER_AGENT: &str = "mc-rust-dev/0.1";
+
 pub fn get_text(url: &str) -> Result<String> {
     let mut resp = ureq::get(url)
+        .header("User-Agent", USER_AGENT)
         .call()
         .with_context(|| format!("GET {url}"))?;
     Ok(resp.body_mut().read_to_string()?)
@@ -17,6 +21,7 @@ pub fn download_to(url: &str, dest: &Path) -> Result<()> {
     }
     let part = part_path(dest);
     let mut resp = ureq::get(url)
+        .header("User-Agent", USER_AGENT)
         .call()
         .with_context(|| format!("GET {url}"))?;
     {

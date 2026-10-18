@@ -358,6 +358,10 @@ server never starts.
   and `WORLD_STOPPED` sends Java to its title screen. A custom dialog's leave warning says Save and Quit too.
 - `--singleplayer <folder>` in mod mode waits for Java's GUI, then runs the same flow (the first status message
   opens the progress screen).
+- **Content mods.** When a server-run Fabric mod ships content (blockstates, or data other than tags), the managed
+  server is Fabric's `KnotServer` over the same server jar with those jars in `mcr-mods.txt`, behind the client's
+  egress fence (below). Fabric logs `Done` before its started hooks run and drops connections in that window, so
+  the server is ready once it answers `list` on its console.
 
 ## World duplication
 
@@ -389,7 +393,9 @@ collection rate and leaves little headroom at join, more than 3 GiB buys nothing
   HTTP (skins, mod web APIs) goes through a Rust loopback proxy (`proxy.rs`: `CONNECT` for https, absolute-form
   requests for http, forced `Connection: close`) set as `http(s).proxyHost/proxyPort` and as Minecraft's own
   `Proxy`. It reaches only Mojang's hosts plus the policy's `http_hosts` (`*.example.com` for subdomains), only
-  global addresses, ports 80 and 443, at most 16 connections, 8 KiB of request head, 30 s idle. A log4j filter
+  global addresses, ports 80 and 443, at most 16 connections, 8 KiB of request head, 30 s idle. The managed
+  Fabric server gets the same hosts file and proxy properties (`egress_properties`). Both cover DNS and Java's HTTP
+  stack only, not raw sockets to literal addresses; `cargo xtask fabric-server` is dev-only and unfenced. A log4j filter
   (`QuietRefusals`) turns the errors mods log for refused hosts (Mod Menu and IPN update checks) into one line per
   logger.
   `System.exit` or a crash in Java freezes or parks the VM for good: the bridge detaches, and mcr exits the
@@ -409,6 +415,24 @@ collection rate and leaves little headroom at join, more than 3 GiB buys nothing
 - The resolver treats `minecraft`, `fabricloader`, `neoforge`, `fml`, `java`, the bridge mod and `mixinextras`
   (bundled with the pinned loader) as provided. Manifests are parsed as leniently as Fabric's: raw control characters in strings
   are accepted.
+
+## Modpacks and modded registries
+
+`cargo xtask modpack-fetch <zip>` fetches a CurseForge Fabric pack without an API key (cfwidget for names, the
+CurseForge file record when cfwidget is stale, the CDN for files) into `.cache/packs/<slug>/`, places each jar for
+the client and the server from its environment and `mod-policy.json` (the only deny-list; `server` mods such as
+Lithium run only on the server), and installs the overrides into `run/packs/<slug>/java`. `cargo xtask
+fabric-server --pack <slug>` serves the pack on loopback.
+
+A modded server renumbers block states (mods add properties to vanilla blocks), so Java reports its registries
+(`McrRegistries`, format 2: every block, state, shape, item, entity type and fluid) at the title screen and at the
+end of configuration. Rust rebuilds its tables from the report (`mcr_data::rebuild`, block state ids are 32-bit),
+holds `FinishConfiguration` until then (10 s cap), and its configuration pongs follow Java's so Fabric's channel
+registration reaches the server first. Mod jars join Rust's resource stack, so modded blocks bake with mcr's own
+baker; code-generated models and modded fluids stay unbaked and are logged by name. Undecodable play packets are
+skipped in mod mode. Measurements of two real packs, the FerriteCore result and the deny-list are in the
+`modpacks-1` change's design; `tools/official-launcher/measure_pack.py` measures the same pack in the official
+launcher.
 
 ## NeoForge
 
@@ -513,6 +537,6 @@ detach and no late frame.
 
 `mod-jvm-host` → `mod-fabric-boot` → `mod-net-bridge` → `mod-render-backend` → `mod-frame-compose` →
 `mod-input-screens` → `mod-entity-render-hooks` → `mod-sound-bridge` → `mod-manager-ui`, later `mod-neoforge-1`,
-`mod-neoforge-2` and `mod-dynamic-lights`.
+`mod-neoforge-2`, `mod-dynamic-lights` and `modpacks-1`.
 Spikes first: SPIR-V combined samplers through naga, SDL3 offscreen video driver off the main thread, and the
 `EmbeddedChannel` behaviour of `Connection.setupInboundProtocol`.

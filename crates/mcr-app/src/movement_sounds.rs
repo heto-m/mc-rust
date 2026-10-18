@@ -61,7 +61,7 @@ impl MovementSounds {
     }
 
     fn block_at(&self, state: &ClientState, pos: [i32; 3]) -> Option<(u32, u32)> {
-        let s = u32::from(state.chunks.block(pos[0], pos[1], pos[2])?.0);
+        let s = state.chunks.block(pos[0], pos[1], pos[2])?.0;
         Some((s, self.data.block_state(s)?.block))
     }
 

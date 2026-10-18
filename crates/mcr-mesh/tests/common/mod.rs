@@ -72,7 +72,7 @@ pub fn fixture() -> Option<&'static Fixture> {
         .as_ref()
 }
 
-pub fn state_of(name: &str, props: &[(&str, &str)]) -> u16 {
+pub fn state_of(name: &str, props: &[(&str, &str)]) -> u32 {
     let v = mcr_data::v26_3();
     let block = v.block_by_name(name).expect("block");
     let info = v.block_info(block).expect("info");
@@ -81,5 +81,5 @@ pub fn state_of(name: &str, props: &[(&str, &str)]) -> u16 {
             let have: Vec<_> = v.state_properties(s).collect();
             props.iter().all(|p| have.contains(p))
         })
-        .expect("state") as u16
+        .expect("state") as u32
 }

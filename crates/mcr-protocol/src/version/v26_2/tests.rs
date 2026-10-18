@@ -348,8 +348,8 @@ fn chunk_sections_remap_and_widen() {
     let mut input = &bytes[8..];
     let chunk = ChunkData::decode(&mut input, &cfg).unwrap();
     let (s, d) = (
-        new_state("minecraft:stone") as u16,
-        new_state("minecraft:dirt") as u16,
+        new_state("minecraft:stone") as u32,
+        new_state("minecraft:dirt") as u32,
     );
     assert_eq!(chunk.sections[0].block(3, 3, 3).0, s);
     assert_eq!(chunk.sections[1].block(0, 0, 0).0, s);

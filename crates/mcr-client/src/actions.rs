@@ -330,7 +330,7 @@ impl Client {
         if self
             .state
             .data
-            .block_state(u32::from(old.0))
+            .block_state(old.0)
             .is_none_or(|i| i.is_air())
         {
             return;
@@ -340,7 +340,7 @@ impl Client {
         self.push_event(crate::events::ClientEvent::LevelEvent {
             event: LEVEL_EVENT_DESTROY_BLOCK,
             pos,
-            data: i32::from(old.0),
+            data: old.0 as i32,
             global: false,
             predicted: true,
         });

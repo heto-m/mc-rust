@@ -2,10 +2,10 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use mcr_animate::{AnimateWorld, Animator, Cue, Sink};
 use mcr_protocol::types::particle::Particle;
 
-struct Dense(u16);
+struct Dense(u32);
 
 impl AnimateWorld for Dense {
-    fn state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+    fn state(&self, x: i32, y: i32, z: i32) -> Option<u32> {
         let torch = (x ^ y ^ z) & 7 == 0;
         Some(if torch { self.0 } else { 0 })
     }
@@ -24,7 +24,7 @@ fn bench(c: &mut Criterion) {
     let torch = data
         .block_by_name("minecraft:torch")
         .and_then(|b| data.block_info(b))
-        .map_or(0, |b| b.default_state as u16);
+        .map_or(0, |b| b.default_state);
     let world = Dense(torch);
     c.bench_function("animate_tick_dense", |b| {
         b.iter(|| animator.tick([0, 64, 0], &world, &mut Null, true));

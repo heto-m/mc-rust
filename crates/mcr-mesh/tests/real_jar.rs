@@ -105,7 +105,7 @@ fn every_block_state_meshes_without_panicking() {
     for base in (0..total).step_by(4096) {
         let mut input = MeshInput::blank(SectionPos::new(0, 0, 0), 2);
         for i in 0..4096usize {
-            let id = (base + i) as u16;
+            let id = (base + i) as u32;
             if base + i >= total {
                 break;
             }
@@ -141,7 +141,7 @@ fn build_time_and_unbaked_report() {
 fn mesh_world(
     f: &common::Fixture,
     section: SectionPos,
-    set: impl Fn(i32, i32, i32) -> u16,
+    set: impl Fn(i32, i32, i32) -> u32,
 ) -> SectionMesh {
     let mut input = MeshInput::blank(section, 2);
     for y in -1..=16 {
@@ -251,7 +251,7 @@ fn partial_shapes_cull_like_vanilla() {
             &[("type", ty), ("waterlogged", "false")],
         )
     };
-    let count = |a: u16, b: u16| {
+    let count = |a: u32, b: u32| {
         let m = mesh_world(f, SectionPos::new(0, 0, 0), |x, y, z| match (x, y, z) {
             (3, 3, 3) => a,
             (4, 3, 3) => b,

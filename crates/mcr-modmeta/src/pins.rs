@@ -1,4 +1,4 @@
-//! The loader builds mcr runs. `xtask` compiles this file too (`#[path]`), so it holds constants only.
+//! The loader builds mcr runs.
 
 /// Fabric Loader, fetched by `cargo xtask fabric-fetch`.
 pub const LOADER_VERSION: &str = "0.19.5";

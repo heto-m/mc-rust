@@ -16,7 +16,7 @@ pub trait CollisionWorld {
 impl CollisionWorld for ChunkStore {
     #[inline]
     fn block_state(&self, x: i32, y: i32, z: i32) -> u32 {
-        self.block(x, y, z).map_or(0, |s| u32::from(s.0))
+        self.block(x, y, z).map_or(0, |s| s.0)
     }
 
     fn is_loaded(&self, x: i32, z: i32) -> bool {

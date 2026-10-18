@@ -1860,7 +1860,9 @@ dependencies = [
  "mcr-auth",
  "mcr-buf",
  "mcr-client",
+ "mcr-data",
  "mcr-jvm",
+ "mcr-modmeta",
  "mcr-nbt",
  "mcr-net",
  "mcr-physics",
@@ -1876,6 +1878,17 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "wgpu",
+ "zip",
+]
+
+[[package]]
+name = "mcr-modmeta"
+version = "0.1.0"
+dependencies = [
+ "png",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
  "zip",
 ]
 
@@ -4517,6 +4530,8 @@ dependencies = [
  "clap",
  "flate2",
  "mcr-data-gen",
+ "mcr-modmeta",
+ "mcr-singleplayer",
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",

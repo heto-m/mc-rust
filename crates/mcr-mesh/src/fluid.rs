@@ -164,7 +164,7 @@ pub(crate) fn mesh_fluid(
     mesher: &mut Mesher,
     ctx: &Ctx,
     cell: [i32; 3],
-    id: u16,
+    id: u32,
     sm: &StateModel,
     out: &mut SectionMesh,
 ) -> bool {
@@ -596,7 +596,7 @@ mod tests {
     const STILL_LAYER: u16 = 20;
     const FLOW_LAYER: u16 = 21;
 
-    fn mesh_with(f: impl Fn(i32, i32, i32) -> u16, tweak: impl Fn(&mut MeshInput)) -> SectionMesh {
+    fn mesh_with(f: impl Fn(i32, i32, i32) -> u32, tweak: impl Fn(&mut MeshInput)) -> SectionMesh {
         let mut cache = test_cache();
         cache.fluid_sprites.water_still = STILL_LAYER;
         cache.fluid_sprites.water_flow = FLOW_LAYER;
@@ -612,7 +612,7 @@ mod tests {
         out
     }
 
-    fn ocean(_x: i32, y: i32, _z: i32) -> u16 {
+    fn ocean(_x: i32, y: i32, _z: i32) -> u32 {
         match y {
             -1 => STONE,
             0..=3 => WATER,

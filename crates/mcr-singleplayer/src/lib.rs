@@ -1,6 +1,7 @@
 //! Singleplayer: Mojang's server jar as a managed loopback child process playing vanilla worlds.
 
 mod error;
+pub mod fabric;
 pub mod flat;
 mod http;
 pub mod icon;

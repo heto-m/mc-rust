@@ -9,6 +9,7 @@ pub const FORWARD: &[(NetPhase, &str)] = &[
     (NetPhase::Login, "custom_query_answer"),
     (NetPhase::Configuration, "custom_payload"),
     (NetPhase::Configuration, "custom_click_action"),
+    (NetPhase::Configuration, "pong"),
     (NetPhase::Play, "custom_payload"),
     (NetPhase::Play, "container_click"),
     (NetPhase::Play, "container_button_click"),
@@ -176,13 +177,12 @@ mod tests {
     fn configuration_row() {
         check(
             NetPhase::Configuration,
-            &["custom_payload", "custom_click_action"],
+            &["custom_payload", "custom_click_action", "pong"],
             &[
                 "client_information",
                 "select_known_packs",
                 "finish_configuration",
                 "keep_alive",
-                "pong",
                 "resource_pack",
                 "accept_code_of_conduct",
                 "cookie_response",

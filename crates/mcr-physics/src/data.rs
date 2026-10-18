@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 use mcr_data::Version;
 
@@ -77,9 +76,10 @@ pub struct PhysicsData {
 }
 
 impl PhysicsData {
+    /// For the active tables ([`mcr_data::v26_3`]).
     pub fn v26_3() -> &'static PhysicsData {
-        static DATA: OnceLock<PhysicsData> = OnceLock::new();
-        DATA.get_or_init(|| PhysicsData::build(mcr_data::v26_3()))
+        static DATA: mcr_data::PerVersion<PhysicsData> = mcr_data::PerVersion::new();
+        DATA.get(PhysicsData::build)
     }
 
     pub fn build(v: &Version) -> Self {

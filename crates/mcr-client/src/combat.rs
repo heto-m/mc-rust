@@ -151,7 +151,7 @@ impl Client {
         self.state
             .chunks
             .block(pos.x, pos.y, pos.z)
-            .and_then(|b| self.state.data.block_state(u32::from(b.0)))
+            .and_then(|b| self.state.data.block_state(b.0))
             .is_none_or(|i| i.is_air())
     }
 

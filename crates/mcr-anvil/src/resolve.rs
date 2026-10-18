@@ -18,8 +18,8 @@ struct BlockSpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolved {
-    Exact(u16),
-    BadProperty(u16),
+    Exact(u32),
+    BadProperty(u32),
     UnknownBlock,
 }
 
@@ -84,8 +84,8 @@ impl BlockResolver {
         self.state_count
     }
 
-    pub fn default_state(&self, name: &str) -> Option<u16> {
-        self.blocks.get(name).map(|b| b.default as u16)
+    pub fn default_state(&self, name: &str) -> Option<u32> {
+        self.blocks.get(name).map(|b| b.default)
     }
 
     pub fn resolve(&self, name: &str, properties: Option<&Compound>) -> Resolved {
@@ -111,7 +111,7 @@ impl BlockResolver {
             let old = ordinal / stride % count;
             ordinal += (new - old) * stride;
         }
-        let state = (i64::from(spec.first) + ordinal) as u16;
+        let state = (i64::from(spec.first) + ordinal) as u32;
         if exact {
             Resolved::Exact(state)
         } else {
@@ -198,8 +198,8 @@ mod tests {
         let Resolved::Exact(s) = r.resolve("minecraft:oak_stairs", Some(&props(&want))) else {
             panic!("not exact");
         };
-        assert_eq!(v.state_block_name(s as u32), Some("minecraft:oak_stairs"));
-        let got: Vec<_> = v.state_properties(s as u32).collect();
+        assert_eq!(v.state_block_name(s), Some("minecraft:oak_stairs"));
+        let got: Vec<_> = v.state_properties(s).collect();
         for (k, val) in want {
             assert!(got.contains(&(k, val)), "{k}={val} in {got:?}");
         }
@@ -212,7 +212,7 @@ mod tests {
         for state in 0..v.state_count() as u32 {
             let name = v.state_block_name(state).unwrap();
             let c = props(&v.state_properties(state).collect::<Vec<_>>());
-            assert_eq!(r.resolve(name, Some(&c)), Resolved::Exact(state as u16));
+            assert_eq!(r.resolve(name, Some(&c)), Resolved::Exact(state));
         }
     }
 

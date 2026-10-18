@@ -36,7 +36,7 @@ fn save_png(name: &str, w: u32, h: u32, rgba: &[u8]) {
 }
 
 /// Display platform floating above the terrain at x 0..12, y 110, z 0..6.
-fn showcase(wx: i32, wy: i32, wz: i32) -> Option<u16> {
+fn showcase(wx: i32, wy: i32, wz: i32) -> Option<u32> {
     if !(0..13).contains(&wx) || !(0..7).contains(&wz) || !(110..114).contains(&wy) {
         return None;
     }

@@ -11,17 +11,17 @@ use crate::cache::{
 use crate::input::MeshInput;
 use crate::tint::{TINT_GRASS, TINT_NONE};
 
-pub const AIR: u16 = 0;
-pub const STONE: u16 = 1;
-pub const DIRT: u16 = 2;
-pub const GLASS: u16 = 3;
-pub const STAINED_GLASS: u16 = 4;
-pub const WATER: u16 = 5;
-pub const SLAB: u16 = 6;
-pub const GRASS_BLOCK: u16 = 7;
-pub const RANDOM: u16 = 9;
-pub const SLAB_TOP: u16 = 10;
-pub const LEAVES: u16 = 8;
+pub const AIR: u32 = 0;
+pub const STONE: u32 = 1;
+pub const DIRT: u32 = 2;
+pub const GLASS: u32 = 3;
+pub const STAINED_GLASS: u32 = 4;
+pub const WATER: u32 = 5;
+pub const SLAB: u32 = 6;
+pub const GRASS_BLOCK: u32 = 7;
+pub const RANDOM: u32 = 9;
+pub const SLAB_TOP: u32 = 10;
+pub const LEAVES: u32 = 8;
 pub const STONE_LAYER: u16 = 1;
 pub const DIRT_LAYER: u16 = 2;
 pub const OVERLAY_LAYER: u16 = 9;
@@ -164,7 +164,7 @@ pub fn test_cache() -> ModelCache {
         states[id as usize] = StateModel {
             shape: Shape::Model,
             ao: true,
-            block: id,
+            block: id as u16,
             quad_start: start,
             quad_count: 6,
             ..StateModel::EMPTY
@@ -194,9 +194,9 @@ pub fn test_cache() -> ModelCache {
             std::array::from_fn(|f| {
                 if occlusion[i] >> f & 1 != 0 {
                     MASK_FULL
-                } else if f == 2 || f == 3 || (i as u16 != SLAB && i as u16 != SLAB_TOP) {
+                } else if f == 2 || f == 3 || (i as u32 != SLAB && i as u32 != SLAB_TOP) {
                     MASK_EMPTY
-                } else if i as u16 == SLAB {
+                } else if i as u32 == SLAB {
                     2
                 } else {
                     3
@@ -228,7 +228,7 @@ pub fn test_cache() -> ModelCache {
     cache
 }
 
-pub fn input_from(f: impl Fn(i32, i32, i32) -> u16) -> MeshInput {
+pub fn input_from(f: impl Fn(i32, i32, i32) -> u32) -> MeshInput {
     let mut input = MeshInput::blank(SectionPos::new(0, 0, 0), 2);
     for y in -1..=16 {
         for z in -1..=16 {
@@ -244,16 +244,16 @@ pub fn input_from(f: impl Fn(i32, i32, i32) -> u16) -> MeshInput {
 /// Real block state ids used by the terrain generator.
 #[derive(Debug, Clone, Copy)]
 pub struct TerrainBlocks {
-    pub stone: u16,
-    pub dirt: u16,
-    pub grass_block: u16,
-    pub sand: u16,
-    pub water: u16,
-    pub coal_ore: u16,
-    pub iron_ore: u16,
-    pub log: u16,
-    pub leaves: u16,
-    pub short_grass: u16,
+    pub stone: u32,
+    pub dirt: u32,
+    pub grass_block: u32,
+    pub sand: u32,
+    pub water: u32,
+    pub coal_ore: u32,
+    pub iron_ore: u32,
+    pub log: u32,
+    pub leaves: u32,
+    pub short_grass: u32,
 }
 
 fn hash3(seed: u32, x: i32, y: i32, z: i32) -> u32 {
@@ -280,7 +280,7 @@ fn tree_at(seed: u32, tx: i32, tz: i32) -> Option<i32> {
     (h > SEA_LEVEL + 1 && hash3(seed ^ 0x77, tx, 0, tz).is_multiple_of(70)).then_some(h)
 }
 
-pub fn terrain_state(b: &TerrainBlocks, seed: u32, x: i32, y: i32, z: i32) -> u16 {
+pub fn terrain_state(b: &TerrainBlocks, seed: u32, x: i32, y: i32, z: i32) -> u32 {
     let h = terrain_height(seed, x, z);
     if y > h {
         if y <= SEA_LEVEL {

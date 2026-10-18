@@ -458,9 +458,7 @@ pub fn default_world_config(
     let air = ["air", "cave_air", "void_air"].map(|name| {
         data.block_by_name(&format!("minecraft:{name}"))
             .and_then(|b| data.block_info(b))
-            .map_or(BlockState::AIR, |info| {
-                BlockState(info.default_state as u16)
-            })
+            .map_or(BlockState::AIR, |info| BlockState(info.default_state))
     });
     Ok(WorldConfig::new(data.state_count() as u32, biomes.max(1), min_y, height)?.with_air(air))
 }
@@ -554,6 +552,15 @@ impl ClientState {
             sim_scratch: BodyScratch::default(),
             resource_packs: config.resource_packs,
             in_batch: false,
+        }
+    }
+
+    /// Tables with a modded server's registries (or vanilla's again) for the coming play phase.
+    pub fn set_data(&mut self, data: &'static Version) {
+        if !std::ptr::eq(self.data, data) {
+            self.data = data;
+            self.ids = PhysicsIds::resolve(data);
+            self.sim_kinds = SimKinds::resolve(data);
         }
     }
 
@@ -711,10 +718,9 @@ pub fn resource_pack_responses(policy: ResourcePackPolicy, id: Uuid) -> Vec<Reso
 }
 
 fn light_table() -> std::sync::Arc<LightTable> {
-    static TABLE: std::sync::OnceLock<std::sync::Arc<LightTable>> = std::sync::OnceLock::new();
+    static TABLE: mcr_data::PerVersion<std::sync::Arc<LightTable>> = mcr_data::PerVersion::new();
     TABLE
-        .get_or_init(|| {
-            let data = mcr_data::v26_3();
+        .get(|data| {
             std::sync::Arc::new(LightTable::new(data.state_count(), |state| {
                 let Some(info) = data.block_state(state) else {
                     return (0, 15, 0);

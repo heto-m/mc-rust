@@ -157,7 +157,12 @@ impl Shell {
         let data = mcr_data::v26_3();
         let settings = Settings::load(&cfg.game_dir);
         let options = settings.borrow().file.options.clone();
-        let assets = Arc::new(Assets::load(&cfg.jar)?);
+        let mod_jars = cfg
+            .mod_net
+            .as_ref()
+            .map(|n| n.jars.clone())
+            .unwrap_or_default();
+        let assets = Arc::new(Assets::load_with_mods(&cfg.jar, &mod_jars)?);
         let index = asset_index_id(&cfg.jar);
         let resources = Arc::new(
             vanilla_resources(
@@ -196,6 +201,7 @@ impl Shell {
             jar: cfg.jar.clone(),
             assets_dir: cfg.assets_dir.clone(),
             index: index.clone(),
+            mods: mod_jars,
         };
         let now = Instant::now();
         let builtin = assets.builtin.clone();
@@ -621,6 +627,13 @@ impl Shell {
             view_distance: self.cfg.render_distance.unwrap_or(options.render_distance),
             simulation_distance: options.simulation_distance,
             dev_cache: crate::mods::cache_dir().to_path_buf(),
+            server_mods: self
+                .cfg
+                .mod_net
+                .as_ref()
+                .map(|n| n.server_jars.clone())
+                .unwrap_or_default(),
+            server_proxy: self.cfg.mod_net.as_ref().map(|n| n.proxy_port),
         };
         if !from_java {
             let (screen, status) = ConnectingScreen::with_text("lang:createWorld.preparing");
@@ -1065,9 +1078,26 @@ impl Shell {
         self.connecting = None;
         match result {
             Ok(client) => {
-                let Some(parts) = self.parts.take() else {
+                let Some(mut parts) = self.parts.take() else {
                     return;
                 };
+                let data = mcr_data::v26_3();
+                if !std::ptr::eq(parts.assets.data, data) {
+                    let started = Instant::now();
+                    match parts.assets.for_data(data) {
+                        Ok(assets) => {
+                            println!(
+                                "assets: models baked for {} block states in {:?}",
+                                data.state_count(),
+                                started.elapsed()
+                            );
+                            parts.assets = Arc::new(assets);
+                        }
+                        Err(e) => {
+                            eprintln!("assets: rebaking for the server's registries failed: {e:#}")
+                        }
+                    }
+                }
                 println!("joined as {}", self.cfg.name);
                 let cfg = PlayConfig {
                     render_distance: self.cfg.render_distance,

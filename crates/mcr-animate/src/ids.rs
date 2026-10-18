@@ -83,10 +83,10 @@ pub const SCULK_TO_REDSTONE: Particle = Particle::DustColorTransition {
     scale: 1.0,
 };
 
-pub fn falling_dust(state: u16) -> Particle {
+pub fn falling_dust(state: u32) -> Particle {
     Particle::BlockState {
         kind: BlockParticleKind::FallingDust,
-        state: i32::from(state),
+        state: state as i32,
     }
 }
 

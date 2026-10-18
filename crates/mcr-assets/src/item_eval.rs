@@ -277,10 +277,13 @@ impl ItemModels {
             let Some(bytes) = resources.read(path)? else {
                 continue;
             };
-            defs.insert(
-                Identifier::new(namespace, name),
-                ItemModelDef::parse(&bytes, path)?,
-            );
+            // Vanilla skips a definition it cannot read; mods add model types only their code knows.
+            match ItemModelDef::parse(&bytes, path) {
+                Ok(def) => {
+                    defs.insert(Identifier::new(namespace, name), def);
+                }
+                Err(e) => tracing::warn!("skipping item model {path}: {e}"),
+            }
         }
         let grass = match resources.read("assets/minecraft/textures/colormap/grass.png")? {
             Some(png) => {

@@ -111,6 +111,19 @@ impl Layout {
         self.root.join("run").join(format!("soak-server-{ver}"))
     }
 
+    pub fn packs_dir(&self) -> PathBuf {
+        self.cache_dir().join("packs")
+    }
+
+    /// A pack's game dir for mcr (`<dir>/java` is Java's).
+    pub fn pack_game_dir(&self, slug: &str) -> PathBuf {
+        self.root.join("run").join("packs").join(slug)
+    }
+
+    pub fn fabric_server_dir(&self, slug: &str) -> PathBuf {
+        self.root.join("run").join(format!("fabric-server-{slug}"))
+    }
+
     pub fn soak_dir(&self) -> PathBuf {
         self.root.join("run").join("soak")
     }

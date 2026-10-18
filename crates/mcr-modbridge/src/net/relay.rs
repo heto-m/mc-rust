@@ -22,6 +22,8 @@ pub struct NetRelay {
     session: u32,
     reason: String,
     last_pos: Option<[f64; 3]>,
+    /// The last registry report this session consumed.
+    registries_seen: u64,
 }
 
 impl NetRelay {
@@ -31,6 +33,7 @@ impl NetRelay {
             session,
             reason: "Disconnected".into(),
             last_pos: None,
+            registries_seen: crate::registries::generation(),
         }
     }
 
@@ -135,6 +138,35 @@ impl Relay for NetRelay {
         if failed {
             shared.detach();
         }
+    }
+
+    fn finish_configuration(&mut self) -> bool {
+        if self.shared.is_detached() {
+            return true;
+        }
+        let Some((generation, bytes)) = crate::registries::latest() else {
+            return false;
+        };
+        if generation <= self.registries_seen || !crate::registries::is_configuration(&bytes) {
+            return false;
+        }
+        self.registries_seen = generation;
+        match crate::registries::install(&bytes) {
+            Ok((version, report)) => {
+                eprintln!(
+                    "[mods] registries: {} block states, {} blocks, {} items, {} entity types from Java",
+                    version.state_count(),
+                    version.block_count(),
+                    version.items().len(),
+                    version.entity_types().len()
+                );
+                for p in &report.problems {
+                    eprintln!("[mods] registry export: {p}");
+                }
+            }
+            Err(e) => eprintln!("[mods] Java's registries could not be used: {e}"),
+        }
+        true
     }
 
     fn answers_custom_queries(&self) -> bool {

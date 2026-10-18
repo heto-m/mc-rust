@@ -164,6 +164,20 @@ impl MeshWorld for NetworkWorld {
             .unwrap_or_default()
     }
 
+    fn biome_climates(&self) -> Vec<Option<mcr_mesh::BiomeClimate>> {
+        self.client
+            .state
+            .registries
+            .get(BIOME)
+            .map(|r| {
+                r.entries
+                    .iter()
+                    .map(|e| e.data.as_ref().and_then(mcr_mesh::BiomeClimate::from_nbt))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn streaming_idle(&self) -> bool {
         self.client.state.player.loaded && self.last_chunk.elapsed() > QUIET_AFTER_CHUNK
     }

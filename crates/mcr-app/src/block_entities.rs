@@ -86,7 +86,7 @@ fn top_y(min_y: i32, height: u32) -> i32 {
 }
 
 fn state_at(chunks: &ChunkStore, pos: Pos) -> Option<u32> {
-    chunks.block(pos[0], pos[1], pos[2]).map(|s| u32::from(s.0))
+    chunks.block(pos[0], pos[1], pos[2]).map(|s| s.0)
 }
 
 fn block_name(state: u32) -> &'static str {

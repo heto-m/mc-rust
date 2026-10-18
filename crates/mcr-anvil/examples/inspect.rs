@@ -27,8 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let version = mcr_data::v26_3();
-    let mut histogram: HashMap<u16, u64> = HashMap::new();
-    let mut flat = [0u16; 4096];
+    let mut histogram: HashMap<u32, u64> = HashMap::new();
+    let mut flat = [0u32; 4096];
     for chunk in &chunks {
         for section in chunk.column.sections() {
             section.unpack_blocks(&mut flat);
@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut by_block: HashMap<&str, u64> = HashMap::new();
     for (state, n) in histogram {
-        let name = version.state_block_name(state as u32).unwrap_or("?");
+        let name = version.state_block_name(state).unwrap_or("?");
         *by_block.entry(name).or_default() += n;
     }
     let mut rows: Vec<_> = by_block.into_iter().collect();

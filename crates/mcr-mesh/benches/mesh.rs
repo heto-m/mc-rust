@@ -60,7 +60,7 @@ fn world_store(b: &TerrainBlocks) -> ChunkStore {
             let sections = (0..cfg.section_count())
                 .map(|i| {
                     let sy = i as i32 - 4;
-                    let mut values = [0u16; 4096];
+                    let mut values = [0u32; 4096];
                     for (n, v) in values.iter_mut().enumerate() {
                         let (x, y, z) = ((n & 15) as i32, (n >> 8) as i32, (n >> 4 & 15) as i32);
                         *v = terrain_state(b, SEED, cx * 16 + x, sy * 16 + y, cz * 16 + z);

@@ -188,7 +188,7 @@ impl Client {
 
     fn block_name_at(&self, pos: BlockPos) -> Option<&'static str> {
         let state = self.state.chunks.block(pos.x, pos.y, pos.z)?;
-        let info = self.state.data.block_state(u32::from(state.0))?;
+        let info = self.state.data.block_state(state.0)?;
         self.state.data.block_name(info.block)
     }
 
@@ -347,7 +347,7 @@ impl Client {
             return Placement::NotABlock;
         };
         let replaceable = data
-            .block_state(u32::from(clicked.0))
+            .block_state(clicked.0)
             .is_some_and(|i| i.is_replaceable());
         let at = if replaceable {
             pos
@@ -359,7 +359,7 @@ impl Client {
             return Placement::NotABlock;
         };
         let free = data
-            .block_state(u32::from(existing.0))
+            .block_state(existing.0)
             .is_some_and(|i| i.is_air() || i.is_replaceable());
         if !free {
             return Placement::Failed;
@@ -392,8 +392,7 @@ impl Client {
             return Placement::Failed;
         }
         let sequence = self.sequence;
-        self.state
-            .predict_block(at, BlockState(state as u16), sequence);
+        self.state.predict_block(at, BlockState(state), sequence);
         self.combat.placed = Some((at, state));
         if !self.state.player.instabuild {
             let slot = match hand {

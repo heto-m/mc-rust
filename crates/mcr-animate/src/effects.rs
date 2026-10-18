@@ -202,7 +202,7 @@ impl<'a> Scan<'a> {
         if self.marker != u16::MAX && info.block == self.marker {
             let marker = Particle::BlockState {
                 kind: BlockParticleKind::BlockMarker,
-                state: i32::from(state),
+                state: state as i32,
             };
             self.particle(&marker, p.map(|c| f64::from(c) + 0.5), ZERO);
         }
@@ -225,7 +225,7 @@ impl<'a> Scan<'a> {
         }
     }
 
-    fn block(&mut self, p: [i32; 3], state: u16, info: &'a Info) {
+    fn block(&mut self, p: [i32; 3], state: u32, info: &'a Info) {
         let ids = self.ids;
         let [x, y, z] = p.map(f64::from);
         match info.kind {
@@ -721,7 +721,7 @@ impl<'a> Scan<'a> {
         }
     }
 
-    fn falling_dust(&mut self, p: [i32; 3], state: u16) {
+    fn falling_dust(&mut self, p: [i32; 3], state: u32) {
         if self.chance(16) && self.at(p, 0).has(flag::FREE_TO_FALL) {
             let at = [
                 f64::from(p[0]) + self.d(),
@@ -1280,7 +1280,7 @@ impl<'a> Scan<'a> {
         if below.fluid != fluid::NONE {
             return;
         }
-        let shape = self.data.collision_shape(u32::from(state));
+        let shape = self.data.collision_shape(state);
         let top = shape
             .iter()
             .map(|b| b.max[1])
@@ -1321,7 +1321,7 @@ impl<'a> Scan<'a> {
                 .state(below_pos[0], below_pos[1] - 1, below_pos[2])
                 .map_or(f32::NEG_INFINITY, |s| {
                     self.data
-                        .collision_shape(u32::from(s))
+                        .collision_shape(s)
                         .iter()
                         .map(|b| b.max[1])
                         .fold(f32::NEG_INFINITY, f32::max)

@@ -10,11 +10,11 @@ fn config() -> WorldConfig {
     WorldConfig::new(35723, 80, -64, 384).unwrap()
 }
 
-fn terrain(distinct: usize, seed: usize) -> [u16; BLOCK_ENTRIES] {
-    let mut v = [0u16; BLOCK_ENTRIES];
+fn terrain(distinct: usize, seed: usize) -> [u32; BLOCK_ENTRIES] {
+    let mut v = [0u32; BLOCK_ENTRIES];
     for (i, slot) in v.iter_mut().enumerate() {
         let layer = i >> 8;
-        *slot = ((layer * 3 + (i * seed) % 5) % distinct) as u16 * 5;
+        *slot = ((layer * 3 + (i * seed) % 5) % distinct) as u32 * 5;
     }
     v
 }
@@ -25,7 +25,7 @@ fn column(cfg: &WorldConfig) -> Vec<u8> {
             let values = terrain(if s < 16 { 24 } else { 2 }, s + 1);
             let blocks = BlockContainer::from_values(&values, cfg.block_limits());
             let biomes = mcr_world::BiomeContainer::from_values(
-                &std::array::from_fn(|i| (i % 3) as u16),
+                &std::array::from_fn(|i| (i % 3) as u32),
                 cfg.biome_limits(),
             );
             ChunkSection::from_containers(blocks, biomes, 4096, 0)
@@ -62,7 +62,7 @@ fn bench(c: &mut Criterion) {
             })
         });
         group.bench_function(format!("unpack/{name}"), |b| {
-            let mut out = [0u16; BLOCK_ENTRIES];
+            let mut out = [0u32; BLOCK_ENTRIES];
             b.iter(|| {
                 container.unpack_into(&mut out);
                 black_box(&out);
@@ -82,7 +82,7 @@ fn bench(c: &mut Criterion) {
         b.iter(|| {
             let mut c = BlockContainer::filled(0, limits);
             for i in 0..BLOCK_ENTRIES {
-                c.set(i, (i % 300) as u16);
+                c.set(i, (i % 300) as u32);
             }
             c
         })

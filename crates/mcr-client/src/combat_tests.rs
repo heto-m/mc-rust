@@ -20,7 +20,7 @@ fn client() -> Client {
         .chunks
         .insert(ChunkPos::new(0, 0), ChunkColumn::empty(&cfg));
     let stone = c.state.data.block_by_name("minecraft:stone").unwrap();
-    let state = c.state.data.block_info(stone).unwrap().default_state as u16;
+    let state = c.state.data.block_info(stone).unwrap().default_state;
     c.state.chunks.set_block(1, 64, 1, BlockState(state));
     c.state.player.physics.on_ground = true;
     c
@@ -380,7 +380,7 @@ fn a_finished_dig_waits_five_ticks_before_the_next() {
     c.handle_keybinds(click(true), on_stone(), false).unwrap();
     mine_ticks(&mut c);
     let stone = c.state.data.block_by_name("minecraft:stone").unwrap();
-    let state = c.state.data.block_info(stone).unwrap().default_state as u16;
+    let state = c.state.data.block_info(stone).unwrap().default_state;
     c.state.chunks.set_block(1, 64, 1, BlockState(state));
     let held = CombatKeys {
         attack_down: true,

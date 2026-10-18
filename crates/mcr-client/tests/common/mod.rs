@@ -88,7 +88,7 @@ impl Live {
         self.client.state.player.physics.pos
     }
 
-    pub fn block(&self, p: BlockPos) -> u16 {
+    pub fn block(&self, p: BlockPos) -> u32 {
         self.client
             .state
             .chunks

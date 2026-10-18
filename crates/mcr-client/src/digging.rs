@@ -13,7 +13,7 @@ const TOOL_COMPONENT: i32 = 28;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct BlockPredictions {
-    pending: FxHashMap<BlockPos, (i32, u16)>,
+    pending: FxHashMap<BlockPos, (i32, u32)>,
 }
 
 impl BlockPredictions {
@@ -25,7 +25,7 @@ impl BlockPredictions {
         self.pending.is_empty()
     }
 
-    pub(crate) fn retain(&mut self, pos: BlockPos, sequence: i32, server_state: u16) {
+    pub(crate) fn retain(&mut self, pos: BlockPos, sequence: i32, server_state: u32) {
         if let Some(entry) = self.pending.get_mut(&pos) {
             entry.0 = sequence;
         } else if self.pending.len() < MAX_PREDICTIONS {
@@ -34,7 +34,7 @@ impl BlockPredictions {
     }
 
     /// A server update for a predicted position is held back until its sequence is acknowledged.
-    pub(crate) fn hold(&mut self, pos: BlockPos, state: u16) -> bool {
+    pub(crate) fn hold(&mut self, pos: BlockPos, state: u32) -> bool {
         match self.pending.get_mut(&pos) {
             Some(entry) => {
                 entry.1 = state;
@@ -44,7 +44,7 @@ impl BlockPredictions {
         }
     }
 
-    pub(crate) fn end_up_to(&mut self, sequence: i32) -> Vec<(BlockPos, u16)> {
+    pub(crate) fn end_up_to(&mut self, sequence: i32) -> Vec<(BlockPos, u32)> {
         let done: Vec<_> = self
             .pending
             .iter()
@@ -157,7 +157,7 @@ impl ClientState {
     /// Vanilla `BlockState#getDestroyProgress` for the player and held item; `None` if there is no block.
     pub fn destroy_progress(&self, pos: BlockPos) -> Option<f32> {
         let state = self.chunks.block(pos.x, pos.y, pos.z)?;
-        let info = self.data.block_state(u32::from(state.0))?;
+        let info = self.data.block_state(state.0)?;
         if info.is_air() {
             return None;
         }
@@ -219,13 +219,13 @@ impl ClientState {
     pub(crate) fn state_after_break(&self, state: BlockState) -> BlockState {
         let fluid = self
             .data
-            .block_state(u32::from(state.0))
+            .block_state(state.0)
             .and_then(|i| i.fluid)
             .filter(|f| f.source);
         let name = fluid.and_then(|f| self.data.fluid_name(f.fluid));
         name.and_then(|n| self.data.block_by_name(n))
             .and_then(|b| self.data.block_info(b))
-            .map_or(BlockState::AIR, |i| BlockState(i.default_state as u16))
+            .map_or(BlockState::AIR, |i| BlockState(i.default_state))
     }
 
     /// Client-side `setBlock` under a prediction sequence; the previous state is restored on ack
@@ -238,7 +238,7 @@ impl ClientState {
         self.chunks.set_block(pos.x, pos.y, pos.z, new);
     }
 
-    pub(crate) fn finish_predictions(&mut self, sequence: i32) -> Vec<(BlockPos, u16)> {
+    pub(crate) fn finish_predictions(&mut self, sequence: i32) -> Vec<(BlockPos, u32)> {
         let done = self.predictions.end_up_to(sequence);
         for (pos, state) in &done {
             self.chunks

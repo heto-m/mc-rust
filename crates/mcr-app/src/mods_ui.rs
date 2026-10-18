@@ -41,10 +41,13 @@ fn row(entry: &ModEntry) -> ModRow {
         (ModStatus::Disabled, _) => ("Disabled", ModTone::Neutral, String::new()),
         (ModStatus::Blocked(why), _) => ("Blocked", ModTone::Bad, why.clone()),
         (ModStatus::Excluded(why), _) => ("Not loaded", ModTone::Bad, why.clone()),
-        (ModStatus::ServerOnly, _) => (
+        (ModStatus::ServerOnly, p) => (
             "Server only",
             ModTone::Neutral,
-            "not loaded on the client".to_owned(),
+            p.filter(|p| p.status == PolicyStatus::Server).map_or_else(
+                || "not loaded on the client".to_owned(),
+                |p| p.reason.clone(),
+            ),
         ),
         (ModStatus::Unsupported(why), _) => {
             let label = if why.starts_with("unreadable") {

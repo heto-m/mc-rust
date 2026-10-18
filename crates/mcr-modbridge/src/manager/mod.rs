@@ -3,12 +3,9 @@
 
 #[cfg(test)]
 pub(crate) mod fixture;
-pub mod neoforge;
-pub mod policy;
-pub mod resolve;
-pub mod scan;
 pub mod session;
-pub mod version;
+
+pub use mcr_modmeta::{neoforge, policy, resolve, scan, version};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -113,7 +110,11 @@ fn evaluate_as(
             let enabled = settings.is_enabled(&info.id, default_enabled(policy.as_ref()));
             let status = if let Some(why) = loader_name(&info.kind) {
                 ModStatus::Unsupported(why)
-            } else if info.side == Side::Server {
+            } else if info.side == Side::Server
+                || policy
+                    .as_ref()
+                    .is_some_and(|p| p.status == PolicyStatus::Server)
+            {
                 ModStatus::ServerOnly
             } else if let Some(p) = policy
                 .as_ref()
@@ -196,6 +197,24 @@ impl Report {
     /// The jars handed to the loader; empty means no JVM starts.
     pub fn jars(&self) -> Vec<PathBuf> {
         self.active().map(|e| e.info.path.clone()).collect()
+    }
+
+    /// The jars a Fabric server for this set runs, or none when no mod it would run ships content, so a
+    /// vanilla server serves the set.
+    pub fn server_jars(&self, policy: &Policy) -> Vec<PathBuf> {
+        if self.loader() != Some(crate::Loader::Fabric) {
+            return Vec::new();
+        }
+        let runs: Vec<&ModEntry> = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e.status, ModStatus::Active | ModStatus::ServerOnly))
+            .filter(|e| policy.runs_on_server(&e.info))
+            .collect();
+        if !runs.iter().any(|e| e.info.content) {
+            return Vec::new();
+        }
+        runs.iter().map(|e| e.info.path.clone()).collect()
     }
 }
 

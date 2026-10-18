@@ -2,6 +2,7 @@ package dev.mcr.bridge.mixin;
 
 import dev.mcr.bridge.McrInput;
 import dev.mcr.bridge.McrPreload;
+import dev.mcr.bridge.McrRegistries;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.network.chat.Component;
@@ -19,6 +20,7 @@ abstract class TitleScreenMixin extends Screen {
     @Inject(method = "init", at = @At("TAIL"))
     private void mcr$button(CallbackInfo ci) {
         McrPreload.milestone(McrPreload.TITLE);
+        McrRegistries.reportAtTitle();
         if (McrInput.active()) {
             addRenderableWidget(McrInput.button());
         }

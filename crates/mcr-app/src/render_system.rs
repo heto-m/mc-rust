@@ -119,7 +119,7 @@ impl RenderSystem {
         let names = world.biome_names();
         let mut pool = MeshPool::new(
             assets.cache.clone(),
-            assets.biome_colors(&names),
+            assets.biome_colors(&names, &world.biome_climates()),
             mesh_threads,
             mcr_mesh::DEFAULT_BLEND_RADIUS,
         );
@@ -154,7 +154,7 @@ impl RenderSystem {
         self.known_biomes = names.len();
         self.pool = MeshPool::new(
             assets.cache.clone(),
-            assets.biome_colors(&names),
+            assets.biome_colors(&names, &world.biome_climates()),
             self.mesh_threads,
             mcr_mesh::DEFAULT_BLEND_RADIUS,
         );
@@ -282,7 +282,7 @@ impl RenderSystem {
         self.known_biomes = names.len();
         self.pool = MeshPool::new(
             self.assets.cache.clone(),
-            self.assets.biome_colors(&names),
+            self.assets.biome_colors(&names, &world.biome_climates()),
             self.mesh_threads,
             mcr_mesh::DEFAULT_BLEND_RADIUS,
         );

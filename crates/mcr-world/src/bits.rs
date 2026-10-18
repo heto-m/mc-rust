@@ -53,7 +53,34 @@ pub(crate) fn set(data: &mut [u64], bits: u8, index: usize, value: u32) {
     data[cell] = (data[cell] & !(m << shift)) | ((value as u64 & m) << shift);
 }
 
-pub(crate) fn pack(values: &[u16], bits: u8) -> Box<[u64]> {
+pub(crate) trait Slot: Copy {
+    fn from_word(v: u64) -> Self;
+    fn word(self) -> u64;
+}
+
+impl Slot for u16 {
+    #[inline(always)]
+    fn from_word(v: u64) -> Self {
+        v as u16
+    }
+    #[inline(always)]
+    fn word(self) -> u64 {
+        self as u64
+    }
+}
+
+impl Slot for u32 {
+    #[inline(always)]
+    fn from_word(v: u64) -> Self {
+        v as u32
+    }
+    #[inline(always)]
+    fn word(self) -> u64 {
+        self as u64
+    }
+}
+
+pub(crate) fn pack<T: Slot>(values: &[T], bits: u8) -> Box<[u64]> {
     let vpl = values_per_long(bits);
     let m = mask(bits);
     values
@@ -62,45 +89,45 @@ pub(crate) fn pack(values: &[u16], bits: u8) -> Box<[u64]> {
             chunk
                 .iter()
                 .rev()
-                .fold(0u64, |acc, &v| (acc << bits) | (v as u64 & m))
+                .fold(0u64, |acc, &v| (acc << bits) | (v.word() & m))
         })
         .collect()
 }
 
-pub(crate) fn unpack(data: &[u64], bits: u8, out: &mut [u16]) {
+pub(crate) fn unpack<T: Slot>(data: &[u64], bits: u8, out: &mut [T]) {
     match bits {
-        1 => unpack_const::<1>(data, out),
-        2 => unpack_const::<2>(data, out),
-        3 => unpack_const::<3>(data, out),
-        4 => unpack_const::<4>(data, out),
-        5 => unpack_const::<5>(data, out),
-        6 => unpack_const::<6>(data, out),
-        7 => unpack_const::<7>(data, out),
-        8 => unpack_const::<8>(data, out),
+        1 => unpack_const::<T, 1>(data, out),
+        2 => unpack_const::<T, 2>(data, out),
+        3 => unpack_const::<T, 3>(data, out),
+        4 => unpack_const::<T, 4>(data, out),
+        5 => unpack_const::<T, 5>(data, out),
+        6 => unpack_const::<T, 6>(data, out),
+        7 => unpack_const::<T, 7>(data, out),
+        8 => unpack_const::<T, 8>(data, out),
         _ => unpack_dyn(data, bits, out),
     }
 }
 
 #[inline(always)]
-fn unpack_const<const BITS: u8>(data: &[u64], out: &mut [u16]) {
+fn unpack_const<T: Slot, const BITS: u8>(data: &[u64], out: &mut [T]) {
     let vpl = values_per_long(BITS);
     let m = mask(BITS);
     for (&word, chunk) in data.iter().zip(out.chunks_mut(vpl)) {
         let mut w = word;
         for slot in chunk {
-            *slot = (w & m) as u16;
+            *slot = T::from_word(w & m);
             w >>= BITS;
         }
     }
 }
 
-fn unpack_dyn(data: &[u64], bits: u8, out: &mut [u16]) {
+fn unpack_dyn<T: Slot>(data: &[u64], bits: u8, out: &mut [T]) {
     let vpl = values_per_long(bits);
     let m = mask(bits);
     for (&word, chunk) in data.iter().zip(out.chunks_mut(vpl)) {
         let mut w = word;
         for slot in chunk {
-            *slot = (w & m) as u16;
+            *slot = T::from_word(w & m);
             w >>= bits;
         }
     }

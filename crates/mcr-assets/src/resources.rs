@@ -5,6 +5,27 @@ use crate::error::{AssetError, Result};
 use crate::pack::{PackFormat, PackMeta};
 use crate::source::{AssetSource, DirSource, ReadBudget, ZipLimits, ZipSource};
 
+const MAX_NESTED_JARS: usize = 256;
+const MAX_NESTED_JAR_BYTES: usize = 64 << 20;
+
+#[derive(Debug)]
+struct AssetsOnly(ZipSource);
+
+impl AssetSource for AssetsOnly {
+    fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        self.0.read(path)
+    }
+
+    fn list(&self) -> Result<Vec<String>> {
+        Ok(self
+            .0
+            .list()?
+            .into_iter()
+            .filter(|p| p.starts_with("assets/") || p == "pack.mcmeta")
+            .collect())
+    }
+}
+
 #[derive(Debug)]
 struct Pack {
     name: String,
@@ -63,6 +84,31 @@ impl ResourceManager {
             Box::new(ZipSource::open(path)?)
         };
         self.push_pack(name, source)
+    }
+
+    /// A mod jar's client resources, after those of the jars nested in it; classes and data are left out.
+    pub fn push_mod_jar(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let name = path.display().to_string();
+        let jar = ZipSource::open(path)?;
+        let nested: Vec<String> = jar
+            .list()?
+            .into_iter()
+            .filter(|p| p.starts_with("META-INF/jars/") && p.ends_with(".jar"))
+            .collect();
+        for inner in nested.iter().take(MAX_NESTED_JARS) {
+            let Some(bytes) = jar.read(inner)? else {
+                continue;
+            };
+            if bytes.len() > MAX_NESTED_JAR_BYTES {
+                continue;
+            }
+            let source = ZipSource::from_bytes(bytes)?;
+            if source.list()?.iter().any(|p| p.starts_with("assets/")) {
+                self.push_pack(format!("{name}!{inner}"), Box::new(AssetsOnly(source)))?;
+            }
+        }
+        self.push_pack(name, Box::new(AssetsOnly(jar)))
     }
 
     /// Adds a zip the server chose: size-limited, safe entry names, and `pack.mcmeta` is mandatory.
@@ -229,6 +275,35 @@ mod tests {
         assert_eq!(rm.read("a.txt").unwrap().unwrap(), b"over");
         assert_eq!(rm.read("b.txt").unwrap().unwrap(), b"b");
         assert_eq!(rm.read("c.txt").unwrap(), None);
+    }
+
+    #[test]
+    fn mod_jars_bring_assets_and_nested_jars() {
+        let dir = TempDir::new("modjar");
+        let nested = zip_bytes(&[
+            ("assets/lib/lang/en_us.json", b"{}"),
+            ("assets/m/textures/a.png", b"nested"),
+        ]);
+        dir.write(
+            "m.jar",
+            &zip_bytes(&[
+                ("fabric.mod.json", b"{}"),
+                ("m/Mod.class", b"\xca\xfe"),
+                ("data/m/recipe/x.json", b"{}"),
+                ("assets/m/textures/a.png", b"main"),
+                ("META-INF/jars/lib.jar", &nested),
+            ]),
+        );
+        let mut rm = ResourceManager::new();
+        rm.push_mod_jar(dir.path().join("m.jar")).unwrap();
+        assert_eq!(
+            rm.read("assets/m/textures/a.png").unwrap().unwrap(),
+            b"main"
+        );
+        assert!(rm.exists("assets/lib/lang/en_us.json"));
+        assert!(!rm.exists("m/Mod.class"));
+        assert!(!rm.exists("data/m/recipe/x.json"));
+        assert_eq!(rm.pack_names().count(), 2);
     }
 
     #[test]

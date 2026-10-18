@@ -129,7 +129,7 @@ impl Client {
             self.state.chunks.block(x, yy, z).is_none_or(|b| {
                 self.state
                     .data
-                    .block_state(u32::from(b.0))
+                    .block_state(b.0)
                     .is_none_or(|i| self.state.data.block_name(i.block) == Some("minecraft:air"))
             })
         })

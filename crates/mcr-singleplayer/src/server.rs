@@ -35,6 +35,26 @@ pub struct Spec {
     /// Per-launch token written next to the pid, proving later that a pid is this launch's server.
     pub token: String,
     pub ready_timeout: Duration,
+    /// Sent once "Done" is logged; the server is ready when it answers. Fabric servers log "Done" before
+    /// their mods' started hooks run and drop connections until then.
+    pub ready_probe: Option<ReadyProbe>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadyProbe {
+    pub command: String,
+    /// The start of the answer's message, after the log prefix.
+    pub answer: String,
+}
+
+impl ReadyProbe {
+    /// `list`, answered from the first tick on.
+    pub fn list() -> Self {
+        Self {
+            command: "list".into(),
+            answer: "There are ".into(),
+        }
+    }
 }
 
 /// The parts of a vanilla server launch that vary.
@@ -52,6 +72,45 @@ pub struct VanillaLaunch<'a> {
 
 impl Spec {
     pub fn vanilla(layout: &Layout, launch: &VanillaLaunch<'_>) -> Option<Self> {
+        Self::launch(layout, launch, |args| {
+            args.push("-jar".into());
+            args.push(launch.jar.into());
+        })
+    }
+
+    /// Fabric's server launcher over `launch.jar`, loading the jars listed in `mods_list` (one per line).
+    /// `egress` fences the mods off the network like the client JVM (mod bridge's egress properties).
+    pub fn fabric(
+        layout: &Layout,
+        launch: &VanillaLaunch<'_>,
+        fabric: &crate::fabric::FabricServer,
+        mods_list: &Path,
+        egress: &[String],
+    ) -> Option<Self> {
+        let class_path = std::env::join_paths(&fabric.class_path).ok()?;
+        Self::launch(layout, launch, |args| {
+            args.extend(egress.iter().map(OsString::from));
+            let mut game = OsString::from("-Dfabric.gameJarPath=");
+            game.push(launch.jar);
+            args.push(game);
+            let mut mods = OsString::from("-Dfabric.addMods=@");
+            mods.push(mods_list);
+            args.push(mods);
+            args.push("-cp".into());
+            args.push(class_path);
+            args.push(fabric.main_class.clone().into());
+        })
+        .map(|spec| Self {
+            ready_probe: Some(ReadyProbe::list()),
+            ..spec
+        })
+    }
+
+    fn launch(
+        layout: &Layout,
+        launch: &VanillaLaunch<'_>,
+        main: impl FnOnce(&mut Vec<OsString>),
+    ) -> Option<Self> {
         let cwd = layout.server_dir(launch.folder)?;
         let mut args: Vec<OsString> = Vec::new();
         let program = if launch.scope {
@@ -77,8 +136,7 @@ impl Spec {
         let mut repo = OsString::from("-DbundlerRepoDir=");
         repo.push(layout.bundle_dir());
         args.push(repo);
-        args.push("-jar".into());
-        args.push(launch.jar.into());
+        main(&mut args);
         args.push("--universe".into());
         args.push(layout.saves().into());
         args.push("--world".into());
@@ -97,6 +155,7 @@ impl Spec {
             token,
             cwd,
             ready_timeout: READY_TIMEOUT,
+            ready_probe: None,
         })
     }
 }
@@ -122,12 +181,17 @@ enum LineEvent {
     Loading,
 }
 
-/// What one server output line tells the supervisor.
-fn parse_line(line: &str) -> Option<LineEvent> {
-    let message = match line.find("]: ") {
+/// A log line without its `[time] [thread/LEVEL]: ` prefix.
+fn message_of(line: &str) -> &str {
+    match line.find("]: ") {
         Some(i) if line.starts_with('[') => &line[i + 3..],
         _ => line,
-    };
+    }
+}
+
+/// What one server output line tells the supervisor.
+fn parse_line(line: &str) -> Option<LineEvent> {
+    let message = message_of(line);
     if message.starts_with("Done (") && message.contains(")! For help") {
         return Some(LineEvent::Done);
     }
@@ -340,6 +404,7 @@ fn supervise(
     let mut stdin = child.stdin.take();
     let begun = Instant::now();
     let mut ready = false;
+    let mut probing = false;
     let mut requested = false;
     let mut kill_at: Option<Instant> = None;
     let mut reason: Option<String> = None;
@@ -351,8 +416,27 @@ fn supervise(
                     tail.pop_front();
                 }
                 tail.push_back(text);
+                let answered = probing
+                    && spec.ready_probe.as_ref().is_some_and(|p| {
+                        let message = message_of(&tail[tail.len() - 1]);
+                        message
+                            .strip_prefix("System chat: ")
+                            .unwrap_or(message)
+                            .starts_with(&p.answer)
+                    });
                 let out = match event {
-                    Some(LineEvent::Done) if !ready => {
+                    Some(LineEvent::Done) if !ready && !probing => match &spec.ready_probe {
+                        Some(probe) => {
+                            probing = true;
+                            send_console(&mut stdin, &probe.command);
+                            None
+                        }
+                        None => {
+                            ready = true;
+                            Some(Event::Ready)
+                        }
+                    },
+                    _ if answered && !ready => {
                         ready = true;
                         Some(Event::Ready)
                     }
@@ -562,6 +646,7 @@ mod tests {
             pid_file: Some(dir.join("server.pid")),
             token: "t".into(),
             ready_timeout: Duration::from_secs(10),
+            ready_probe: None,
         };
         (dir, spec)
     }
@@ -627,6 +712,30 @@ done
         assert!(log.contains("got tick freeze"));
         assert!(log.contains("got save-all flush"));
         assert!(!dir.join("server.pid").exists());
+        drop(server);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_probe_holds_ready_until_answered() {
+        let body = r#"echo '[12:00:02] [Server thread/INFO]: Done (1.2s)! For help, type "help"'
+read line
+echo "[12:00:03] [Server thread/INFO]: still starting, got $line"
+sleep 0.3
+echo "[12:00:03] [Server thread/INFO]: System chat: There are 0 of a max of 8 players online: "
+while read line; do
+  if [ "$line" = "stop" ]; then exit 0; fi
+done
+"#;
+        let (dir, mut spec) = script("probe", body);
+        spec.ready_probe = Some(ReadyProbe::list());
+        let mut server = ManagedServer::start(spec).unwrap();
+        until(&mut server, Duration::from_secs(10), |e| *e == Event::Ready);
+        let log = fs::read_to_string(dir.join("logs/console.log")).unwrap();
+        assert!(log.contains("got list"));
+        assert!(log.contains("There are 0"), "ready only after the answer");
+        server.stop(Duration::from_secs(5));
+        server.wait(Duration::from_secs(10)).unwrap();
         drop(server);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -740,6 +849,59 @@ done
         );
         assert_eq!(parse_line("<Steve> Done (1s)! For help"), None);
         assert_eq!(parse_line("[1] [x]: Preparing spawn area: x%"), None);
+    }
+
+    #[test]
+    fn fabric_command_line() {
+        let layout = Layout::new("/g");
+        let launch = VanillaLaunch {
+            java: Path::new("/jdk/bin/java"),
+            jar: Path::new("/g/versions/26.3/server.jar"),
+            folder: "W",
+            port: 25576,
+            heap_mib: 2048,
+            scope: false,
+            bonus_chest: false,
+        };
+        let fabric = crate::fabric::FabricServer {
+            main_class: "net.fabricmc.loader.impl.launch.knot.KnotServer".into(),
+            class_path: vec!["/c/a.jar".into(), "/c/b.jar".into()],
+        };
+        let egress = [
+            "-Djdk.net.hosts.file=/g/saves/W/mcr-server/mcr-hosts".to_owned(),
+            "-Dhttp.proxyHost=127.0.0.1".to_owned(),
+            "-Dhttp.proxyPort=4321".to_owned(),
+            "-Dhttps.proxyHost=127.0.0.1".to_owned(),
+            "-Dhttps.proxyPort=4321".to_owned(),
+        ];
+        let spec =
+            Spec::fabric(&layout, &launch, &fabric, Path::new("/g/mods.txt"), &egress).unwrap();
+        let args: Vec<String> = spec
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"-Dfabric.gameJarPath=/g/versions/26.3/server.jar".to_owned()));
+        assert!(args.contains(&"-Dfabric.addMods=@/g/mods.txt".to_owned()));
+        assert!(!args.contains(&"-jar".to_owned()));
+        let main = args.iter().position(|a| a.ends_with("KnotServer")).unwrap();
+        assert_eq!(args[main - 2], "-cp");
+        assert_eq!(args[main + 1], "--universe");
+        assert_eq!(spec.ready_probe, Some(ReadyProbe::list()));
+        for prop in &egress {
+            let at = args.iter().position(|a| a == prop).unwrap();
+            assert!(at < main, "{prop} is a JVM option");
+        }
+        let vanilla = Spec::vanilla(&layout, &launch).unwrap();
+        assert!(
+            !vanilla
+                .args
+                .iter()
+                .any(|a| a.to_string_lossy().contains("proxy")
+                    || a.to_string_lossy().contains("hosts.file")),
+            "the vanilla server launch is unchanged"
+        );
+        assert_eq!(vanilla.ready_probe, None);
     }
 
     #[test]

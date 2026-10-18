@@ -87,18 +87,18 @@ impl ChunkSection {
 
     #[inline]
     pub fn biome(&self, x: usize, y: usize, z: usize) -> Biome {
-        Biome(self.biomes.get(biome_index(x, y, z)))
+        Biome(self.biomes.get(biome_index(x, y, z)) as u16)
     }
 
     pub fn set_biome(&mut self, x: usize, y: usize, z: usize, biome: Biome) -> Biome {
-        Biome(self.biomes.set(biome_index(x, y, z), biome.0))
+        Biome(self.biomes.set(biome_index(x, y, z), u32::from(biome.0)) as u16)
     }
 
-    pub fn unpack_blocks(&self, out: &mut [u16; BLOCK_ENTRIES]) {
+    pub fn unpack_blocks(&self, out: &mut [u32; BLOCK_ENTRIES]) {
         self.blocks.unpack_into(out);
     }
 
-    pub fn unpack_biomes(&self, out: &mut [u16; BIOME_ENTRIES]) {
+    pub fn unpack_biomes(&self, out: &mut [u32; BIOME_ENTRIES]) {
         self.biomes.unpack_into(out);
     }
 
@@ -155,12 +155,12 @@ mod tests {
         let cfg = cfg();
         let mut s = ChunkSection::empty(&cfg);
         s.set_block(3, 9, 5, BlockState(77), &cfg);
-        let mut flat = [0u16; BLOCK_ENTRIES];
+        let mut flat = [0u32; BLOCK_ENTRIES];
         s.unpack_blocks(&mut flat);
         assert_eq!(flat[9 * 256 + 5 * 16 + 3], 77);
         assert_eq!(flat.iter().filter(|&&v| v != 0).count(), 1);
         s.set_biome(1, 2, 3, Biome(7));
-        let mut b = [0u16; BIOME_ENTRIES];
+        let mut b = [0u32; BIOME_ENTRIES];
         s.unpack_biomes(&mut b);
         assert_eq!(b[2 * 16 + 3 * 4 + 1], 7);
     }
@@ -170,7 +170,7 @@ mod tests {
         let cfg = cfg();
         let mut s = ChunkSection::empty(&cfg);
         for i in 0..40 {
-            s.set_block(i % 16, i / 16, i % 7, BlockState(i as u16 + 1), &cfg);
+            s.set_block(i % 16, i / 16, i % 7, BlockState(i as u32 + 1), &cfg);
         }
         s.set_biome(0, 0, 0, Biome(3));
         let mut bytes = Vec::new();

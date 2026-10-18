@@ -4,7 +4,7 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 20;
+    public static final int VERSION = 21;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
     public static final String COMPOSE_PROPERTY = "mcr.compose";
 
@@ -175,6 +175,18 @@ public final class BridgeAbi {
     public static final int REPORT_STOPPING = 7;
     public static final int REPORT_KEYS = 8;
     public static final int REPORT_WORLD = 9;
+
+    /** State flag bits of the registry report, mcr-data's `flag` module. */
+    public static final int REG_FLAG_AIR = 1;
+    public static final int REG_FLAG_LIQUID = 2;
+    public static final int REG_FLAG_REPLACEABLE = 4;
+    public static final int REG_FLAG_HAS_BLOCK_ENTITY = 8;
+    public static final int REG_FLAG_CAN_OCCLUDE = 16;
+    public static final int REG_FLAG_USE_SHAPE_FOR_LIGHT_OCCLUSION = 32;
+    public static final int REG_FLAG_SOLID_RENDER = 64;
+    public static final int REG_FLAG_FULL_COLLISION = 128;
+    public static final int REG_FLAG_PROPAGATES_SKYLIGHT_DOWN = 256;
+    public static final int REG_FLAG_REDSTONE_CONDUCTOR = 512;
 
     public static final int PHASE_LOGIN = 1;
     public static final int PHASE_CONFIGURATION = 2;
@@ -376,7 +388,8 @@ public final class BridgeAbi {
         SOUND_STREAM_OPEN("sound_stream_open", "(IIIII)I", Flavour.NORMAL),
         SOUND_STREAM_PUSH("sound_stream_push", "(IIJI)I", Flavour.NORMAL),
         CLIPBOARD_GET("clipboard_get", "(JI)I", Flavour.NORMAL),
-        CLIPBOARD_SET("clipboard_set", "(JI)V", Flavour.NORMAL);
+        CLIPBOARD_SET("clipboard_set", "(JI)V", Flavour.NORMAL),
+        REGISTRY_REPORT("registry_report", "(JI)V", Flavour.NORMAL);
 
         public final String symbol;
         public final String descriptor;

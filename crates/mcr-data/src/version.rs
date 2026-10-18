@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use crate::rebuild::{Export, RebuildError};
 use crate::tables::{Aabb, DIRECTION_NAMES, DecodeError, STATE_NAMES, Tables, flag, fluid_bits};
 
 pub type StateId = u32;
@@ -234,7 +235,21 @@ pub struct Version {
 
 impl Version {
     pub fn from_blob(blob: &[u8]) -> Result<Self, DecodeError> {
-        let tables = Tables::decode(blob)?;
+        Self::from_tables(Tables::decode(blob)?)
+    }
+
+    /// These tables with a modded client's registries, blocks, items, entity types and fluids.
+    pub fn rebuild(&self, export: &Export) -> Result<Self, RebuildError> {
+        Self::from_tables(crate::rebuild::rebuild(&self.tables, export)?)
+            .map_err(|_| RebuildError::Invalid("a core registry is missing".into()))
+    }
+
+    /// The parts of these tables [`rebuild`](Self::rebuild) replaces.
+    pub fn export(&self) -> Export {
+        crate::rebuild::export_of(&self.tables)
+    }
+
+    fn from_tables(tables: Tables) -> Result<Self, DecodeError> {
         let find = |name: &str| {
             tables
                 .registries

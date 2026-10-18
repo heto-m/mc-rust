@@ -43,7 +43,7 @@ impl LightTable {
 
     fn entry(&self, state: BlockState) -> u16 {
         self.packed
-            .get(usize::from(state.0))
+            .get(state.0 as usize)
             .copied()
             .unwrap_or(15 << 4)
     }

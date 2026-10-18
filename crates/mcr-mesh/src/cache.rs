@@ -213,6 +213,8 @@ pub struct ModelCache {
     pub textures: TextureArrays,
     pub missing_sprites: Vec<String>,
     pub unbaked_states: usize,
+    /// The first few blocks with unbaked states.
+    pub unbaked_blocks: Vec<String>,
 }
 
 fn compute_meta(attr: u8, occ: u8, partial: u8, emission: u8) -> u32 {
@@ -227,10 +229,8 @@ impl ModelCache {
         self.states.len()
     }
 
-    pub fn state(&self, id: u16) -> &StateModel {
-        self.states
-            .get(usize::from(id))
-            .unwrap_or(&StateModel::EMPTY)
+    pub fn state(&self, id: u32) -> &StateModel {
+        self.states.get(id as usize).unwrap_or(&StateModel::EMPTY)
     }
 
     pub fn quads(&self, state: &StateModel) -> &[QuadDef] {
@@ -254,32 +254,32 @@ impl ModelCache {
     }
 
     #[inline]
-    pub fn attr(&self, id: u16) -> u8 {
-        self.attrs.get(usize::from(id)).copied().unwrap_or(0)
+    pub fn attr(&self, id: u32) -> u8 {
+        self.attrs.get(id as usize).copied().unwrap_or(0)
     }
 
     /// Bit `f` is set when the state fully covers its face `f` (render face order).
     #[inline]
-    pub fn occlusion(&self, id: u16) -> u8 {
-        self.occlusion.get(usize::from(id)).copied().unwrap_or(0)
+    pub fn occlusion(&self, id: u32) -> u8 {
+        self.occlusion.get(id as usize).copied().unwrap_or(0)
     }
 
     /// Attributes, full and partial occlusion bits and emission packed for one lookup per cell.
     #[inline]
-    pub fn meta(&self, id: u16) -> u32 {
-        self.meta.get(usize::from(id)).copied().unwrap_or(0)
+    pub fn meta(&self, id: u32) -> u32 {
+        self.meta.get(id as usize).copied().unwrap_or(0)
     }
 
     /// Occlusion mask id of face `face` of state `id`: `MASK_EMPTY`, `MASK_FULL` or a partial shape.
     #[inline]
-    pub fn face_mask(&self, id: u16, face: usize) -> u16 {
-        match self.face_masks.get(usize::from(id)) {
+    pub fn face_mask(&self, id: u32, face: usize) -> u16 {
+        match self.face_masks.get(id as usize) {
             Some(m) => m[face],
             None => self.fallback_mask(id, face),
         }
     }
 
-    fn fallback_mask(&self, id: u16, face: usize) -> u16 {
+    fn fallback_mask(&self, id: u32, face: usize) -> u16 {
         if self.occlusion(id) >> face & 1 != 0 {
             MASK_FULL
         } else {
@@ -288,11 +288,11 @@ impl ModelCache {
     }
 
     pub fn mask(&self, id: u16) -> &FaceMask {
-        self.masks.get(usize::from(id)).unwrap_or(&FULL_MASK)
+        self.masks.get(id as usize).unwrap_or(&FULL_MASK)
     }
 
     /// Vanilla `Block.shouldRenderFace` on occlusion shapes, without the same-block skip rule.
-    pub fn face_visible(&self, state: u16, neighbor: u16, face: usize) -> bool {
+    pub fn face_visible(&self, state: u32, neighbor: u32, face: usize) -> bool {
         let occluder = self.face_mask(neighbor, face ^ 1);
         if occluder == MASK_FULL {
             return false;
@@ -382,6 +382,7 @@ impl ModelCache {
             textures: TextureArrays::default(),
             missing_sprites: Vec::new(),
             unbaked_states: 0,
+            unbaked_blocks: Vec::new(),
         }
     }
 
@@ -409,6 +410,7 @@ impl ModelCache {
         let mut baked = Vec::with_capacity(count);
         let mut multipart_of: HashMap<u16, bool> = HashMap::new();
         let mut unbaked = 0;
+        let mut unbaked_blocks: Vec<String> = Vec::new();
         for id in 0..count as u32 {
             let name = version.state_block_name(id).unwrap_or("minecraft:air");
             let props: Vec<(&str, &str)> = version.state_properties(id).collect();
@@ -429,6 +431,10 @@ impl ModelCache {
                 Err(err) => {
                     tracing::debug!(%name, %err, "state has no model");
                     unbaked += 1;
+                    if unbaked_blocks.len() < 16 && unbaked_blocks.last().is_none_or(|b| b != name)
+                    {
+                        unbaked_blocks.push(name.to_owned());
+                    }
                     baked.push(None);
                 }
             }
@@ -712,6 +718,7 @@ impl ModelCache {
         cache.textures = textures;
         cache.missing_sprites = missing_sprites;
         cache.unbaked_states = unbaked;
+        cache.unbaked_blocks = unbaked_blocks;
         Ok(cache)
     }
 }

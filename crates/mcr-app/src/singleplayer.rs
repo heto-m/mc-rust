@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use mcr_singleplayer::fabric::{self, FabricServer};
 use mcr_singleplayer::lan::{self, Announcer, Forwarder};
 use mcr_singleplayer::level::{self, Difficulty, GameMode, LevelInfo};
 use mcr_singleplayer::props::{self, LaunchProps, NewWorld, WorldType};
@@ -19,6 +20,7 @@ use mcr_ui::{
 
 pub const EULA_URL: &str = "https://aka.ms/MinecraftEULA";
 const MAX_UPDATES_PER_POLL: usize = 64;
+const MODS_LIST: &str = "mcr-mods.txt";
 
 pub struct FileWorlds {
     layout: Layout,
@@ -235,6 +237,10 @@ pub struct LaunchInput {
     pub simulation_distance: i32,
     /// The repository `.cache`, searched for the dev JDK like the mod layer does.
     pub dev_cache: PathBuf,
+    /// Mod jars for a Fabric server; empty runs the vanilla one.
+    pub server_mods: Vec<PathBuf>,
+    /// The mod bridge's allow-list proxy; a Fabric server runs only behind it.
+    pub server_proxy: Option<u16>,
 }
 
 fn new_world(s: &CreateWorldSettings) -> NewWorld {
@@ -328,7 +334,17 @@ enum Prep {
     Failed(String),
 }
 
+/// Pins the local server's port (tests share a machine with other servers); unset picks a free one.
+const PORT_ENV: &str = "MCR_SP_PORT";
+
 fn free_port() -> std::io::Result<u16> {
+    if let Some(port) = std::env::var(PORT_ENV)
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .filter(|&p| p != 0)
+    {
+        return Ok(port);
+    }
     Ok(std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?
         .port())
@@ -496,21 +512,41 @@ fn prepare(
 
     let heap_mib = memory::server_heap_mib();
     let scope = memory::scope_available();
-    let spec = Spec::vanilla(
-        layout,
-        &VanillaLaunch {
-            java: &java,
-            jar: &jar,
-            folder: &folder,
-            port,
-            heap_mib,
-            scope,
-            bonus_chest: bonus,
-        },
-    )
+    let launch = VanillaLaunch {
+        java: &java,
+        jar: &jar,
+        folder: &folder,
+        port,
+        heap_mib,
+        scope,
+        bonus_chest: bonus,
+    };
+    let spec = if input.server_mods.is_empty() {
+        Spec::vanilla(layout, &launch)
+    } else {
+        let fabric = FabricServer::load(&input.dev_cache).map_err(|e| {
+            format!("The Fabric server is not set up ({e}); run `cargo xtask fabric-fetch`")
+        })?;
+        let proxy = input
+            .server_proxy
+            .ok_or("the mods' web proxy is not running, so their server cannot start")?;
+        let egress = mcr_modbridge::egress_properties(&server_dir, proxy)
+            .map_err(|e| format!("cannot fence the server's mods off the network: {e}"))?;
+        let list = server_dir.join(MODS_LIST);
+        write(
+            MODS_LIST,
+            &fabric::mods_list(&input.server_mods).map_err(|e| e.to_string())?,
+        )?;
+        Spec::fabric(layout, &launch, &fabric, &list, &egress)
+    }
     .ok_or("not a world folder")?;
     println!(
-        "singleplayer: {folder} on 127.0.0.1:{port}, heap {heap_mib} MiB{}",
+        "singleplayer: {folder} on 127.0.0.1:{port}, heap {heap_mib} MiB{}{}",
+        if input.server_mods.is_empty() {
+            String::new()
+        } else {
+            format!(", Fabric with {} mods", input.server_mods.len())
+        },
         if scope {
             " in a memory-capped scope"
         } else {

@@ -338,7 +338,7 @@ pub fn plan(
             "-Dio.netty.native.workdir={}",
             utf8(&game_dir.join("natives").join("netty"))?
         ),
-        format!("-Djdk.net.hosts.file={}", utf8(&game_dir.join(HOSTS_FILE))?),
+        hosts_file_property(&game_dir.join(HOSTS_FILE))?,
         format!("-Duser.dir={}", utf8(game_dir)?),
         "-Djava.awt.headless=true".into(),
         "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED".into(),
@@ -351,10 +351,7 @@ pub fn plan(
         properties.push(format!("-D{}=true", crate::profile::PROFILE_PROPERTY));
     }
     if let Some(port) = config.proxy_port {
-        for scheme in ["http", "https"] {
-            properties.push(format!("-D{scheme}.proxyHost=127.0.0.1"));
-            properties.push(format!("-D{scheme}.proxyPort={port}"));
-        }
+        properties.extend(proxy_properties(port));
     }
     if let Some(saves) = &config.saves_dir {
         properties.push(format!("-D{SAVES_PROPERTY}={}", utf8(saves)?));
@@ -407,10 +404,44 @@ pub fn plan(
     })
 }
 
+/// Java resolves only localhost from this file, so mods reach no named host by themselves.
+fn hosts_file_property(hosts_file: &Path) -> Result<String, BridgeError> {
+    Ok(format!("-Djdk.net.hosts.file={}", utf8(hosts_file)?))
+}
+
+/// Java's HTTP stack goes through mcr's allow-list proxy on `port`.
+fn proxy_properties(port: u16) -> Vec<String> {
+    ["http", "https"]
+        .into_iter()
+        .flat_map(|scheme| {
+            [
+                format!("-D{scheme}.proxyHost=127.0.0.1"),
+                format!("-D{scheme}.proxyPort={port}"),
+            ]
+        })
+        .collect()
+}
+
+/// The client JVM's network fence for another JVM running the same mods (the singleplayer Fabric server):
+/// the localhost-only hosts file written into `dir` and the bridge's allow-list proxy on `proxy_port`.
+/// Like the client's, it covers name resolution and Java's HTTP stack, not raw sockets to literal addresses.
+pub fn egress_properties(dir: &Path, proxy_port: u16) -> Result<Vec<String>, BridgeError> {
+    let hosts = write_hosts_file(dir)?;
+    let mut out = vec![hosts_file_property(&hosts)?];
+    out.extend(proxy_properties(proxy_port));
+    Ok(out)
+}
+
+fn write_hosts_file(dir: &Path) -> std::io::Result<PathBuf> {
+    let path = dir.join(HOSTS_FILE);
+    std::fs::write(&path, HOSTS)?;
+    Ok(path)
+}
+
 /// Seeds `options.txt` (skips onboarding) and a localhost-only hosts file: Rust owns DNS and sockets.
 pub fn prepare_game_dir(game_dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(game_dir.join("mods"))?;
-    std::fs::write(game_dir.join(HOSTS_FILE), HOSTS)?;
+    write_hosts_file(game_dir)?;
     let options = game_dir.join("options.txt");
     if !options.exists() {
         std::fs::write(options, "onboardAccessibility:false\n")?;
@@ -722,6 +753,27 @@ mod tests {
                 .unwrap()
                 .contains("localhost")
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_server_jvm_gets_the_clients_fence() {
+        let dir = std::env::temp_dir().join(format!("mcr-modbridge-egress-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let props = egress_properties(&dir, 4321).unwrap();
+        let hosts = dir.join(HOSTS_FILE);
+        assert_eq!(std::fs::read_to_string(&hosts).unwrap(), HOSTS);
+        let mut client = BridgeConfig::new("/c".into(), dir.clone(), Vec::new());
+        client.proxy_port = Some(4321);
+        let m = LaunchManifest::parse(MANIFEST, Path::new("/c")).unwrap();
+        let plan = plan(&m, &client, 0).unwrap();
+        for prop in &props {
+            assert!(
+                plan.properties.contains(prop),
+                "{prop} differs from the client's"
+            );
+        }
+        assert_eq!(props.len(), 5);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -180,8 +180,8 @@ pub fn resolve(
 
 #[cfg(test)]
 mod tests {
-    use super::super::scan::{ModKind, Nested, Side};
     use super::*;
+    use crate::scan::{ModKind, Nested, Side};
     use std::path::PathBuf;
 
     fn info(id: &str, version: &str) -> ModInfo {
@@ -202,6 +202,7 @@ mod tests {
             nested: Vec::new(),
             warnings: Vec::new(),
             neoforge: None,
+            content: false,
         }
     }
 

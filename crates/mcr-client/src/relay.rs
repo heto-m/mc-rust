@@ -36,8 +36,14 @@ pub enum LocalAction {
 /// A mirror of this connection that may send through it. Called on the game thread only.
 pub trait Relay: Send + std::fmt::Debug {
     fn poll(&mut self, phase: Phase, sink: &mut dyn FnMut(Relayed<'_>));
-    /// While true the mirror answers login custom queries and the client stays silent.
+    /// While true the mirror answers login custom queries and configuration pings, and the client
+    /// stays silent, so the mirror's custom payloads reach the server before its pong.
     fn answers_custom_queries(&self) -> bool;
+    /// The server finished configuration; the client answers once this returns true (or after a
+    /// timeout), so the mirror can hand over the registries it synced first.
+    fn finish_configuration(&mut self) -> bool {
+        true
+    }
     /// After every client tick in play, with the local player as the server now knows it.
     fn tick_end(&mut self, _tick: u64, _player: &LocalPlayer) {}
     /// Before the packet of a predicted action is sent.

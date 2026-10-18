@@ -32,6 +32,10 @@ use crate::state::{ClientState, Outbox, resource_pack_responses};
 
 const MAX_FRAMES_PER_PUMP: usize = 8192;
 const LOAD_TIMEOUT_TICKS: u32 = 600;
+const MAX_PENDING_PONGS: usize = 64;
+const MAX_SKIP_LOGS: u64 = 16;
+/// Longest wait for the mirror's registries at the end of configuration.
+const FINISH_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -62,6 +66,12 @@ pub struct Client {
     scratch: Vec<u8>,
     pub(crate) sequence: i32,
     transfer: Option<(String, u16)>,
+    /// Configuration pings the mirror answers, so its custom payloads reach the server before the pong.
+    pending_pongs: Vec<i32>,
+    /// The server finished configuration while the mirror was still preparing its registries.
+    finish_pending: Option<Instant>,
+    /// Play packets skipped in mod mode because a mod's content made them undecodable to Rust.
+    skipped_play: u64,
     joined: bool,
     conduct_pending: bool,
     pub ticks: u64,
@@ -178,6 +188,9 @@ impl Client {
             scratch: Vec::new(),
             sequence: 0,
             transfer: None,
+            pending_pongs: Vec::new(),
+            finish_pending: None,
+            skipped_play: 0,
             joined: false,
             conduct_pending: false,
             ticks: 0,
@@ -220,6 +233,7 @@ impl Client {
             self.flush_dialog_replies()?;
             self.flush_conduct_reply()?;
             self.flush_relay()?;
+            self.try_finish_configuration()?;
             match self.conn.recv_timeout(Duration::from_millis(50)) {
                 Some(Event::Frame(f)) => self.handle_frame(f)?,
                 Some(Event::Closed(reason)) => return Err(self.closed(reason.to_string())),
@@ -382,6 +396,9 @@ impl Client {
             combat: crate::combat::Combat::default(),
             relay: None,
             sent: Vec::new(),
+            pending_pongs: Vec::new(),
+            finish_pending: None,
+            skipped_play: 0,
         }
     }
 
@@ -579,10 +596,8 @@ impl Client {
                 return Err(ClientError::Disconnected(Box::new(p.reason)));
             }
             ConfigClientbound::FinishConfiguration(_) => {
-                self.send_config(&ConfigServerbound::FinishConfiguration(
-                    cfg::ServerboundFinishConfiguration,
-                ))?;
-                self.set_phase(Phase::Play);
+                self.finish_pending = Some(Instant::now());
+                self.try_finish_configuration()?;
             }
             ConfigClientbound::KeepAlive(p) => {
                 self.send_config(&ConfigServerbound::KeepAlive(c::ServerboundKeepAlive {
@@ -590,7 +605,16 @@ impl Client {
                 }))?;
             }
             ConfigClientbound::Ping(p) => {
-                self.send_config(&ConfigServerbound::Pong(c::Pong { id: p.id }))?;
+                if self.pending_pongs.len() < MAX_PENDING_PONGS
+                    && self
+                        .relay
+                        .as_ref()
+                        .is_some_and(|r| r.answers_custom_queries())
+                {
+                    self.pending_pongs.push(p.id);
+                } else {
+                    self.send_config(&ConfigServerbound::Pong(c::Pong { id: p.id }))?;
+                }
             }
             ConfigClientbound::RegistryData(p) => self.state.registries.apply_registry_data(&p),
             ConfigClientbound::UpdateTags(p) => self.state.registries.apply_tags(&p),
@@ -688,7 +712,18 @@ impl Client {
     }
 
     fn handle_play(&mut self, id: i32, payload: &[u8]) -> Result<()> {
-        let packet = PlayClientbound::decode(id, payload, self.ids)?;
+        let packet = match PlayClientbound::decode(id, payload, self.ids) {
+            Ok(packet) => packet,
+            // Java decodes the relayed stream with the mods' codecs and stays authoritative.
+            Err(e) if self.relay.is_some() => {
+                self.skipped_play += 1;
+                if self.skipped_play <= MAX_SKIP_LOGS {
+                    eprintln!("[mods] skipping play packet {id:#04x} Rust cannot decode: {e}");
+                }
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
         if let Some(link) = &self.config.pack_link {
             match packet {
                 PlayClientbound::ResourcePackPush(p) => {
@@ -879,12 +914,31 @@ impl Client {
                 result = self.relayed(item);
             }
         });
+        let answers = relay.answers_custom_queries();
         self.relay = Some(relay);
-        result
+        result?;
+        if !answers && self.phase == Phase::Configuration {
+            for id in std::mem::take(&mut self.pending_pongs) {
+                self.send_config(&ConfigServerbound::Pong(c::Pong { id }))?;
+            }
+        }
+        Ok(())
     }
 
     fn relayed(&mut self, item: Relayed<'_>) -> Result<()> {
         match item {
+            Relayed::Frame { id, payload }
+                if self.phase == Phase::Configuration && Some(id) == self.config_pong_id() =>
+            {
+                let pong = payload
+                    .get(..4)
+                    .map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+                if let Some(i) = pong.and_then(|p| self.pending_pongs.iter().position(|&x| x == p))
+                {
+                    self.pending_pongs.remove(i);
+                    self.conn.send(id, payload)?;
+                }
+            }
             Relayed::Frame { id, payload } => self.conn.send(id, payload)?,
             Relayed::Chat(text) if self.phase == Phase::Play => self.send_chat(text)?,
             Relayed::Command(command) if self.phase == Phase::Play => self.send_command(command)?,
@@ -899,11 +953,39 @@ impl Client {
         Ok(())
     }
 
+    fn try_finish_configuration(&mut self) -> Result<()> {
+        let Some(since) = self.finish_pending else {
+            return Ok(());
+        };
+        let ready = self.relay.as_mut().is_none_or(|r| r.finish_configuration());
+        if !ready && since.elapsed() < FINISH_WAIT {
+            return Ok(());
+        }
+        if !ready {
+            eprintln!(
+                "the mod bridge's registries did not arrive; continuing with the current tables"
+            );
+        }
+        self.finish_pending = None;
+        self.state.set_data(mcr_data::v26_3());
+        self.send_config(&ConfigServerbound::FinishConfiguration(
+            cfg::ServerboundFinishConfiguration,
+        ))?;
+        self.set_phase(Phase::Play);
+        Ok(())
+    }
+
+    fn config_pong_id(&self) -> Option<i32> {
+        self.ids
+            .id_by_name(ProtocolState::Configuration, Direction::Serverbound, "pong")
+    }
+
     fn pump(&mut self) -> Result<()> {
         self.flush_pack_replies()?;
         self.flush_dialog_replies()?;
         self.flush_conduct_reply()?;
         self.flush_relay()?;
+        self.try_finish_configuration()?;
         for _ in 0..MAX_FRAMES_PER_PUMP {
             match self.conn.try_recv() {
                 Some(Event::Frame(f)) => self.handle_frame(f)?,

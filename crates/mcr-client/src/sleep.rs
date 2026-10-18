@@ -12,7 +12,7 @@ use crate::state::ClientState;
 impl ClientState {
     /// Vanilla `AbstractBedBlock#getBedOrientation`: the facing of the bed block at `pos`.
     pub fn bed_orientation(&self, pos: BlockPos) -> Option<Facing> {
-        let state = u32::from(self.chunks.block(pos.x, pos.y, pos.z)?.0);
+        let state = self.chunks.block(pos.x, pos.y, pos.z)?.0;
         let info = self.data.block_state(state)?;
         if !self.data.block_name(info.block)?.ends_with("_bed") {
             return None;
@@ -40,7 +40,7 @@ impl ClientState {
         };
         let top = self
             .data
-            .outline_shape(u32::from(state.0))
+            .outline_shape(state.0)
             .iter()
             .map(|b| f64::from(b.max[1]))
             .fold(None, |m: Option<f64>, y| Some(m.map_or(y, |m| m.max(y))));
@@ -96,7 +96,7 @@ mod tests {
 
     const BED: BlockPos = BlockPos { x: 1, y: 64, z: 1 };
 
-    fn bed_state(c: &Client) -> u16 {
+    fn bed_state(c: &Client) -> u32 {
         let data = c.state.data;
         let bed = data.block_by_name("minecraft:red_bed").unwrap();
         let (first, end) = data.block_info(bed).unwrap().states;
@@ -105,7 +105,7 @@ mod tests {
                 let props: Vec<_> = data.state_properties(s).collect();
                 props.contains(&("facing", "east")) && props.contains(&("part", "head"))
             })
-            .unwrap() as u16
+            .unwrap()
     }
 
     fn in_bed() -> Client {

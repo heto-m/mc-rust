@@ -58,9 +58,9 @@ pub enum PaletteKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Repr {
-    Single(u16),
+    Single(u32),
     Indirect {
-        palette: Vec<u16>,
+        palette: Vec<u32>,
         bits: u8,
         data: Box<[u64]>,
     },
@@ -77,7 +77,7 @@ pub struct PalettedContainer<const N: usize> {
 }
 
 impl<const N: usize> PalettedContainer<N> {
-    pub fn filled(value: u16, limits: Limits) -> Self {
+    pub fn filled(value: u32, limits: Limits) -> Self {
         Self {
             repr: Repr::Single(value),
             limits,
@@ -85,9 +85,9 @@ impl<const N: usize> PalettedContainer<N> {
     }
 
     /// Picks the narrowest representation for the distinct values present.
-    pub fn from_values(values: &[u16; N], limits: Limits) -> Self {
+    pub fn from_values(values: &[u32; N], limits: Limits) -> Self {
         let mut slot_of = vec![u32::MAX; limits.id_count as usize];
-        let mut palette: Vec<u16> = Vec::new();
+        let mut palette: Vec<u32> = Vec::new();
         let mut indices = [0u16; N];
         for (out, &v) in indices.iter_mut().zip(values) {
             let slot = &mut slot_of[v as usize];
@@ -131,7 +131,7 @@ impl<const N: usize> PalettedContainer<N> {
     }
 
     /// Ids present in a single or indirect container; empty for direct.
-    pub fn palette(&self) -> &[u16] {
+    pub fn palette(&self) -> &[u32] {
         match &self.repr {
             Repr::Single(v) => std::slice::from_ref(v),
             Repr::Indirect { palette, .. } => palette,
@@ -140,7 +140,7 @@ impl<const N: usize> PalettedContainer<N> {
     }
 
     #[inline]
-    pub fn get(&self, index: usize) -> u16 {
+    pub fn get(&self, index: usize) -> u32 {
         debug_assert!(index < N);
         match &self.repr {
             Repr::Single(v) => *v,
@@ -149,12 +149,12 @@ impl<const N: usize> PalettedContainer<N> {
                 bits,
                 data,
             } => palette[bits::get(data, *bits, index) as usize],
-            Repr::Direct { bits, data } => bits::get(data, *bits, index) as u16,
+            Repr::Direct { bits, data } => bits::get(data, *bits, index),
         }
     }
 
     /// Returns the previous value; widens the palette as needed.
-    pub fn set(&mut self, index: usize, value: u16) -> u16 {
+    pub fn set(&mut self, index: usize, value: u32) -> u32 {
         assert!(index < N, "container index {index} out of range");
         match &mut self.repr {
             Repr::Single(old) => {
@@ -190,15 +190,15 @@ impl<const N: usize> PalettedContainer<N> {
                 old
             }
             Repr::Direct { bits, data } => {
-                let old = bits::get(data, *bits, index) as u16;
-                bits::set(data, *bits, index, value as u32);
+                let old = bits::get(data, *bits, index);
+                bits::set(data, *bits, index, value);
                 old
             }
         }
     }
 
     #[cold]
-    fn widen_and_set(&mut self, index: usize, value: u16) -> u16 {
+    fn widen_and_set(&mut self, index: usize, value: u32) -> u32 {
         let Repr::Indirect {
             palette,
             bits: old_bits,
@@ -207,13 +207,13 @@ impl<const N: usize> PalettedContainer<N> {
         else {
             unreachable!("only a full indirect palette widens");
         };
-        let mut slots = [0u16; N];
+        let mut slots = [0u32; N];
         bits::unpack(data, *old_bits, &mut slots);
         let old = palette[slots[index] as usize];
         if *old_bits < self.limits.max_indirect {
             let bits = *old_bits + 1;
             palette.push(value);
-            slots[index] = (palette.len() - 1) as u16;
+            slots[index] = (palette.len() - 1) as u32;
             *data = bits::pack(&slots, bits);
             *old_bits = bits;
         } else {
@@ -230,7 +230,7 @@ impl<const N: usize> PalettedContainer<N> {
         old
     }
 
-    pub fn unpack_into(&self, out: &mut [u16; N]) {
+    pub fn unpack_into(&self, out: &mut [u32; N]) {
         match &self.repr {
             Repr::Single(v) => out.fill(*v),
             Repr::Indirect {
@@ -324,10 +324,10 @@ impl<const N: usize> PalettedContainer<N> {
     }
 }
 
-fn read_id(input: &mut &[u8], count: u32) -> Result<u16> {
+fn read_id(input: &mut &[u8], count: u32) -> Result<u32> {
     let id = read_varint(input)?;
     match u32::try_from(id) {
-        Ok(id) if id < count => Ok(id as u16),
+        Ok(id) if id < count => Ok(id),
         _ => Err(WorldError::IdOutOfRange {
             id: id as u32,
             count,
@@ -366,15 +366,15 @@ mod tests {
         Limits::new(80, 1, 3)
     }
 
-    fn distinct_values<const N: usize>(distinct: usize, count: u32) -> [u16; N] {
-        let mut v = [0u16; N];
+    fn distinct_values<const N: usize>(distinct: usize, count: u32) -> [u32; N] {
+        let mut v = [0u32; N];
         for (i, slot) in v.iter_mut().enumerate() {
-            *slot = (i % distinct) as u16 * (count / distinct as u32).max(1) as u16;
+            *slot = (i % distinct) as u32 * (count / distinct as u32).max(1);
         }
         v
     }
 
-    fn round_trip<const N: usize>(values: &[u16; N], limits: Limits) -> PalettedContainer<N> {
+    fn round_trip<const N: usize>(values: &[u32; N], limits: Limits) -> PalettedContainer<N> {
         let c = PalettedContainer::<N>::from_values(values, limits);
         let mut bytes = Vec::new();
         c.encode(&mut bytes);
@@ -382,7 +382,7 @@ mod tests {
         let back = PalettedContainer::<N>::decode(&mut input, limits).unwrap();
         assert!(input.is_empty());
         assert_eq!(back, c);
-        let mut out = [0u16; N];
+        let mut out = [0u32; N];
         back.unpack_into(&mut out);
         assert_eq!(&out, values);
         for (i, &v) in values.iter().enumerate() {
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn indirect_has_no_array_length_prefix() {
-        let mut v = [0u16; BLOCK_ENTRIES];
+        let mut v = [0u32; BLOCK_ENTRIES];
         v[5] = 9;
         let c = BlockContainer::from_values(&v, block_limits());
         let mut bytes = Vec::new();
@@ -479,10 +479,10 @@ mod tests {
     #[test]
     fn set_grows_through_every_stage() {
         let mut c = BlockContainer::filled(0, block_limits());
-        let mut model = [0u16; BLOCK_ENTRIES];
+        let mut model = [0u32; BLOCK_ENTRIES];
         let mut seen_bits = Vec::new();
         for (i, slot) in model.iter_mut().enumerate() {
-            let value = (i as u16 + 1) * 3;
+            let value = (i as u32 + 1) * 3;
             assert_eq!(c.set(i, value), *slot);
             *slot = value;
             if seen_bits.last() != Some(&c.bits()) {
@@ -490,7 +490,7 @@ mod tests {
             }
         }
         assert_eq!(seen_bits, [4, 5, 6, 7, 8, 16]);
-        let mut out = [0u16; BLOCK_ENTRIES];
+        let mut out = [0u32; BLOCK_ENTRIES];
         c.unpack_into(&mut out);
         assert_eq!(out, model);
         assert_eq!(c.set(10, 7), model[10]);
@@ -501,11 +501,11 @@ mod tests {
     fn biome_set_grows_to_direct() {
         let mut c = BiomeContainer::filled(1, biome_limits());
         for i in 0..BIOME_ENTRIES {
-            c.set(i, i as u16);
+            c.set(i, i as u32);
         }
         assert_eq!(c.kind(), PaletteKind::Direct);
         for i in 0..BIOME_ENTRIES {
-            assert_eq!(c.get(i), i as u16);
+            assert_eq!(c.get(i), i as u32);
         }
     }
 

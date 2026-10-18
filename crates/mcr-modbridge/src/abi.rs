@@ -15,7 +15,7 @@ use crate::sections::SectionShared;
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 20;
+pub const BRIDGE_VERSION: u32 = 21;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -413,6 +413,11 @@ pub const ENTRIES: &[EntryDesc] = &[
         descriptor: "(JI)V",
         flavour: Flavour::Normal,
     },
+    EntryDesc {
+        name: "registry_report",
+        descriptor: "(JI)V",
+        flavour: Flavour::Normal,
+    },
 ];
 
 /// One `MSG_FRAME`: what Java's next frame runs with.
@@ -543,6 +548,7 @@ pub(crate) struct Shared {
     pub input: InputShared,
     pub sections: SectionShared,
     pub lights: LightShared,
+    pub registries: crate::registries::RegistryShared,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -567,6 +573,7 @@ pub(crate) fn shared() -> Result<&'static Shared, RingError> {
         input: InputShared::new(),
         sections: SectionShared::new(),
         lights: LightShared::new(),
+        registries: crate::registries::RegistryShared::new(),
     }))
 }
 
@@ -577,7 +584,7 @@ pub(crate) fn shared_now() -> Option<&'static Shared> {
 pub(crate) fn table() -> &'static ExtensionTable {
     TABLE.get_or_init(|| {
         use crate::gpu::ffi;
-        let fns: [*const c_void; 12] = [
+        let fns: [*const c_void; 13] = [
             shared_address as *const c_void,
             report as *const c_void,
             ffi::gpu_device as *const c_void,
@@ -590,6 +597,7 @@ pub(crate) fn table() -> &'static ExtensionTable {
             sound::sound_stream_push as *const c_void,
             input::clipboard_get as *const c_void,
             input::clipboard_set as *const c_void,
+            crate::registries::registry_report as *const c_void,
         ];
         let entries: Vec<_> = ENTRIES.iter().copied().zip(fns).collect();
         ExtensionTable::leak(BRIDGE_VERSION, &entries)

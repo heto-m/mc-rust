@@ -284,7 +284,7 @@ impl Converter {
             }
             _ => return Err(AnvilError::Malformed("empty block palette")),
         };
-        let mapped: Vec<u16> = entries
+        let mapped: Vec<u32> = entries
             .iter()
             .map(|&(name, props)| match self.resolver.resolve(name, props) {
                 Resolved::Exact(s) => s,
@@ -298,10 +298,7 @@ impl Converter {
                 }
             })
             .collect();
-        let infos: Vec<_> = mapped
-            .iter()
-            .map(|&s| version.block_state(s as u32))
-            .collect();
+        let infos: Vec<_> = mapped.iter().map(|&s| version.block_state(s)).collect();
         let is_air = |p: usize| infos[p].is_none_or(|i| i.is_air());
         let has_fluid = |p: usize| infos[p].is_some_and(|i| i.fluid.is_some());
 
@@ -321,7 +318,7 @@ impl Converter {
             let data = states.get_long_array("data").unwrap_or(&[]);
             let bits = ceil_log2(mapped.len()).max(4);
             let idx = unpack::<BLOCK_ENTRIES>(data, bits, mapped.len())?;
-            let mut values = [0u16; BLOCK_ENTRIES];
+            let mut values = [0u32; BLOCK_ENTRIES];
             let (mut non_empty, mut fluids) = (0u16, 0u16);
             for (out, &i) in values.iter_mut().zip(&idx) {
                 *out = mapped[i as usize];
@@ -360,13 +357,13 @@ impl Converter {
             })
             .collect();
         if ids.len() == 1 {
-            return Ok(BiomeContainer::filled(ids[0], limits));
+            return Ok(BiomeContainer::filled(u32::from(ids[0]), limits));
         }
         let data = biomes.get_long_array("data").unwrap_or(&[]);
         let idx = unpack::<BIOME_ENTRIES>(data, ceil_log2(ids.len()), ids.len())?;
-        let mut values = [0u16; BIOME_ENTRIES];
+        let mut values = [0u32; BIOME_ENTRIES];
         for (out, &i) in values.iter_mut().zip(&idx) {
-            *out = ids[i as usize];
+            *out = u32::from(ids[i as usize]);
         }
         Ok(BiomeContainer::from_values(&values, limits))
     }
