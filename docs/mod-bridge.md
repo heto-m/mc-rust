@@ -431,8 +431,19 @@ holds `FinishConfiguration` until then (10 s cap), and its configuration pongs f
 registration reaches the server first. Mod jars join Rust's resource stack, so modded blocks bake with mcr's own
 baker; code-generated models and modded fluids stay unbaked and are logged by name. Undecodable play packets are
 skipped in mod mode. Measurements of two real packs, the FerriteCore result and the deny-list are in the
-`modpacks-1` change's design; `tools/official-launcher/measure_pack.py` measures the same pack in the official
-launcher.
+`modpacks-1` change's design; `tools/official-launcher/measure_pack.py` measures the same pack in the real Java
+client under Prism Launcher (the official launcher behind `--launcher official`).
+
+Prism comparison, in order (Prism needs an account once; an offline one is enough for the bench server):
+
+```
+python3 tools/official-launcher/measure_pack.py prepare <slug> --set pack   # full pack, then --set mcr
+python3 tools/official-launcher/measure_pack.py serve <slug>                # 127.0.0.1:25583, 4G scope
+# restart Prism, launch "mcr bench - <Pack> (full pack)" (first launch downloads; quit, launch again)
+python3 tools/official-launcher/measure_pack.py watch <slug> --set pack     # title, join, peak RSS, frames
+# after chunks load press Shift_L+F2 (MangoHud, 60 s of frames), quit the game
+python3 tools/official-launcher/measure_pack.py serve --stop
+```
 
 ## NeoForge
 
