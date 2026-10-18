@@ -1072,9 +1072,20 @@ fn entity_transform(v: &EntityView<'_>, plan: &Plan) -> Mat4 {
     } else {
         v.body_yaw + plan.body_yaw_offset
     };
-    let mut m = Mat4::from_scale(Vec3::splat(v.scale * plan.scale))
+    let sleeping = v.pose() == mcr_protocol::types::entity_data::Pose::Sleeping;
+    let mut m = Mat4::IDENTITY;
+    if sleeping && let Some(bed) = v.bed {
+        let eye = u32::try_from(v.type_id)
+            .ok()
+            .and_then(|t| mcr_data::v26_3().entity_type_info(t))
+            .map_or(1.62, |i| i.eye_height);
+        let head = eye * v.scale - 0.1;
+        let [x, z] = bed.step();
+        m = Mat4::from_translation(Vec3::new(-x * head, 0.0, -z * head));
+    }
+    m *= Mat4::from_scale(Vec3::splat(v.scale * plan.scale))
         * Mat4::from_translation(plan.pre_offset);
-    if !plan.skip_rotation {
+    if !plan.skip_rotation && !sleeping {
         m *= Mat4::from_rotation_y((180.0 - yaw).to_radians());
     }
     if plan.spin != 0.0 {
@@ -1086,6 +1097,11 @@ fn entity_transform(v: &EntityView<'_>, plan: &Plan) -> Mat4 {
     if v.death_time > 0.0 {
         let fall = ((v.death_time - 1.0) / 20.0 * 1.6).max(0.0).sqrt().min(1.0);
         m *= Mat4::from_quat(Quat::from_rotation_z((fall * plan.flip).to_radians()));
+    } else if sleeping {
+        let angle = v.bed.map_or(yaw, |b| b.sleep_rotation());
+        m *= Mat4::from_rotation_y(angle.to_radians())
+            * Mat4::from_rotation_z(plan.flip.to_radians())
+            * Mat4::from_rotation_y(270f32.to_radians());
     }
     m *= plan.post_rot;
     m * Mat4::from_translation(plan.extra_offset)

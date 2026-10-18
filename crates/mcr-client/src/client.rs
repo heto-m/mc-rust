@@ -70,7 +70,10 @@ pub struct Client {
     pub(crate) destroy_delay: u8,
     pub(crate) using: Option<crate::use_item::UsingItem>,
     pub(crate) ride: Option<crate::riding::Ride>,
+    pub(crate) combat: crate::combat::Combat,
     relay: Option<Box<dyn Relay>>,
+    #[cfg(test)]
+    pub(crate) sent: Vec<(i32, Vec<u8>)>,
 }
 
 const MAX_CUSTOM_ACTION_BYTES: usize = 65_600;
@@ -183,7 +186,10 @@ impl Client {
             destroy_delay: 0,
             using: None,
             ride: None,
+            combat: crate::combat::Combat::default(),
             relay,
+            #[cfg(test)]
+            sent: Vec::new(),
         };
         let intent = if client.config.transfer {
             Intent::Transfer
@@ -333,7 +339,62 @@ impl Client {
         }
         self.scratch.clear();
         let id = p.encode_into(self.ids, &mut self.scratch);
+        #[cfg(test)]
+        self.sent.push((id, self.scratch.clone()));
         self.send_raw(ProtocolState::Play, id)
+    }
+
+    /// A client in the play phase over a loopback socket nobody reads; sent packets land in `sent`.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let stream =
+            std::net::TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let (peer, _) = listener.accept().expect("accept");
+        std::mem::forget(peer);
+        let conn = Connection::from_stream(stream, ConnectOptions::default()).expect("conn");
+        let config = ClientConfig::default();
+        let state = ClientState::new(&config, Uuid::nil());
+        Self {
+            conn,
+            ids: PacketIds::v26_3(),
+            wire: Wire::Canonical,
+            session: Session::default(),
+            inbound_buf: Vec::new(),
+            outbound_buf: Vec::new(),
+            translate_warned: FxHashSet::default(),
+            config,
+            state,
+            phase: Phase::Play,
+            shared_phase: Arc::new(AtomicU8::new(Phase::Play as u8)),
+            events: VecDeque::new(),
+            scratch: Vec::new(),
+            sequence: 0,
+            transfer: None,
+            joined: true,
+            conduct_pending: false,
+            ticks: 0,
+            view: (0.0, 0.0),
+            digging: None,
+            destroy_delay: 0,
+            using: None,
+            ride: None,
+            combat: crate::combat::Combat::default(),
+            relay: None,
+            sent: Vec::new(),
+        }
+    }
+
+    /// Decodes and drains the packets sent so far.
+    #[cfg(test)]
+    pub(crate) fn take_sent(&mut self) -> Vec<PlayServerbound<'static>> {
+        std::mem::take(&mut self.sent)
+            .into_iter()
+            .map(|(id, payload)| {
+                let payload: &'static [u8] = Box::leak(payload.into_boxed_slice());
+                PlayServerbound::decode(id, payload, self.ids).expect("decodes")
+            })
+            .collect()
     }
 
     /// The wire this connection speaks.
@@ -871,6 +932,7 @@ impl Client {
         if self.phase == Phase::Play && self.joined {
             self.state.tick();
             self.update_using_item();
+            self.tick_attack_strength();
             self.player_tick(input)?;
             self.send_play(&PlayServerbound::ClientTickEnd(sb::ClientTickEnd))?;
             if let Some(r) = self.relay.as_mut() {
@@ -899,7 +961,7 @@ impl Client {
         }
     }
 
-    fn player_tick(&mut self, input: &PlayerInput) -> Result<()> {
+    pub(crate) fn player_tick(&mut self, input: &PlayerInput) -> Result<()> {
         let player = &mut self.state.player;
         let pos = player.physics.pos;
         let column_loaded = self
@@ -942,11 +1004,18 @@ impl Client {
                 ..PlayerInput::default()
             };
         }
+        if self.state.player.is_sleeping() {
+            keys = PlayerInput {
+                yaw: keys.yaw,
+                ..PlayerInput::default()
+            };
+        }
         self.view = (keys.yaw, keys.pitch);
         let player = &mut self.state.player;
         if let Some(vehicle) = player.vehicle {
             return self.ride_tick(&keys, vehicle);
         }
+        self.combat.hands_busy = false;
         if self.ride.take().is_some() {
             self.state.controlled_vehicle = None;
             self.state.player.physics.passenger = false;

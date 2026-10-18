@@ -26,27 +26,27 @@ Scope: mcr-app view and play, mcr-client inventory, mcr-ui container screens.
 
 Scope: mcr-client player and handler, mcr-physics pose, mcr-app camera and hand, mcr-ui in-bed screen.
 
-- [ ] 2.1 S1 (G) Sleeping is not modelled; a player in bed cannot leave it
-- [ ] 2.2 N5 (V) Immediate respawn breaks after the first respawn
-- [ ] 2.3 N6 (V) Respawn data-kept flags ignored
-- [ ] 2.4 Unit tests: sleeping blocks input and Leave Bed sends STOP_SLEEPING, respawn keeps show_death_screen and the flagged attributes and data
-- [ ] 2.5 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 2.1 S1 (G) Sleeping is not modelled; a player in bed cannot leave it
+- [x] 2.2 N5 (V) Immediate respawn breaks after the first respawn
+- [x] 2.3 N6 (V) Respawn data-kept flags ignored
+- [x] 2.4 Unit tests: sleeping blocks input and Leave Bed sends STOP_SLEEPING, respawn keeps show_death_screen and the flagged attributes and data
+- [x] 2.5 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 3. Use and attack loop
 
 Scope: mcr-app play gameplay loop, mcr-client use_item and actions.
 
-- [ ] 3.1 I1 (G) Spears (piercing and kinetic weapons) do not work
-- [ ] 3.2 I2 (G) Items used by the server but not tracked never send RELEASE_USE_ITEM
-- [ ] 3.3 I7 (V) Attacking and mining while using an item
-- [ ] 3.4 I8 (V) UseItem and UseItemOn repeat every 4 ticks while in use
-- [ ] 3.5 I9 (V) Survival mining timing fixed at dig start
-- [ ] 3.6 I14 (V) Attack strength ticker not reset on item change or abort
-- [ ] 3.7 I15 (V) No miss penalty
-- [ ] 3.8 I19 (M) Attacking and using while rowing
-- [ ] 3.9 I20 (M) Holding use on an entity does not repeat
-- [ ] 3.10 Unit tests: spear left-click sends STAB, release sent for server-flagged use, no attack while using, per-tick progress restarts on item change, miss lockout
-- [ ] 3.11 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 3.1 I1 (G) Spears (piercing and kinetic weapons) do not work
+- [x] 3.2 I2 (G) Items used by the server but not tracked never send RELEASE_USE_ITEM
+- [x] 3.3 I7 (V) Attacking and mining while using an item
+- [x] 3.4 I8 (V) UseItem and UseItemOn repeat every 4 ticks while in use
+- [x] 3.5 I9 (V) Survival mining timing fixed at dig start
+- [x] 3.6 I14 (V) Attack strength ticker not reset on item change or abort
+- [x] 3.7 I15 (V) No miss penalty
+- [x] 3.8 I19 (M) Attacking and using while rowing
+- [x] 3.9 I20 (M) Holding use on an entity does not repeat
+- [x] 3.10 Unit tests: spear left-click sends STAB, release sent for server-flagged use, no attack while using, per-tick progress restarts on item change, miss lockout
+- [x] 3.11 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 4. Targeting, adventure and placement
 

@@ -629,6 +629,7 @@ impl ClientState {
             });
         }
         self.player.tick_hurt();
+        self.player.tick_sleep();
     }
 
     /// Where a collector's pickup animation aims: halfway up its body.

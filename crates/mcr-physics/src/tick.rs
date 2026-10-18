@@ -75,7 +75,9 @@ impl PlayerPhysics {
         if !self.can_fit(w, Pose::Swimming) {
             return;
         }
-        let desired = if self.swimming {
+        let desired = if self.sleeping {
+            Pose::Sleeping
+        } else if self.swimming {
             Pose::Swimming
         } else if self.fall_flying {
             Pose::FallFlying

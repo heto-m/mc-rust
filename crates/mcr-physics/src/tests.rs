@@ -505,3 +505,19 @@ fn camera_water_height_follows_vanilla() {
     assert!(crate::camera_in_water(&w, data, [0.5, 61.95, 0.5]));
     assert!(!crate::camera_in_water(&w, data, [f64::NAN, 61.0, 0.5]));
 }
+
+#[test]
+fn sleeping_uses_the_small_sleeping_box() {
+    let w = TestWorld::flat("minecraft:stone", 64);
+    let mut p = settled(&w, [0.5, 64.0, 0.5]);
+    p.sleeping = true;
+    p.tick(&idle(), &w);
+    assert_eq!(p.pose, crate::Pose::Sleeping);
+    let bb = p.bounding_box();
+    near(bb.max[0] - bb.min[0], 0.2, 1e-6);
+    near(bb.max[1] - bb.min[1], 0.2, 1e-6);
+    near(f64::from(p.eye_height()), 0.2, 1e-6);
+    p.sleeping = false;
+    p.tick(&idle(), &w);
+    assert_eq!(p.pose, crate::Pose::Standing);
+}

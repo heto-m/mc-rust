@@ -207,6 +207,10 @@ impl GameView for StateView<'_> {
         self.state.player.game_mode == GameType::Spectator
     }
 
+    fn sleeping(&self) -> bool {
+        self.state.player.is_sleeping()
+    }
+
     fn merchant(&self) -> Option<&MerchantInfo> {
         self.cache.merchant.as_ref()
     }

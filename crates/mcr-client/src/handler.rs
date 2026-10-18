@@ -60,12 +60,14 @@ fn sane3(v: [f64; 3]) -> bool {
 }
 
 const MAX_SERVER_ICON_BYTES: usize = 64 * 1024;
+/// `ClientboundAnimatePacket.WAKE_UP`.
+const ANIMATE_WAKE_UP: u8 = 0;
 
 impl ClientState {
     pub fn handle_play(&mut self, packet: P<'_>, out: &mut Outbox, now: Instant) -> Result<()> {
         match packet {
             P::Login(p) => self.on_login(&p, out)?,
-            P::Respawn(p) => self.on_respawn(&p.spawn_info, out)?,
+            P::Respawn(p) => self.on_respawn(&p.spawn_info, p.data_to_keep, out)?,
             P::KeepAlive(p) => {
                 out.replies
                     .push(S::KeepAlive(mcr_protocol::common::ServerboundKeepAlive {
@@ -454,10 +456,19 @@ impl ClientState {
                 }
             }
             P::SetEntityData(p) if p.entity_id == self.player.entity_id => {
+                let mut bed = None;
                 for entry in p.values.entries.into_iter().take(64) {
+                    if entry.index == crate::player::SLEEPING_POS_INDEX
+                        && let EntityDataValue::OptionalBlockPos(Some(pos)) = entry.value
+                    {
+                        bed = Some(pos);
+                    }
                     self.player.data.insert(entry.index, entry.value);
                 }
                 crate::glide::apply_player_flags(&mut self.player);
+                if let Some(bed) = bed {
+                    self.place_on_bed(bed);
+                }
             }
             P::SetEntityData(p) => {
                 if let Some(e) = self.entities.get_mut(p.entity_id) {
@@ -544,10 +555,15 @@ impl ClientState {
                     event: p.event_id,
                 });
             }
-            P::Animate(p) => out.event(ClientEvent::EntityAnimation {
-                entity_id: p.entity_id,
-                action: p.action,
-            }),
+            P::Animate(p) => {
+                if p.entity_id == self.player.entity_id && p.action == ANIMATE_WAKE_UP {
+                    self.player.wake_up();
+                }
+                out.event(ClientEvent::EntityAnimation {
+                    entity_id: p.entity_id,
+                    action: p.action,
+                })
+            }
             P::SwingAnimation(p) => out.event(ClientEvent::EntitySwing {
                 entity_id: p.entity_id,
                 offhand: p.hand == mcr_protocol::types::game::Hand::Off,
@@ -965,7 +981,7 @@ impl ClientState {
     ) -> Result<()> {
         self.player.entity_id = p.player_id;
         self.post_effects.clear();
-        self.apply_spawn_world(&p.spawn_info, true)?;
+        self.apply_spawn_world(&p.spawn_info, true, None)?;
         self.world.hardcore = p.hardcore;
         self.world.view_distance = p.chunk_radius.clamp(0, 64);
         self.world.simulation_distance = p.simulation_distance.clamp(0, 64);
@@ -1034,18 +1050,28 @@ impl ClientState {
         list.truncate(crate::state::MAX_CHAT_COMPLETIONS);
     }
 
-    fn on_respawn(&mut self, info: &CommonPlayerSpawnInfo, out: &mut Outbox) -> Result<()> {
+    fn on_respawn(
+        &mut self,
+        info: &CommonPlayerSpawnInfo,
+        keep: u8,
+        out: &mut Outbox,
+    ) -> Result<()> {
         let changed = info.dimension != self.dimension.name;
         self.camera_entity = None;
         self.post_effects.clear();
-        self.apply_spawn_world(info, changed)?;
+        self.apply_spawn_world(info, changed, Some(keep))?;
         self.inventory.open = None;
         self.inventory.cursor = ItemStack::default();
         out.event(ClientEvent::Respawned);
         Ok(())
     }
 
-    fn apply_spawn_world(&mut self, info: &CommonPlayerSpawnInfo, rebuild: bool) -> Result<()> {
+    fn apply_spawn_world(
+        &mut self,
+        info: &CommonPlayerSpawnInfo,
+        rebuild: bool,
+        keep: Option<u8>,
+    ) -> Result<()> {
         let dimension = Dimension {
             name: info.dimension.clone(),
             type_id: info.dimension_type,
@@ -1062,7 +1088,9 @@ impl ClientState {
             self.dimension.seed = info.seed;
         }
         self.player
-            .reset_for_spawn(info.game_type, info.previous_game_type);
+            .reset_for_spawn(info.game_type, info.previous_game_type, keep);
+        crate::glide::apply_player_flags(&mut self.player);
+        self.refresh_physics_inputs();
         Ok(())
     }
 

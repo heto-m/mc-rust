@@ -978,3 +978,78 @@ fn spoofable_targets_are_rejected() {
         assert!(out.is_empty(), "{event:?}");
     }
 }
+
+struct Asleep(bool);
+
+impl mcr_ui::GameView for Asleep {
+    fn sleeping(&self) -> bool {
+        self.0
+    }
+}
+
+fn in_bed() -> ChatScreen {
+    let hud: SharedChat = Rc::new(RefCell::new(ChatHud::default()));
+    let mut screen = ChatScreen::new(
+        hud,
+        Box::new(SharedScript::default()),
+        ChatOptions::default(),
+    )
+    .in_bed();
+    screen.init(W, H);
+    screen
+}
+
+fn tick_out(screen: &mut ChatScreen, view: &dyn mcr_ui::GameView) -> Vec<ScreenAction> {
+    let mut clip = MemoryClipboard::default();
+    let mut env = Env {
+        view,
+        clipboard: &mut clip,
+        now_ms: 0,
+    };
+    let mut out = Vec::new();
+    screen.tick(&mut env, &mut out);
+    out
+}
+
+#[test]
+fn leave_bed_button_and_escape_wake_up_without_closing() {
+    let mut screen = in_bed();
+    let out = send(
+        &mut screen,
+        &Asleep(true),
+        &click((W / 2) as f32, (H - 30) as f32),
+    );
+    assert!(matches!(
+        out.as_slice(),
+        [ScreenAction::ClickSound, ScreenAction::StopSleeping]
+    ));
+    let out = key(&mut screen, Key::Escape);
+    assert!(matches!(out.as_slice(), [ScreenAction::StopSleeping]));
+}
+
+#[test]
+fn in_bed_chat_stays_open_after_sending() {
+    let mut screen = in_bed();
+    send(&mut screen, &Asleep(true), &typed("good night"));
+    let out = key(&mut screen, Key::Enter);
+    assert!(matches!(out.as_slice(), [ScreenAction::SendChat(m)] if m == "good night"));
+    assert_eq!(screen.text(), "");
+}
+
+#[test]
+fn waking_up_closes_the_screen_or_keeps_the_typed_text() {
+    let mut screen = in_bed();
+    assert!(tick_out(&mut screen, &Asleep(true)).is_empty());
+    assert!(matches!(
+        tick_out(&mut screen, &Asleep(false)).as_slice(),
+        [ScreenAction::Pop]
+    ));
+
+    let mut screen = in_bed();
+    send(&mut screen, &Asleep(true), &typed("brb"));
+    assert!(tick_out(&mut screen, &Asleep(false)).is_empty());
+    assert!(!screen.is_in_bed());
+    assert_eq!(screen.text(), "brb");
+    let out = key(&mut screen, Key::Escape);
+    assert!(matches!(out.as_slice(), [ScreenAction::Pop]));
+}

@@ -5,7 +5,8 @@ use std::time::Instant;
 
 use mcr_buf::BlockPos;
 use mcr_client::{
-    ChatKind, Client, ClientError, ClientEvent, PlayerInput, UseResult, UseTarget, sanitize_for_log,
+    ChatKind, Client, ClientError, ClientEvent, CombatKeys, PlayerInput, UseTarget,
+    sanitize_for_log,
 };
 use mcr_particles::ParticleEngine;
 use mcr_physics::Pose;
@@ -46,7 +47,7 @@ use crate::overlays::Overlays;
 use crate::preview::Preview;
 use crate::render_system::{PipelineStats, RenderSystem};
 use crate::settings::{OptionsScreen, SharedSettings};
-use crate::target::{BlockHit, EntityPicker, Target, pick, reach, third_person_distance};
+use crate::target::{EntityPicker, Target, pick, reach, third_person_distance};
 use crate::view::{StateView, SuggestEngine, ViewCache};
 use mcr_modbridge::frame::JavaCamera;
 use mcr_modbridge::sound::{SoundOwner, event_owner};
@@ -122,9 +123,6 @@ fn rand_unit() -> f32 {
 }
 const MAX_TICKS_PER_FRAME: u32 = 10;
 const THIRD_PERSON_DISTANCE: f64 = 4.0;
-const CLICK_DELAY: u32 = 5;
-const USE_DELAY: u32 = 4;
-const HIT_SOUND_INTERVAL: u32 = 4;
 
 fn music_volume(options: &Options) -> f32 {
     let volume = |name: &str| {
@@ -211,13 +209,6 @@ impl Keys {
             spectator_outlines: i("key.spectatorOutlines"),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Dig {
-    pos: BlockPos,
-    progress: u32,
-    total: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -474,10 +465,6 @@ pub struct Play {
     closed: Option<String>,
     attack_click: bool,
     use_click: bool,
-    attack_delay: u32,
-    use_delay: u32,
-    dig: Option<Dig>,
-    using_item: bool,
     target: Option<Target>,
     ambience: Ambience,
     block_animation: BlockAnimation,
@@ -486,6 +473,8 @@ pub struct Play {
     skins: crate::skins::SkinStore,
     boss_darkening: (f32, f32),
     spectate_view: Option<(f32, f32)>,
+    /// First-person yaw of a sleeper, along the bed: vanilla `Camera#alignWithEntity`.
+    bed_view: Option<f32>,
     pub turn_latency: crate::latency::TurnLatency,
     seen_camera: Option<i32>,
     glow: Option<(wgpu::TextureFormat, mcr_render::GlowOutline)>,
@@ -647,10 +636,6 @@ impl Play {
             sky_factor: 1.0,
             attack_click: false,
             use_click: false,
-            attack_delay: 0,
-            use_delay: 0,
-            dig: None,
-            using_item: false,
             target: None,
             ambience: Ambience::new(data),
             block_animation: BlockAnimation::new(data, animate_assets),
@@ -658,6 +643,7 @@ impl Play {
             entity_events: Default::default(),
             boss_darkening: (0.0, 0.0),
             spectate_view: None,
+            bed_view: None,
             turn_latency: crate::latency::TurnLatency::default(),
             seen_camera: None,
             glow: None,
@@ -937,8 +923,9 @@ impl Play {
                 state,
                 yaw: self.yaw,
                 pitch: self.pitch,
-                local_using: self.using_item,
+                local_using: self.world.client.is_using_item(),
                 server_using,
+                swap_scale: self.world.client.item_swap_scale(1.0),
             });
         }
         let rain = if running {
@@ -983,7 +970,7 @@ impl Play {
                 audio.play("weather.rain", Some(at), 0.2, 1.0, SoundSource::Weather);
             }
         }
-        if let (Some(dig), Some(Target::Block(hit))) = (self.dig, self.target)
+        if let (Some(dig), Some(Target::Block(hit))) = (self.world.client.digging(), self.target)
             && dig.pos == hit.pos
         {
             let face = match hit.face {
@@ -1014,6 +1001,10 @@ impl Play {
         let [x, y, z] = player.pos();
         self.cur_eye = [x, y + f64::from(self.eye_height), z];
         self.spectate_view = None;
+        self.bed_view = player
+            .sleeping_pos()
+            .and_then(|bed| state.bed_orientation(bed))
+            .map(|facing| mcr_client::facing_yaw(facing) - 180.0);
         if let Some(e) = state.camera_entity.and_then(|id| state.entities.get(id)) {
             self.cur_eye = crate::entities::eye_position(self.data, e);
             let yaw = if e.sim.is_some() { e.yaw } else { e.head_yaw };
@@ -1418,31 +1409,6 @@ impl Play {
         }
     }
 
-    fn held_block_state(&self) -> Option<u32> {
-        let player = &self.world.client.state.player;
-        let stack = self.world.client.state.inventory.hotbar(player.held_slot);
-        if stack.is_empty() {
-            return None;
-        }
-        let item = u32::try_from(stack.item).ok()?;
-        let block = self.data.item_info(item)?.block?;
-        Some(self.data.block_info(block)?.default_state)
-    }
-
-    fn swing(&mut self) {
-        if let Some(hand) = &mut self.hand {
-            hand.swing();
-        }
-        self.net(Client::swing);
-    }
-
-    fn reset_attack_strength(&mut self) {
-        if let Some(hand) = &mut self.hand {
-            hand.reset_attack_strength();
-        }
-        self.world.client.reset_attack_strength();
-    }
-
     fn gameplay(&mut self) {
         if self.world.client.state.player.dead {
             if self.attack_click || self.use_click {
@@ -1452,119 +1418,17 @@ impl Play {
             self.use_click = false;
             return;
         }
-        if self.busy() {
-            self.attack_click = false;
-            self.use_click = false;
-            self.abort_dig();
-            return;
-        }
-        self.attack_delay = self.attack_delay.saturating_sub(1);
-        self.use_delay = self.use_delay.saturating_sub(1);
-        self.do_attack();
-        self.do_use();
-    }
-
-    fn abort_dig(&mut self) {
-        if self.dig.take().is_some() {
-            self.net(Client::abort_digging);
-        }
-    }
-
-    fn do_attack(&mut self) {
-        let click = std::mem::take(&mut self.attack_click);
-        let active = self.held.is_active(self.keys.attack);
-        if !active && !click {
-            self.abort_dig();
-            return;
-        }
-        self.attack_target(click);
-        if !active {
-            self.abort_dig();
-        }
-    }
-
-    fn attack_target(&mut self, click: bool) {
-        match self.target {
-            Some(Target::Entity { id, .. }) => {
-                self.abort_dig();
-                if click {
-                    self.net(|c| c.attack(id));
-                    self.swing();
-                    self.reset_attack_strength();
-                }
-            }
-            Some(Target::Block(hit)) => self.mine(hit, click),
-            None => {
-                self.abort_dig();
-                if click {
-                    self.swing();
-                    self.reset_attack_strength();
-                }
-            }
-        }
-    }
-
-    fn mine(&mut self, hit: BlockHit, click: bool) {
-        let creative = self.world.client.state.player.instabuild;
-        if creative {
-            if click || self.attack_delay == 0 {
-                self.net(|c| c.break_instantly(hit.pos, hit.face));
-                self.swing();
-                self.attack_delay = CLICK_DELAY;
-            }
-            return;
-        }
-        if let Some(mut dig) = self.dig.filter(|d| d.pos == hit.pos) {
-            dig.progress += 1;
-            let fraction = dig.progress as f32 / dig.total as f32;
-            self.world.client.dig_progress(fraction);
-            self.swing();
-            if dig.progress % HIT_SOUND_INTERVAL == 0 {
-                self.play_block(hit.state, BlockSound::Hit, center(hit.pos));
-            }
-            if dig.progress >= dig.total {
-                self.net(Client::finish_digging);
-                self.dig = None;
-                self.attack_delay = CLICK_DELAY;
-            } else {
-                self.dig = Some(dig);
-            }
-            return;
-        }
-        self.abort_dig();
-        if self.attack_delay > 0 {
-            return;
-        }
-        let Some(total) = self.world.client.estimate_dig_ticks(hit.pos) else {
-            return;
+        let keys = CombatKeys {
+            attack_clicks: u8::from(std::mem::take(&mut self.attack_click)),
+            use_clicks: u8::from(std::mem::take(&mut self.use_click)),
+            attack_down: self.held.is_active(self.keys.attack),
+            use_down: self.held.is_active(self.keys.use_item),
         };
-        self.net(|c| c.start_digging(hit.pos, hit.face));
-        self.swing();
-        self.dig = Some(Dig {
-            pos: hit.pos,
-            progress: 0,
-            total: total.max(1),
-        });
-    }
-
-    fn do_use(&mut self) {
-        let click = std::mem::take(&mut self.use_click);
-        let active = self.held.is_active(self.keys.use_item);
-        if click || (active && self.use_delay == 0) {
-            self.use_target(click);
-        }
-        if !active && std::mem::take(&mut self.using_item) {
-            self.net(Client::release_use_item);
-        }
-    }
-
-    fn use_target(&mut self, click: bool) {
-        let target = match self.target {
-            Some(Target::Entity { id, .. }) if click => UseTarget::Entity {
+        let hit = match self.target {
+            Some(Target::Entity { id, .. }) => UseTarget::Entity {
                 id,
                 location: [0.0; 3],
             },
-            Some(Target::Entity { .. }) => return,
             Some(Target::Block(hit)) => UseTarget::Block {
                 pos: hit.pos,
                 face: hit.face,
@@ -1573,49 +1437,56 @@ impl Play {
             },
             None => UseTarget::Air,
         };
-        let predicted = match self.target {
-            Some(Target::Block(hit)) => self.predict_place(hit),
-            _ => None,
-        };
-        let Some(result) = self.net(|c| c.start_use(target)) else {
+        let busy = self.busy();
+        let Some(out) = self.net(|c| c.handle_keybinds(keys, hit, busy)) else {
             return;
         };
-        if result == UseResult::Success
+        if out.swing
             && let Some(hand) = &mut self.hand
         {
             hand.swing();
         }
-        if self.world.client.using_item().is_some() {
-            self.using_item = true;
-        }
-        if let (Some(state), Some(Target::Block(hit))) = (predicted, self.target)
-            && result == UseResult::Success
-        {
-            let at = neighbour(hit.pos, hit.face);
+        if let Some((at, state)) = out.placed {
             self.play_block(state, BlockSound::Place, center(at));
         }
-        if !matches!(target, UseTarget::Entity { .. }) {
-            self.use_delay = USE_DELAY;
+        if let (Some(pos), Some(Target::Block(hit))) = (out.dig_hit, self.target)
+            && hit.pos == pos
+        {
+            self.play_block(hit.state, BlockSound::Hit, center(pos));
+        }
+        if out.stab {
+            self.play_stab();
         }
     }
 
-    fn predict_place(&self, hit: BlockHit) -> Option<u32> {
-        let state = self.held_block_state()?;
-        let sneaking = self.world.client.state.player.physics.crouching;
-        let target_interactive = self
-            .data
-            .block_state(hit.state)
-            .is_some_and(|s| s.has_block_entity());
-        if target_interactive && !sneaking {
-            return None;
+    /// `PiercingWeapon#makeSound`: the server leaves the stabbing player out of its broadcast.
+    fn play_stab(&mut self) {
+        let state = &self.world.client.state;
+        let stack = state.held_stack();
+        let patched = stack.components.added.iter().find_map(|c| match c {
+            mcr_protocol::types::component::DataComponent::PiercingWeapon(p) => {
+                Some(p.sound.clone())
+            }
+            _ => None,
+        });
+        let name = match patched {
+            Some(Some(sound)) => self.sound_name(&sound),
+            Some(None) => None,
+            None => {
+                let item = u32::try_from(stack.item)
+                    .ok()
+                    .and_then(|i| self.data.item_name(i));
+                Some(if item == Some("minecraft:wooden_spear") {
+                    "minecraft:item.spear_wood.attack".to_owned()
+                } else {
+                    "minecraft:item.spear.attack".to_owned()
+                })
+            }
+        };
+        let at = self.world.client.state.player.pos();
+        if let (Some(name), Some(audio)) = (name, &mut self.audio) {
+            audio.play(&name, Some(at), 1.0, 1.0, SoundSource::Players);
         }
-        let at = neighbour(hit.pos, hit.face);
-        let current = self.world.client.state.chunks.block(at.x, at.y, at.z)?;
-        let replaceable = self
-            .data
-            .block_state(u32::from(current.0))
-            .is_some_and(|s| s.is_air() || s.is_replaceable());
-        replaceable.then_some(state)
     }
 
     fn play_block(&mut self, state: u32, kind: BlockSound, at: [f64; 3]) {
@@ -2196,6 +2067,7 @@ impl Play {
     fn screens_tick(&mut self) {
         self.suggest.pump(&mut self.world.client);
         self.death_check();
+        self.bed_check();
         if self.stack.is_empty() {
             return;
         }
@@ -2222,6 +2094,22 @@ impl Play {
         if self.world.client.state.player.dead {
             self.handle_actions(vec![ScreenAction::Respawn]);
         }
+    }
+
+    /// Vanilla `Gui#tick` opens the in-bed chat whenever a sleeper has no screen.
+    fn bed_check(&mut self) {
+        let player = &self.world.client.state.player;
+        if self.java_gui || self.busy() || player.dead || !player.is_sleeping() {
+            return;
+        }
+        let screen = ChatScreen::new(
+            self.hud.chat.clone(),
+            self.suggest.suggester(),
+            crate::hud::chat_options(&self.options, true),
+        )
+        .in_bed();
+        self.push_screen(Box::new(screen));
+        self.chat_depth = Some(self.stack.len());
     }
 
     fn death_check(&mut self) {
@@ -2318,6 +2206,9 @@ impl Play {
                     };
                     let (p, q) = (id(primary), id(secondary));
                     self.net(|c| c.set_beacon(p, q));
+                }
+                ScreenAction::StopSleeping => {
+                    self.net(Client::stop_sleeping);
                 }
                 ScreenAction::Respawn => {
                     self.net(Client::respawn);
@@ -2495,7 +2386,9 @@ impl Play {
         } else if i == k.swap {
             self.net(Client::swap_offhand);
         } else if i == k.pick {
-            if let Some(Target::Block(hit)) = self.target {
+            if let Some(Target::Block(hit)) = self.target
+                && !self.world.client.is_using_item()
+            {
                 self.net(|c| c.pick_block(hit.pos, false));
             }
         } else if i == k.gui {
@@ -2575,6 +2468,15 @@ impl Play {
         let fov_mod = self.prev_fov_mod + (self.fov_mod - self.prev_fov_mod) * partial;
         let fov = (self.options.fov.0 as f32 * fov_mod * self.java_fov_scale).clamp(1.0, 170.0);
         let (look_yaw, look_pitch) = self.spectate_view.unwrap_or((self.yaw, self.pitch));
+        let bed = self
+            .bed_view
+            .filter(|_| self.perspective == Perspective::First && self.spectate_view.is_none());
+        let (look_yaw, look_pitch) = bed.map_or((look_yaw, look_pitch), |yaw| (yaw, 0.0));
+        let eye = if bed.is_some() {
+            [eye[0], eye[1] + 0.15, eye[2]]
+        } else {
+            eye
+        };
         let mut camera = Camera {
             position: DVec3::from(eye),
             yaw: std::f32::consts::PI - look_yaw.to_radians(),
@@ -2709,6 +2611,7 @@ impl Play {
             tick: self.ticks as u32,
             partial: self.partial(),
             hidden,
+            sleep_overlay: !self.java_gui,
             tab_held: self.tab_held,
             chat_open,
             debug: debug.as_ref(),
@@ -2878,7 +2781,7 @@ impl Play {
                         .ghost_age
                         .map(|a| (a as f32 + partial) / GHOST_TICKS as f32),
                     local_swing: swing,
-                    local_using: self.using_item,
+                    local_using: self.world.client.is_using_item(),
                     events: &self.entity_events,
                     skins: &self.skins,
                     spectator_outlines: state.player.game_mode
@@ -2924,6 +2827,7 @@ impl Play {
             };
             let visible = self.perspective == Perspective::First
                 && !self.hud_hidden
+                && !state.player.is_sleeping()
                 && state.player.game_mode != mcr_protocol::types::game::GameType::Spectator;
             if visible {
                 hand.prepare(&frame);
@@ -2962,8 +2866,11 @@ impl Play {
             self.render.renderer.update_weather(camera, radius, &source);
         }
         let own = self
-            .dig
-            .map(|d| (d.pos, (d.progress * 10 / d.total.max(1)).min(9) as u8));
+            .world
+            .client
+            .digging()
+            .filter(|d| d.progress > 0.0)
+            .map(|d| (d.pos, ((d.progress * 10.0) as u8).min(9)));
         let decals = self.effects.decals(state, own);
         self.render.renderer.set_destroy_decals(&decals);
         let distance = f64::from(self.world.render_distance().max(2) * 16);
@@ -3000,18 +2907,6 @@ fn center(pos: BlockPos) -> [f64; 3] {
         f64::from(pos.y) + 0.5,
         f64::from(pos.z) + 0.5,
     ]
-}
-
-fn neighbour(pos: BlockPos, face: Facing) -> BlockPos {
-    let (dx, dy, dz) = match face {
-        Facing::Down => (0, -1, 0),
-        Facing::Up => (0, 1, 0),
-        Facing::North => (0, 0, -1),
-        Facing::South => (0, 0, 1),
-        Facing::West => (-1, 0, 0),
-        Facing::East => (1, 0, 0),
-    };
-    BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
 }
 
 #[cfg(test)]

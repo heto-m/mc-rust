@@ -262,6 +262,7 @@ impl Client {
     }
 
     pub(crate) fn ride_tick(&mut self, keys: &PlayerInput, vehicle: i32) -> Result<()> {
+        self.combat.hands_busy = false;
         let Some(entity) = self.state.entities.get(vehicle).cloned() else {
             self.ride = None;
             self.state.controlled_vehicle = None;
@@ -305,6 +306,8 @@ impl Client {
         let mut paddle = None;
         let mut on_ground = false;
         let mut jump_data = None;
+        self.combat.hands_busy = matches!(ride.sim, Sim::Boat(_))
+            && (keys.forward || keys.backward || keys.left || keys.right);
         match &mut ride.sim {
             Sim::Boat(boat) => {
                 if teleported {

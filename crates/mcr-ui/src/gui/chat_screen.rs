@@ -9,9 +9,11 @@ use super::input::{Key, MouseButton, UiInput, contains};
 use super::menus::ConfirmScreen;
 use super::screen::{Screen, ScreenAction};
 use super::tooltip::TooltipLines;
+use super::widgets::{Button, WidgetEvent, WidgetEventKind};
 use crate::screens::{ChatHud, ChatOptions};
 
 const INPUT_ID: u32 = 1;
+const LEAVE_BED_ID: u32 = 2;
 const LIST_LIMIT: usize = 10;
 const ROW: i32 = 12;
 const FILL: u32 = 0xD000_0000;
@@ -104,6 +106,7 @@ pub struct ChatScreen {
     history_pos: usize,
     history_draft: String,
     popup_anchor: usize,
+    in_bed: bool,
 }
 
 impl std::fmt::Debug for ChatScreen {
@@ -141,12 +144,35 @@ impl ChatScreen {
             history_pos,
             history_draft: String::new(),
             popup_anchor: 0,
+            in_bed: false,
         }
     }
 
     pub fn with_initial(mut self, text: &str) -> Self {
         self.initial = text.to_owned();
         self
+    }
+
+    /// Vanilla `InBedChatScreen`: a Leave Bed button, Esc wakes up instead of closing, and sending
+    /// a message keeps the screen open.
+    pub fn in_bed(mut self) -> Self {
+        self.in_bed = true;
+        self
+    }
+
+    pub fn is_in_bed(&self) -> bool {
+        self.in_bed
+    }
+
+    /// `InBedChatScreen#onPlayerWokeUp`: typed text stays in a plain chat screen.
+    fn woke_up(&mut self, out: &mut Vec<ScreenAction>) {
+        self.in_bed = false;
+        if self.text().is_empty() {
+            out.push(ScreenAction::Pop);
+        } else {
+            let (w, h) = self.gui;
+            self.init(w, h);
+        }
     }
 
     pub fn text(&self) -> &str {
@@ -308,7 +334,25 @@ impl ChatScreen {
             }
         }
         self.chat.borrow_mut().reset_scroll();
-        out.push(ScreenAction::Pop);
+        if self.in_bed {
+            self.edit().set_value("");
+            self.edit().take_changed();
+            self.popup = None;
+            self.history_pos = self.chat.borrow().recent().len();
+        } else {
+            out.push(ScreenAction::Pop);
+        }
+    }
+
+    fn pressed_leave_bed(events: &[WidgetEvent], out: &mut Vec<ScreenAction>) -> bool {
+        let pressed = events
+            .iter()
+            .any(|e| e.id == LEAVE_BED_ID && e.kind == WidgetEventKind::Pressed);
+        if pressed {
+            out.push(ScreenAction::ClickSound);
+            out.push(ScreenAction::StopSleeping);
+        }
+        pressed
     }
 
     pub fn handle_click_event(&mut self, event: ClickEvent, out: &mut Vec<ScreenAction>) {
@@ -378,6 +422,13 @@ impl Screen for ChatScreen {
         input.set_value(&keep);
         input.take_changed();
         self.widgets.add(input);
+        if self.in_bed {
+            self.widgets.add(Button::new(
+                LEAVE_BED_ID,
+                [width / 2 - 100, height - 40, 200, 20],
+                "lang:multiplayer.stopSleeping",
+            ));
+        }
         self.widgets.set_focus(Some(INPUT_ID), 0);
         self.popup = None;
     }
@@ -406,6 +457,10 @@ impl Screen for ChatScreen {
                     return true;
                 }
                 match key {
+                    Key::Escape if self.in_bed => {
+                        out.push(ScreenAction::StopSleeping);
+                        return true;
+                    }
                     Key::Escape => {
                         self.chat.borrow_mut().reset_scroll();
                         out.push(ScreenAction::Pop);
@@ -441,6 +496,9 @@ impl Screen for ChatScreen {
                 }
                 let mut events = Vec::new();
                 let used = self.widgets.input(env, input, &mut events);
+                if Self::pressed_leave_bed(&events, out) {
+                    return true;
+                }
                 if !events.is_empty() {
                     self.edited();
                 }
@@ -477,6 +535,7 @@ impl Screen for ChatScreen {
                 }
                 let mut events = Vec::new();
                 self.widgets.input(env, input, &mut events);
+                Self::pressed_leave_bed(&events, out);
                 true
             }
             UiInput::Scroll { x, y, dy, .. } => {
@@ -501,8 +560,11 @@ impl Screen for ChatScreen {
         }
     }
 
-    fn tick(&mut self, _env: &mut Env<'_>, _out: &mut Vec<ScreenAction>) {
+    fn tick(&mut self, env: &mut Env<'_>, out: &mut Vec<ScreenAction>) {
         self.take_results();
+        if self.in_bed && !env.view.sleeping() {
+            self.woke_up(out);
+        }
     }
 }
 

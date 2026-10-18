@@ -192,6 +192,7 @@ pub(crate) fn apply_player_flags(player: &mut crate::player::LocalPlayer) {
     if let Some(l) = living {
         player.physics.spin_attack_flag = l & SPIN_ATTACK_BIT != 0;
     }
+    player.physics.sleeping = player.is_sleeping();
 }
 
 #[cfg(test)]

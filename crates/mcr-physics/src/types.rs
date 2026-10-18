@@ -101,14 +101,23 @@ pub enum Pose {
     Swimming,
     FallFlying,
     SpinAttack,
+    Sleeping,
 }
 
 impl Pose {
+    pub fn width(self) -> f32 {
+        match self {
+            Pose::Sleeping => 0.2,
+            _ => 0.6,
+        }
+    }
+
     pub fn height(self) -> f32 {
         match self {
             Pose::Standing => 1.8,
             Pose::Crouching => 1.5,
             Pose::Swimming | Pose::FallFlying | Pose::SpinAttack => 0.6,
+            Pose::Sleeping => 0.2,
         }
     }
 
@@ -117,6 +126,7 @@ impl Pose {
             Pose::Standing => 1.62,
             Pose::Crouching => 1.27,
             Pose::Swimming | Pose::FallFlying | Pose::SpinAttack => 0.4,
+            Pose::Sleeping => 0.2,
         }
     }
 }

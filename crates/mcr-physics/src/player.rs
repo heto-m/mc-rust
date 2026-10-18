@@ -49,6 +49,8 @@ pub struct PlayerPhysics {
     pub spin_attack_ticks: i32,
     /// Living-entity flag 4 as the server reports it.
     pub spin_attack_flag: bool,
+    /// The server reports a sleeping position: vanilla `isSleeping`.
+    pub sleeping: bool,
     pub(crate) fall_flying_started: bool,
     pub(crate) abilities_changed: bool,
     pub(crate) fluid: FluidState,
@@ -120,6 +122,7 @@ impl PlayerPhysics {
             stand_on_lava: false,
             spin_attack_ticks: 0,
             spin_attack_flag: false,
+            sleeping: false,
             fall_flying_started: false,
             abilities_changed: false,
             fluid: FluidState::default(),
@@ -170,7 +173,7 @@ impl PlayerPhysics {
     }
 
     pub(crate) fn bounding_box_for(&self, pose: Pose, p: [f64; 3]) -> Aabb {
-        let (width, height) = self.dims.unwrap_or((0.6, pose.height()));
+        let (width, height) = self.dims.unwrap_or((pose.width(), pose.height()));
         let w = f64::from(width / 2.0);
         let h = f64::from(height);
         Aabb::new([p[0] - w, p[1], p[2] - w], [p[0] + w, p[1] + h, p[2] + w])

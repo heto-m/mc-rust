@@ -7,6 +7,9 @@ mod audit_tests;
 mod batch;
 mod chat_in;
 mod client;
+mod combat;
+#[cfg(test)]
+mod combat_tests;
 pub mod commands;
 mod conduct;
 mod config;
@@ -50,6 +53,7 @@ mod riding;
 mod screens;
 pub mod script;
 pub mod secure_chat;
+mod sleep;
 mod slot_display;
 mod social;
 mod state;
@@ -61,6 +65,7 @@ mod use_item_tests;
 pub use actions::Digging;
 pub use batch::ChunkBatchSizeCalculator;
 pub use client::{Client, Phase};
+pub use combat::{CombatKeys, CombatOutcome, MISS_TICKS};
 pub use commands::{CommandTree, Completion, SuggestSource, complete_chat};
 pub use conduct::{
     ConductEnd, ConductLink, ConductReply, ConductRequest, conduct_channel, conduct_hash,
@@ -93,6 +98,7 @@ pub use registry::{BuiltinData, Dimension, Registries, Registry, RegistryItem, d
 pub use relay::{ClientHooks, LocalAction, Relay, Relayed};
 pub use riding::{Ride, Sim};
 pub use secure_chat::TextRenderer;
+pub use sleep::facing_yaw;
 pub use slot_display::{holder_items, resolve as resolve_slot_display};
 pub use social::{
     BossBar, ChatMessage, ChatState, MAX_SIDEBAR_ROWS, MAX_TAB_ENTRIES, Objective, PlayerInfo,

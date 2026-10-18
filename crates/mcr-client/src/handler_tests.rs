@@ -177,3 +177,70 @@ fn win_game_event_shows_the_credits() {
     );
     assert!(matches!(events.as_slice(), [ClientEvent::ShowCredits]));
 }
+
+fn respawn(s: &ClientState, data_to_keep: u8) -> P<'static> {
+    use mcr_protocol::play::clientbound::player::{CommonPlayerSpawnInfo, Respawn};
+    use mcr_protocol::types::game::GameType;
+    P::Respawn(Respawn {
+        spawn_info: CommonPlayerSpawnInfo {
+            dimension_type: 0,
+            dimension: s.dimension.name.clone(),
+            seed: 0,
+            game_type: GameType::Survival,
+            previous_game_type: None,
+            is_debug: false,
+            is_flat: false,
+            last_death_location: None,
+            portal_cooldown: 0,
+            sea_level: 63,
+        },
+        data_to_keep,
+    })
+}
+
+#[test]
+fn immediate_respawn_survives_every_respawn() {
+    use mcr_protocol::play::clientbound::world::GameEvent;
+    let mut s = state();
+    handle(
+        &mut s,
+        P::GameEvent(GameEvent {
+            event: 11,
+            param: 1.0,
+        }),
+    );
+    for _ in 0..3 {
+        let packet = respawn(&s, 0);
+        handle(&mut s, packet);
+        assert!(!s.player.show_death_screen);
+    }
+}
+
+#[test]
+fn respawn_with_kept_attributes_keeps_their_modifiers() {
+    use mcr_protocol::play::clientbound::player::Respawn;
+    use mcr_protocol::types::component::{AttributeModifier, AttributeOperation};
+    let mut s = state();
+    let speed = s
+        .data
+        .registry("minecraft:attribute")
+        .and_then(|r| r.id_of("minecraft:movement_speed"))
+        .unwrap() as i32;
+    s.player.attributes.insert(
+        speed,
+        crate::entity::AttributeState {
+            base: 0.1,
+            modifiers: vec![AttributeModifier {
+                id: Identifier::parse("minecraft:effect.speed").unwrap(),
+                amount: 1.0,
+                operation: AttributeOperation::AddMultipliedTotal,
+            }],
+        },
+    );
+    let packet = respawn(&s, Respawn::KEEP_ATTRIBUTE_MODIFIERS);
+    handle(&mut s, packet);
+    assert!((s.player.physics.attributes.movement_speed - 0.2).abs() < 1e-9);
+    let packet = respawn(&s, 0);
+    handle(&mut s, packet);
+    assert!((s.player.physics.attributes.movement_speed - 0.1).abs() < 1e-9);
+}

@@ -81,6 +81,11 @@ pub trait GameView {
         false
     }
 
+    /// The player lies in a bed; the in-bed chat screen closes once this turns false.
+    fn sleeping(&self) -> bool {
+        false
+    }
+
     fn xp_level(&self) -> i32 {
         0
     }

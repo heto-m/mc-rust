@@ -93,6 +93,8 @@ pub struct HudInput<'a> {
     pub tick: u32,
     pub partial: f32,
     pub hidden: bool,
+    /// Java draws the sleep fade itself in mod mode.
+    pub sleep_overlay: bool,
     pub tab_held: bool,
     pub chat_open: bool,
     pub debug: Option<&'a DebugOverlay>,
@@ -136,6 +138,28 @@ fn wrapped(frame: &mut UiFrame<'_>, cells: &[mcr_ui::Cell], width: f32) -> Vec<V
         .into_iter()
         .map(|r| cells[r].iter().filter(|c| c.ch != '\n').cloned().collect())
         .collect()
+}
+
+/// Vanilla `Hud#extractSleepOverlay`: dark blue, rising over 100 ticks and fading over 10 after.
+pub fn sleep_overlay_color(timer: u32) -> Option<u32> {
+    if timer == 0 {
+        return None;
+    }
+    let t = timer as f32;
+    let amount = if t > 100.0 {
+        1.0 - (t - 100.0) / 10.0
+    } else {
+        t / 100.0
+    };
+    let alpha = (220.0 * amount.clamp(0.0, 1.0)) as u32;
+    Some(alpha << 24 | 0x10_1020)
+}
+
+fn draw_sleep_overlay(frame: &mut UiFrame<'_>, timer: u32) {
+    if let Some(color) = sleep_overlay_color(timer) {
+        let (w, h) = frame.gui_size();
+        frame.fill_rect(0, 0, w, h, color);
+    }
 }
 
 pub fn chat_options(options: &Options, focused: bool) -> ChatOptions {
@@ -336,6 +360,12 @@ impl Hud {
         if !input.hidden {
             self.draw_gameplay(frame, icons, input);
         }
+        if input.sleep_overlay {
+            draw_sleep_overlay(frame, input.state.player.sleep_timer);
+        }
+        if !input.hidden {
+            self.draw_messages(frame, input);
+        }
         if let Some(debug) = input.debug {
             debug.draw(frame);
         }
@@ -354,6 +384,11 @@ impl Hud {
         }
         self.draw_bars(frame, icons, input);
         self.draw_bosses(frame, state);
+    }
+
+    /// The HUD parts vanilla draws over the sleep fade.
+    fn draw_messages(&mut self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
+        let state = input.state;
         self.draw_sidebar(frame, state);
         self.draw_titles(frame, input);
         if input.tab_held {
@@ -860,7 +895,16 @@ impl Hud {
 
 #[cfg(test)]
 mod tests {
-    use super::WaypointStyle;
+    use super::{WaypointStyle, sleep_overlay_color};
+
+    #[test]
+    fn sleep_fade_rises_then_fades_after_waking() {
+        assert_eq!(sleep_overlay_color(0), None);
+        assert_eq!(sleep_overlay_color(50), Some(110 << 24 | 0x10_1020));
+        assert_eq!(sleep_overlay_color(100), Some(220 << 24 | 0x10_1020));
+        assert_eq!(sleep_overlay_color(105), Some(110 << 24 | 0x10_1020));
+        assert_eq!(sleep_overlay_color(110), Some(0x10_1020));
+    }
 
     #[test]
     fn style_json_is_bounded_and_validated() {

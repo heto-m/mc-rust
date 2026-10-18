@@ -14,6 +14,7 @@ use mcr_entity_model::{
     hidden_while_fresh, idx, slot, teleport_duration,
 };
 use mcr_physics::Pose as PhysPose;
+use mcr_protocol::play::serverbound::Facing;
 use mcr_render::{Camera, Frustum};
 use mcr_ui::Ui;
 use mcr_world::{ChunkPos, ChunkStore};
@@ -539,6 +540,7 @@ impl EntityLayer {
             PhysPose::Swimming => DataPose::Swimming,
             PhysPose::FallFlying => DataPose::FallFlying,
             PhysPose::SpinAttack => DataPose::SpinAttack,
+            PhysPose::Sleeping => DataPose::Sleeping,
         };
         self.local_data.insert(6, EntityDataValue::Pose(pose));
         self.local_data.insert(
@@ -620,6 +622,7 @@ impl EntityLayer {
                 1.0,
             );
             v.equipment = Some(&*local_equipment);
+            v.bed = bed_of(cx.state, &v);
             apply_events(&mut v, cx.events.view(local_id, cx.partial));
             v.attack_time = cx.local_swing;
             v.player = PlayerView {
@@ -682,6 +685,7 @@ impl EntityLayer {
                 view.on_ground = e.on_ground || (t.pos[1] - t.prev_pos[1]).abs() < 1.0e-3;
                 view.object_data = e.object_data;
                 view.equipment = Some(&e.equipment);
+                view.bed = bed_of(cx.state, &view);
                 view.flight = e.flight.as_ref().map(|f| f.lean(cx.partial));
                 view.leash = leash_line(cx, tracks, data, e, &view, scale);
                 view.fuse = e.fuse_remaining(cx.partial);
@@ -1110,6 +1114,24 @@ fn make_view<'a>(
     let gliding = v.shared_flag(7) || v.pose() == DataPose::FallFlying;
     v.glide = t.glide.view(partial, v.yaw, v.pitch, gliding);
     v
+}
+
+/// The bed a living entity in the sleeping pose lies in (its synced sleeping position, index 14).
+fn bed_of(state: &ClientState, v: &EntityView<'_>) -> Option<mcr_entity_model::BedFacing> {
+    use mcr_entity_model::BedFacing as B;
+    if v.pose() != DataPose::Sleeping {
+        return None;
+    }
+    let Some(EntityDataValue::OptionalBlockPos(Some(pos))) = v.data.get(14) else {
+        return None;
+    };
+    Some(match state.bed_orientation(*pos)? {
+        Facing::North => B::North,
+        Facing::South => B::South,
+        Facing::West => B::West,
+        Facing::East => B::East,
+        Facing::Down | Facing::Up => return None,
+    })
 }
 
 fn apply_events(v: &mut EntityView<'_>, ev: crate::entity_events::EventView) {

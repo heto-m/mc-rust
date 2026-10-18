@@ -437,7 +437,7 @@ impl Autopilot {
                             .java_camera
                             .map_or("none", |c| if c.input { "captured" } else { "moved" });
                         println!(
-                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?} mod input {:?} fov_scale {:.2} camera {:.2} {:.2} {:.2} java_camera {java_cam} java_roll {:.1} java_weather {} java_steps {} java_turn {} perspective {} view_roll {:.1} dyn_lights {}",
+                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?} mod input {:?} fov_scale {:.2} camera {:.2} {:.2} {:.2} java_camera {java_cam} java_roll {:.1} java_weather {} java_steps {} java_turn {} perspective {} view_roll {:.1} dyn_lights {} dead {} health {:.1} sleeping {} sleep_timer {} using {} miss {} strength {:.2} dig {:?}",
                             play.ticks,
                             p[0],
                             p[1],
@@ -468,6 +468,17 @@ impl Autopilot {
                             play.perspective_name(),
                             play.java_view_roll.to_degrees(),
                             play.render.renderer.dynamic_lights_drawn(),
+                            state.player.dead,
+                            state.player.health,
+                            state.player.is_sleeping(),
+                            state.player.sleep_timer,
+                            play.world.client.is_using_item(),
+                            play.world.client.miss_time(),
+                            play.world.client.attack_strength_scale(0.0),
+                            play.world
+                                .client
+                                .digging()
+                                .map(|d| (d.pos, d.ticks, d.progress)),
                         );
                     }
                 }

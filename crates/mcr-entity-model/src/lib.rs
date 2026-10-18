@@ -58,7 +58,7 @@ pub use rig::{
 pub use scene::{BlockTop, EntityScene, FrameParams, NameTag, SceneStats};
 pub use texcache::TextureCache;
 pub use view::{
-    EntityData, EntityView, EventAnim, Glide, NoData, PlayerView, Registries, Skin, slot,
+    BedFacing, EntityData, EntityView, EventAnim, Glide, NoData, PlayerView, Registries, Skin, slot,
 };
 
 pub use glam;

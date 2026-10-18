@@ -1,5 +1,5 @@
 use mcr_physics::{Abilities, Attributes, Effects, PlayerPhysics};
-use mcr_protocol::play::clientbound::player::RelativeFlags;
+use mcr_protocol::play::clientbound::player::{RelativeFlags, Respawn};
 use mcr_protocol::types::Vec3d;
 use mcr_protocol::types::game::GameType;
 use rustc_hash::FxHashMap;
@@ -7,6 +7,7 @@ use rustc_hash::FxHashMap;
 use crate::entity::{AttributeState, MobEffect};
 
 const XP_DISPLAY_TICKS: u32 = 100;
+pub(crate) const SLEEPING_POS_INDEX: u8 = 14;
 
 pub const SPRINT_MODIFIER_ID: &str = "minecraft:sprinting";
 
@@ -33,6 +34,8 @@ pub struct LocalPlayer {
     pub permission_level: u8,
     pub dead: bool,
     pub show_death_screen: bool,
+    /// Vanilla `sleepCounter`: up to 100 while asleep, then 101..110 fading out after waking.
+    pub sleep_timer: u32,
     pub vehicle: Option<i32>,
     /// A teleport has been received since login/respawn.
     pub placed: bool,
@@ -77,6 +80,7 @@ impl Default for LocalPlayer {
             permission_level: 0,
             dead: false,
             show_death_screen: true,
+            sleep_timer: 0,
             vehicle: None,
             placed: false,
             loaded: false,
@@ -105,19 +109,71 @@ impl LocalPlayer {
         self.physics.pos
     }
 
-    /// Fresh per-life state: vitals reset, position kept until the next teleport.
-    pub fn reset_for_spawn(&mut self, game_mode: GameType, previous: Option<GameType>) {
-        let entity_id = self.entity_id;
-        let held = self.held_slot;
-        let permission_level = self.permission_level;
+    /// The bed the server has the player sleeping in: vanilla `getSleepingPos`.
+    pub fn sleeping_pos(&self) -> Option<mcr_buf::BlockPos> {
+        match self.data.get(&SLEEPING_POS_INDEX) {
+            Some(mcr_protocol::types::entity_data::EntityDataValue::OptionalBlockPos(p)) => *p,
+            _ => None,
+        }
+    }
+
+    pub fn is_sleeping(&self) -> bool {
+        self.sleeping_pos().is_some()
+    }
+
+    /// `Player#stopSleepInBed` on the wake-up animation: the fade runs its last 10 ticks.
+    pub fn wake_up(&mut self) {
+        self.data.remove(&SLEEPING_POS_INDEX);
+        self.physics.sleeping = false;
+        self.sleep_timer = 100;
+    }
+
+    /// `Player#tick`'s sleep counter, which drives the sleep fade.
+    pub fn tick_sleep(&mut self) {
+        if self.is_sleeping() {
+            self.sleep_timer = (self.sleep_timer + 1).min(100);
+        } else if self.sleep_timer > 0 {
+            self.sleep_timer += 1;
+            if self.sleep_timer >= 110 {
+                self.sleep_timer = 0;
+            }
+        }
+    }
+
+    /// Fresh per-life state: vitals reset, position kept until the next teleport. `keep` holds the
+    /// respawn packet's data-kept flags; `None` is a login, which starts from nothing.
+    pub fn reset_for_spawn(
+        &mut self,
+        game_mode: GameType,
+        previous: Option<GameType>,
+        keep: Option<u8>,
+    ) {
+        let old = std::mem::take(self);
         *self = Self {
-            entity_id,
-            held_slot: held,
-            permission_level,
+            entity_id: old.entity_id,
+            held_slot: old.held_slot,
+            permission_level: old.permission_level,
             game_mode,
             previous_game_mode: previous,
             ..Self::default()
         };
+        if let Some(keep) = keep {
+            self.show_death_screen = old.show_death_screen;
+            self.attributes = old.attributes;
+            if keep & Respawn::KEEP_ATTRIBUTE_MODIFIERS == 0 {
+                for a in self.attributes.values_mut() {
+                    a.modifiers.clear();
+                }
+            }
+            if keep & Respawn::KEEP_ENTITY_DATA != 0 {
+                self.data = old.data;
+                self.physics.vel = old.physics.vel;
+                self.physics.yaw = old.physics.yaw;
+                self.physics.pitch = old.physics.pitch;
+            } else {
+                self.physics.yaw = -180.0;
+            }
+        }
         self.apply_game_mode(game_mode);
     }
 
@@ -381,6 +437,58 @@ mod tests {
             RelativeFlags::default(),
         );
         assert_eq!(p.physics.pitch, 90.0);
+    }
+
+    fn veteran() -> LocalPlayer {
+        use mcr_protocol::types::component::{AttributeModifier, AttributeOperation};
+        use mcr_protocol::types::entity_data::EntityDataValue;
+        let mut p = LocalPlayer {
+            show_death_screen: false,
+            ..LocalPlayer::default()
+        };
+        p.attributes.insert(
+            5,
+            AttributeState {
+                base: 0.2,
+                modifiers: vec![AttributeModifier {
+                    id: mcr_buf::Identifier::parse("minecraft:effect.speed").unwrap(),
+                    amount: 0.4,
+                    operation: AttributeOperation::AddMultipliedTotal,
+                }],
+            },
+        );
+        p.data.insert(15, EntityDataValue::Float(4.0));
+        p.physics.snap_to([0.0; 3], [0.1, 0.2, 0.3], 30.0, 10.0);
+        p
+    }
+
+    #[test]
+    fn respawn_keeps_the_death_screen_choice_and_base_attributes() {
+        let mut p = veteran();
+        p.reset_for_spawn(GameType::Survival, None, Some(0));
+        assert!(!p.show_death_screen, "immediate respawn stays on");
+        assert_eq!(p.attributes[&5].base, 0.2);
+        assert!(p.attributes[&5].modifiers.is_empty());
+        assert!(p.data.is_empty());
+        assert_eq!(p.physics.yaw, -180.0);
+    }
+
+    #[test]
+    fn respawn_flags_keep_modifiers_data_motion_and_rotation() {
+        let mut p = veteran();
+        p.reset_for_spawn(GameType::Survival, None, Some(Respawn::KEEP_ALL_DATA));
+        assert_eq!(p.attributes[&5].modifiers.len(), 1);
+        assert_eq!(p.data.len(), 1);
+        assert_eq!(p.physics.vel, [0.1, 0.2, 0.3]);
+        assert_eq!((p.physics.yaw, p.physics.pitch), (30.0, 10.0));
+    }
+
+    #[test]
+    fn login_starts_a_fresh_player() {
+        let mut p = veteran();
+        p.reset_for_spawn(GameType::Survival, None, None);
+        assert!(p.show_death_screen);
+        assert!(p.attributes.is_empty());
     }
 
     #[test]

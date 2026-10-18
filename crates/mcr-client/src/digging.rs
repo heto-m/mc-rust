@@ -137,7 +137,7 @@ impl ClientState {
         self.inventory.hotbar(self.player.held_slot)
     }
 
-    fn attribute(&self, name: &str, default: f64) -> f64 {
+    pub(crate) fn attribute(&self, name: &str, default: f64) -> f64 {
         let id = self
             .data
             .registry("minecraft:attribute")

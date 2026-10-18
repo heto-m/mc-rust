@@ -140,6 +140,37 @@ pub struct EventAnim {
     pub tentacle_sync: Option<f32>,
 }
 
+/// The facing of the bed a sleeper lies in: vanilla `LivingEntity#getBedOrientation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BedFacing {
+    North,
+    South,
+    West,
+    East,
+}
+
+impl BedFacing {
+    /// `Direction#getStepX` and `getStepZ`.
+    pub fn step(self) -> [f32; 2] {
+        match self {
+            Self::North => [0.0, -1.0],
+            Self::South => [0.0, 1.0],
+            Self::West => [-1.0, 0.0],
+            Self::East => [1.0, 0.0],
+        }
+    }
+
+    /// `LivingEntityRenderer#sleepDirectionToRotation`.
+    pub fn sleep_rotation(self) -> f32 {
+        match self {
+            Self::South => 90.0,
+            Self::West => 0.0,
+            Self::North => 270.0,
+            Self::East => 180.0,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct EntityView<'a> {
     pub id: i32,
@@ -188,6 +219,8 @@ pub struct EntityView<'a> {
     pub outline: Option<[u8; 3]>,
     /// Interpolated state of a display entity; without it the raw entity data is used.
     pub display: Option<crate::display::DisplaySample>,
+    /// The bed of an entity in the sleeping pose.
+    pub bed: Option<BedFacing>,
 }
 
 impl std::fmt::Debug for EntityView<'_> {
@@ -242,6 +275,7 @@ impl<'a> EntityView<'a> {
             display: None,
             custom_name: None,
             player: PlayerView::default(),
+            bed: None,
         }
     }
 

@@ -101,11 +101,6 @@ impl Client {
         self.send_play(&S::Punch(sb::Punch))
     }
 
-    /// An attack or a miss reset the attack strength; only a mirror needs to hear it.
-    pub fn reset_attack_strength(&mut self) {
-        self.local_action(LocalAction::ResetAttackStrength);
-    }
-
     /// Mining progress of the current dig, counted by the caller; only a mirror needs to hear it.
     pub fn dig_progress(&mut self, progress: f32) {
         if let Some(pos) = self.digging.as_ref().map(|d| d.pos) {
@@ -302,7 +297,9 @@ impl Client {
             pos: d.pos,
             face: Facing::Down,
             sequence: 0,
-        }))
+        }))?;
+        self.reset_attack_strength();
+        Ok(())
     }
 
     fn can_act_on_block(&self, pos: BlockPos) -> bool {

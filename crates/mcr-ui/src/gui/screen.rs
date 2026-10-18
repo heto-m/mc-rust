@@ -64,6 +64,8 @@ pub enum ScreenAction {
         secondary: Option<String>,
     },
     Respawn,
+    /// The in-bed screen's Leave Bed button or Esc.
+    StopSleeping,
     Disconnect,
     Connect(String),
     CancelConnect,
@@ -161,6 +163,7 @@ impl std::fmt::Debug for ScreenAction {
                 .field("remember", remember)
                 .finish(),
             Self::Respawn => f.write_str("Respawn"),
+            Self::StopSleeping => f.write_str("StopSleeping"),
             Self::Disconnect => f.write_str("Disconnect"),
             Self::Connect(a) => f.debug_tuple("Connect").field(a).finish(),
             Self::CancelConnect => f.write_str("CancelConnect"),

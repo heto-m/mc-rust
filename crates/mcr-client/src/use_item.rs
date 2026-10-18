@@ -19,6 +19,8 @@ use crate::relay::LocalAction;
 
 const LIVING_FLAGS: u8 = 8;
 const MAX_USE_TICKS: i32 = 72_000;
+/// `BundleItem` and `BrushItem#getUseDuration`.
+const BUNDLE_BRUSH_USE_TICKS: i32 = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UseTarget {
@@ -152,7 +154,6 @@ fn is_instant_item(name: &str) -> bool {
         || n == "bucket"
         || n.ends_with("_boat")
         || n.ends_with("_raft")
-        || n.ends_with("bundle")
         || matches!(
             n,
             "snowball"
@@ -195,9 +196,6 @@ impl Client {
     pub fn start_use(&mut self, target: UseTarget) -> Result<UseResult> {
         if self.digging.is_some() || self.state.player.game_mode == GameType::Spectator {
             return Ok(UseResult::Pass);
-        }
-        if self.state.player.vehicle.is_some() && self.state.player.physics.passenger {
-            // Hands stay free while riding; only entity and item use continue below.
         }
         for hand in [Hand::Main, Hand::Off] {
             if let Some(result) = self.use_hand(hand, target)? {
@@ -271,6 +269,10 @@ impl Client {
                     Placement::Failed => return Ok(Some(UseResult::Consume)),
                     Placement::NotABlock => {}
                 }
+                if self.state.is_item(&held, "brush") {
+                    self.begin_using(hand, UseKind::Hold, BUNDLE_BRUSH_USE_TICKS, &held);
+                    return Ok(Some(UseResult::Consume));
+                }
                 let on_cooldown = self.state.is_on_cooldown(&held);
                 if let (Some(item), Some(block)) = (held_name, block)
                     && !on_cooldown
@@ -298,6 +300,9 @@ impl Client {
                 }
                 Some((kind, ticks)) => {
                     self.begin_using(hand, kind, ticks, &held);
+                    if self.state.is_bundle(&held) {
+                        return Ok(Some(UseResult::Success));
+                    }
                     return Ok(Some(UseResult::Consume));
                 }
                 None => {}
@@ -364,6 +369,7 @@ impl Client {
         };
         let state = info.default_state;
         if data.state_properties(state).count() != 0 {
+            self.combat.placed = Some((at, state));
             return Placement::Placed;
         }
         let bb = self.state.player.physics.bounding_box();
@@ -388,6 +394,7 @@ impl Client {
         let sequence = self.sequence;
         self.state
             .predict_block(at, BlockState(state as u16), sequence);
+        self.combat.placed = Some((at, state));
         if !self.state.player.instabuild {
             let slot = match hand {
                 Hand::Main => {
@@ -460,24 +467,30 @@ impl Client {
         self.release_use_item()
     }
 
-    /// Per-tick use countdown, kept in step with the server's living-entity flags.
+    /// Per-tick use countdown. Like `LocalPlayer#onSyncedDataUpdated`, only a change of the server's
+    /// using flag starts or stops the local use, so a stale flag never restarts a released one.
     pub(crate) fn update_using_item(&mut self) {
-        let server = match self.state.player.data.get(&LIVING_FLAGS) {
+        let (server, hand) = match self.state.player.data.get(&LIVING_FLAGS) {
             Some(EntityDataValue::Byte(b)) => {
-                Some((b & 1 != 0, if b & 2 != 0 { Hand::Off } else { Hand::Main }))
+                (b & 1 != 0, if b & 2 != 0 { Hand::Off } else { Hand::Main })
             }
-            _ => None,
+            _ => (false, Hand::Main),
         };
+        let was = std::mem::replace(&mut self.combat.server_using, server);
         let Some(u) = self.using else {
-            if let Some((true, hand)) = server {
+            if server && !was {
                 let stack = self.hand_stack(hand);
-                if let Some((kind, ticks)) = self.use_kind(&stack) {
+                if !stack.is_empty() {
+                    let (kind, ticks) = match self.use_kind(&stack) {
+                        Some((UseKind::Instant, _)) | None => (UseKind::Hold, MAX_USE_TICKS),
+                        Some(k) => k,
+                    };
                     self.begin_using(hand, kind, ticks, &stack);
                 }
             }
             return;
         };
-        if self.ticks > u.started_tick + 2 && server.is_some_and(|(using, _)| !using) {
+        if was && !server {
             self.stop_using_local();
             return;
         }
@@ -514,6 +527,13 @@ impl crate::state::ClientState {
                 .cloned()
                 .unwrap_or_default(),
         }
+    }
+
+    fn is_bundle(&self, stack: &ItemStack) -> bool {
+        u32::try_from(stack.item)
+            .ok()
+            .and_then(|i| self.data.item_name(i))
+            .is_some_and(|n| short(n).ends_with("bundle"))
     }
 
     pub(crate) fn is_item(&self, stack: &ItemStack, name: &str) -> bool {
@@ -589,6 +609,12 @@ impl crate::state::ClientState {
                 }
             }
             "trident" | "shield" | "spyglass" | "goat_horn" => Some((UseKind::Hold, MAX_USE_TICKS)),
+            _ if name.ends_with("bundle") => Some((UseKind::Hold, BUNDLE_BRUSH_USE_TICKS)),
+            _ if self.has_component(stack, "minecraft:blocks_attacks")
+                || self.has_component(stack, "minecraft:kinetic_weapon") =>
+            {
+                Some((UseKind::Hold, MAX_USE_TICKS))
+            }
             _ if is_instant_item(name) => Some((UseKind::Instant, 0)),
             _ if data.item_equip_slot(item).is_some_and(|s| s != "mainhand") => {
                 Some((UseKind::Instant, 0))

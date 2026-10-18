@@ -81,6 +81,7 @@ impl PlayerState {
         let pose = match p.pose {
             Pose::Standing => 0,
             Pose::FallFlying => 1,
+            Pose::Sleeping => 2,
             Pose::Swimming => 3,
             Pose::SpinAttack => 4,
             Pose::Crouching => 5,

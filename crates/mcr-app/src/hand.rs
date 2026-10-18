@@ -18,7 +18,6 @@ use crate::entities::{SyncedRegistries, hand_view_proj};
 
 const MAX_HEIGHT_STEP: f32 = 0.4;
 const DEFAULT_SWING_TICKS: f32 = 6.0;
-const DEFAULT_ATTACK_SPEED: f32 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UseKind {
@@ -205,7 +204,6 @@ pub struct Hand {
     swinging: bool,
     attack_anim: f32,
     old_attack_anim: f32,
-    attack_ticker: u32,
     use_elapsed: u32,
     using: Option<UseKind>,
     x_bob: f32,
@@ -232,6 +230,8 @@ pub struct HandTick<'a> {
     pub pitch: f32,
     pub local_using: bool,
     pub server_using: bool,
+    /// The player's `getItemSwapScale(1)`, which raises the main hand after a swap or attack.
+    pub swap_scale: f32,
 }
 
 impl Hand {
@@ -262,7 +262,6 @@ impl Hand {
             swinging: false,
             attack_anim: 0.0,
             old_attack_anim: 0.0,
-            attack_ticker: 100,
             use_elapsed: 0,
             using: None,
             x_bob: 0.0,
@@ -287,24 +286,6 @@ impl Hand {
         }
     }
 
-    pub fn reset_attack_strength(&mut self) {
-        self.attack_ticker = 0;
-    }
-
-    fn attack_speed(state: &ClientState) -> f32 {
-        mcr_data::v26_3()
-            .registry("minecraft:attribute")
-            .and_then(|r| r.id_of("minecraft:attack_speed"))
-            .and_then(|id| state.player.attributes.get(&(id as i32)))
-            .map_or(DEFAULT_ATTACK_SPEED, |a| a.value(None) as f32)
-            .clamp(0.1, 1024.0)
-    }
-
-    fn attack_strength(&self, state: &ClientState) -> f32 {
-        let delay = 20.0 / Self::attack_speed(state);
-        ((self.attack_ticker as f32 + 0.5) / delay).clamp(0.0, 1.0)
-    }
-
     pub fn tick(&mut self, t: &HandTick<'_>) {
         let state = t.state;
         let inv = &state.inventory;
@@ -313,10 +294,9 @@ impl Hand {
             .and_then(|i| inv.player.slots.get(i))
             .cloned()
             .unwrap_or_default();
-        self.attack_ticker = self.attack_ticker.saturating_add(1);
         self.old_main_height = self.main_height;
         self.old_off_height = self.off_height;
-        let strength = self.attack_strength(state);
+        let strength = t.swap_scale;
         let main_target = if same_item(&self.main_item, &main) {
             strength * strength * strength
         } else {
