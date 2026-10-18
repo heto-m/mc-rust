@@ -241,6 +241,26 @@ sets `FSTATE_STEPS` and mcr stops playing the player's footsteps. The probe itse
 movement keys a mod let through just before that wipe (`ISTATE_SCREEN_MOVES`, the `MOVE_*` bits), and mcr moves
 its player with them, so InvMove-style mods walk with the inventory open. Without such a mod the bits are 0.
 
+**Dynamic lights (ABI 20).** mcr lights the terrain, so a dynamic light mod working on vanilla's light lookups
+would only reach the entities Java draws. After each lockstep frame `McrDynamicLights` reads LambDynamicLights'
+active sources (its `dynamicLightSources` set and config mode, found once by reflection; the mod has no read API)
+and writes them into `SHARED_LIGHTS`: a sequence word (odd while writing), `LIGHTS_PROVIDER`/`LIGHTS_ENABLED`
+flags, a count and up to 256 entries of start `f64×3`, end offset `f32×3` and level. Entities are points at their
+eye lerped to Java's partial tick, particles points, line, beacon and end gateway behaviours segments; any other
+behaviour becomes a point at its bounding box centre. Nothing is written while the mod's mode is off, and a failed
+lookup turns the channel off for the session. Rust reads the block when it completes Java's frame (`lights.rs`:
+count bounded, non-finite entries dropped, levels clamped to 0–15, segments to 4096 blocks), and the shell hands
+the list to the renderer while Java draws the world and `mcrDynamicLights` is on (Video Settings shows "Mod Dynamic
+Lights" while a provider is loaded). The renderer keeps the 64 nearest sources whose reach touches the frustum,
+camera-relative, in a uniform, bins them into a 16³ grid of 16-block cells around the camera (two mask words per
+cell), and draws terrain with variant pipelines (`dynlight.wgsl`) only in frames with a source. A fragment takes
+the sources of its cell and raises its block light to `max(block, level − distance · 15 / 7.75)`, the mod's own
+falloff, measured from half a block in front of the face, before the lightmap lookup. Nothing is remeshed. The
+variants exist only in mod mode; without a source the terrain draws with the base pipelines. At 1920x1080 on a flat
+world (RX 6800 XT) terrain draws took 0.040 ms with no source, 0.063 ms with a held torch, 0.11 ms with 56
+glowstone items 12 blocks apart and 0.51 ms with 64 packed within 20 blocks of the camera, on both loaders; Java's
+frame did not change with the torch.
+
 **Section visibility.** Java's own visibility graph sees through every bridge section (they have no geometry), so
 mcr shares the sections its graph reached from this frame's camera (`SHARED_SECTIONS`: a box in section
 coordinates and one bit per section, at most 2^23 bits, republished when the search reruns; `FRAME_SECTIONS` says
@@ -476,7 +496,7 @@ detach and no late frame.
 | Entity Texture Features | 7.2.6 | loads | entities render; its variant and emissive textures need a resource pack, not tried |
 | Not Enough Animations | 1.12.6 | loads | third person renders the player; animations not judged from stills |
 | WaveyCapes | 1.11.3 | loads | joins; an offline player has no cape to wave |
-| LambDynamicLights | 4.13.0 | partial | multi-loader jar, joins; a held torch lights nothing, because mcr meshes and lights the terrain, not Java |
+| LambDynamicLights | 4.13.0 | works | multi-loader jar; held torch, dropped glowstone, burning zombie light mcr's terrain through the dynamic light channel, and its mode off removes the light |
 | Cherished Worlds | 18.0.0 | partial | favourite star toggles and persists; cannot join vanilla servers: its SpectreLib registers a required payload, so NeoForge itself refuses, as on stock |
 | Zoomify | 2.17.0 | broken | needs YACL 3.9.7+26.3-neoforge, whose `neoforge.mods.toml` asks for Minecraft and NeoForge `[26.2,26.3)`; excluded as FML would |
 | Dynamic FPS | 3.11.10 | blocked | policy: frame pacing and the window are mcr's |
@@ -485,7 +505,7 @@ detach and no late frame.
 ## Change sequence
 
 `mod-jvm-host` → `mod-fabric-boot` → `mod-net-bridge` → `mod-render-backend` → `mod-frame-compose` →
-`mod-input-screens` → `mod-entity-render-hooks` → `mod-sound-bridge` → `mod-manager-ui`, later `mod-neoforge-1` and
-`mod-neoforge-2`.
+`mod-input-screens` → `mod-entity-render-hooks` → `mod-sound-bridge` → `mod-manager-ui`, later `mod-neoforge-1`,
+`mod-neoforge-2` and `mod-dynamic-lights`.
 Spikes first: SPIR-V combined samplers through naga, SDL3 offscreen video driver off the main thread, and the
 `EmbeddedChannel` behaviour of `Connection.setupInboundProtocol`.

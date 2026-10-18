@@ -246,6 +246,7 @@ impl App {
         let mut config = world_setup::renderer_config(&self.opts, RendererConfig::default());
         if self.boot.is_some() {
             config.scene_texture = true;
+            config.dynamic_lights = true;
             config.optional_features = mcr_modbridge::gpu::context::OPTIONAL_FEATURES;
         }
         let mut renderer = Renderer::new(

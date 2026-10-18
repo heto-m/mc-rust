@@ -9,12 +9,13 @@ use mcr_jvm::{Doorbell, EntryDesc, ExtensionTable, Flavour, Ring, RingError};
 use crate::events::BridgeEvent;
 use crate::frame::FrameShared;
 use crate::input::{self, InputShared};
+use crate::lights::LightShared;
 use crate::net::{NetShared, SPILL_LIMIT};
 use crate::sections::SectionShared;
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 19;
+pub const BRIDGE_VERSION: u32 = 20;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -31,6 +32,8 @@ pub const SHARED_FRAME_BELL: i32 = 17;
 pub const SHARED_INPUT_STATE: i32 = 18;
 /// mcr's reached-section bitset for Java's culling.
 pub const SHARED_SECTIONS: i32 = 19;
+/// Dynamic light sources a Java mod computed, for mcr's terrain shader.
+pub const SHARED_LIGHTS: i32 = 20;
 
 pub const MSG_FRAME: u16 = 1;
 pub const MSG_SHUTDOWN: u16 = 2;
@@ -195,6 +198,22 @@ pub const SEC_ORIGIN: usize = 8;
 pub const SEC_DIMS: usize = 20;
 pub const SEC_BITS: usize = 64;
 pub const SEC_MAX_BITS: usize = 1 << 23;
+
+/// The shared light block: a sequence number (odd while Java writes), `LIGHTS_*` flags, the count, then
+/// `LIGHT_MAX` entries of start `f64×3`, end minus start `f32×3` and level `f32`.
+pub const LIGHT_SEQ: usize = 0;
+pub const LIGHT_FLAGS: usize = 8;
+pub const LIGHT_COUNT: usize = 12;
+pub const LIGHT_ENTRIES: usize = 16;
+pub const LIGHT_ENTRY_SIZE: usize = 40;
+pub const LIGHT_START: usize = 0;
+pub const LIGHT_END: usize = 24;
+pub const LIGHT_LEVEL: usize = 36;
+pub const LIGHT_MAX: usize = 256;
+/// A dynamic light mod is loaded and the bridge reads its sources.
+pub const LIGHTS_PROVIDER: u32 = 1;
+/// The mod's dynamic lighting is switched on.
+pub const LIGHTS_ENABLED: u32 = 2;
 
 pub const SLOT_IMMEDIATE: u32 = 0;
 pub const SLOT_GUI: u32 = 1;
@@ -523,6 +542,7 @@ pub(crate) struct Shared {
     pub sound: Arc<SoundShared>,
     pub input: InputShared,
     pub sections: SectionShared,
+    pub lights: LightShared,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -546,6 +566,7 @@ pub(crate) fn shared() -> Result<&'static Shared, RingError> {
         sound,
         input: InputShared::new(),
         sections: SectionShared::new(),
+        lights: LightShared::new(),
     }))
 }
 
@@ -610,6 +631,7 @@ extern "C" fn shared_address(id: i32) -> i64 {
         SHARED_SOUND_CONTROL => shared.sound.control_addr(),
         SHARED_INPUT_STATE => shared.input.state_addr(),
         SHARED_SECTIONS => shared.sections.addr(),
+        SHARED_LIGHTS => shared.lights.addr(),
         _ => 0,
     }
 }
@@ -727,6 +749,7 @@ mod tests {
             ("SHARED_SOUND_CONTROL", SHARED_SOUND_CONTROL.into()),
             ("SHARED_INPUT_STATE", SHARED_INPUT_STATE.into()),
             ("SHARED_SECTIONS", SHARED_SECTIONS.into()),
+            ("SHARED_LIGHTS", SHARED_LIGHTS.into()),
             ("MSG_FRAME", MSG_FRAME.into()),
             ("MSG_SHUTDOWN", MSG_SHUTDOWN.into()),
             ("MSG_INPUT", MSG_INPUT.into()),
@@ -854,6 +877,17 @@ mod tests {
             ("SEC_DIMS", SEC_DIMS as i64),
             ("SEC_BITS", SEC_BITS as i64),
             ("SEC_MAX_BITS", SEC_MAX_BITS as i64),
+            ("LIGHT_SEQ", LIGHT_SEQ as i64),
+            ("LIGHT_FLAGS", LIGHT_FLAGS as i64),
+            ("LIGHT_COUNT", LIGHT_COUNT as i64),
+            ("LIGHT_ENTRIES", LIGHT_ENTRIES as i64),
+            ("LIGHT_ENTRY_SIZE", LIGHT_ENTRY_SIZE as i64),
+            ("LIGHT_START", LIGHT_START as i64),
+            ("LIGHT_END", LIGHT_END as i64),
+            ("LIGHT_LEVEL", LIGHT_LEVEL as i64),
+            ("LIGHT_MAX", LIGHT_MAX as i64),
+            ("LIGHTS_PROVIDER", LIGHTS_PROVIDER.into()),
+            ("LIGHTS_ENABLED", LIGHTS_ENABLED.into()),
             ("SLOT_IMMEDIATE", SLOT_IMMEDIATE.into()),
             ("SLOT_GUI", SLOT_GUI.into()),
             ("SLOT_WORLD_SOLID", SLOT_WORLD_SOLID.into()),

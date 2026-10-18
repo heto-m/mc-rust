@@ -1252,6 +1252,26 @@ impl Shell {
         }
     }
 
+    /// Hands the light sources a Java mod computed to the terrain renderer, unless the user turned them off.
+    fn update_dynamic_lights(&mut self) {
+        let frames = self.cfg.mod_net.as_ref().and_then(|n| n.frames.as_ref());
+        let Some(frames) = frames else {
+            return;
+        };
+        let link = frames.lock();
+        let provider = link.dynamic_light_provider();
+        if let Some(play) = &mut self.play {
+            let on = self.settings.borrow().file.options.mcr_dynamic_lights;
+            let lights = if on { link.dynamic_lights() } else { &[] };
+            play.render.renderer.set_dynamic_lights(lights);
+        }
+        drop(link);
+        let mut settings = self.settings.borrow_mut();
+        if settings.dynamic_lights_provider != provider {
+            settings.dynamic_lights_provider = provider;
+        }
+    }
+
     pub(crate) fn mod_frames(&self) -> Option<&ModFrames> {
         self.cfg.mod_net.as_ref()?.frames.as_ref()
     }
@@ -1633,6 +1653,7 @@ impl Shell {
             );
             link.world_active()
         });
+        self.update_dynamic_lights();
         self.update_route();
         if let Some(play) = &mut self.play {
             play.java_gui = java_gui;

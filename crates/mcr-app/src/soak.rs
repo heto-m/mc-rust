@@ -46,6 +46,7 @@ pub fn run(opts: &Options, duration: Duration) -> Result<()> {
     let started = crate::mods::startup(opts)?;
     if started.boot.is_some() {
         config.scene_texture = true;
+        config.dynamic_lights = true;
         config.optional_features = mcr_modbridge::gpu::context::OPTIONAL_FEATURES;
     }
     let mut renderer =

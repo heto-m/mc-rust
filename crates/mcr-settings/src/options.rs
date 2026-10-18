@@ -22,7 +22,8 @@ pub const MODEL_PARTS: [&str; 7] = [
 
 macro_rules! options {
     ($( $field:ident : $ty:ty = $key:literal => $default:expr $(, [$lo:expr, $hi:expr])? ; )*) => {
-        /// Every `options.txt` client option of Minecraft 26.3 except sound volumes, model parts and key bindings.
+        /// Every `options.txt` client option of Minecraft 26.3 except sound volumes, model parts and key bindings,
+        /// plus mcr's own `mcr*` keys, which vanilla ignores.
         #[derive(Debug, Clone, PartialEq)]
         pub struct Options {
             $(pub $field: $ty,)*
@@ -181,6 +182,7 @@ options! {
     started_cleanly: bool = "startedCleanly" => true;
     music_toast: MusicToastState = "musicToast" => MusicToastState::Never;
     music_frequency: MusicFrequency = "musicFrequency" => MusicFrequency::Default;
+    mcr_dynamic_lights: bool = "mcrDynamicLights" => true;
 }
 
 impl Options {

@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 
 use mcr_jvm::PushError;
 use mcr_render::glam::{DVec3, Mat4, Vec3};
-use mcr_render::{Camera, ExternalCtx, ExternalSubmitter};
+use mcr_render::{Camera, DynamicLight, ExternalCtx, ExternalSubmitter};
 
 use crate::abi::{
     self, FRAME_CAMERA_HANDOFF, FRAME_DETACHED, FRAME_LOCKSTEP, FRAME_SECTIONS, FrameBegin,
-    MSG_FRAME, Shared,
+    LIGHTS_ENABLED, LIGHTS_PROVIDER, MSG_FRAME, Shared,
 };
 use crate::events::BridgeEvent;
 use crate::frame::{
@@ -157,6 +157,10 @@ pub struct FrameLink {
     ready: Option<u64>,
     /// The frame posted this mcr frame, which saw this frame's camera.
     posted_now: Option<u64>,
+    /// Dynamic light sources of Java's last finished frame and the block's `LIGHTS_*` flags.
+    lights: Vec<DynamicLight>,
+    light_scratch: Vec<DynamicLight>,
+    light_flags: u32,
 }
 
 impl FrameLink {
@@ -192,6 +196,9 @@ impl FrameLink {
             ahead: false,
             ready: None,
             posted_now: None,
+            lights: Vec::new(),
+            light_scratch: Vec::new(),
+            light_flags: 0,
         }
     }
 
@@ -251,6 +258,20 @@ impl FrameLink {
         } else {
             0.0
         }
+    }
+
+    /// Dynamic light sources a Java mod computed in its last finished frame, while Java draws the world.
+    pub fn dynamic_lights(&self) -> &[DynamicLight] {
+        if self.world_active() && self.light_flags & LIGHTS_ENABLED != 0 {
+            &self.lights
+        } else {
+            &[]
+        }
+    }
+
+    /// A dynamic light mod is loaded and reports its sources.
+    pub fn dynamic_light_provider(&self) -> bool {
+        self.light_flags & LIGHTS_PROVIDER != 0 && !self.shared.frame.is_gone()
     }
 
     /// A mod replaced vanilla's rain and snow in Java's last frame.
@@ -469,6 +490,11 @@ impl FrameLink {
     /// The outstanding frame finished: profile it and keep its frame time for [`AheadPolicy`].
     fn finished(&mut self, java: &JavaFrame) {
         self.java_finished(java);
+        self.light_flags = self
+            .shared
+            .lights
+            .read(&mut self.lights, &mut self.light_scratch)
+            .flags;
         self.policy.java_frame(Duration::from_nanos(java.nanos));
     }
 

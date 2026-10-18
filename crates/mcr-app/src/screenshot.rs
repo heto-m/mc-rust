@@ -174,6 +174,8 @@ fn shell_bench(shell: &mut crate::shell::Shell, frames: u32) {
     shell.reset_mod_stats();
     let start = Instant::now();
     let mut last = start;
+    let mut gpu = Vec::with_capacity(frames as usize);
+    let mut draw = Vec::with_capacity(frames as usize);
     for _ in 0..frames {
         let now = Instant::now();
         shell.advance((now - last).as_secs_f32());
@@ -181,13 +183,29 @@ fn shell_bench(shell: &mut crate::shell::Shell, frames: u32) {
         if let Some(play) = &mut shell.play {
             play.look(turn, 0.0);
         }
-        shell.frame();
+        if let Some(g) = shell.frame().and_then(|s| s.gpu) {
+            gpu.push(g.frame_ms);
+            draw.push(g.draw_ms);
+        }
     }
     let wall = start.elapsed().as_secs_f64();
     println!(
         "bench: {frames} frames in {wall:.2}s: {:.0} fps ({:.3} ms)",
         f64::from(frames) / wall,
         wall * 1000.0 / f64::from(frames)
+    );
+    let median = |v: &mut Vec<f32>| {
+        v.sort_by(f32::total_cmp);
+        v.get(v.len() / 2).copied().unwrap_or(0.0)
+    };
+    let lights = shell
+        .play
+        .as_ref()
+        .map_or(0, |p| p.render.renderer.dynamic_lights_drawn());
+    println!(
+        "bench: gpu median world {:.3} ms, terrain draws {:.3} ms, dynamic lights {lights}",
+        median(&mut gpu),
+        median(&mut draw)
     );
     if let Some(frames) = shell.mod_frames() {
         println!("bench: {}", frames.lock().stats().summary());
@@ -244,6 +262,7 @@ pub fn run_shell(opts: &crate::cli::Options, out: &Path, launched: Instant) -> R
         let jvm = started.boot.is_some();
         if jvm {
             config.scene_texture = true;
+            config.dynamic_lights = true;
             config.optional_features = mcr_modbridge::gpu::context::OPTIONAL_FEATURES;
         }
         let mut renderer = Renderer::new(Target::Offscreen { width, height }, config)

@@ -4,7 +4,7 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 19;
+    public static final int VERSION = 20;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
     public static final String COMPOSE_PROPERTY = "mcr.compose";
 
@@ -19,6 +19,7 @@ public final class BridgeAbi {
     public static final int SHARED_FRAME_BELL = 17;
     public static final int SHARED_INPUT_STATE = 18;
     public static final int SHARED_SECTIONS = 19;
+    public static final int SHARED_LIGHTS = 20;
 
     public static final int MSG_FRAME = 1;
     public static final int MSG_SHUTDOWN = 2;
@@ -146,6 +147,17 @@ public final class BridgeAbi {
     public static final int SEC_DIMS = 20;
     public static final int SEC_BITS = 64;
     public static final int SEC_MAX_BITS = 8388608;
+    public static final int LIGHT_SEQ = 0;
+    public static final int LIGHT_FLAGS = 8;
+    public static final int LIGHT_COUNT = 12;
+    public static final int LIGHT_ENTRIES = 16;
+    public static final int LIGHT_ENTRY_SIZE = 40;
+    public static final int LIGHT_START = 0;
+    public static final int LIGHT_END = 24;
+    public static final int LIGHT_LEVEL = 36;
+    public static final int LIGHT_MAX = 256;
+    public static final int LIGHTS_PROVIDER = 1;
+    public static final int LIGHTS_ENABLED = 2;
 
     public static final int SLOT_IMMEDIATE = 0;
     public static final int SLOT_GUI = 1;

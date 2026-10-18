@@ -9,6 +9,7 @@ use wgpu::util::DeviceExt;
 use crate::animation::{ANIM_TABLE_LEN, AnimationTable, SpriteAnimation};
 use crate::arena::Arena;
 use crate::camera::Camera;
+use crate::dynlight::{self, DynamicLight, GRID_CELLS, GpuLight, GpuLights};
 use crate::effects::{
     CloudSettings, DestroyDecal, EffectAssets, Effects, WeatherSource, WorldBorderVisual,
 };
@@ -27,6 +28,7 @@ use crate::texture::{MAX_TEXTURE_GROUPS, TextureArrayData, TextureGroupData};
 const QUAD_SRC: &str = include_str!("shaders/quad.wgsl");
 const GLOBALS_SRC: &str = include_str!("shaders/globals.wgsl");
 const TERRAIN_SRC: &str = include_str!("shaders/terrain.wgsl");
+const DYNLIGHT_SRC: &str = include_str!("shaders/dynlight.wgsl");
 const CULL_SRC: &str = include_str!("shaders/cull.wgsl");
 const TRANS_CULL_SRC: &str = include_str!("shaders/trans_cull.wgsl");
 
@@ -99,6 +101,8 @@ pub struct RendererConfig {
     /// Render into an offscreen `Rgba8Unorm` scene that external work can sample, then blit it to
     /// the surface; also raises texture and uniform limits to the adapter's.
     pub scene_texture: bool,
+    /// Builds the terrain variants that add [`DynamicLight`]s (mod mode); without it they are ignored.
+    pub dynamic_lights: bool,
 }
 
 impl Default for RendererConfig {
@@ -116,6 +120,7 @@ impl Default for RendererConfig {
             visibility_graph: true,
             optional_features: wgpu::Features::empty(),
             scene_texture: false,
+            dynamic_lights: false,
         }
     }
 }
@@ -341,6 +346,7 @@ pub struct Renderer {
     lightmap_key: Option<(Environment, f32)>,
     sky_pipeline: wgpu::RenderPipeline,
     effects: Effects,
+    dyn_lights: Option<DynamicLights>,
 
     cube_arena: Arena,
     model_arena: Arena,
@@ -361,6 +367,22 @@ pub struct Renderer {
     capture_requested: bool,
     capture_pending: Option<PendingCapture>,
     captured: Option<Capture>,
+}
+
+/// Terrain pipelines with the dynamic light term, its uniform and this frame's sources.
+struct DynamicLights {
+    cube: wgpu::RenderPipeline,
+    model: wgpu::RenderPipeline,
+    trans: wgpu::RenderPipeline,
+    buffer: wgpu::Buffer,
+    grid_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    sources: Vec<DynamicLight>,
+    scratch: Vec<(f32, GpuLight)>,
+    gpu: Box<GpuLights>,
+    grid: Vec<[u32; 2]>,
+    /// This frame draws terrain with the variants.
+    active: bool,
 }
 
 /// The world image of one frame, before UI: tightly packed 8-bit pixels in display encoding.
@@ -810,7 +832,7 @@ impl Renderer {
                 texture_entry(3),
                 texture_entry(4),
                 texture_entry(5),
-                uniform_entry(6, wgpu::ShaderStages::VERTEX),
+                uniform_entry(6, wgpu::ShaderStages::VERTEX_FRAGMENT),
                 storage_entry(7, wgpu::ShaderStages::FRAGMENT, true),
             ],
         });
@@ -903,42 +925,59 @@ impl Renderer {
             bind_group_layouts: &[Some(&globals_bgl), Some(&geom_bgl)],
             immediate_size: 0,
         });
+        let terrain_pipeline = |module: &wgpu::ShaderModule,
+                                layout: &wgpu::PipelineLayout,
+                                label: &str,
+                                vs_entry: &str,
+                                fs_entry: &str,
+                                cull: Option<wgpu::Face>,
+                                blend: bool| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(layout),
+                vertex: wgpu::VertexState {
+                    module,
+                    entry_point: Some(vs_entry),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: cull,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(!blend),
+                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module,
+                    entry_point: Some(fs_entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: color_format,
+                        blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         let make_pipeline =
             |label: &str, vs_entry: &str, fs_entry: &str, cull: Option<wgpu::Face>, blend: bool| {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(&draw_layout),
-                    vertex: wgpu::VertexState {
-                        module: &terrain_module,
-                        entry_point: Some(vs_entry),
-                        compilation_options: Default::default(),
-                        buffers: &[],
-                    },
-                    primitive: wgpu::PrimitiveState {
-                        cull_mode: cull,
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: DEPTH_FORMAT,
-                        depth_write_enabled: Some(!blend),
-                        depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
-                        stencil: Default::default(),
-                        bias: Default::default(),
-                    }),
-                    multisample: Default::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &terrain_module,
-                        entry_point: Some(fs_entry),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: color_format,
-                            blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
+                terrain_pipeline(
+                    &terrain_module,
+                    &draw_layout,
+                    label,
+                    vs_entry,
+                    fs_entry,
+                    cull,
+                    blend,
+                )
             };
         let cube_pipeline =
             make_pipeline("cube", "vs_cube", "fs_main", Some(wgpu::Face::Back), false);
@@ -956,6 +995,67 @@ impl Renderer {
             Some(wgpu::Face::Back),
             true,
         );
+        let dyn_lights = config.dynamic_lights.then(|| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("terrain dynamic lights"),
+                source: wgpu::ShaderSource::Wgsl(
+                    [QUAD_SRC, GLOBALS_SRC, TERRAIN_SRC, DYNLIGHT_SRC]
+                        .concat()
+                        .into(),
+                ),
+            });
+            let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("dynamic lights"),
+                entries: &[
+                    uniform_entry(0, wgpu::ShaderStages::FRAGMENT),
+                    storage_entry(1, wgpu::ShaderStages::FRAGMENT, true),
+                ],
+            });
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("terrain dynamic lights"),
+                bind_group_layouts: &[Some(&globals_bgl), Some(&geom_bgl), Some(&bgl)],
+                immediate_size: 0,
+            });
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("dynamic lights"),
+                size: std::mem::size_of::<GpuLights>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let grid_buffer = storage_buffer(
+                &device,
+                "dynamic light grid",
+                (GRID_CELLS * 8) as u64,
+                wgpu::BufferUsages::empty(),
+            );
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dynamic lights"),
+                layout: &bgl,
+                entries: &[bind(0, &buffer), bind(1, &grid_buffer)],
+            });
+            let back = Some(wgpu::Face::Back);
+            let pipeline = |label, vs, fs, blend| {
+                terrain_pipeline(&module, &layout, label, vs, fs, back, blend)
+            };
+            DynamicLights {
+                cube: pipeline("cube dynamic lights", "vs_cube_dyn", "fs_main_dyn", false),
+                model: pipeline("model dynamic lights", "vs_model_dyn", "fs_main_dyn", false),
+                trans: pipeline(
+                    "translucent dynamic lights",
+                    "vs_model_dyn",
+                    "fs_translucent_dyn",
+                    true,
+                ),
+                buffer,
+                grid_buffer,
+                bind_group,
+                sources: Vec::new(),
+                scratch: Vec::new(),
+                gpu: Box::default(),
+                grid: vec![[0; 2]; GRID_CELLS],
+                active: false,
+            }
+        });
         let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sky"),
             layout: Some(&draw_layout),
@@ -1044,6 +1144,7 @@ impl Renderer {
             lightmap_key: None,
             sky_pipeline,
             effects,
+            dyn_lights,
             cube_arena: Arena::new(cube_quads),
             model_arena: Arena::new(model_quads),
             occlusion: config.occlusion_culling,
@@ -1336,6 +1437,23 @@ impl Renderer {
     }
 
     /// Colours (`r | g << 8 | b << 16`) for constant tint kinds 8 and up, indexed `kind - 8`.
+    /// This frame's mod light sources in world space; ignored unless built with
+    /// [`RendererConfig::dynamic_lights`].
+    pub fn set_dynamic_lights(&mut self, lights: &[DynamicLight]) {
+        if let Some(d) = &mut self.dyn_lights {
+            d.sources.clear();
+            d.sources.extend_from_slice(lights);
+        }
+    }
+
+    /// Dynamic light sources the last frame's terrain evaluated.
+    pub fn dynamic_lights_drawn(&self) -> usize {
+        self.dyn_lights
+            .as_ref()
+            .filter(|d| d.active)
+            .map_or(0, |d| d.gpu.count())
+    }
+
     pub fn set_tint_palette(&mut self, colors: &[u32]) {
         let mut words = [0u32; TINT_PALETTE_WORDS];
         let n = colors.len().min(TINT_PALETTE_WORDS);
@@ -1856,6 +1974,23 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        if let Some(d) = &mut self.dyn_lights {
+            dynlight::select(
+                &d.sources,
+                cam.position,
+                &frustum,
+                &mut d.scratch,
+                &mut d.gpu,
+                &mut d.grid,
+            );
+            d.active = d.gpu.count() > 0;
+            if d.active {
+                self.queue
+                    .write_buffer(&d.buffer, 0, bytemuck::bytes_of(&*d.gpu));
+                self.queue
+                    .write_buffer(&d.grid_buffer, 0, bytemuck::cast_slice(&d.grid));
+            }
+        }
         let mut graph_ms = 0.0;
         if graph {
             let origin = [ci.x >> 4, ci.y >> 4, ci.z >> 4];
@@ -2305,7 +2440,11 @@ impl Renderer {
     ) {
         let cube_max = self.slot_count * 6;
         let model_max = self.slot_count;
-        pass.set_pipeline(&self.cube_pipeline);
+        let dyn_lights = self.dyn_lights.as_ref().filter(|d| d.active);
+        if let Some(d) = dyn_lights {
+            pass.set_bind_group(2, &d.bind_group, &[]);
+        }
+        pass.set_pipeline(dyn_lights.map_or(&self.cube_pipeline, |d| &d.cube));
         pass.set_index_buffer(self.geo.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
         if self.draw_count_supported {
             pass.multi_draw_indexed_indirect_count(
@@ -2318,7 +2457,7 @@ impl Renderer {
         } else {
             pass.multi_draw_indexed_indirect(&self.geo.cube_cmds, cube_offset, cube_max);
         }
-        pass.set_pipeline(&self.model_pipeline);
+        pass.set_pipeline(dyn_lights.map_or(&self.model_pipeline, |d| &d.model));
         if self.draw_count_supported {
             pass.multi_draw_indexed_indirect_count(
                 &self.geo.model_cmds,
@@ -2344,7 +2483,13 @@ impl Renderer {
             pass.set_bind_group(0, &self.globals_bg, &[]);
         }
         if trans_n > 0 {
-            pass.set_pipeline(&self.trans_pipeline);
+            match self.dyn_lights.as_ref().filter(|d| d.active) {
+                Some(d) => {
+                    pass.set_bind_group(2, &d.bind_group, &[]);
+                    pass.set_pipeline(&d.trans);
+                }
+                None => pass.set_pipeline(&self.trans_pipeline),
+            }
             pass.set_bind_group(1, &self.trans_geom_bg, &[]);
             pass.set_index_buffer(self.geo.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.multi_draw_indexed_indirect(&self.geo.trans_cmds, 0, trans_n);

@@ -203,6 +203,7 @@ public final class McrFrame {
         int weather = McrWeather.takeReplaced() ? BridgeAbi.FSTATE_WEATHER : 0;
         int steps = McrSteps.replaced() ? BridgeAbi.FSTATE_STEPS : 0;
         int turn = McrTurn.captured() ? BridgeAbi.FSTATE_TURN : 0;
+        McrDynamicLights.publish(minecraft);
         publish(Bridge.get(), minecraft, BridgeAbi.FSTATE_READY | (loaded ? BridgeAbi.FSTATE_LOADED : 0) | weather | steps | turn);
     }
 

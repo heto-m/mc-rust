@@ -36,10 +36,16 @@ fn lightmap_at(block: u32, sky: u32) -> vec3<f32> {
     return lightmap[sky * 16u + block].xyz;
 }
 
-// Bilinear in 1/16-level units, like sampling vanilla's filtered 16x16 lightmap texture.
+fn sky_level(packed: u32) -> f32 {
+    return clamp(f32((packed >> 8u) & 255u) / 16.0, 0.0, 15.0);
+}
+
 fn light_color(packed: u32) -> vec3<f32> {
-    let sky = clamp(f32((packed >> 8u) & 255u) / 16.0, 0.0, 15.0);
-    let block = clamp(f32(packed & 255u) / 16.0, 0.0, 15.0);
+    return light_levels(sky_level(packed), clamp(f32(packed & 255u) / 16.0, 0.0, 15.0));
+}
+
+// Bilinear in 1/16-level units, like sampling vanilla's filtered 16x16 lightmap texture.
+fn light_levels(sky: f32, block: f32) -> vec3<f32> {
     let s0 = u32(floor(sky));
     let b0 = u32(floor(block));
     let s1 = min(s0 + 1u, 15u);
@@ -76,8 +82,25 @@ fn fog_distances(rel: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(length(rel), max(length(rel.xz), abs(rel.y)));
 }
 
-@vertex
-fn vs_cube(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) -> VsOut {
+// One quad corner before it becomes vertex output; `rel` is camera-relative.
+struct Corner {
+    rel: vec3<f32>,
+    uv: vec2<f32>,
+    layer: u32,
+    tint: vec2<u32>,
+    cell: vec3<f32>,
+    light: u32,
+    shade: f32,
+    normal: vec3<f32>,
+}
+
+fn face_normal(face: u32) -> vec3<f32> {
+    var n = vec3<f32>(0.0);
+    n[face >> 1u] = select(-1.0, 1.0, (face & 1u) == 0u);
+    return n;
+}
+
+fn cube_corner(vi: u32, slot: u32) -> Corner {
     let draw = cube_draws[slot];
     let q = decode_cube(cube_quads[draw.first_quad + (vi >> 2u)]);
 
@@ -109,9 +132,8 @@ fn vs_cube(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) -
     p[u_axis] += cu * f32(q.width);
     p[v_axis] += cv * f32(q.height);
 
-    var out: VsOut;
-    let rel = draw.origin + p;
-    out.clip = g.view_proj * vec4<f32>(rel, 1.0);
+    var out: Corner;
+    out.rel = draw.origin + p;
     // Texture orientation per face matches vanilla's default UVs (u/v mirrored where the face is seen from behind).
     let mirror_u = q.face == 0u || q.face == 5u;
     let mirror_v = axis != 1u || q.face == 3u;
@@ -121,31 +143,51 @@ fn vs_cube(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) -
     out.layer = q.layer;
     out.tint = vec2<u32>(q.tint, draw.tint_base);
     out.cell = p + nudge;
-    let ao = 0.2 + 0.2 * f32(q.ao[c]);
-    out.color = light_color(q.light[c]) * (ao * face_shade(q.face));
-    out.fog_distance = fog_distances(rel);
+    out.light = q.light[c];
+    out.shade = (0.2 + 0.2 * f32(q.ao[c])) * face_shade(q.face);
+    out.normal = nudge * -2.0;
     return out;
 }
 
-@vertex
-fn vs_model(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) -> VsOut {
+fn model_corner(vi: u32, slot: u32) -> Corner {
     let draw = model_draws[slot];
     let q = model_quads[draw.first_quad + (vi >> 2u)];
     let c = vi & 3u;
     let p = decode_model_corner(q, c);
-    let cell = model_cell(q);
+    let shade_face = decode_model_shade_face(q);
 
-    var out: VsOut;
-    let rel = draw.origin + p;
-    out.clip = g.view_proj * vec4<f32>(rel, 1.0);
+    var out: Corner;
+    out.rel = draw.origin + p;
     out.uv = decode_model_uv(q, c);
     out.layer = decode_model_layer(q);
     out.tint = vec2<u32>(decode_model_tint(q), draw.tint_base);
-    out.cell = cell + vec3<f32>(0.5, 0.0, 0.5);
-    let ao = f32(decode_model_ao(q, c)) / 63.0;
-    out.color = light_color(decode_model_light(q, c)) * (ao * face_shade(decode_model_shade_face(q)));
-    out.fog_distance = fog_distances(rel);
+    out.cell = model_cell(q) + vec3<f32>(0.5, 0.0, 0.5);
+    out.light = decode_model_light(q, c);
+    out.shade = f32(decode_model_ao(q, c)) / 63.0 * face_shade(shade_face);
+    out.normal = face_normal(shade_face);
     return out;
+}
+
+fn corner_out(c: Corner) -> VsOut {
+    var out: VsOut;
+    out.clip = g.view_proj * vec4<f32>(c.rel, 1.0);
+    out.uv = c.uv;
+    out.layer = c.layer;
+    out.tint = c.tint;
+    out.cell = c.cell;
+    out.color = light_color(c.light) * c.shade;
+    out.fog_distance = fog_distances(c.rel);
+    return out;
+}
+
+@vertex
+fn vs_cube(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) -> VsOut {
+    return corner_out(cube_corner(vi, slot));
+}
+
+@vertex
+fn vs_model(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) -> VsOut {
+    return corner_out(model_corner(vi, slot));
 }
 
 fn tint_color(kind: u32, base: u32, cell: vec3<f32>) -> vec3<f32> {
@@ -208,28 +250,37 @@ fn apply_fog(color: vec3<f32>, d: vec2<f32>) -> vec3<f32> {
     return mix(color, g.fog_color.rgb, f * g.fog_color.a);
 }
 
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let dx = dpdx(in.uv);
-    let dy = dpdy(in.uv);
-    let t = sample_animated(in.uv, in.layer, dx, dy);
+// Texture times tint; cutout below half alpha.
+fn opaque_texel(uv: vec2<f32>, layer: u32, tint: vec2<u32>, cell: vec3<f32>) -> vec3<f32> {
+    let dx = dpdx(uv);
+    let dy = dpdy(uv);
+    let t = sample_animated(uv, layer, dx, dy);
     if t.a < 0.5 {
         discard;
     }
-    let c = t.rgb * tint_color(in.tint.x, in.tint.y, in.cell) * in.color;
+    return t.rgb * tint_color(tint.x, tint.y, cell);
+}
+
+fn translucent_texel(uv: vec2<f32>, layer: u32, tint: vec2<u32>, cell: vec3<f32>) -> vec4<f32> {
+    let dx = dpdx(uv);
+    let dy = dpdy(uv);
+    let t = sample_animated(uv, layer, dx, dy);
+    if t.a < 0.1 {
+        discard;
+    }
+    return vec4<f32>(t.rgb * tint_color(tint.x, tint.y, cell), t.a);
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let c = opaque_texel(in.uv, in.layer, in.tint, in.cell) * in.color;
     return vec4<f32>(apply_fog(c, in.fog_distance), 1.0);
 }
 
 @fragment
 fn fs_translucent(in: VsOut) -> @location(0) vec4<f32> {
-    let dx = dpdx(in.uv);
-    let dy = dpdy(in.uv);
-    let t = sample_animated(in.uv, in.layer, dx, dy);
-    if t.a < 0.1 {
-        discard;
-    }
-    let c = t.rgb * tint_color(in.tint.x, in.tint.y, in.cell) * in.color;
-    return vec4<f32>(apply_fog(c, in.fog_distance), t.a);
+    let t = translucent_texel(in.uv, in.layer, in.tint, in.cell);
+    return vec4<f32>(apply_fog(t.rgb * in.color, in.fog_distance), t.a);
 }
 
 struct SkyOut {

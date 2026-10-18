@@ -19,7 +19,6 @@
     {"id": "dynamic_fps", "status": "unsupported", "reason": "frame pacing and window are owned by mcr"},
     {"id": "continuity", "status": "partial", "reason": "terrain is rendered by mcr; no visible effect"},
     {"id": "moreculling", "status": "partial", "reason": "terrain is rendered by mcr; no visible effect"},
-    {"id": "lambdynlights", "status": "partial", "reason": "terrain lighting is mcr's"},
     {"id": "badoptimizations", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
     {"id": "c2me", "status": "partial", "reason": "optimises or caches paths mcr replaces"},
     {"id": "bobby", "status": "partial", "reason": "optimises or caches paths mcr replaces"},

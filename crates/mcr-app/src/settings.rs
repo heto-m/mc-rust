@@ -19,6 +19,8 @@ pub struct Settings {
     path: PathBuf,
     /// Bumped on every edit so the running session knows to re-apply.
     pub version: u64,
+    /// Java runs a dynamic light mod, so Video Settings offers mcr's switch for it; not saved.
+    pub dynamic_lights_provider: bool,
 }
 
 pub type SharedSettings = Rc<RefCell<Settings>>;
@@ -34,6 +36,7 @@ impl Settings {
             file,
             path,
             version: 1,
+            dynamic_lights_provider: false,
         }))
     }
 
@@ -224,7 +227,7 @@ impl FormScreen {
     }
 
     pub fn video(settings: SharedSettings) -> Self {
-        let items = vec![
+        let mut items = vec![
             stepped(
                 "Render Distance",
                 (2, 32),
@@ -270,6 +273,13 @@ impl FormScreen {
                 set: |o, v| o.entity_shadows = v,
             },
         ];
+        if settings.borrow().dynamic_lights_provider {
+            items.push(Item::Toggle {
+                label: "Mod Dynamic Lights",
+                get: |o| o.mcr_dynamic_lights,
+                set: |o, v| o.mcr_dynamic_lights = v,
+            });
+        }
         Self::new("Video Settings", settings, items)
     }
 
@@ -618,6 +628,27 @@ mod tests {
         assert!(settings.borrow().version > before);
         let again = Settings::load(&dir);
         assert_eq!(again.borrow().file.options.render_distance, 5);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dynamic_lights_switch_only_with_a_provider() {
+        let dir = std::env::temp_dir().join(format!("mcr-settings-dl-{}", std::process::id()));
+        let settings = Settings::load(&dir);
+        let labels = |s: &SharedSettings| -> Vec<&'static str> {
+            FormScreen::video(s.clone())
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Toggle { label, .. } => Some(*label),
+                    Item::Slider { .. } => None,
+                })
+                .collect()
+        };
+        assert!(!labels(&settings).contains(&"Mod Dynamic Lights"));
+        settings.borrow_mut().dynamic_lights_provider = true;
+        assert!(labels(&settings).contains(&"Mod Dynamic Lights"));
+        assert!(settings.borrow().file.options.mcr_dynamic_lights);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

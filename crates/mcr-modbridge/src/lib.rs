@@ -7,6 +7,7 @@ pub mod frame;
 pub mod gpu;
 pub mod input;
 mod launch;
+mod lights;
 mod loader;
 pub mod manager;
 pub mod net;

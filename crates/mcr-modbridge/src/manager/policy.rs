@@ -191,17 +191,10 @@ mod tests {
         for id in ["voicechat", "litematica", "dynamic_fps"] {
             assert_eq!(p.get(id).unwrap().status, PolicyStatus::Unsupported, "{id}");
         }
-        for id in [
-            "continuity",
-            "moreculling",
-            "lambdynlights",
-            "c2me",
-            "bobby",
-            "krypton",
-        ] {
+        for id in ["continuity", "moreculling", "c2me", "bobby", "krypton"] {
             assert_eq!(p.get(id).unwrap().status, PolicyStatus::Partial, "{id}");
         }
-        for id in ["fabric-api", "freecam", "particlerain"] {
+        for id in ["fabric-api", "freecam", "particlerain", "lambdynlights"] {
             assert!(p.get(id).is_none(), "{id}");
         }
     }

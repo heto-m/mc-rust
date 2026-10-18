@@ -90,7 +90,7 @@ crafting table for Crafting Tweaks.
 | Visuality | 0.7.15 | works | boots and joins; its particles are Java's |
 | Subtle Effects | 1.15.0-hotfix.1 | works | boots and joins; its particles are Java's |
 | Dynamic Crosshair | 9.15 | works | its crosshair replaces the vanilla one and hides it with no target |
-| LambDynamicLights | 4.13.0 | partial | policy: terrain lighting is mcr's, only Java-drawn entities could light up |
+| LambDynamicLights | 4.13.0 | works | a held torch, a dropped glowstone item, a burning zombie and a beacon beam light mcr's terrain through the dynamic light channel (`mod-dynamic-lights`); its mode switch and per-source toggles apply; Java's entities light up as in vanilla |
 | Freelook | 1.4.4 | works | holding Alt switches Java to its default third-person view, which mcr follows (`FSTATE_PERSPECTIVE`), and the mouse turns the camera, not the player (`FSTATE_TURN`); releasing it returns to first person |
 | Camera Overhaul | 2.1.2 | works | its pitch and yaw nudges reach mcr through the camera handoff; its strafe and turn roll of the bob pose rolls mcr's world (`FSTATE_VIEW_ROLL`, about 1° while strafing with the defaults) as well as the hand |
 | Shoulder Surfing Reloaded | 5.2.0 | works | with the default config it starts in its shoulder view (third person back, offset sideways, decoupled camera orbiting with the mouse) and F5 cycles first person, third back, third front and the shoulder view; mcr follows Java's camera type |

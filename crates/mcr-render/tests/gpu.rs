@@ -808,3 +808,60 @@ fn animation_tick_changes_reuse_uploaded_sections() {
     let c = read(&mut r, 8);
     assert!(a[0] > 150 && b[1] > 150 && c[0] > 150);
 }
+
+fn dark_wall_pixel(dynamic_lights: bool, lights: &[mcr_render::DynamicLight]) -> Option<[u8; 4]> {
+    let mut r = renderer_with(
+        64,
+        64,
+        RendererConfig {
+            dynamic_lights,
+            ..RendererConfig::default()
+        },
+    )?;
+    r.set_texture_groups(&[flat_group(&[[255, 255, 255, 255]])]);
+    r.set_environment(&mcr_render::Environment::overworld(18000, 0.0, 0.0));
+    r.set_section([0, 0, 0], &lit_wall(0, mcr_render::pack_light(0, 0)))
+        .unwrap();
+    r.set_dynamic_lights(lights);
+    let cam = Camera {
+        position: DVec3::new(8.0, 8.0, 20.0),
+        ..Camera::default()
+    };
+    frame(&mut r, &cam);
+    let px = r.read_offscreen().unwrap();
+    let i = (32 * 64 + 32) * 4;
+    Some([px[i], px[i + 1], px[i + 2], px[i + 3]])
+}
+
+#[test]
+fn dynamic_light_brightens_terrain_near_it_only() {
+    use mcr_render::DynamicLight;
+    let Some(dark) = dark_wall_pixel(true, &[]) else {
+        return;
+    };
+    // The wall's face is at z = 5; the pixel at the centre looks at (8, 8, 5).
+    let near = [DynamicLight::point(DVec3::new(8.0, 8.0, 6.5), 14.0)];
+    let lit = dark_wall_pixel(true, &near).unwrap();
+    assert!(
+        lit[0] > dark[0].saturating_add(80),
+        "torch lights the wall: {dark:?} -> {lit:?}"
+    );
+    assert!(lit[0] > lit[2], "block light is warm: {lit:?}");
+    let far = [DynamicLight::point(DVec3::new(8.0, 8.0, 15.0), 14.0)];
+    assert_eq!(dark_wall_pixel(true, &far).unwrap(), dark, "out of reach");
+    assert_eq!(
+        dark_wall_pixel(false, &near).unwrap(),
+        dark,
+        "ignored without the variants"
+    );
+    let beam = [DynamicLight {
+        start: DVec3::new(-20.0, 8.0, 6.0),
+        end: DVec3::new(40.0, 8.0, 6.0),
+        level: 15.0,
+    }];
+    let beam_lit = dark_wall_pixel(true, &beam).unwrap();
+    assert!(
+        beam_lit[0] > dark[0].saturating_add(80),
+        "segment: {beam_lit:?}"
+    );
+}
