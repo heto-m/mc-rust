@@ -85,8 +85,9 @@ impl GameView for TestView {
         self.pages.clone()
     }
 
-    fn enchant_clue(&self, option: usize) -> Option<(String, i32)> {
-        Some((["Sharpness", "Unbreaking", "Looting"][option].into(), 2))
+    fn enchant_clue(&self, option: usize) -> Option<(String, i32, i32)> {
+        let key = ["sharpness", "unbreaking", "looting"][option];
+        Some((format!("enchantment.minecraft.{key}"), 2, 5))
     }
 }
 

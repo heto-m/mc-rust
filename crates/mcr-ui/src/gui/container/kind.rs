@@ -151,6 +151,8 @@ pub struct SlotSpec {
     pub kind: SlotKind,
     pub active: bool,
     pub icon: Option<&'static str>,
+    /// False in menus whose `canTakeItemForPickAll` refuses (the merchant).
+    pub pick_all: bool,
 }
 
 impl SlotSpec {
@@ -162,6 +164,7 @@ impl SlotSpec {
             kind: SlotKind::Normal,
             active: true,
             icon: None,
+            pick_all: true,
         }
     }
 
@@ -185,7 +188,7 @@ impl SlotSpec {
     }
 
     pub fn takes_pick_all(&self) -> bool {
-        !matches!(self.kind, SlotKind::Result | SlotKind::Locked)
+        self.pick_all && !matches!(self.kind, SlotKind::Result | SlotKind::Locked)
     }
 }
 
@@ -402,6 +405,7 @@ impl ContainerLayout {
                 slots.push(one(162, 37));
                 slots.push(result(220, 37));
                 player_slots(&mut slots, 108, 84);
+                slots.iter_mut().for_each(|s| s.pick_all = false);
                 width = 276;
                 texture = "container/villager";
                 inventory_label = Some((107, 72));
@@ -576,6 +580,13 @@ mod tests {
         for (name, count) in expect {
             assert_eq!(layout(name).slots.len(), count, "{name}");
         }
+    }
+
+    #[test]
+    fn merchant_slots_refuse_pick_all() {
+        let l = layout("merchant");
+        assert!(l.slots.iter().all(|s| !s.takes_pick_all()));
+        assert!(layout("generic_9x3").slots[0].takes_pick_all());
     }
 
     #[test]

@@ -39,7 +39,9 @@ pub struct ContainerScreen {
     pub(super) beacon: super::menus::BeaconState,
     pub(super) crafter_override: [Option<bool>; 9],
     pub(super) anvil_item: Option<ItemStack>,
-    pub(super) anvil_sent: String,
+    pub(super) anvil_sent: Option<String>,
+    pub(super) anvil_hover: String,
+    pub(super) pending_rename: Option<String>,
     pub(super) book_layout: Option<crate::gui::book::PageLayout>,
     pub(super) recipes: Option<RecipeBook>,
 }
@@ -61,7 +63,9 @@ impl ContainerScreen {
             beacon: Default::default(),
             crafter_override: [None; 9],
             anvil_item: None,
-            anvil_sent: String::new(),
+            anvil_sent: None,
+            anvil_hover: String::new(),
+            pending_rename: None,
             book_layout: None,
             recipes: RecipeBook::for_menu(kind),
         }
@@ -278,6 +282,9 @@ impl Screen for ContainerScreen {
     }
 
     fn tick(&mut self, env: &mut Env<'_>, out: &mut Vec<ScreenAction>) {
+        if let Some(name) = self.pending_rename.take() {
+            out.push(ScreenAction::RenameItem(name));
+        }
         if let Some(book) = &mut self.recipes {
             book.tick(env.view, &self.layout);
             book.take_actions(out);
@@ -456,9 +463,14 @@ impl ContainerScreen {
             ClickType::Pickup if disabled => Some(true),
             ClickType::Pickup if is_empty(view.carried()) => Some(false),
             ClickType::Swap if disabled => {
-                let hotbar =
-                    self.layout.player_start() + 27 + usize::try_from(click.button).unwrap_or(99);
-                (!is_empty(view.slot(hotbar))).then_some(true)
+                let swapped = if click.button == 40 {
+                    view.offhand()
+                } else {
+                    let button = usize::try_from(click.button).unwrap_or(usize::MAX);
+                    let start = self.layout.player_start() + 27;
+                    start.checked_add(button).and_then(|i| view.slot(i))
+                };
+                (!is_empty(swapped)).then_some(true)
             }
             _ => None,
         };

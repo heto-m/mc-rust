@@ -654,6 +654,10 @@ impl ClientState {
             P::OpenScreen(p) => {
                 self.inventory
                     .open_container(p.container_id, p.menu_type, p.title.clone());
+                if let Some(open) = self.inventory.open.as_mut() {
+                    open.player_start =
+                        crate::menu::Layout::menu_player_start(self.data, p.menu_type);
+                }
                 out.event(ClientEvent::ContainerOpened {
                     id: p.container_id,
                     menu_type: p.menu_type,
@@ -893,6 +897,7 @@ impl ClientState {
             }
             P::MerchantOffers(p) => {
                 self.gameplay.merchant = Some(p.into());
+                self.gameplay.merchant_revision += 1;
                 out.event(ClientEvent::MerchantOffersUpdated);
             }
             P::AwardStats(p) => {

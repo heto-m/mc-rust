@@ -2,7 +2,7 @@ use mcr_buf::Identifier;
 use mcr_nbt::Compound;
 use mcr_protocol::common::UpdateTags;
 use mcr_protocol::configuration::RegistryData;
-use mcr_protocol::play::clientbound::ui::UpdateRecipes;
+use mcr_protocol::play::clientbound::ui::{SlotDisplay, StonecutterRecipe, UpdateRecipes};
 use mcr_protocol::types::component::HolderSet;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
@@ -119,7 +119,9 @@ pub struct Registries {
     registries: FxHashMap<String, Registry>,
     tags: FxHashMap<String, FxHashMap<String, Vec<i32>>>,
     recipe_sets: FxHashMap<String, FxHashSet<i32>>,
-    stonecutter_inputs: Vec<HolderSet>,
+    stonecutter_recipes: Vec<StonecutterRecipe>,
+    /// Bumped on every `update_recipes`, for caches keyed on the stonecutter list.
+    pub recipes_revision: u64,
     pub enabled_features: Vec<String>,
     builtin: Option<BuiltinData>,
     builtin_lookups: usize,
@@ -166,12 +168,13 @@ impl Registries {
                 .collect();
             self.recipe_sets.insert(key.as_str().to_owned(), set);
         }
-        self.stonecutter_inputs = packet
+        self.stonecutter_recipes = packet
             .stonecutter_recipes
             .iter()
             .take(MAX_STONECUTTER_INPUTS)
-            .map(|r| r.input.clone())
+            .cloned()
             .collect();
+        self.recipes_revision += 1;
     }
 
     /// Whether an item is in a synced recipe property set such as `minecraft:furnace_input`.
@@ -180,10 +183,18 @@ impl Registries {
     }
 
     pub fn stonecutter_accepts(&self, item: i32) -> bool {
-        self.stonecutter_inputs.iter().any(|input| match input {
-            HolderSet::Ids(ids) => ids.contains(&item),
-            HolderSet::Tag(tag) => self.is_in_tag("minecraft:item", tag.as_str(), item),
-        })
+        self.stonecutter_matches(item).next().is_some()
+    }
+
+    /// Option displays of the synced stonecutter recipes whose input takes `item`, in server order.
+    pub fn stonecutter_matches(&self, item: i32) -> impl Iterator<Item = &SlotDisplay> {
+        self.stonecutter_recipes
+            .iter()
+            .filter(move |r| match &r.input {
+                HolderSet::Ids(ids) => ids.contains(&item),
+                HolderSet::Tag(tag) => self.is_in_tag("minecraft:item", tag.as_str(), item),
+            })
+            .map(|r| &r.option_display)
     }
 
     pub fn tag_registries(&self) -> impl Iterator<Item = &str> {

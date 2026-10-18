@@ -6,21 +6,21 @@
 
 Scope: mcr-app view and play, mcr-client inventory, mcr-ui container screens.
 
-- [ ] 1.1 C1 (G) Horse, donkey, llama and nautilus inventories never open
-- [ ] 1.2 C2 (G) Inventory key while riding opens the player inventory
-- [ ] 1.3 C3 (G) Villager trade list always empty
-- [ ] 1.4 C4 (G) Stonecutter recipe list always empty
-- [ ] 1.5 C5 (G) Loom shows no patterns
-- [ ] 1.6 C6 (G) Anvil rename never syncs on item placement
-- [ ] 1.7 C7 (G) Crafter screen corrupts the client's hotbar and inventory
-- [ ] 1.8 C10 (V) Enchanting table clue tooltip missing
-- [ ] 1.9 C11 (V) Ghost item stays on the cursor after closing a container
-- [ ] 1.10 C14 (V) Anvil cost not red when unaffordable
-- [ ] 1.11 C17 (M) Merchant double-click collects
-- [ ] 1.12 C20 (M) StateView leaves spectator, trims and score at defaults
-- [ ] 1.13 C21 (M) Crafter F-swap toggle
-- [ ] 1.14 Unit tests: mount open event builds the mount menu, crafter mirroring keeps the hotbar, anvil rename emits the packet, StateView returns merchant, stonecutter and loom data
-- [ ] 1.15 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 1.1 C1 (G) Horse, donkey, llama and nautilus inventories never open
+- [x] 1.2 C2 (G) Inventory key while riding opens the player inventory
+- [x] 1.3 C3 (G) Villager trade list always empty
+- [x] 1.4 C4 (G) Stonecutter recipe list always empty
+- [x] 1.5 C5 (G) Loom shows no patterns
+- [x] 1.6 C6 (G) Anvil rename never syncs on item placement
+- [x] 1.7 C7 (G) Crafter screen corrupts the client's hotbar and inventory
+- [x] 1.8 C10 (V) Enchanting table clue tooltip missing
+- [x] 1.9 C11 (V) Ghost item stays on the cursor after closing a container
+- [x] 1.10 C14 (V) Anvil cost not red when unaffordable
+- [x] 1.11 C17 (M) Merchant double-click collects
+- [x] 1.12 C20 (M) StateView leaves spectator, trims and score at defaults
+- [x] 1.13 C21 (M) Crafter F-swap toggle
+- [x] 1.14 Unit tests: mount open event builds the mount menu, crafter mirroring keeps the hotbar, anvil rename emits the packet, StateView returns merchant, stonecutter and loom data
+- [x] 1.15 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 2. Sleeping and respawn state
 

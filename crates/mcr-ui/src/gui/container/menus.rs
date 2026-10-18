@@ -77,6 +77,7 @@ impl ContainerScreen {
                 self.widgets.add(name);
                 self.widgets.set_focus(Some(ANVIL_NAME), 0);
                 self.anvil_item = None;
+                self.anvil_sent = None;
             }
             MenuKind::Beacon => self.build_beacon(),
             MenuKind::Lectern => {
@@ -199,12 +200,35 @@ impl ContainerScreen {
                         e.take_changed();
                         e.editable = current.is_some();
                     }
-                    self.anvil_sent = name;
+                    self.anvil_hover = name.clone();
                     self.anvil_item = current;
                     self.widgets.set_focus(Some(ANVIL_NAME), cx.now_ms);
+                    if self.anvil_item.is_some() {
+                        self.send_rename(&name);
+                    }
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Vanilla sends an empty name when the box still shows the item's own, uncustomised name.
+    fn rename_payload(&self, typed: &str) -> Option<String> {
+        let item = self.anvil_item.as_ref()?;
+        let named = mcr_protocol::types::component::component_type_id("custom_name")
+            .is_some_and(|id| item.components.get(id).is_some());
+        let payload = if !named && typed == self.anvil_hover {
+            String::new()
+        } else {
+            typed.to_owned()
+        };
+        (self.anvil_sent.as_deref() != Some(&payload)).then_some(payload)
+    }
+
+    fn send_rename(&mut self, typed: &str) {
+        if let Some(payload) = self.rename_payload(typed) {
+            self.anvil_sent = Some(payload.clone());
+            self.pending_rename = Some(payload);
         }
     }
 
@@ -214,10 +238,8 @@ impl ContainerScreen {
                 (MenuKind::Anvil, ANVIL_NAME, WidgetEventKind::Edited) => {
                     if let Some(e) = self.widgets.edit(ANVIL_NAME) {
                         let value = e.value().to_owned();
-                        if value != self.anvil_sent {
-                            self.anvil_sent = value.clone();
-                            out.push(ScreenAction::RenameItem(value));
-                        }
+                        self.send_rename(&value);
+                        out.extend(self.pending_rename.take().map(ScreenAction::RenameItem));
                     }
                 }
                 (MenuKind::Lectern, BOOK_DONE, WidgetEventKind::Pressed) => {
@@ -740,16 +762,21 @@ impl ContainerScreen {
     fn enchant_tooltip(&self, cx: &mut RenderCx<'_, '_>, i: usize) {
         let view = cx.view;
         let cost = view.data(i);
-        let Some((name, level)) = view.enchant_clue(i) else {
+        let Some((key, level, max_level)) = view.enchant_clue(i) else {
             return;
         };
         if cost <= 0 || level < 0 {
             return;
         }
+        let mut name = cx.lang(&key);
+        if level != 1 || max_level != 1 {
+            let numeral = cx.lang(&format!("enchantment.level.{level}"));
+            name = format!("{name} {numeral}");
+        }
         let mut lines = TooltipLines::default();
         lines.push_text(format!(
             "§f{}",
-            cx.lang_fmt("container.enchant.clue", &[&format!("{name} {level}")])
+            cx.lang_fmt("container.enchant.clue", &[&name])
         ));
         if !view.creative() {
             lines.push_text("");
@@ -789,9 +816,10 @@ impl ContainerScreen {
         } else if is_empty(view.slot(2)) {
             return;
         } else {
+            let affordable = view.creative() || view.xp_level() >= cost;
             (
                 cx.lang_fmt("container.repair.cost", &[&cost.to_string()]),
-                0xFF80_FF20,
+                if affordable { 0xFF80_FF20 } else { 0xFFFF_6060 },
             )
         };
         let w = cx.text_width(&text);
@@ -1280,7 +1308,42 @@ fn fraction(value: i32, total: i32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::fraction;
+    use mcr_protocol::types::component::DataComponent;
+    use mcr_protocol::types::text::Component;
+
+    use super::*;
+
+    fn anvil(item: ItemStack, hover: &str) -> ContainerScreen {
+        let mut screen = ContainerScreen::new(MenuKind::Anvil, Component::text(""));
+        screen.anvil_item = Some(item);
+        screen.anvil_hover = hover.to_owned();
+        screen
+    }
+
+    #[test]
+    fn placing_an_unnamed_item_syncs_an_empty_rename() {
+        let mut screen = anvil(ItemStack::new(1, 1), "Iron Sword");
+        screen.send_rename("Iron Sword");
+        assert_eq!(screen.pending_rename.take().as_deref(), Some(""));
+        screen.send_rename("Iron Sword");
+        assert_eq!(screen.pending_rename, None);
+    }
+
+    #[test]
+    fn placing_a_named_item_syncs_its_name_and_edits_follow() {
+        let mut item = ItemStack::new(1, 1);
+        item.components
+            .added
+            .push(DataComponent::CustomName(Component::text("Excalibur")));
+        let mut screen = anvil(item, "Excalibur");
+        screen.send_rename("Excalibur");
+        assert_eq!(screen.pending_rename.take().as_deref(), Some("Excalibur"));
+        screen.send_rename("Excalibur II");
+        assert_eq!(
+            screen.pending_rename.take().as_deref(),
+            Some("Excalibur II")
+        );
+    }
 
     #[test]
     fn progress_survives_hostile_totals() {

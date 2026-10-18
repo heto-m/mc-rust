@@ -3,18 +3,147 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mcr_client::{Client, ClientState, SuggestSource};
+use mcr_client::{Client, ClientState, Merchant, SuggestSource};
+use mcr_protocol::play::clientbound::ui::MerchantOffer;
 use mcr_protocol::play::clientbound::ui::{
     PositionedAdvancement, RecipeBookEntry, RecipeBookSettings, RecipeDisplay, SlotDisplay,
 };
+use mcr_protocol::types::component::DataComponent;
 use mcr_protocol::types::component::HolderSet;
+use mcr_protocol::types::entity_data::EntityDataValue;
+use mcr_protocol::types::game::GameType;
 use mcr_protocol::types::item::ItemStack;
-use mcr_ui::{CommandSuggester, GameView, Suggestion, SuggestionSet};
+use mcr_ui::{CommandSuggester, GameView, MerchantInfo, Suggestion, SuggestionSet, TradeOffer};
 use rustc_hash::FxHashMap;
 
 pub struct StateView<'a> {
     pub state: &'a ClientState,
     pub operator_items: bool,
+    pub cache: &'a ViewCache,
+}
+
+const MAX_TRADE_OFFERS: usize = 256;
+const PLAYER_SCORE_DATA_INDEX: u8 = 16;
+
+/// Owned data the `GameView` borrows, rebuilt only when its source changes.
+#[derive(Default)]
+pub struct ViewCache {
+    merchant_key: Option<(u64, i32)>,
+    merchant: Option<MerchantInfo>,
+    stonecutter_key: Option<(i32, i32, u64)>,
+    stonecutter: Vec<ItemStack>,
+    trim_materials: Vec<String>,
+}
+
+impl ViewCache {
+    pub fn refresh(&mut self, state: &ClientState) {
+        self.refresh_trim_materials(state);
+        let Some(open) = state.inventory.open.as_ref() else {
+            self.merchant_key = None;
+            self.merchant = None;
+            self.stonecutter_key = None;
+            self.stonecutter.clear();
+            return;
+        };
+        let key = (state.gameplay.merchant_revision, open.id);
+        if self.merchant_key != Some(key) {
+            self.merchant_key = Some(key);
+            self.merchant = state
+                .gameplay
+                .merchant
+                .as_ref()
+                .filter(|m| m.container_id == open.id)
+                .map(|m| merchant_info(m, state.data));
+        }
+        if let (Some(info), Some(m)) = (self.merchant.as_mut(), state.gameplay.merchant.as_ref()) {
+            info.future_xp = future_xp(m, open.slots.get(2));
+        }
+        match state.stonecutter_input() {
+            Some(input) => {
+                let key = (open.id, input, state.registries.recipes_revision);
+                if self.stonecutter_key != Some(key) {
+                    self.stonecutter_key = Some(key);
+                    self.stonecutter = state.stonecutter_options(input);
+                }
+            }
+            None => {
+                self.stonecutter_key = None;
+                self.stonecutter.clear();
+            }
+        }
+    }
+
+    fn refresh_trim_materials(&mut self, state: &ClientState) {
+        let Some(registry) = state.registries.get("minecraft:trim_material") else {
+            return;
+        };
+        if registry.len() != self.trim_materials.len() {
+            self.trim_materials = registry
+                .entries
+                .iter()
+                .map(|e| e.id.as_str().to_owned())
+                .collect();
+        }
+    }
+}
+
+fn offer_stack(item: i32, count: i32, components: &[DataComponent]) -> ItemStack {
+    let mut stack = ItemStack::new(item, count);
+    stack.components.added = components.to_vec();
+    stack
+}
+
+/// `MerchantOffer#getModifiedCostCount`: demand and the special price move the first cost.
+fn modified_cost_count(offer: &MerchantOffer, max_stack: i32) -> i32 {
+    let base = offer.cost_a.count;
+    let demand =
+        ((base as f32 * offer.demand as f32 * offer.price_multiplier).floor() as i32).max(0);
+    (base + demand + offer.special_price_diff).clamp(1, max_stack.max(1))
+}
+
+fn merchant_info(m: &Merchant, data: &mcr_data::Version) -> MerchantInfo {
+    let offers = m
+        .offers
+        .iter()
+        .take(MAX_TRADE_OFFERS)
+        .map(|o| {
+            let max_stack = u32::try_from(o.cost_a.item)
+                .ok()
+                .and_then(|i| data.item_info(i))
+                .map_or(64, |i| i32::from(i.max_stack_size));
+            let a = &o.cost_a;
+            TradeOffer {
+                base_cost_a: offer_stack(a.item, a.count, &a.components),
+                cost_a: offer_stack(a.item, modified_cost_count(o, max_stack), &a.components),
+                cost_b: o
+                    .cost_b
+                    .as_ref()
+                    .map(|b| offer_stack(b.item, b.count, &b.components))
+                    .unwrap_or_default(),
+                result: o.result.clone(),
+                out_of_stock: o.out_of_stock,
+            }
+        })
+        .collect();
+    MerchantInfo {
+        offers,
+        level: m.villager_level,
+        xp: m.villager_xp,
+        future_xp: 0,
+        show_progress: m.show_progress,
+        can_restock: m.can_restock,
+    }
+}
+
+fn future_xp(m: &Merchant, result: Option<&ItemStack>) -> i32 {
+    let Some(result) = result.filter(|r| !r.is_empty()) else {
+        return 0;
+    };
+    m.offers
+        .iter()
+        .take(MAX_TRADE_OFFERS)
+        .find(|o| o.result.item == result.item && !o.out_of_stock)
+        .map_or(0, |o| o.xp)
 }
 
 impl StateView<'_> {
@@ -38,6 +167,14 @@ impl GameView for StateView<'_> {
 
     fn carried(&self) -> Option<&ItemStack> {
         Some(&self.state.inventory.cursor)
+    }
+
+    fn offhand(&self) -> Option<&ItemStack> {
+        self.state
+            .inventory
+            .player
+            .slots
+            .get(mcr_client::OFFHAND_MENU_SLOT)
     }
 
     fn data(&self, index: usize) -> i32 {
@@ -64,6 +201,57 @@ impl GameView for StateView<'_> {
         let name = format!("minecraft:{}", id.strip_prefix("minecraft:").unwrap_or(id));
         let item = mcr_data::v26_3().item_by_name(&name)?;
         Some(ItemStack::new(i32::try_from(item).ok()?, count))
+    }
+
+    fn spectator(&self) -> bool {
+        self.state.player.game_mode == GameType::Spectator
+    }
+
+    fn merchant(&self) -> Option<&MerchantInfo> {
+        self.cache.merchant.as_ref()
+    }
+
+    fn stonecutter_options(&self) -> &[ItemStack] {
+        &self.cache.stonecutter
+    }
+
+    fn loom_pattern_count(&self) -> usize {
+        self.state.loom_pattern_count()
+    }
+
+    fn trim_materials(&self) -> &[String] {
+        &self.cache.trim_materials
+    }
+
+    fn score(&self) -> i32 {
+        match self.state.player.data.get(&PLAYER_SCORE_DATA_INDEX) {
+            Some(EntityDataValue::Int(v)) => *v,
+            _ => 0,
+        }
+    }
+
+    fn enchant_clue(&self, option: usize) -> Option<(String, i32, i32)> {
+        if option >= 3 {
+            return None;
+        }
+        let id = self.data(4 + option);
+        let level = self.data(7 + option);
+        let entry = self
+            .state
+            .registries
+            .get("minecraft:enchantment")?
+            .get(id)?;
+        let (namespace, path) = entry.id.as_str().split_once(':')?;
+        let max_level = entry
+            .data
+            .as_ref()
+            .and_then(|d| d.get_i32("max_level"))
+            .unwrap_or(1);
+        Some((
+            format!("enchantment.{namespace}.{}", path.replace('/', ".")),
+            level,
+            max_level,
+        ))
     }
 
     fn xp_level(&self) -> i32 {
@@ -307,5 +495,115 @@ impl SuggestEngine {
             Vec::new()
         };
         self.bridge.borrow_mut().result = Some(SuggestionSet { suggestions, usage });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mcr_protocol::play::clientbound::ui::{ItemCost, MerchantOffers};
+    use mcr_protocol::types::text::Component;
+    use uuid::Uuid;
+
+    use super::*;
+
+    fn item(name: &str) -> i32 {
+        mcr_data::v26_3().item_by_name(name).unwrap() as i32
+    }
+
+    fn offer(demand: i32, special: i32) -> MerchantOffer {
+        MerchantOffer {
+            cost_a: ItemCost {
+                item: item("minecraft:emerald"),
+                count: 10,
+                components: Vec::new(),
+            },
+            result: ItemStack::new(item("minecraft:bread"), 4),
+            cost_b: None,
+            out_of_stock: false,
+            uses: 0,
+            max_uses: 12,
+            xp: 5,
+            special_price_diff: special,
+            price_multiplier: 0.05,
+            demand,
+        }
+    }
+
+    fn trading_state() -> ClientState {
+        let mut s = ClientState::new(&mcr_client::ClientConfig::default(), Uuid::nil());
+        s.inventory.open_container(7, 19, Component::text(""));
+        s.inventory
+            .set_content(7, 0, vec![ItemStack::default(); 39], ItemStack::default());
+        s.gameplay.merchant = Some(
+            MerchantOffers {
+                container_id: 7,
+                offers: vec![offer(20, -3), offer(0, 0)],
+                villager_level: 2,
+                villager_xp: 12,
+                show_progress: true,
+                can_restock: true,
+            }
+            .into(),
+        );
+        s.gameplay.merchant_revision += 1;
+        s
+    }
+
+    fn view<'a>(state: &'a ClientState, cache: &'a ViewCache) -> StateView<'a> {
+        StateView {
+            state,
+            operator_items: false,
+            cache,
+        }
+    }
+
+    #[test]
+    fn state_view_returns_the_merchant_offers_with_adjusted_prices() {
+        let state = trading_state();
+        let mut cache = ViewCache::default();
+        cache.refresh(&state);
+        let view = view(&state, &cache);
+        let info = view.merchant().unwrap();
+        assert_eq!((info.level, info.xp), (2, 12));
+        assert_eq!(info.offers.len(), 2);
+        assert_eq!(info.offers[0].base_cost_a.count, 10);
+        assert_eq!(info.offers[0].cost_a.count, 10 + 10 - 3);
+        assert_eq!(info.offers[1].cost_a.count, 10);
+    }
+
+    #[test]
+    fn merchant_offers_of_another_container_are_not_shown() {
+        let mut state = trading_state();
+        state.inventory.open.as_mut().unwrap().id = 8;
+        let mut cache = ViewCache::default();
+        cache.refresh(&state);
+        assert!(view(&state, &cache).merchant().is_none());
+    }
+
+    #[test]
+    fn future_xp_follows_the_result_slot() {
+        let mut state = trading_state();
+        let mut cache = ViewCache::default();
+        cache.refresh(&state);
+        assert_eq!(cache.merchant.as_ref().unwrap().future_xp, 0);
+        state.inventory.open.as_mut().unwrap().slots[2] =
+            ItemStack::new(item("minecraft:bread"), 4);
+        cache.refresh(&state);
+        assert_eq!(cache.merchant.as_ref().unwrap().future_xp, 5);
+    }
+
+    #[test]
+    fn state_view_reports_spectators_and_the_synced_score() {
+        let mut state = trading_state();
+        let cache = ViewCache::default();
+        assert!(!view(&state, &cache).spectator());
+        state.player.game_mode = GameType::Spectator;
+        state
+            .player
+            .data
+            .insert(PLAYER_SCORE_DATA_INDEX, EntityDataValue::Int(42));
+        let v = view(&state, &cache);
+        assert!(v.spectator());
+        assert_eq!(v.score(), 42);
     }
 }

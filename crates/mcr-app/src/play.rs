@@ -47,13 +47,47 @@ use crate::preview::Preview;
 use crate::render_system::{PipelineStats, RenderSystem};
 use crate::settings::{OptionsScreen, SharedSettings};
 use crate::target::{BlockHit, EntityPicker, Target, pick, reach, third_person_distance};
-use crate::view::{StateView, SuggestEngine};
+use crate::view::{StateView, SuggestEngine, ViewCache};
 use mcr_modbridge::frame::JavaCamera;
 use mcr_modbridge::sound::{SoundOwner, event_owner};
 
 pub const TICK_SECONDS: f32 = 0.05;
 const LOW_DISK_SPACE_TOAST: u32 = 0x4c44_5321;
 const INSECURE_SERVER_TOAST: u32 = 0x5553_4357;
+
+fn container_menu(
+    state: &mcr_client::ClientState,
+    menu_type: i32,
+    title: mcr_protocol::types::text::Component,
+) -> Option<(MenuKind, mcr_protocol::types::text::Component)> {
+    if menu_type != -1 {
+        return MenuKind::from_registry_id(menu_type).map(|k| (k, title));
+    }
+    let screen = state.mount_screen()?;
+    let name = state
+        .inventory
+        .open
+        .as_ref()?
+        .mount
+        .and_then(|m| state.entity_type_short_name(m.entity_type))?;
+    let title = mcr_protocol::types::text::Component::translatable(
+        format!("entity.minecraft.{name}"),
+        Vec::new(),
+    );
+    let kind = match screen.family {
+        mcr_client::MountFamily::Nautilus => MenuKind::Nautilus {
+            saddle: screen.saddle,
+            armor: screen.armor,
+        },
+        family => MenuKind::Mount {
+            chest_columns: u8::try_from(screen.columns).unwrap_or(0),
+            saddle: screen.saddle,
+            armor: screen.armor,
+            llama: family == mcr_client::MountFamily::Llama,
+        },
+    };
+    Some((kind, title))
+}
 
 fn line_tag(tag: mcr_client::ChatTag) -> mcr_ui::ChatLineTag {
     match tag {
@@ -369,6 +403,7 @@ pub struct Play {
     container_open: bool,
     creative_open: bool,
     hotbars: Rc<RefCell<HotbarStore>>,
+    view_cache: ViewCache,
     hotbar_path: std::path::PathBuf,
     death_shown: bool,
     death_message: Option<mcr_protocol::types::text::Component>,
@@ -556,6 +591,7 @@ impl Play {
             container_open: false,
             creative_open: false,
             hotbars,
+            view_cache: ViewCache::default(),
             hotbar_path,
             death_shown: false,
             death_message: None,
@@ -1249,8 +1285,8 @@ impl Play {
             ClientEvent::ContainerOpened { .. } if self.java_gui => self.container_open = false,
             ClientEvent::ContainerOpened {
                 menu_type, title, ..
-            } => match MenuKind::from_registry_id(menu_type) {
-                Some(kind) => {
+            } => match container_menu(&self.world.client.state, menu_type, title) {
+                Some((kind, title)) => {
                     if self.container_open {
                         self.stack.pop();
                     }
@@ -1769,9 +1805,11 @@ impl Play {
         }
         let mut actions = Vec::new();
         {
+            self.view_cache.refresh(&self.world.client.state);
             let view = StateView {
                 state: &self.world.client.state,
                 operator_items: self.options.operator_items_tab,
+                cache: &self.view_cache,
             };
             let mut env = Env {
                 view: &view,
@@ -2014,6 +2052,10 @@ impl Play {
         if self.busy() {
             return;
         }
+        if self.world.client.state.riding_custom_inventory() {
+            self.net(Client::open_inventory);
+            return;
+        }
         let creative = self.world.client.state.player.instabuild;
         if creative {
             self.push_screen(Box::new(CreativeScreen::new(self.hotbars.clone())));
@@ -2159,9 +2201,11 @@ impl Play {
         }
         let mut actions = Vec::new();
         {
+            self.view_cache.refresh(&self.world.client.state);
             let view = StateView {
                 state: &self.world.client.state,
                 operator_items: self.options.operator_items_tab,
+                cache: &self.view_cache,
             };
             let mut env = Env {
                 view: &view,
@@ -2680,9 +2724,11 @@ impl Play {
             millis: self.started.elapsed().as_millis() as u64,
         };
         {
+            self.view_cache.refresh(&self.world.client.state);
             let view = StateView {
                 state: &self.world.client.state,
                 operator_items: self.options.operator_items_tab,
+                cache: &self.view_cache,
             };
             let max_scale = u32::try_from(self.gui_scale()).unwrap_or(0);
             let mut frame = self.gui.ui.frame_scaled(size.0, size.1, max_scale);
@@ -2971,6 +3017,45 @@ fn neighbour(pos: BlockPos, face: Facing) -> BlockPos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mount_state(entity: &str, columns: usize) -> mcr_client::ClientState {
+        let mut s =
+            mcr_client::ClientState::new(&mcr_client::ClientConfig::default(), uuid::Uuid::nil());
+        let entity_type = s.data.entity_type_by_name(entity).unwrap() as i32;
+        s.inventory
+            .open_container(4, -1, mcr_protocol::types::text::Component::text(""));
+        s.inventory.open.as_mut().unwrap().mount = Some(mcr_client::MountInfo {
+            columns,
+            entity_type,
+        });
+        s
+    }
+
+    #[test]
+    fn mount_open_event_builds_the_mount_menu() {
+        let title = mcr_protocol::types::text::Component::text("");
+        let (kind, _) =
+            container_menu(&mount_state("minecraft:llama", 3), -1, title.clone()).unwrap();
+        assert_eq!(
+            kind,
+            MenuKind::Mount {
+                chest_columns: 3,
+                saddle: false,
+                armor: true,
+                llama: true
+            }
+        );
+        let (kind, _) =
+            container_menu(&mount_state("minecraft:nautilus", 0), -1, title.clone()).unwrap();
+        assert_eq!(
+            kind,
+            MenuKind::Nautilus {
+                saddle: true,
+                armor: true
+            }
+        );
+        assert!(container_menu(&mount_state("minecraft:cow", 0), -1, title).is_none());
+    }
 
     #[test]
     fn sensitivity_matches_vanilla_default() {

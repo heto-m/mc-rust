@@ -64,6 +64,10 @@ pub trait GameView {
         None
     }
 
+    fn offhand(&self) -> Option<&ItemStack> {
+        None
+    }
+
     /// Container data property `index` (furnace progress, enchant costs, beacon levels, ...).
     fn data(&self, _index: usize) -> i32 {
         0
@@ -102,7 +106,8 @@ pub trait GameView {
         None
     }
 
-    fn enchant_clue(&self, _option: usize) -> Option<(String, i32)> {
+    /// Clue for enchanting option `_option`: the enchantment's translation key, level and max level.
+    fn enchant_clue(&self, _option: usize) -> Option<(String, i32, i32)> {
         None
     }
 

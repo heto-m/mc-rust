@@ -156,6 +156,31 @@ impl Rules<'_> {
             && self.has(s, "minecraft:provides_banner_patterns")
     }
 
+    /// Banner patterns the loom offers for a banner and dye, given the pattern slot (`LoomMenu#getSelectablePatterns`).
+    pub fn loom_pattern_count(&self, pattern_item: &ItemStack) -> usize {
+        let registry = "minecraft:banner_pattern";
+        let tag_len = |tag: &str| self.registries.tag(registry, tag).map_or(0, <[i32]>::len);
+        if pattern_item.is_empty() {
+            return tag_len("minecraft:no_item_required");
+        }
+        let explicit = component_type_id("provides_banner_patterns")
+            .and_then(|id| pattern_item.components.get(id));
+        match explicit {
+            Some(DataComponent::ProvidesBannerPatterns(HolderSet::Tag(tag))) => {
+                tag_len(tag.as_str())
+            }
+            Some(DataComponent::ProvidesBannerPatterns(HolderSet::Ids(ids))) => ids.len(),
+            _ => self
+                .item_name(pattern_item)
+                .filter(|_| self.has(pattern_item, "minecraft:provides_banner_patterns"))
+                .and_then(|n| {
+                    n.strip_prefix("minecraft:")?
+                        .strip_suffix("_banner_pattern")
+                })
+                .map_or(0, |n| tag_len(&format!("minecraft:pattern_item/{n}"))),
+        }
+    }
+
     pub fn in_recipe_set(&self, set: &str, s: &ItemStack) -> bool {
         self.registries.recipe_set_contains(set, s.item)
     }

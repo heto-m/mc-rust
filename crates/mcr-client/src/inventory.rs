@@ -20,6 +20,8 @@ pub struct Container {
     pub title: Component,
     pub data: FxHashMap<i16, i16>,
     pub mount: Option<crate::menu::MountInfo>,
+    /// First player-inventory slot when the 36 player slots are not the last ones (the crafter).
+    pub player_start: Option<usize>,
     pub synced: bool,
 }
 
@@ -33,6 +35,7 @@ impl Container {
             title: Component::text(""),
             data: FxHashMap::default(),
             mount: None,
+            player_start: None,
             synced: false,
         }
     }
@@ -123,6 +126,7 @@ impl Inventory {
     pub fn close(&mut self, id: i32) -> bool {
         if self.open.as_ref().is_some_and(|c| c.id == id) {
             self.open = None;
+            self.cursor = ItemStack::default();
             self.qc = crate::menu::QuickCraft::default();
             true
         } else {
@@ -210,20 +214,24 @@ impl Inventory {
         true
     }
 
-    /// An open container's last 36 slots are the player's main inventory and hotbar.
+    /// An open container's 36 player slots (the last 36 unless `player_start` says otherwise) are the
+    /// player's main inventory and hotbar.
     fn mirror_player_slots(&mut self) {
         let Some(open) = &self.open else {
             return;
         };
-        let n = open.slots.len();
-        if n < 36 {
+        let Some(start) = open
+            .player_start
+            .or_else(|| open.slots.len().checked_sub(36))
+            .filter(|s| s + 36 <= open.slots.len())
+        else {
             return;
-        }
+        };
         for i in 0..27 {
-            self.player.slots[9 + i] = open.slots[n - 36 + i].clone();
+            self.player.slots[9 + i] = open.slots[start + i].clone();
         }
         for i in 0..9 {
-            self.player.slots[HOTBAR_START + i] = open.slots[n - 9 + i].clone();
+            self.player.slots[HOTBAR_START + i] = open.slots[start + 27 + i].clone();
         }
     }
 }
@@ -281,12 +289,13 @@ impl Inventory {
             );
             let n = slots.len();
             let is_player = container_id == PLAYER_MENU_ID;
+            let hotbar_start = layout.player_start(n) + 27;
             let hotbar = move |b: i8| {
                 let b = usize::try_from(b).ok()?;
                 if is_player {
                     Some(HOTBAR_START + b)
                 } else {
-                    n.checked_sub(9).map(|s| s + b)
+                    (n >= hotbar_start + 9).then_some(hotbar_start + b)
                 }
             };
             let mut qc = std::mem::take(&mut self.qc);
@@ -431,5 +440,48 @@ mod tests {
         let items = vec![ItemStack::default(); MAX_CONTAINER_SLOTS + 100];
         inv.set_content(1, 0, items, ItemStack::default());
         assert_eq!(inv.container(1).unwrap().slots.len(), MAX_CONTAINER_SLOTS);
+    }
+    fn open_crafter(inv: &mut Inventory) {
+        inv.open_container(1, 7, Component::text(""));
+        inv.open.as_mut().unwrap().player_start = Some(9);
+        let mut items = vec![ItemStack::default(); 46];
+        for k in 0..9 {
+            items[36 + k] = stack(10 + k as i32, 1);
+        }
+        items[9] = stack(30, 1);
+        items[45] = stack(99, 1);
+        assert!(inv.set_content(1, 0, items, ItemStack::default()));
+    }
+
+    #[test]
+    fn crafter_mirroring_keeps_the_hotbar_and_inventory() {
+        let mut inv = Inventory::default();
+        open_crafter(&mut inv);
+        assert_eq!(inv.player.slots[9].item, 30);
+        for k in 0..9 {
+            assert_eq!(inv.player.slots[36 + k].item, 10 + k as i32);
+        }
+        assert!(inv.player.slots[10..36].iter().all(ItemStack::is_empty));
+    }
+
+    #[test]
+    fn crafter_number_key_swaps_the_matching_hotbar_slot() {
+        let mut inv = Inventory::default();
+        open_crafter(&mut inv);
+        inv.predict_click(&cx(), false, 1, 9, 2, ContainerInput::Swap);
+        let open = inv.open.as_ref().unwrap();
+        assert_eq!(open.slots[9].item, 12);
+        assert_eq!(open.slots[36 + 2].item, 30);
+        assert_eq!(open.slots[45].item, 99);
+        assert_eq!(inv.player.slots[36 + 2].item, 30);
+    }
+
+    #[test]
+    fn closing_a_container_clears_the_cursor() {
+        let mut inv = Inventory::default();
+        inv.open_container(3, 2, Component::text("Chest"));
+        inv.cursor = stack(4, 2);
+        assert!(inv.close(3));
+        assert!(inv.cursor.is_empty());
     }
 }

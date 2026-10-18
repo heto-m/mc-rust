@@ -322,6 +322,7 @@ pub struct GameplayState {
     pub advancements: Advancements,
     pub maps: FxHashMap<i32, MapData>,
     pub merchant: Option<Merchant>,
+    pub merchant_revision: u64,
     pub stats: FxHashMap<(i32, i32), i32>,
     pub stats_revision: u64,
     pub ghost_recipe: Option<GhostRecipe>,

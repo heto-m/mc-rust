@@ -10,6 +10,7 @@ use rustc_hash::FxHashMap;
 use super::{Menu, Rules, split};
 
 const PLAYER_SLOTS: usize = 36;
+const CRAFTER_PLAYER_START: usize = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MountInfo {
@@ -119,6 +120,23 @@ impl Layout {
         } else {
             layout
         }
+    }
+
+    /// Index of the first of the 36 player-inventory slots in a menu of `total` slots.
+    pub fn player_start(self, total: usize) -> usize {
+        match self {
+            Self::Crafter => CRAFTER_PLAYER_START,
+            _ => total.saturating_sub(PLAYER_SLOTS),
+        }
+    }
+
+    /// `player_start` for a registry menu type, without the slot count.
+    pub fn menu_player_start(data: &Version, menu_type: i32) -> Option<usize> {
+        let name = data
+            .registry("minecraft:menu")?
+            .name_of(u32::try_from(menu_type).ok()?)?;
+        (name.strip_prefix("minecraft:").unwrap_or(name) == "crafter_3x3")
+            .then_some(CRAFTER_PLAYER_START)
     }
 
     fn slot_count(self) -> Option<usize> {
@@ -389,16 +407,17 @@ impl Layout {
     }
 
     pub(super) fn can_take_for_pickup_all(self, kind: SlotKind) -> bool {
-        !matches!(
-            kind,
-            SlotKind::Result(
-                ResultKind::Crafting { .. }
-                    | ResultKind::Stonecutter
-                    | ResultKind::Smithing
-                    | ResultKind::Cartography
-                    | ResultKind::Unpredicted
+        self != Self::Merchant
+            && !matches!(
+                kind,
+                SlotKind::Result(
+                    ResultKind::Crafting { .. }
+                        | ResultKind::Stonecutter
+                        | ResultKind::Smithing
+                        | ResultKind::Cartography
+                        | ResultKind::Unpredicted
+                )
             )
-        )
     }
 }
 

@@ -496,12 +496,13 @@ impl Client {
     }
 
     pub fn close_container(&mut self) -> Result<()> {
-        let id = self
-            .state
-            .inventory
-            .open
-            .take()
-            .map_or(PLAYER_MENU_ID, |c| c.id);
+        let id = match self.state.inventory.open.take() {
+            Some(c) => {
+                self.state.inventory.cursor = ItemStack::default();
+                c.id
+            }
+            None => PLAYER_MENU_ID,
+        };
         self.send_play(&S::ContainerClose(sb::ContainerClose { container_id: id }))
     }
 
