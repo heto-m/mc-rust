@@ -176,7 +176,10 @@ staging, and the render thread's queue writes and batch bookkeeping (`gpu::backe
 submit time includes finishing mcr's held encoder when a hook adds Java work after it. Java samples its render
 thread with JFR (`McrProfiler`) and logs each mod's share every 10
 seconds. `MCR_MOD_PROFILE=frame` skips the sampler, which slows Java down. `mcr --screenshot out.png --bench N`, alone or with `--mods` and `--connect … --after-ticks T`, runs N
-unpaced frames offscreen and prints the totals. `--bench-timeline S` instead runs unpaced frames until S seconds
+unpaced frames offscreen and prints the totals. `MCR_BENCH_MOUSE=<px>` moves the mouse that many pixels per bench frame through mcr's mouse path (Java
+gets the motion too), and the bench prints the turn latency and the frames in which Java handed a camera back.
+The turn latency runs from a mouse look to the end of the first frame whose camera shows it (`latency.rs`);
+windowed runs add it to the once-a-second stats line. `--bench-timeline S` instead runs unpaced frames until S seconds
 after joining (or after Java's title screen appears) and prints the frame rate of every second; with `--mods`
 the shell flow also prints when Java's title screen appeared.
 
@@ -444,7 +447,11 @@ frames, net, sound, input) is loader-agnostic.
   NeoForge overloads must pick the overload by descriptor. `SectionRenderDispatcher.RenderSection.compileSync`
   and `compileAsync` gained `List<AdditionalSectionRenderer>` overloads, which NeoForge's `LevelRenderer`
   calls: `RenderSectionMixin` handles both (`require = 0` on NeoForge's), or real meshing would run and the
-  level loading screen would wait for the player's section forever.
+  level loading screen would wait for the player's section forever. NeoForge's `Camera.alignWithEntity` turns
+  the camera with `setRotation(yaw, pitch, roll)` from `ViewportEvent.ComputeCameraAngles` instead of
+  vanilla's two-argument call: the bridge seeds that event with Rust's look (listeners turn on top) and gives
+  NeoForge's mirrored third-person call Rust's look. Without it Java's camera kept the shadow player's tick-old
+  look and the camera handoff made mcr render terrain from it while turning (`neoforge-perf`).
 - **Warm-up.** The AOT cache and preloading run under NeoForge too. The key also hashes the patched game jar
   (FML takes it from the library directory, not the class path) and names the loader and its version. The
   preloader reads the game's loader through `GameClasses`: Knot under Fabric, FML's `TransformingClassLoader`

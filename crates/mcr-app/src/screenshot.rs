@@ -165,27 +165,42 @@ fn shell_bench(shell: &mut crate::shell::Shell, frames: u32) {
         .and_then(|v| v.parse().ok())
         .filter(|v: &f32| v.is_finite())
         .unwrap_or(0.0);
-    if turn != 0.0
+    let mouse: f64 = std::env::var("MCR_BENCH_MOUSE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v: &f64| v.is_finite())
+        .unwrap_or(0.0);
+    if (turn != 0.0 || mouse != 0.0)
         && let Some(play) = &mut shell.play
     {
         (play.yaw, play.pitch) = (0.0, 0.0);
     }
     shell.set_mod_uncapped(true);
     shell.reset_mod_stats();
+    if let Some(play) = &mut shell.play {
+        play.turn_latency.reset();
+    }
     let start = Instant::now();
     let mut last = start;
     let mut gpu = Vec::with_capacity(frames as usize);
     let mut draw = Vec::with_capacity(frames as usize);
+    let (mut turn_frames, mut handoff_frames) = (0u32, 0u32);
     for _ in 0..frames {
         let now = Instant::now();
         shell.advance((now - last).as_secs_f32());
         last = now;
-        if let Some(play) = &mut shell.play {
+        if mouse != 0.0 {
+            shell.mouse_motion(mouse, 0.0);
+        } else if let Some(play) = &mut shell.play {
             play.look(turn, 0.0);
         }
         if let Some(g) = shell.frame().and_then(|s| s.gpu) {
             gpu.push(g.frame_ms);
             draw.push(g.draw_ms);
+        }
+        if let Some(play) = &shell.play {
+            turn_frames += u32::from(play.java_turn);
+            handoff_frames += u32::from(play.java_camera.is_some());
         }
     }
     let wall = start.elapsed().as_secs_f64();
@@ -194,6 +209,16 @@ fn shell_bench(shell: &mut crate::shell::Shell, frames: u32) {
         f64::from(frames) / wall,
         wall * 1000.0 / f64::from(frames)
     );
+    if let Some(play) = &shell.play {
+        let turn = play
+            .turn_latency
+            .summary()
+            .map_or_else(|| "no turns".to_owned(), |t| t.to_string());
+        println!(
+            "bench: {turn} | java turn {turn_frames} frames, camera handoff {handoff_frames} frames, fov scale {:.3}",
+            play.java_fov_scale
+        );
+    }
     let median = |v: &mut Vec<f32>| {
         v.sort_by(f32::total_cmp);
         v.get(v.len() / 2).copied().unwrap_or(0.0)

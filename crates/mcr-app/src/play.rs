@@ -451,6 +451,7 @@ pub struct Play {
     skins: crate::skins::SkinStore,
     boss_darkening: (f32, f32),
     spectate_view: Option<(f32, f32)>,
+    pub turn_latency: crate::latency::TurnLatency,
     seen_camera: Option<i32>,
     glow: Option<(wgpu::TextureFormat, mcr_render::GlowOutline)>,
     spectator_effect: crate::post_effects::SpectatorEffect,
@@ -621,6 +622,7 @@ impl Play {
             entity_events: Default::default(),
             boss_darkening: (0.0, 0.0),
             spectate_view: None,
+            turn_latency: crate::latency::TurnLatency::default(),
             seen_camera: None,
             glow: None,
             spectator_effect: Default::default(),
@@ -1689,6 +1691,20 @@ impl Play {
     pub fn look(&mut self, dyaw: f32, dpitch: f32) {
         self.yaw = (self.yaw + dyaw).rem_euclid(360.0);
         self.pitch = (self.pitch + dpitch).clamp(-90.0, 90.0);
+        self.turn_latency.look(Instant::now(), self.yaw, self.pitch);
+    }
+
+    /// The look (yaw, pitch in degrees) a rendered camera shows, undoing [`Self::player_camera`].
+    fn shown_look(&self, camera: &Camera) -> (f32, f32) {
+        let (mut yaw, mut pitch) = (camera.yaw, camera.pitch);
+        if self.perspective == Perspective::ThirdFront {
+            yaw -= std::f32::consts::PI;
+            pitch = -pitch;
+        }
+        (
+            (std::f32::consts::PI - yaw).to_degrees().rem_euclid(360.0),
+            -pitch.to_degrees(),
+        )
     }
 
     pub fn scroll(&mut self, lines: f32) {
@@ -2769,6 +2785,10 @@ impl Play {
             self.render.renderer.request_capture();
         }
         let stats = self.render.draw_with(&camera, 1.0, Some(&mut overlay));
+        if self.spectate_view.is_none() {
+            let (yaw, pitch) = self.shown_look(&camera);
+            self.turn_latency.shown(yaw, pitch, Instant::now());
+        }
         if let Some(c) = self.render.renderer.take_capture() {
             self.world_icon =
                 mcr_singleplayer::icon::thumbnail(c.width, c.height, &c.pixels, c.bgra);

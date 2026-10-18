@@ -20,6 +20,7 @@ mod hand;
 mod hud;
 mod input;
 mod language;
+mod latency;
 mod launcher;
 mod map;
 mod mesh_world;
@@ -439,11 +440,17 @@ impl App {
             }
             let Some(frame) = shell.frame() else { return };
             self.stats.record(dt, &frame);
-            if let Some(play) = &shell.play {
+            if let Some(play) = &mut shell.play {
                 let mem = play.render.renderer.memory_stats();
                 if let Some(line) = self.stats.report(Some((play.pipeline_stats(), mem))) {
                     let p = play.feet();
-                    println!("{line} | pos {:.1} {:.1} {:.1}", p[0], p[1], p[2]);
+                    let turn = play
+                        .turn_latency
+                        .summary()
+                        .map(|t| format!(" | {t}"))
+                        .unwrap_or_default();
+                    println!("{line} | pos {:.1} {:.1} {:.1}{turn}", p[0], p[1], p[2]);
+                    play.turn_latency.reset();
                 }
             }
             let want = shell.wants_grab();

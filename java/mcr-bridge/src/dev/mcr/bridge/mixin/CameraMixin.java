@@ -109,6 +109,44 @@ abstract class CameraMixin implements McrCameraHandoff.Placement {
         return mcr$rust != null ? mcr$rust.xRot() : xRot;
     }
 
+    // NeoForge seeds ViewportEvent.ComputeCameraAngles with the entity's look, so listeners turn on top of Rust's.
+    @ModifyArg(
+            method = "alignWithEntity",
+            at = @At(value = "INVOKE", target = "Lnet/neoforged/neoforge/client/event/ViewportEvent$ComputeCameraAngles;<init>(Lnet/minecraft/client/Camera;FFFF)V"),
+            index = 2,
+            require = 0)
+    private float mcr$rustEventYRot(float yRot) {
+        return mcr$rust != null ? mcr$rust.yRot() : yRot;
+    }
+
+    @ModifyArg(
+            method = "alignWithEntity",
+            at = @At(value = "INVOKE", target = "Lnet/neoforged/neoforge/client/event/ViewportEvent$ComputeCameraAngles;<init>(Lnet/minecraft/client/Camera;FFFF)V"),
+            index = 3,
+            require = 0)
+    private float mcr$rustEventXRot(float xRot) {
+        return mcr$rust != null ? mcr$rust.xRot() : xRot;
+    }
+
+    // NeoForge's mirrored third-person turn; its first setRotation(FFF) takes the event's angles above.
+    @ModifyArg(
+            method = "alignWithEntity",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/client/Camera;setRotation(FFF)V", ordinal = 1),
+            index = 0,
+            require = 0)
+    private float mcr$rustMirroredYRot(float yRot) {
+        return mcr$rust != null ? mcr$rust.yRot() : yRot;
+    }
+
+    @ModifyArg(
+            method = "alignWithEntity",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/client/Camera;setRotation(FFF)V", ordinal = 1),
+            index = 1,
+            require = 0)
+    private float mcr$rustMirroredXRot(float xRot) {
+        return mcr$rust != null ? mcr$rust.xRot() : xRot;
+    }
+
     @ModifyArg(method = "alignWithEntity", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/Camera;setPosition(DDD)V"), index = 0, require = 0)
     private double mcr$rustX(double x) {
         return mcr$rust != null ? mcr$eye()[0] : x;
