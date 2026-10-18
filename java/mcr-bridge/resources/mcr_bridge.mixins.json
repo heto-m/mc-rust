@@ -47,6 +47,7 @@
     "ListenerMixin",
     "LivingEntityFallSoundMixin",
     "LocalPlayerMixin",
+    "MainMixin",
     "MainTargetMixin",
     "MessageBoxMixin",
     "MinecraftMixin",

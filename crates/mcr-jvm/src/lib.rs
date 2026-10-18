@@ -8,6 +8,7 @@ mod home;
 mod host;
 mod jni;
 mod options;
+pub mod preload;
 mod ring;
 mod table;
 pub mod upcall;

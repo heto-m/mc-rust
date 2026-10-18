@@ -71,6 +71,22 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
   other hidden classes from Knot, signed jars (Fabric Loader) and pre-Java-6 class files are not cached.
   With 29 mods the cache saves about 0.8 s of 11.1 s to the title screen (1.1 s with a cold page cache) and
   does not change the frame rate after joining (numbers in the `mod-jvm-warmup` design).
+- **Preloading.** Every session also logs its class loads (`-Xlog:class+load` into `<key>.<pid>.classlog`),
+  and at shutdown mcr merges them into `<key>.classes` (`mcr_jvm::preload`, header `mcr-jvm-preload 1`) next to
+  the AOT cache. Java loads a marker class (`McrPreload$Mark<k>`) at four milestones: the game's `main`, the
+  first game-loop frame, the title screen and the login packet; the markers cut the list into segments. When a
+  list exists, the `mcr-preload` daemon thread starts at `main`, after every `preLaunch` entrypoint added its
+  mixin configs, and loads each listed class with `Class.forName(name, false, knot)` once this session reached
+  the milestone the class followed last time. Classes are read, mixin-transformed and defined off the render
+  thread, never initialized. Left to the game: Mixin and its extensions (MixinExtras), which Mixin loads while
+  holding its transformer lock, so a preload holding one of their class locks deadlocks against a transform on
+  the render thread; classes in mixin packages; and the targets and mod packages of plugins whose `preApply` or
+  `postApply` is not empty. A preloading session counts as a strike until it ends cleanly, so a hang or kill
+  counts; two strikes stop preloading for the key. `MCR_JVM_PRELOAD=off` turns logging and preloading off.
+  With 29 mods the thread loads about 11,600 classes in 3–3.5 s after `main`, staying ahead of the render
+  thread, and the title screen comes about 1.7 s sooner (9.1 s instead of 10.8 s with the AOT cache, 2.4 s sooner
+  without it), joining about 2 s sooner, and Java's first second in the world takes half as long per frame
+  (numbers in the `mod-jvm-preload` design).
 
 ## Seams (vanilla 26.3 classes)
 

@@ -38,7 +38,7 @@ pub use launch::{
     AotSettings, BOOT_JAR, BRIDGE_JAR, BridgeConfig, LAUNCH_MANIFEST, LaunchManifest, LaunchPlan,
     plan, prepare_game_dir,
 };
-pub use mcr_jvm::aot;
+pub use mcr_jvm::{aot, preload};
 pub use net::NetLink;
 pub use pacer::{FRAME_RATE, TICK_RATE, TickClock};
 
@@ -117,7 +117,16 @@ struct Warmup {
     cache: aot::AotCache,
     plan: aot::AotPlan,
     helper: PathBuf,
+    classes: preload::ClassList,
+    preload: preload::PreloadPlan,
+    preload_failed: bool,
 }
+
+/// Java loads `<marker><k>` when it reaches preload milestone `k` (`McrPreload`).
+pub const PRELOAD_MARKER: &str = "dev.mcr.bridge.McrPreload$Mark";
+pub const PRELOAD_PROPERTY: &str = "mcr.preload";
+/// Whether sessions preload when `MCR_JVM_PRELOAD` is not set; lists are recorded either way.
+pub const PRELOAD_BY_DEFAULT: bool = true;
 
 impl Bridge {
     /// Moves the process into `config.game_dir`: mods open `config/…` through java.io, which
@@ -161,6 +170,12 @@ impl Bridge {
             .and_then(|settings| warmup(settings, &home, &plan));
         if let Some(w) = &warmup {
             options.extra.extend(w.plan.options());
+            options.extra.extend(w.preload.options());
+            if let Some(list) = w.preload.list() {
+                options
+                    .extra
+                    .push(format!("-D{PRELOAD_PROPERTY}={}", list.display()));
+            }
         }
         let mut jvm = JvmConfig::new(home, options);
         jvm.args = plan.args.clone();
@@ -241,6 +256,11 @@ impl Bridge {
         self.aot.as_ref().map(|w| &w.plan)
     }
 
+    /// Whether this session records and preloads Java's classes, when warm-up is configured.
+    pub fn preload_plan(&self) -> Option<&preload::PreloadPlan> {
+        self.aot.as_ref().map(|w| &w.preload)
+    }
+
     /// The packet bridge; one per process like the VM.
     pub fn net(&self) -> NetLink {
         NetLink::new(
@@ -278,6 +298,11 @@ impl Bridge {
 
     fn observe(&mut self, event: &BridgeEvent) {
         match *event {
+            BridgeEvent::Info { ref key, .. } if key == "preload_stopped" => {
+                if let Some(w) = &mut self.aot {
+                    w.preload_failed = true;
+                }
+            }
             BridgeEvent::VmExited { code } => self.vm = VmState::Exited(code),
             BridgeEvent::VmFinished { boot_ok, destroyed } => {
                 self.vm = VmState::Finished { boot_ok, destroyed };
@@ -379,9 +404,16 @@ fn warmup(settings: &AotSettings, home: &mcr_jvm::JavaHome, plan: &LaunchPlan) -
     });
     match result {
         Ok((cache, aot_plan)) => {
+            let classes = preload::ClassList::new(&settings.dir, cache.key(), PRELOAD_MARKER);
+            let mut preload = classes.plan(PRELOAD_BY_DEFAULT);
+            if let Err(e) = classes.begin(&preload) {
+                tracing::warn!("class preloading off: {e}");
+                preload = preload::PreloadPlan::Off("class list directory unavailable");
+            }
             tracing::info!(
                 key = cache.key(),
                 plan = ?aot_plan,
+                ?preload,
                 ms = started.elapsed().as_millis() as u64,
                 "JVM AOT cache"
             );
@@ -389,6 +421,9 @@ fn warmup(settings: &AotSettings, home: &mcr_jvm::JavaHome, plan: &LaunchPlan) -
                 cache,
                 plan: aot_plan,
                 helper: settings.helper.clone(),
+                classes,
+                preload,
+                preload_failed: false,
             })
         }
         Err(e) => {
@@ -399,8 +434,16 @@ fn warmup(settings: &AotSettings, home: &mcr_jvm::JavaHome, plan: &LaunchPlan) -
 }
 
 impl Warmup {
-    /// Keeps a finished recording and starts the helper that builds the cache from it.
+    /// Merges the class list, keeps a finished recording and starts the helper that builds the cache from it.
     fn finish(self, clean: bool) {
+        match self
+            .classes
+            .finish(&self.preload, clean && !self.preload_failed)
+        {
+            Ok(n) if n > 0 => tracing::info!(classes = n, "class list for preloading updated"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("class list for preloading: {e}"),
+        }
         if self.plan.records() {
             match self.cache.end_recording(clean) {
                 Ok(true) => {

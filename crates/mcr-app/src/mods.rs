@@ -43,6 +43,19 @@ fn aot_line(plan: &mcr_modbridge::aot::AotPlan) -> String {
     }
 }
 
+fn preload_line(plan: &mcr_modbridge::preload::PreloadPlan) -> String {
+    use mcr_modbridge::preload::PreloadPlan;
+    match plan {
+        PreloadPlan::On { list: Some(_), .. } => {
+            "JVM class preload: on, from the last session's class list".to_owned()
+        }
+        PreloadPlan::On { list: None, .. } => {
+            "JVM class preload: recording this session's class list".to_owned()
+        }
+        PreloadPlan::Off(why) => format!("JVM class preload off: {why}"),
+    }
+}
+
 /// What the shell needs from the mod host: hooks for each connection and Java's join requests.
 #[derive(Debug, Clone)]
 pub struct ModNet {
@@ -230,6 +243,9 @@ impl ModHost {
             .map_err(fail)?;
         let recording = bridge.aot_plan().is_some_and(|p| p.records());
         if let Some(line) = bridge.aot_plan().map(aot_line) {
+            eprintln!("[mods] {line}");
+        }
+        if let Some(line) = bridge.preload_plan().map(preload_line) {
             eprintln!("[mods] {line}");
         }
         let frames = bridge.frames();

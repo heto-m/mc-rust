@@ -2,11 +2,13 @@ package dev.mcr.bridge.mixin;
 
 import dev.mcr.bridge.BridgeAbi;
 import dev.mcr.bridge.McrCameraHandoff;
+import dev.mcr.bridge.McrPreload;
 import dev.mcr.bridge.net.McrNet;
 import dev.mcr.bridge.net.NetProbe;
 import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
+import net.minecraft.network.protocol.game.ClientboundLoginPacket;
 import net.minecraft.network.protocol.game.ClientboundSetCameraPacket;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -30,6 +32,11 @@ abstract class ClientPacketListenerMixin {
             McrNet.sendChat(BridgeAbi.CHAT_COMMAND, command);
             ci.cancel();
         }
+    }
+
+    @Inject(method = "handleLogin", at = @At("TAIL"))
+    private void mcr$preloadWorld(ClientboundLoginPacket packet, CallbackInfo ci) {
+        McrPreload.milestone(McrPreload.LOGIN);
     }
 
     @Inject(method = "handleSetCamera", at = @At("TAIL"))

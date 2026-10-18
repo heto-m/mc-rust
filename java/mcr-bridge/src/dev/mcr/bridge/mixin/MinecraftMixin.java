@@ -5,6 +5,7 @@ import dev.mcr.bridge.McrCrash;
 import dev.mcr.bridge.McrFrame;
 import dev.mcr.bridge.McrFrameTimes;
 import dev.mcr.bridge.McrInput;
+import dev.mcr.bridge.McrPreload;
 import dev.mcr.bridge.gpu.GpuSelfTest;
 import dev.mcr.bridge.net.GameplayKeys;
 import dev.mcr.bridge.net.McrNet;
@@ -21,6 +22,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 abstract class MinecraftMixin {
     @Inject(method = "runTick", at = @At("HEAD"))
     private void mcr$awaitFrame(boolean advanceGameTime, CallbackInfo ci) {
+        McrPreload.milestone(McrPreload.GAME_LOOP);
         McrFrame.awaitFrame((Minecraft) (Object) this);
     }
 
@@ -61,6 +63,7 @@ abstract class MinecraftMixin {
 
     @Inject(method = "stop", at = @At("TAIL"))
     private void mcr$quit(CallbackInfo ci) {
+        McrPreload.cancel();
         if (McrInput.active() && !McrFrame.stopping()) {
             McrInput.quit();
         }

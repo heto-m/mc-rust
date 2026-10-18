@@ -277,7 +277,7 @@ impl AotCache {
     }
 
     /// Keeps the [`MAX_CACHES`] most recently used caches, this key's first, and drops other keys'
-    /// stale leftovers.
+    /// stale leftovers; class lists are [`crate::preload`]'s to evict.
     pub fn evict(&self) -> io::Result<()> {
         let mut caches = Vec::new();
         let mut others = Vec::new();
@@ -294,7 +294,7 @@ impl AotCache {
             let modified = entry.metadata()?.modified()?;
             if ext == "aot" {
                 caches.push((modified, entry.path()));
-            } else {
+            } else if ext != "classes" {
                 others.push((modified, entry.path()));
             }
         }
