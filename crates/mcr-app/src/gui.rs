@@ -3,7 +3,9 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use mcr_assets::ResourceManager;
 use mcr_render::{Overlay, OverlayCtx, wgpu};
-use mcr_ui::{ItemIcons, Lang, MemoryClipboard, ScreenAssets, ToastManager, Ui, UiRenderer};
+use mcr_ui::{ItemIcons, Lang, ScreenAssets, ToastManager, Ui, UiRenderer};
+
+use crate::mod_input::UiClipboard;
 
 /// Everything that draws GUI: owned by the shell between sessions and lent to a session while it runs.
 pub struct Gui {
@@ -11,7 +13,7 @@ pub struct Gui {
     pub ui_renderer: UiRenderer,
     pub icons: ItemIcons,
     pub assets: ScreenAssets,
-    pub clipboard: MemoryClipboard,
+    pub clipboard: UiClipboard,
     pub toasts: ToastManager,
     resources: Arc<ResourceManager>,
     language: String,
@@ -40,7 +42,7 @@ impl Gui {
             ui_renderer: UiRenderer::new(device, format),
             icons,
             assets,
-            clipboard: MemoryClipboard::default(),
+            clipboard: UiClipboard::default(),
             toasts: ToastManager::default(),
             resources,
             language: mcr_ui::DEFAULT_LANGUAGE.to_owned(),

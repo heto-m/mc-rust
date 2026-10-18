@@ -73,7 +73,7 @@ impl SystemClipboard {
         let system = match arboard::Clipboard::new() {
             Ok(c) => Some(Mutex::new(c)),
             Err(e) => {
-                eprintln!("[mods] no system clipboard ({e}); Java gets a private one");
+                eprintln!("no system clipboard ({e}); using a private one");
                 None
             }
         };
@@ -110,6 +110,35 @@ impl ClipboardHost for SystemClipboard {
                     .set_text(text.to_owned());
             }
             None => self.fallback.set(text),
+        }
+    }
+}
+
+/// The native UI's clipboard: private until a windowed run hands it the desktop's.
+#[derive(Default)]
+pub struct UiClipboard {
+    system: Option<Arc<SystemClipboard>>,
+    private: mcr_ui::MemoryClipboard,
+}
+
+impl UiClipboard {
+    pub fn use_system(&mut self, system: Arc<SystemClipboard>) {
+        self.system = Some(system);
+    }
+}
+
+impl mcr_ui::Clipboard for UiClipboard {
+    fn get(&mut self) -> String {
+        match &self.system {
+            Some(system) => ClipboardHost::get(&**system).unwrap_or_default(),
+            None => self.private.get(),
+        }
+    }
+
+    fn set(&mut self, text: &str) {
+        match &self.system {
+            Some(system) => ClipboardHost::set(&**system, text),
+            None => self.private.set(text),
         }
     }
 }

@@ -271,14 +271,16 @@ impl App {
             self.mod_host = plan.start(&self.opts, &mut renderer, &mods_app)?;
         }
         self.scene = Some(if self.opts.world.is_none() && !self.opts.synthetic {
-            Scene::Shell(Box::new(Shell::new(
+            let mut shell = Shell::new(
                 renderer,
                 shell_config(
                     &self.opts,
                     self.mod_host.as_ref().map(mods::ModHost::net),
                     mods_app,
                 ),
-            )?))
+            )?;
+            shell.use_system_clipboard();
+            Scene::Shell(Box::new(shell))
         } else if self.opts.synthetic {
             self.synthetic_scene(renderer)?
         } else {

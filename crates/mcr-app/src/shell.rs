@@ -144,6 +144,15 @@ fn asset_index_id(jar: &std::path::Path) -> Option<String> {
 }
 
 impl Shell {
+    /// Hands the menus the desktop clipboard; offscreen runs keep a private one.
+    pub fn use_system_clipboard(&mut self) {
+        if let Some(p) = &mut self.parts {
+            p.gui
+                .clipboard
+                .use_system(crate::mod_input::SystemClipboard::open());
+        }
+    }
+
     pub fn new(renderer: Renderer, cfg: ShellConfig) -> Result<Self> {
         let data = mcr_data::v26_3();
         let settings = Settings::load(&cfg.game_dir);

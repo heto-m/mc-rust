@@ -46,8 +46,6 @@ pub struct Launcher {
     started: Instant,
     pub quit: bool,
     pub shot: Option<PathBuf>,
-    /// Copy code reaches the desktop only in a windowed run.
-    system_clipboard: Option<Arc<crate::mod_input::SystemClipboard>>,
 }
 
 impl std::fmt::Debug for Launcher {
@@ -81,12 +79,13 @@ impl Launcher {
             started: Instant::now(),
             quit: false,
             shot: None,
-            system_clipboard: None,
         })
     }
 
     pub fn use_system_clipboard(&mut self) {
-        self.system_clipboard = Some(crate::mod_input::SystemClipboard::open());
+        self.gui
+            .clipboard
+            .use_system(crate::mod_input::SystemClipboard::open());
     }
 
     pub fn take_plan(&mut self) -> Option<LaunchPlan> {
@@ -126,12 +125,7 @@ impl Launcher {
             match action {
                 ScreenAction::Quit => self.quit = true,
                 ScreenAction::OpenUrl(url) => gui::open_url(&url),
-                ScreenAction::CopyToClipboard(text) => {
-                    if let Some(system) = &self.system_clipboard {
-                        mcr_modbridge::input::ClipboardHost::set(&**system, &text);
-                    }
-                    self.gui.clipboard.set(&text);
-                }
+                ScreenAction::CopyToClipboard(text) => self.gui.clipboard.set(&text),
                 _ => {}
             }
         }
