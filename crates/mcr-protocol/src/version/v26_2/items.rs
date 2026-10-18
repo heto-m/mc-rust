@@ -300,6 +300,7 @@ fn trim_material(r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
 }
 
 fn block_predicate(r: &mut &[u8], w: &mut Vec<u8>, d: Depth) -> Result<()> {
+    let d = d.deeper()?;
     if io::bool(r, w)? {
         holder_set(r, w, maps().block, "block")?;
     }

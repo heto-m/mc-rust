@@ -373,7 +373,10 @@ impl Client {
                 if self.translate_warned.len() < 256
                     && self.translate_warned.insert((state as u8, frame.id))
                 {
-                    eprintln!("dropping untranslatable packet: {e}");
+                    eprintln!(
+                        "dropping untranslatable packet: {}",
+                        crate::events::sanitize_for_log(&e.to_string())
+                    );
                 }
                 Ok(())
             }

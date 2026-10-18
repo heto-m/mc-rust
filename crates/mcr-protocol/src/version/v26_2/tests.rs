@@ -492,3 +492,25 @@ fn brewing_property_sets_are_synthesized() {
     assert!(set("minecraft:brewing_reagent").contains(&new_item("minecraft:nether_wart")));
     assert_eq!(set("minecraft:brewing_reagent").len(), 21);
 }
+
+#[test]
+fn nested_block_predicates_hit_the_depth_limit() {
+    use crate::version::io::Depth;
+    let new = crate::types::component::COMPONENT_NAMES
+        .iter()
+        .position(|n| *n == "can_break")
+        .unwrap() as i32;
+    let old = maps().component.back(new).unwrap();
+    let levels = 64;
+    let mut comps = Vec::new();
+    for _ in 0..levels {
+        comps.extend(varint(old));
+        comps.extend([1, 0, 0, 0, 1]);
+    }
+    comps.extend(varint(old));
+    comps.extend([1, 0, 0, 0, 0, 0]);
+    comps.extend(std::iter::repeat_n(0, levels));
+    let bytes = old_stack_bytes(old_item("minecraft:diamond_pickaxe"), 1, &comps, 1);
+    let mut w = Vec::new();
+    assert!(super::items::stack(&mut bytes.as_slice(), &mut w, Depth::top()).is_err());
+}
