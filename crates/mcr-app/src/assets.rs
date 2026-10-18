@@ -1,24 +1,44 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use mcr_assets::ResourceManager;
+use mcr_assets::{AssetSource, ResourceManager, ZipSource};
+use mcr_client::BuiltinData;
 use mcr_entity_model::SceneAssets;
-use mcr_mesh::{BiomeColors, ColorMaps, ModelCache};
+use mcr_mesh::{BiomeClimate, BiomeColors, ColorMaps, ModelCache};
+
+const BIOME: &str = "minecraft:worldgen/biome";
+
+/// Registry entries from the vanilla data in the client jar; resource packs never supply them.
+pub fn jar_registry_data(jar: &Path) -> BuiltinData {
+    let source = match ZipSource::open(jar) {
+        Ok(source) => Some(source),
+        Err(e) => {
+            eprintln!(
+                "assets: no built-in registry data from {}: {e}",
+                jar.display()
+            );
+            None
+        }
+    };
+    BuiltinData::new(move |registry, entry| {
+        let path = mcr_client::data_pack_path(registry, entry)?;
+        let bytes = source.as_ref()?.read(&path).ok()??;
+        mcr_nbt::json::compound_from_slice(&bytes)
+    })
+}
 
 pub struct Assets {
     pub cache: Arc<ModelCache>,
     pub resources: Arc<ResourceManager>,
     pub scene: Option<Arc<SceneAssets>>,
     maps: ColorMaps,
-    biome_dir: PathBuf,
+    pub builtin: BuiltinData,
 }
 
 impl std::fmt::Debug for Assets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Assets")
-            .field("biome_dir", &self.biome_dir)
-            .finish_non_exhaustive()
+        f.debug_struct("Assets").finish_non_exhaustive()
     }
 }
 
@@ -53,10 +73,7 @@ impl Assets {
             maps: ColorMaps::load(&resources),
             resources,
             scene,
-            biome_dir: jar
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join("generated/data/minecraft/worldgen/biome"),
+            builtin: jar_registry_data(jar),
         })
     }
 
@@ -64,12 +81,24 @@ impl Assets {
         self.resources.read(path).ok().flatten()
     }
 
+    /// Colours per biome in registry order, from the jar's biome data; unknown biomes get plains.
     pub fn biome_colors(&self, names: &[String]) -> Arc<BiomeColors> {
-        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        Arc::new(BiomeColors::from_json_dir(
-            &self.biome_dir,
-            &refs,
-            &self.maps,
-        ))
+        let mut missing = 0;
+        let climates: Vec<BiomeClimate> = names
+            .iter()
+            .map(|name| {
+                self.builtin
+                    .get(BIOME, name)
+                    .and_then(|c| BiomeClimate::from_nbt(&c))
+                    .unwrap_or_else(|| {
+                        missing += 1;
+                        BiomeClimate::default()
+                    })
+            })
+            .collect();
+        if missing > 0 {
+            eprintln!("assets: {missing} biomes without colours in the jar, using plains");
+        }
+        Arc::new(BiomeColors::from_climates(&climates, &self.maps))
     }
 }

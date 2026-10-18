@@ -196,7 +196,7 @@ impl AudioAttributes {
 
     /// A JSON file of the vanilla data (`worldgen/biome`, `dimension_type`) with an `attributes` object.
     pub fn from_json(bytes: &[u8]) -> Option<Self> {
-        registry_json(bytes).map(|c| Self::from_registry_entry(&c))
+        mcr_nbt::json::compound_from_slice(bytes).map(|c| Self::from_registry_entry(&c))
     }
 
     /// The biome's value wins attribute by attribute over the dimension's (the `override` modifier).
@@ -214,56 +214,6 @@ impl AudioAttributes {
             firefly_bush_sounds: self.firefly_bush_sounds.or(dimension.firefly_bush_sounds),
         }
     }
-}
-
-const MAX_JSON_DEPTH: u32 = 12;
-
-/// A data pack JSON file (`worldgen/biome`, `dimension_type`) as the registry entry compound a server would send.
-pub fn registry_json(bytes: &[u8]) -> Option<Compound> {
-    let json: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    match json_to_nbt(&json, 0)? {
-        Value::Compound(c) => Some(c),
-        _ => None,
-    }
-}
-
-fn json_to_nbt(json: &serde_json::Value, depth: u32) -> Option<Value> {
-    use serde_json::Value as J;
-    if depth > MAX_JSON_DEPTH {
-        return None;
-    }
-    Some(match json {
-        J::Bool(b) => Value::Byte(i8::from(*b)),
-        J::Number(n) => match n.as_i64().and_then(|v| i32::try_from(v).ok()) {
-            Some(i) => Value::Int(i),
-            None => Value::Double(n.as_f64()?),
-        },
-        J::String(s) => Value::String(s.clone()),
-        J::Array(items) => {
-            let compounds: Vec<Compound> = items
-                .iter()
-                .filter_map(|i| match json_to_nbt(i, depth + 1) {
-                    Some(Value::Compound(c)) => Some(c),
-                    _ => None,
-                })
-                .collect();
-            Value::List(if compounds.is_empty() {
-                List::Empty
-            } else {
-                List::Compound(compounds)
-            })
-        }
-        J::Object(map) => {
-            let mut c = Compound::new();
-            for (k, v) in map {
-                if let Some(v) = json_to_nbt(v, depth + 1) {
-                    c.insert(k.clone(), v);
-                }
-            }
-            Value::Compound(c)
-        }
-        J::Null => return None,
-    })
 }
 
 fn attribute<'a>(attributes: &'a Compound, key: &str) -> Option<&'a Value> {

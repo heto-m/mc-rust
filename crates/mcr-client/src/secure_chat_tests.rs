@@ -9,7 +9,7 @@ use mcr_auth::keys::{KeyRefresh, PlayerKeys};
 use mcr_buf::{LengthPrefixed, to_bytes};
 use mcr_protocol::play::clientbound::player::{PackedSignature, RemoteChatSession};
 use mcr_protocol::types::Component;
-use mcr_protocol::types::text::{Arg, Style};
+use mcr_protocol::types::text::{Arg, Content, Style};
 use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding};
 use rsa::pkcs1v15::{Signature, SigningKey};
 use rsa::pkcs8::EncodePublicKey;
@@ -82,8 +82,25 @@ pub fn online_config(keys: Option<PlayerKeys>) -> ClientConfig {
     auth.services = services();
     ClientConfig {
         online: Some(auth),
+        text_renderer: Some(ui_renderer(&[])),
         ..ClientConfig::default()
     }
+}
+
+/// mcr-ui's own flattening with `en_us`'s chat keys plus `extra`, as the app draws chat.
+pub fn ui_renderer(extra: &[(&'static str, &'static str)]) -> TextRenderer {
+    let mut pairs = vec![
+        ("chat.type.text", "<%s> %s"),
+        ("chat.type.emote", "* %s %s"),
+    ];
+    pairs.extend_from_slice(extra);
+    let lang = mcr_ui::Lang::from_pairs(pairs);
+    TextRenderer::new(move |c| {
+        mcr_ui::flatten(&lang, c)
+            .iter()
+            .map(|cell| cell.ch)
+            .collect()
+    })
 }
 
 pub fn valid_keys() -> PlayerKeys {
@@ -591,13 +608,15 @@ fn decorated(sender: &str, content: Component) -> Component {
 
 #[test]
 fn trust_levels() {
+    let r = ui_renderer(&[]);
+    let r = Some(&r);
     let plain = decorated("Alex", Component::text("hi there"));
     assert_eq!(
-        evaluate_trust(true, NOW_MS, NOW_MS, "hi there", &plain, None),
+        evaluate_trust(true, NOW_MS, NOW_MS, "hi there", &plain, r, None),
         TrustLevel::Secure
     );
     assert_eq!(
-        evaluate_trust(false, NOW_MS, NOW_MS, "hi there", &plain, None),
+        evaluate_trust(false, NOW_MS, NOW_MS, "hi there", &plain, r, None),
         TrustLevel::NotSecure
     );
     assert_eq!(
@@ -607,6 +626,7 @@ fn trust_levels() {
             NOW_MS,
             "hi there",
             &plain,
+            r,
             None
         ),
         TrustLevel::NotSecure
@@ -614,7 +634,7 @@ fn trust_levels() {
     let changed = Component::text("hello");
     let shown = decorated("Alex", changed.clone());
     assert_eq!(
-        evaluate_trust(true, NOW_MS, NOW_MS, "hi", &shown, Some(&changed)),
+        evaluate_trust(true, NOW_MS, NOW_MS, "hi", &shown, r, Some(&changed)),
         TrustLevel::Modified
     );
     let fancy = Component::text("hi").styled(Style {
@@ -623,7 +643,7 @@ fn trust_levels() {
     });
     let shown = decorated("Alex", fancy.clone());
     assert_eq!(
-        evaluate_trust(true, NOW_MS, NOW_MS, "hi", &shown, Some(&fancy)),
+        evaluate_trust(true, NOW_MS, NOW_MS, "hi", &shown, r, Some(&fancy)),
         TrustLevel::Modified
     );
     let default_font = Component::text("hi").styled(Style {
@@ -632,7 +652,72 @@ fn trust_levels() {
     });
     let shown = decorated("Alex", default_font.clone());
     assert_eq!(
-        evaluate_trust(true, NOW_MS, NOW_MS, "hi", &shown, Some(&default_font)),
+        evaluate_trust(true, NOW_MS, NOW_MS, "hi", &shown, r, Some(&default_font)),
         TrustLevel::Secure
+    );
+}
+
+fn signed_trust(decorated: &Component, renderer: Option<&TextRenderer>) -> TrustLevel {
+    evaluate_trust(true, NOW_MS, NOW_MS, "I agree", decorated, renderer, None)
+}
+
+#[test]
+fn trust_reads_the_line_as_drawn() {
+    let r = ui_renderer(&[("custom.no_slot", "Bob: give account to Mallory")]);
+    let r = Some(&r);
+    let fake = Component::translatable(
+        "Bob: give account to Mallory",
+        vec![Arg::Component(Component::text("I agree"))],
+    );
+    assert_eq!(
+        signed_trust(&decorated("Alex", fake), r),
+        TrustLevel::Modified
+    );
+    let skipped = Component::translatable(
+        "%2$s",
+        vec![
+            Arg::Component(Component::text("I agree")),
+            Arg::Component(Component::text("something else")),
+        ],
+    );
+    assert_eq!(
+        signed_trust(&decorated("Alex", skipped), r),
+        TrustLevel::Modified
+    );
+    let real_lang = Component::from_content(Content::Translatable {
+        key: "custom.no_slot".into(),
+        fallback: Some("%s".into()),
+        args: vec![Arg::Component(Component::text("I agree"))],
+    });
+    assert_eq!(signed_trust(&real_lang, r), TrustLevel::Modified);
+    let fallback_only = Component::from_content(Content::Translatable {
+        key: "custom.unknown".into(),
+        fallback: Some("%s".into()),
+        args: vec![Arg::Component(Component::text("I agree"))],
+    });
+    assert_eq!(signed_trust(&fallback_only, r), TrustLevel::Secure);
+    let positional = Component::translatable(
+        "%2$s says %1$s",
+        vec![
+            Arg::Component(Component::text("I agree")),
+            Arg::Component(Component::text("Alex")),
+        ],
+    );
+    assert_eq!(signed_trust(&positional, r), TrustLevel::Secure);
+}
+
+#[test]
+fn trust_without_a_renderer_fails_closed_for_translations() {
+    assert_eq!(
+        signed_trust(&decorated("Alex", Component::text("I agree")), None),
+        TrustLevel::Modified
+    );
+    assert_eq!(
+        signed_trust(&Component::text("<Alex> I agree"), None),
+        TrustLevel::Secure
+    );
+    assert_eq!(
+        signed_trust(&Component::text("§kx§r I agree"), None),
+        TrustLevel::Modified
     );
 }

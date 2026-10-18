@@ -75,6 +75,8 @@ pub enum ScreenAction {
     StartLan(super::lan_screen::LanSettings),
     OpenOptions,
     OpenMods,
+    /// Leave the title screen for the launcher.
+    Launcher,
     OpenAdvancements,
     OpenStats,
     RecipeBookSettings {
@@ -168,6 +170,7 @@ impl std::fmt::Debug for ScreenAction {
             Self::StartLan(s) => f.debug_tuple("StartLan").field(s).finish(),
             Self::OpenOptions => f.write_str("OpenOptions"),
             Self::OpenMods => f.write_str("OpenMods"),
+            Self::Launcher => f.write_str("Launcher"),
             Self::OpenAdvancements => f.write_str("OpenAdvancements"),
             Self::OpenStats => f.write_str("OpenStats"),
             Self::RecipeBookSettings {

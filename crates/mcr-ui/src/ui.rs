@@ -106,7 +106,7 @@ struct Placed {
 pub struct Ui {
     fonts: Fonts,
     sprites: Sprites,
-    lang: Lang,
+    lang: std::sync::Arc<Lang>,
     batch: Batch,
     placed_scratch: Vec<Placed>,
     rng: u32,
@@ -122,7 +122,7 @@ impl Ui {
         Ok(Self {
             fonts: Fonts::load(resources, options)?,
             sprites: Sprites::load(resources)?,
-            lang: Lang::load(resources, DEFAULT_LANGUAGE)?,
+            lang: std::sync::Arc::new(Lang::load(resources, DEFAULT_LANGUAGE)?),
             batch: Batch::default(),
             frames: 0,
             placed_scratch: Vec::new(),
@@ -150,8 +150,13 @@ impl Ui {
         &self.lang
     }
 
+    /// The current language, for code that draws text off this `Ui` (chat trust checks).
+    pub fn shared_lang(&self) -> std::sync::Arc<Lang> {
+        self.lang.clone()
+    }
+
     pub fn set_language(&mut self, resources: &ResourceManager, code: &str) -> Result<()> {
-        self.lang = Lang::load(resources, code)?;
+        self.lang = std::sync::Arc::new(Lang::load(resources, code)?);
         Ok(())
     }
 

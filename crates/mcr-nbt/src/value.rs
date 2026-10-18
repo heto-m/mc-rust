@@ -18,6 +18,12 @@ pub enum Value {
     LongArray(Vec<i64>),
 }
 
+#[derive(Clone, Copy)]
+enum Number {
+    Int(i64),
+    Float(f64),
+}
+
 /// Homogeneous list; the element type is the variant, `Empty` has none.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum List {
@@ -75,6 +81,54 @@ impl List {
             List::Compound(_) => tag::COMPOUND,
             List::IntArray(_) => tag::INT_ARRAY,
             List::LongArray(_) => tag::LONG_ARRAY,
+        }
+    }
+
+    /// A typed list when every value has one tag, else each value wrapped in a compound under `""`
+    /// (vanilla's heterogeneous list form).
+    pub fn from_values(values: Vec<Value>) -> List {
+        let Some(first) = values.first() else {
+            return List::Empty;
+        };
+        let tag = first.tag();
+        if values.iter().any(|v| v.tag() != tag) {
+            return List::Compound(
+                values
+                    .into_iter()
+                    .map(|v| {
+                        let mut wrapper = Compound::new();
+                        wrapper.insert("", v);
+                        wrapper
+                    })
+                    .collect(),
+            );
+        }
+        macro_rules! typed {
+            ($variant:ident) => {
+                List::$variant(
+                    values
+                        .into_iter()
+                        .filter_map(|v| match v {
+                            Value::$variant(x) => Some(x),
+                            _ => None,
+                        })
+                        .collect(),
+                )
+            };
+        }
+        match first {
+            Value::Byte(_) => typed!(Byte),
+            Value::Short(_) => typed!(Short),
+            Value::Int(_) => typed!(Int),
+            Value::Long(_) => typed!(Long),
+            Value::Float(_) => typed!(Float),
+            Value::Double(_) => typed!(Double),
+            Value::ByteArray(_) => typed!(ByteArray),
+            Value::String(_) => typed!(String),
+            Value::List(_) => typed!(List),
+            Value::Compound(_) => typed!(Compound),
+            Value::IntArray(_) => typed!(IntArray),
+            Value::LongArray(_) => typed!(LongArray),
         }
     }
 
@@ -143,45 +197,49 @@ impl Value {
         }
     }
 
+    /// Any numeric tag, as vanilla's `NumericTag` reads it.
+    fn number(&self) -> Option<Number> {
+        Some(match *self {
+            Value::Byte(v) => Number::Int(v.into()),
+            Value::Short(v) => Number::Int(v.into()),
+            Value::Int(v) => Number::Int(v.into()),
+            Value::Long(v) => Number::Int(v),
+            Value::Float(v) => Number::Float(v.into()),
+            Value::Double(v) => Number::Float(v),
+            _ => return None,
+        })
+    }
+
     pub fn as_i8(&self) -> Option<i8> {
-        match *self {
-            Value::Byte(v) => Some(v),
-            _ => None,
-        }
+        self.as_i64().map(|v| v as i8)
     }
 
     pub fn as_i16(&self) -> Option<i16> {
-        match *self {
-            Value::Short(v) => Some(v),
-            _ => None,
-        }
+        self.as_i64().map(|v| v as i16)
     }
 
     pub fn as_i32(&self) -> Option<i32> {
-        match *self {
-            Value::Int(v) => Some(v),
-            _ => None,
+        match self.number()? {
+            Number::Int(v) => Some(v as i32),
+            Number::Float(v) => Some(v as i32),
         }
     }
 
     pub fn as_i64(&self) -> Option<i64> {
-        match *self {
-            Value::Long(v) => Some(v),
-            _ => None,
+        match self.number()? {
+            Number::Int(v) => Some(v),
+            Number::Float(v) => Some(v as i64),
         }
     }
 
     pub fn as_f32(&self) -> Option<f32> {
-        match *self {
-            Value::Float(v) => Some(v),
-            _ => None,
-        }
+        self.as_f64().map(|v| v as f32)
     }
 
     pub fn as_f64(&self) -> Option<f64> {
-        match *self {
-            Value::Double(v) => Some(v),
-            _ => None,
+        match self.number()? {
+            Number::Int(v) => Some(v as f64),
+            Number::Float(v) => Some(v),
         }
     }
 

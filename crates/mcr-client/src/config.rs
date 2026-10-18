@@ -81,6 +81,10 @@ pub struct ClientConfig {
     pub only_show_secure_chat: bool,
     /// The managed singleplayer server: the player's own messages count as secure, as vanilla's integrated server.
     pub local_server: bool,
+    /// Fills registry entries the server left out because they come from a known pack.
+    pub builtin_data: Option<crate::BuiltinData>,
+    /// Draws chat as the player sees it, for the secure chat check; without it translated lines count as modified.
+    pub text_renderer: Option<crate::TextRenderer>,
     pub wire: WireChoice,
 }
 
@@ -110,6 +114,8 @@ impl Default for ClientConfig {
             particle_status: ParticleStatus::All,
             only_show_secure_chat: false,
             local_server: false,
+            builtin_data: None,
+            text_renderer: None,
             wire: WireChoice::Canonical,
         }
     }

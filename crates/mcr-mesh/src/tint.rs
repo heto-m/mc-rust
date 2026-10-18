@@ -161,6 +161,35 @@ impl BiomeClimate {
     }
 }
 
+fn nbt_hex(v: &mcr_nbt::Value) -> Option<u32> {
+    match v {
+        mcr_nbt::Value::String(s) => u32::from_str_radix(s.trim_start_matches('#'), 16).ok(),
+        other => other.as_i64().map(|n| n as u32 & 0xff_ffff),
+    }
+}
+
+impl BiomeClimate {
+    /// A biome registry entry, as the server sends it or as filled from the client jar.
+    pub fn from_nbt(root: &mcr_nbt::Compound) -> Option<Self> {
+        let effects = root.get_compound("effects")?;
+        let modifier = match effects.get_str("grass_color_modifier") {
+            Some("dark_forest") => GrassModifier::DarkForest,
+            Some("swamp") => GrassModifier::Swamp,
+            _ => GrassModifier::None,
+        };
+        let color = |key: &str| effects.get(key).and_then(nbt_hex);
+        Some(Self {
+            temperature: root.get_f32("temperature")?,
+            downfall: root.get_f32("downfall")?,
+            water: color("water_color")?,
+            grass: color("grass_color"),
+            foliage: color("foliage_color"),
+            dry_foliage: color("dry_foliage_color"),
+            modifier,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ColorMaps {
     grass: Vec<u32>,
@@ -540,6 +569,23 @@ mod tests {
         let colors = BiomeColors::from_climates(&[swamp], &ColorMaps::flat(1, 2, 3));
         assert_eq!(colors.grass[0], from_hex(0x6a7039));
         assert_eq!(colors.foliage[0], from_hex(0x6a7039));
+    }
+
+    #[test]
+    fn nbt_matches_json_and_reads_network_ints() {
+        let doc = r##"{"temperature":0.8,"downfall":0.9,"effects":{"water_color":"#617b64","foliage_color":"#6a7039","grass_color_modifier":"swamp"}}"##;
+        let from_json = BiomeClimate::from_json(doc).unwrap();
+        let nbt = mcr_nbt::json::compound_from_slice(doc.as_bytes()).unwrap();
+        assert_eq!(BiomeClimate::from_nbt(&nbt), Some(from_json));
+        let mut effects = mcr_nbt::Compound::new();
+        effects.insert("water_color", 0x3f76e4i32);
+        let mut network = mcr_nbt::Compound::new();
+        network.insert("temperature", 0.5f32);
+        network.insert("downfall", 0.5f32);
+        network.insert("effects", effects);
+        let climate = BiomeClimate::from_nbt(&network).unwrap();
+        assert_eq!(climate.water, 0x3f76e4);
+        assert_eq!(climate.grass, None);
     }
 
     #[test]

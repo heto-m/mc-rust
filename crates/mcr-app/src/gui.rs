@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use mcr_assets::ResourceManager;
 use mcr_render::{Overlay, OverlayCtx, wgpu};
-use mcr_ui::{ItemIcons, MemoryClipboard, ScreenAssets, ToastManager, Ui, UiRenderer};
+use mcr_ui::{ItemIcons, Lang, MemoryClipboard, ScreenAssets, ToastManager, Ui, UiRenderer};
 
 /// Everything that draws GUI: owned by the shell between sessions and lent to a session while it runs.
 pub struct Gui {
@@ -15,6 +15,7 @@ pub struct Gui {
     pub toasts: ToastManager,
     resources: Arc<ResourceManager>,
     language: String,
+    lang: Arc<RwLock<Arc<Lang>>>,
 }
 
 impl std::fmt::Debug for Gui {
@@ -32,7 +33,9 @@ impl Gui {
         let mut ui = Ui::load(&resources).context("loading ui")?;
         let icons = ItemIcons::load(&resources).context("loading item icons")?;
         let assets = ScreenAssets::load(&mut ui, &resources).context("loading screen textures")?;
+        let lang = Arc::new(RwLock::new(ui.shared_lang()));
         Ok(Self {
+            lang,
             ui,
             ui_renderer: UiRenderer::new(device, format),
             icons,
@@ -59,7 +62,26 @@ impl Gui {
         if let Err(e) = self.ui.set_language(&self.resources, &self.language) {
             tracing::warn!("language {} failed to reload: {e}", self.language);
         }
+        self.publish_lang();
         Ok(())
+    }
+
+    fn publish_lang(&self) {
+        if let Ok(mut lang) = self.lang.write() {
+            *lang = self.ui.shared_lang();
+        }
+    }
+
+    /// Chat as this GUI draws it, in whatever language it uses when the line arrives.
+    pub fn text_renderer(&self) -> mcr_client::TextRenderer {
+        let lang = self.lang.clone();
+        mcr_client::TextRenderer::new(move |component| {
+            let lang = lang.read().map(|l| l.clone()).unwrap_or_default();
+            mcr_ui::flatten(&lang, component)
+                .iter()
+                .map(|cell| cell.ch)
+                .collect()
+        })
     }
 
     pub fn sync_language(&mut self, code: &str) {
@@ -70,6 +92,7 @@ impl Gui {
         if let Err(e) = self.ui.set_language(&self.resources, code) {
             tracing::warn!("language {code} failed to load: {e}");
         }
+        self.publish_lang();
     }
 
     /// Advances the toasts and returns the sound events they want played.

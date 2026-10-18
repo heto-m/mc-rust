@@ -227,41 +227,66 @@ fn shell_timeline(shell: &mut crate::shell::Shell, secs: u32, origin: Instant) {
 const JAVA_FADE: Duration = Duration::from_secs(3);
 
 pub fn run_shell(opts: &crate::cli::Options, out: &Path, launched: Instant) -> Result<()> {
+    let base = opts.clone();
     let mut opts = opts.clone();
     let mut autopilot = match &opts.autopilot {
         Some(path) => Some(crate::load_autopilot(path)?),
         None => None,
     };
-    if opts.launcher && !run_launcher(&mut opts, out, autopilot.as_mut())? {
-        return Ok(());
+    let mut show_launcher = opts.launcher;
+    loop {
+        if show_launcher && !run_launcher(&mut opts, out, autopilot.as_mut())? {
+            return Ok(());
+        }
+        let (width, height) = opts.size;
+        let mut config = world_setup::renderer_config(&opts, RendererConfig::default());
+        let started = crate::mods::startup(&opts)?;
+        let jvm = started.boot.is_some();
+        if jvm {
+            config.scene_texture = true;
+            config.optional_features = mcr_modbridge::gpu::context::OPTIONAL_FEATURES;
+        }
+        let mut renderer = Renderer::new(Target::Offscreen { width, height }, config)
+            .context("creating renderer")?;
+        let mod_host = match started.boot {
+            Some(plan) => plan.start(&opts, &mut renderer, &started.app)?,
+            None => None,
+        };
+        let result = shell_frames(
+            &opts,
+            out,
+            renderer,
+            mod_host.as_ref().map(crate::mods::ModHost::net),
+            started.app,
+            launched,
+            autopilot.take(),
+        );
+        let needs_exit = mod_host.is_some_and(crate::mods::ModHost::finish);
+        match result {
+            Ok(ShellEnd::Launcher(pilot)) if jvm => {
+                drop(pilot);
+                return crate::launcher::relaunch(&opts);
+            }
+            Ok(ShellEnd::Launcher(pilot)) => {
+                println!("title: back to the launcher");
+                autopilot = pilot;
+                opts = base.clone();
+                show_launcher = true;
+            }
+            other => {
+                if needs_exit {
+                    std::process::exit(0);
+                }
+                return other.map(|_| ());
+            }
+        }
     }
-    let opts = &opts;
-    let (width, height) = opts.size;
-    let mut config = world_setup::renderer_config(opts, RendererConfig::default());
-    let started = crate::mods::startup(opts)?;
-    if started.boot.is_some() {
-        config.scene_texture = true;
-        config.optional_features = mcr_modbridge::gpu::context::OPTIONAL_FEATURES;
-    }
-    let mut renderer =
-        Renderer::new(Target::Offscreen { width, height }, config).context("creating renderer")?;
-    let mod_host = match started.boot {
-        Some(plan) => plan.start(opts, &mut renderer, &started.app)?,
-        None => None,
-    };
-    let result = shell_frames(
-        opts,
-        out,
-        renderer,
-        mod_host.as_ref().map(crate::mods::ModHost::net),
-        started.app,
-        launched,
-        autopilot,
-    );
-    if let Some(host) = mod_host {
-        host.finish();
-    }
-    result
+}
+
+enum ShellEnd {
+    Done,
+    /// The title screen asked for the launcher; the script's remaining steps go with it.
+    Launcher(Option<crate::autopilot::Autopilot>),
 }
 
 /// The launcher offscreen until Play applies a profile (`true`), or until the script ends or quits,
@@ -325,7 +350,7 @@ fn shell_frames(
     mods: crate::mods_ui::ModsApp,
     launched: Instant,
     autopilot: Option<crate::autopilot::Autopilot>,
-) -> Result<()> {
+) -> Result<ShellEnd> {
     use crate::shell::{Shell, ShellConfig};
     let (width, height) = opts.size;
     let config = ShellConfig {
@@ -411,6 +436,9 @@ fn shell_frames(
             } else {
                 frames > 30 && (!scripted || shell.script_finished())
             };
+        if shell.to_launcher {
+            return Ok(ShellEnd::Launcher(shell.take_autopilot()));
+        }
         if done || shell.quit {
             break;
         }
@@ -452,5 +480,5 @@ fn shell_frames(
             world_setup::peak_rss_mb()
         );
     }
-    Ok(())
+    Ok(ShellEnd::Done)
 }

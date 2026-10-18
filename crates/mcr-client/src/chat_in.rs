@@ -147,7 +147,8 @@ impl ClientState {
                 now_ms,
                 &p.body.content,
                 &decorated,
-                unsigned,
+                self.secure.renderer.as_ref(),
+                p.unsigned_content.as_ref(),
             )
         };
         let shown_text = match &p.filter_mask {

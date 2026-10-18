@@ -806,6 +806,16 @@ impl Session {
         }
     }
 
+    /// The port of the local server once it accepts players.
+    pub fn local_port(&self) -> Option<u16> {
+        match &self.state {
+            State::Running {
+                ready: true, port, ..
+            } => Some(*port),
+            _ => None,
+        }
+    }
+
     pub fn difficulty_locked(&self) -> bool {
         self.difficulty_locked
     }

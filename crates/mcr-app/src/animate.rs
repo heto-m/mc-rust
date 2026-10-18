@@ -7,7 +7,6 @@ use mcr_animate::{
     AnimateWorld, Animator, ConduitTarget, Cue, Height, MAX_PARTICLES_PER_TICK,
     MAX_SOUNDS_PER_TICK, Sink, VaultPlayer, Visual, tag,
 };
-use mcr_audio::registry_json;
 use mcr_client::{ClientState, RegistryItem};
 use mcr_mesh::BiomeColors;
 use mcr_protocol::types::Particle;
@@ -235,20 +234,12 @@ impl BlockAnimation {
         }
     }
 
-    /// Servers omit entries the client knows from its own data pack, so those come from the jar.
-    fn entry_visual(&self, directory: &str, entry: &RegistryItem) -> Visual {
-        match &entry.data {
-            Some(data) => Visual::from_registry_entry(data),
-            None => {
-                let id = entry.id.as_str();
-                let (namespace, name) = id.split_once(':').unwrap_or(("minecraft", id));
-                self.assets
-                    .read(&format!("data/{namespace}/{directory}/{name}.json"))
-                    .and_then(|bytes| registry_json(&bytes))
-                    .map(|c| Visual::from_registry_entry(&c))
-                    .unwrap_or_default()
-            }
-        }
+    fn entry_visual(entry: &RegistryItem) -> Visual {
+        entry
+            .data
+            .as_ref()
+            .map(Visual::from_registry_entry)
+            .unwrap_or_default()
     }
 
     fn refresh(&mut self, state: &ClientState) {
@@ -265,9 +256,7 @@ impl BlockAnimation {
             .registries
             .get(DIMENSION_TYPE)
             .and_then(|r| r.get(type_id));
-        self.dimension = dimension_entry
-            .map(|e| self.entry_visual("dimension_type", e))
-            .unwrap_or_default();
+        self.dimension = dimension_entry.map(Self::entry_visual).unwrap_or_default();
         self.creaking_dimension =
             dimension_entry.is_some_and(|e| CREAKING_DIMENSIONS.contains(&e.id.as_str()));
         if count != self.biome_count {
@@ -281,7 +270,7 @@ impl BlockAnimation {
             .map(|r| {
                 r.entries
                     .iter()
-                    .map(|e| self.entry_visual("worldgen/biome", e).over(&self.dimension))
+                    .map(|e| Self::entry_visual(e).over(&self.dimension))
                     .collect()
             })
             .unwrap_or_default();
@@ -577,10 +566,11 @@ mod tests {
         }
         let assets = Assets::load(jar).unwrap();
         let ambient = |biome: &str| {
-            let bytes = assets
-                .read(&format!("data/minecraft/worldgen/biome/{biome}.json"))
+            let entry = assets
+                .builtin
+                .get("minecraft:worldgen/biome", biome)
                 .unwrap_or_else(|| panic!("{biome} missing from the jar"));
-            Visual::from_registry_entry(&registry_json(&bytes).unwrap())
+            Visual::from_registry_entry(&entry)
         };
         let names = mcr_particles::PARTICLE_NAMES;
         for (biome, particle) in [

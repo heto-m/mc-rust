@@ -22,7 +22,6 @@ pub use ambient::{
 };
 pub use attributes::{
     Additions, AmbientSounds, AudioAttributes, BackgroundMusic, MAX_MUSIC_DELAY, Mood, Music,
-    registry_json,
 };
 pub use block_sounds::SoundType;
 pub use category::SoundSource;

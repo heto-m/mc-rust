@@ -515,7 +515,7 @@ impl ClientState {
             data,
             name: config.name.clone(),
             uuid,
-            registries: Registries::default(),
+            registries: Registries::with_builtin(config.builtin_data.clone()),
             dimension: Dimension::default(),
             chunks,
             block_entities: FxHashMap::default(),

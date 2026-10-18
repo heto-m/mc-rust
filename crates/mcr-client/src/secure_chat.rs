@@ -260,6 +260,7 @@ pub struct SecureChat {
     pub only_show_secure: bool,
     pub local_server: bool,
     warned_insecure: bool,
+    pub renderer: Option<TextRenderer>,
 }
 
 pub fn now_millis() -> i64 {
@@ -294,6 +295,7 @@ impl SecureChat {
             only_show_secure: config.only_show_secure_chat,
             local_server: config.local_server,
             warned_insecure: false,
+            renderer: config.text_renderer.clone(),
         }
     }
 
@@ -603,30 +605,42 @@ impl SecureChat {
     }
 }
 
-/// Plain text with every translation argument, which is all a "contains" check needs without a language.
-fn plain_with_args(component: &Component, out: &mut String, depth: usize) {
-    if depth > 32 || out.len() > 1 << 16 {
-        return;
+/// The text a component shows on screen, from the UI's own flattening with its language, so a trust check
+/// sees exactly what the player reads.
+#[derive(Clone)]
+pub struct TextRenderer(Arc<dyn Fn(&Component) -> String + Send + Sync>);
+
+impl TextRenderer {
+    pub fn new(render: impl Fn(&Component) -> String + Send + Sync + 'static) -> Self {
+        Self(Arc::new(render))
     }
-    match &component.content {
-        Content::Translatable { args, .. } => {
-            for arg in args {
-                match arg {
-                    Arg::Str(s) => out.push_str(s),
-                    Arg::Component(c) => plain_with_args(c, out, depth + 1),
-                    Arg::Number(_) => {}
-                }
+
+    pub fn render(&self, component: &Component) -> String {
+        (self.0)(component)
+    }
+}
+
+impl std::fmt::Debug for TextRenderer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TextRenderer")
+    }
+}
+
+/// Without a language a translation's shown text is unknown, so only literal text without `§` codes counts.
+fn shown_without_language(component: &Component) -> Option<String> {
+    fn literal_only(c: &Component, depth: usize) -> bool {
+        depth < 64
+            && match &c.content {
+                Content::Translatable { .. } => false,
+                Content::Text(t) => !t.contains('§'),
+                Content::Object {
+                    fallback: Some(f), ..
+                } => literal_only(f, depth + 1),
+                _ => true,
             }
-        }
-        _ => {
-            let mut leaf = component.clone();
-            leaf.extra.clear();
-            out.push_str(&leaf.to_plain_string());
-        }
+            && c.extra.iter().all(|e| literal_only(e, depth + 1))
     }
-    for sibling in &component.extra {
-        plain_with_args(sibling, out, depth + 1);
-    }
+    literal_only(component, 0).then(|| component.to_plain_string())
 }
 
 fn uses_custom_font(component: &Component, depth: usize) -> bool {
@@ -653,21 +667,27 @@ fn uses_custom_font(component: &Component, depth: usize) -> bool {
             .any(|c| uses_custom_font(c, depth + 1))
 }
 
-/// Vanilla's `ChatTrustLevel.evaluate`.
+/// Vanilla's `ChatTrustLevel.evaluate`, on the decorated line as it is drawn (`renderer`); without a
+/// renderer a line with translations counts as modified.
 pub fn evaluate_trust(
     signed: bool,
     timestamp_ms: i64,
     now_ms: i64,
     signed_content: &str,
     decorated: &Component,
+    renderer: Option<&TextRenderer>,
     unsigned_content: Option<&Component>,
 ) -> TrustLevel {
     if !signed || now_ms > timestamp_ms.saturating_add(CLIENT_EXPIRY_MS) {
         return TrustLevel::NotSecure;
     }
-    let mut text = String::new();
-    plain_with_args(decorated, &mut text, 0);
-    if !text.contains(signed_content) || unsigned_content.is_some_and(|c| uses_custom_font(c, 0)) {
+    let shown = match renderer {
+        Some(r) => Some(r.render(decorated)),
+        None => shown_without_language(decorated),
+    };
+    if !shown.is_some_and(|text| text.contains(signed_content))
+        || unsigned_content.is_some_and(|c| uses_custom_font(c, 0))
+    {
         TrustLevel::Modified
     } else {
         TrustLevel::Secure

@@ -87,7 +87,7 @@ At launch a Microsoft account SHALL be refreshed without prompting and its token
 - **THEN** the client config holds those keys and the services keys, and their debug output hides the private key
 
 ### Requirement: Launcher view
-The launcher view SHALL show the profile list, the active account and a Play button, drawn with mcr's UI. Play SHALL apply the selected profile (game dir, version jar, mods folder or vanilla, heap, resolution, account), record its last played time, and continue to the title screen, or in mod mode to Java's boot. Profiles SHALL only be switched before the game starts.
+The launcher view SHALL show the profile list, the active account and a Play button, drawn with mcr's UI. Play SHALL apply the selected profile (game dir, version jar, mods folder or vanilla, heap, resolution, account), record its last played time, and continue to the title screen, or in mod mode to Java's boot. Profiles SHALL be switched only in the launcher; the title screen SHALL lead back to it.
 
 #### Scenario: Play a vanilla profile
 - **WHEN** the user selects a profile without mods and clicks Play
@@ -115,3 +115,14 @@ The launcher view SHALL show the profile list, the active account and a Play but
 #### Scenario: Scripted launcher
 - **WHEN** `--launcher --connect host --autopilot s.txt` runs and the script clicks Play
 - **THEN** the launcher's account name joins `host`, and the remaining steps run in the game
+
+### Requirement: Back to the launcher
+The native title screen SHALL have a Launcher button, and in mod mode the "mcr" menu SHALL offer Launcher while no world is open. Without a JVM in the process, mcr SHALL return to the launcher view in the same process. When a JVM was started, mcr SHALL shut Java down cleanly and start itself again with `--launcher` and the same `--data-dir`, keeping an offscreen run offscreen.
+
+#### Scenario: Native round trip
+- **WHEN** the user clicks Launcher on the native title screen
+- **THEN** the launcher view shows in the same process and Play starts the selected profile again
+
+#### Scenario: Mod mode
+- **WHEN** the user picks Launcher in the "mcr" menu on Java's title screen
+- **THEN** Java shuts down cleanly and a new mcr process shows the launcher with the same data dir

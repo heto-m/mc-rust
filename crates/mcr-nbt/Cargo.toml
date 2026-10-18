@@ -9,6 +9,7 @@ publish.workspace = true
 mcr-buf.workspace = true
 thiserror.workspace = true
 flate2 = "1"
+serde_json.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

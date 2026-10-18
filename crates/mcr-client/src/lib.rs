@@ -85,9 +85,10 @@ pub use packs::{PackEnd, PackLink, PackReply, PackRequest, pack_channel};
 pub use pickup::Pickup;
 pub use player::LocalPlayer;
 pub use probe::{ServerVersion, probe};
-pub use registry::{Dimension, Registries, Registry, RegistryItem};
+pub use registry::{BuiltinData, Dimension, Registries, Registry, RegistryItem, data_pack_path};
 pub use relay::{ClientHooks, LocalAction, Relay, Relayed};
 pub use riding::{Ride, Sim};
+pub use secure_chat::TextRenderer;
 pub use slot_display::{holder_items, resolve as resolve_slot_display};
 pub use social::{
     BossBar, ChatMessage, ChatState, MAX_SIDEBAR_ROWS, MAX_TAB_ENTRIES, Objective, PlayerInfo,

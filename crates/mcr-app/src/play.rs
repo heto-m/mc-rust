@@ -526,7 +526,6 @@ impl Play {
             None => (None, None, None, None),
         };
         let overlay_assets = assets.clone();
-        let data_assets = assets.clone();
         let animate_assets = assets.clone();
         let skin_assets = assets.clone();
         let render = RenderSystem::new(renderer, assets, &world);
@@ -616,7 +615,7 @@ impl Play {
             dig: None,
             using_item: false,
             target: None,
-            ambience: Ambience::new(data, Box::new(move |path| data_assets.read(path))),
+            ambience: Ambience::new(data),
             block_animation: BlockAnimation::new(data, animate_assets),
             loops: EntityLoops::new(data),
             entity_events: Default::default(),

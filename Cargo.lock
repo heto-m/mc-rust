@@ -1754,6 +1754,7 @@ dependencies = [
  "mcr-net",
  "mcr-physics",
  "mcr-protocol",
+ "mcr-ui",
  "mcr-world",
  "rand",
  "rsa",
@@ -1840,6 +1841,7 @@ dependencies = [
  "criterion 0.5.1",
  "mcr-assets",
  "mcr-data",
+ "mcr-nbt",
  "mcr-render",
  "mcr-world",
  "png",
@@ -1884,6 +1886,7 @@ dependencies = [
  "criterion 0.5.1",
  "flate2",
  "mcr-buf",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

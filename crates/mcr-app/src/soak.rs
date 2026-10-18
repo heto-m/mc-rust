@@ -60,8 +60,8 @@ pub fn run(opts: &Options, duration: Duration) -> Result<()> {
         started.app,
     );
     let result = Shell::new(renderer, config).and_then(|shell| frames(shell, duration));
-    if let Some(host) = mod_host {
-        host.finish();
+    if mod_host.is_some_and(crate::mods::ModHost::finish) {
+        std::process::exit(0);
     }
     result
 }

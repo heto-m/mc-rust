@@ -50,10 +50,7 @@ struct RidingVoice {
     voice: VoiceId,
 }
 
-pub type DataReader = Box<dyn Fn(&str) -> Option<Vec<u8>>>;
-
 pub struct Ambience {
-    read: DataReader,
     dimension_type: Option<i32>,
     dimension_name: String,
     dimension_attrs: AudioAttributes,
@@ -82,9 +79,8 @@ impl std::fmt::Debug for Ambience {
 }
 
 impl Ambience {
-    pub fn new(data: &'static Version, read: DataReader) -> Self {
+    pub fn new(data: &'static Version) -> Self {
         Self {
-            read,
             dimension_type: None,
             dimension_name: String::new(),
             dimension_attrs: AudioAttributes::default(),
@@ -132,7 +128,7 @@ impl Ambience {
             .registries
             .get(DIMENSION_TYPE)
             .and_then(|r| r.get(type_id))
-            .map(|e| self.entry_attributes("dimension_type", e))
+            .map(Self::entry_attributes)
             .unwrap_or_default();
         self.biome_attrs = state
             .registries
@@ -140,10 +136,7 @@ impl Ambience {
             .map(|r| {
                 r.entries
                     .iter()
-                    .map(|e| {
-                        self.entry_attributes("worldgen/biome", e)
-                            .over(&self.dimension_attrs)
-                    })
+                    .map(|e| Self::entry_attributes(e).over(&self.dimension_attrs))
                     .collect()
             })
             .unwrap_or_default();
@@ -152,36 +145,21 @@ impl Ambience {
         self.dimension_name = name.to_owned();
     }
 
-    /// Servers omit entries the client knows from its own data pack, so those come from the jar.
-    fn entry_attributes(&self, directory: &str, entry: &RegistryItem) -> AudioAttributes {
-        match &entry.data {
-            Some(data) => AudioAttributes::from_registry_entry(data),
-            None => self
-                .data_json(directory, entry.id.as_str())
-                .and_then(|bytes| AudioAttributes::from_json(&bytes))
-                .unwrap_or_default(),
-        }
-    }
-
-    fn data_json(&self, directory: &str, id: &str) -> Option<Vec<u8>> {
-        let (namespace, name) = id.split_once(':').unwrap_or(("minecraft", id));
-        (self.read)(&format!("data/{namespace}/{directory}/{name}.json"))
+    fn entry_attributes(entry: &RegistryItem) -> AudioAttributes {
+        entry
+            .data
+            .as_ref()
+            .map(AudioAttributes::from_registry_entry)
+            .unwrap_or_default()
     }
 
     /// The sound event of a jukebox song registry entry.
     pub fn jukebox_sound(&self, state: &ClientState, song: i32) -> Option<String> {
         let entry = state.registries.get("minecraft:jukebox_song")?.get(song)?;
-        match &entry.data {
-            Some(data) => match data.get("sound_event")? {
-                mcr_nbt::Value::String(name) => Some(name.clone()),
-                mcr_nbt::Value::Compound(c) => c.get_str("sound_id").map(str::to_owned),
-                _ => None,
-            },
-            None => {
-                let bytes = self.data_json("jukebox_song", entry.id.as_str())?;
-                let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-                json.get("sound_event")?.as_str().map(str::to_owned)
-            }
+        match entry.data.as_ref()?.get("sound_event")? {
+            mcr_nbt::Value::String(name) => Some(name.clone()),
+            mcr_nbt::Value::Compound(c) => c.get_str("sound_id").map(str::to_owned),
+            _ => None,
         }
     }
 

@@ -771,6 +771,7 @@ const TITLE_MULTI: u32 = 2;
 const TITLE_OPTIONS: u32 = 3;
 const TITLE_QUIT: u32 = 4;
 const TITLE_MODS: u32 = 5;
+const TITLE_LAUNCHER: u32 = 6;
 
 pub struct TitleScreen {
     widgets: WidgetSet,
@@ -822,7 +823,12 @@ impl Screen for TitleScreen {
             "lang:menu.multiplayer",
         ));
         self.widgets
-            .add(Button::new(TITLE_MODS, [x, y + 48, 200, 20], "Mods"));
+            .add(Button::new(TITLE_MODS, [x, y + 48, 98, 20], "Mods"));
+        self.widgets.add(Button::new(
+            TITLE_LAUNCHER,
+            [width / 2 + 2, y + 48, 98, 20],
+            "Launcher",
+        ));
         self.widgets.add(Button::new(
             TITLE_OPTIONS,
             [x, y + 84, 98, 20],
@@ -874,6 +880,7 @@ impl Screen for TitleScreen {
                     self.servers.clone(),
                 )))),
                 TITLE_MODS => out.push(ScreenAction::OpenMods),
+                TITLE_LAUNCHER => out.push(ScreenAction::Launcher),
                 TITLE_OPTIONS => out.push(ScreenAction::OpenOptions),
                 TITLE_QUIT => out.push(ScreenAction::Quit),
                 _ => {}

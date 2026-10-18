@@ -325,7 +325,8 @@ impl ModHost {
     }
 
     /// A Java side that exited or crashed is frozen for good, so the process exits here.
-    pub fn finish(self) {
+    /// Stops Java; `true` when the process must exit instead of returning (Java froze or parked the VM).
+    pub fn finish(self) -> bool {
         if let Some(frames) = &self.net.frames {
             let s = frames.lock().stats();
             let (w50, w99, wmax) = ComposeStats::percentiles(&s.waits_us);
@@ -337,7 +338,7 @@ impl ModHost {
         }
         self.stop.store(true, Ordering::Release);
         let Ok(bridge) = self.thread.join() else {
-            return;
+            return false;
         };
         let outcome = bridge.shutdown(SHUTDOWN_TIMEOUT);
         self.tracker.finish(&outcome);
@@ -353,9 +354,7 @@ impl ModHost {
                 }
             );
         }
-        if outcome.needs_process_exit() {
-            std::process::exit(0);
-        }
+        outcome.needs_process_exit()
     }
 }
 

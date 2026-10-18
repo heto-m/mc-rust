@@ -38,6 +38,10 @@ Rust SHALL forward a Java serverbound frame only if its phase tag equals Rust's 
 - **WHEN** an operator on a remote server changes or locks the difficulty in Java's World Options
 - **THEN** the server receives Java's `change_difficulty` or `lock_difficulty` packet
 
+#### Scenario: Game rules
+- **WHEN** a player with gamemaster permission changes game rules in Java's in-world game rules screen
+- **THEN** the server receives Java's `set_game_rule` packet
+
 ### Requirement: Chat through Rust
 Chat messages and commands sent from Java SHALL be handed to Rust as text and sent by Rust's chat session, never forwarded as raw frames, so they are signed by Rust's keys when a session exists. Java's chat acknowledgements and session updates SHALL stay dropped; Rust alone acknowledges. With an online account Java SHALL fetch Mojang's services key set so its chat HUD verifies sessions and messages like vanilla, while holding no profile keys itself.
 

@@ -117,6 +117,11 @@ impl Scene {
 
 struct App {
     opts: Options,
+    /// The options before a launcher profile was applied, restored when the title screen returns to it.
+    base_opts: Options,
+    /// A JVM was started in this process, so the launcher can only come back in a new process.
+    jvm_started: bool,
+    relaunch: bool,
     launched: Instant,
     window: Option<Arc<Window>>,
     scene: Option<Scene>,
@@ -142,7 +147,10 @@ impl App {
             None => (None, None),
         };
         Self {
+            base_opts: opts.clone(),
             opts,
+            jvm_started: false,
+            relaunch: false,
             launched,
             window: None,
             scene: None,
@@ -170,24 +178,46 @@ impl App {
             )?,
         );
         if self.mods_app.is_none() {
-            let size = window.inner_size();
-            let mut launcher = launcher::scene::Launcher::new(
-                Target::Surface {
-                    target: window.clone().into(),
-                    width: size.width,
-                    height: size.height,
-                },
-                &self.opts,
-            )?;
-            launcher.use_system_clipboard();
             if let Some(path) = &self.opts.autopilot {
                 self.autopilot = Some(load_autopilot(path)?);
             }
-            self.scene = Some(Scene::Launcher(Box::new(launcher)));
-            self.window = Some(window);
-            return Ok(());
+            return self.show_launcher(window);
         }
         self.start_game(window)
+    }
+
+    fn show_launcher(&mut self, window: Arc<Window>) -> Result<()> {
+        let size = window.inner_size();
+        let mut launcher = launcher::scene::Launcher::new(
+            Target::Surface {
+                target: window.clone().into(),
+                width: size.width,
+                height: size.height,
+            },
+            &self.opts,
+        )?;
+        launcher.use_system_clipboard();
+        self.scene = Some(Scene::Launcher(Box::new(launcher)));
+        self.window = Some(window);
+        Ok(())
+    }
+
+    /// The title screen's Launcher: the same process while no JVM ever started in it, else a new one.
+    fn back_to_launcher(&mut self) -> Result<()> {
+        if self.jvm_started {
+            self.relaunch = true;
+            self.exit = true;
+            return Ok(());
+        }
+        if let Some(Scene::Shell(mut shell)) = self.scene.take() {
+            self.autopilot = shell.take_autopilot();
+        }
+        self.set_grab(false);
+        self.opts = self.base_opts.clone();
+        self.mods_app = None;
+        self.boot = None;
+        let window = self.window.take().context("no window")?;
+        self.show_launcher(window)
     }
 
     /// Leaves the launcher for the game with the profile Play applied.
@@ -236,6 +266,7 @@ impl App {
         );
         let mods_app = self.mods_app.clone().context("mod startup missing")?;
         if let Some(plan) = self.boot.take() {
+            self.jvm_started = true;
             self.mod_host = plan.start(&self.opts, &mut renderer, &mods_app)?;
         }
         self.scene = Some(if self.opts.world.is_none() && !self.opts.synthetic {
@@ -394,6 +425,13 @@ impl App {
             shell.advance(dt);
             if shell.quit {
                 self.exit = true;
+                return;
+            }
+            if shell.to_launcher {
+                if let Err(e) = self.back_to_launcher() {
+                    eprintln!("launcher failed: {e:#}");
+                    self.exit = true;
+                }
                 return;
             }
             let Some(frame) = shell.frame() else { return };
@@ -685,6 +723,7 @@ fn main() -> Result<()> {
     }
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pin_mmap_threshold();
+    launcher::remember_start_dir();
     let launched = Instant::now();
     let mut opts = match cli::parse(std::env::args().skip(1)) {
         Ok(opts) => opts,
@@ -718,9 +757,14 @@ fn main() -> Result<()> {
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App::new(opts, launched, started);
     let result = event_loop.run_app(&mut app);
-    if let Some(host) = app.mod_host.take() {
-        host.finish();
-    }
+    let needs_exit = app.mod_host.take().is_some_and(mods::ModHost::finish);
     result?;
+    if app.relaunch {
+        drop(app.window.take());
+        return launcher::relaunch(&app.opts);
+    }
+    if needs_exit {
+        std::process::exit(0);
+    }
     Ok(())
 }

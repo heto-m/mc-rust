@@ -54,7 +54,10 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
 - **Threads.** The Java thread runs Minecraft's "Render thread" (`Main.main` → `Minecraft.run()`), paced by a
   blocking `awaitFrame` downcall. The mcr main thread never enters Java, so safepoints never stop it. A GC
   pause only delays the Java frame, and the render thread waits for that frame's slots (ZGC pauses are under 1 ms).
-  The JVM cannot be re-created in-process, so changing the mod set requires restarting `mcr`.
+  The JVM cannot be re-created in-process, so changing the mod set requires restarting `mcr`. Launcher in the
+  "mcr" menu on Java's title screen therefore stops Java as on quit and replaces the process with
+  `mcr --launcher --data-dir <dir>` (plus `--screenshot`/`--size` offscreen); the window closes and reopens, and
+  the next Play boots Java again. Without a JVM in the process the native title's Launcher button stays in-process.
 - **Warm-up (AOT cache).** Java starts from a JDK 25 AOT cache per mod set (`mcr_jvm::aot`), stored in
   `<game dir>/cache/jvm-aot/<key>.aot`. The key hashes the JDK, the JVM options other than `-D`, the class path
   (size and modification time) and every mod jar's content, plus `BRIDGE_VERSION`. The first session of a mod set
@@ -323,6 +326,10 @@ server never starts.
   which reports the level locked until the session ends, and `level.dat` gets `difficulty_settings.locked` once
   the server exited. The dedicated server has no lock command and applies `server.properties`' difficulty at
   start whatever the lock, so the next start reports the lock from `level.dat`.
+- **Game rules.** World Options' Edit Game Rules is vanilla's in-world screen: it asks the server for the values
+  (`client_command`) and sends `set_game_rule`, both forwarded, and the server checks gamemaster permission. In
+  mcr's world the owner is an operator exactly when the world allows cheats, so the button is active then and
+  greyed otherwise, as in vanilla singleplayer.
 - **Save and Quit.** `PauseScreen` sees `isLocalServer()` as true for its label only; `disconnectFromWorld` takes
   the saving path and then shows `McrWorldScreen` in saving mode. Rust's session end saves and stops the server,
   and `WORLD_STOPPED` sends Java to its title screen. A custom dialog's leave warning says Save and Quit too.
@@ -368,8 +375,8 @@ collection rate and leaves little headroom at join, more than 3 GiB buys nothing
 - With mods, Java has GUI authority: screens, HUD and chat come from Java. Native screens remain for mcr-only UI
   (mod manager, debug, crash fallback). On a Java crash, mcr detaches the bridge and continues natively.
 - Rust answers every vanilla protocol acknowledgement. From Java it forwards only custom payloads, custom query
-  answers, container and screen actions (including dialogs, advancement tabs and operator block editors), game mode and
-  difficulty changes, and chat/commands (re-signed by Rust). A Java packet-handling failure detaches Java; Rust stays connected.
+  answers, container and screen actions (including dialogs, advancement tabs and operator block editors), game mode,
+  difficulty and game rule changes, and chat/commands (re-signed by Rust). A Java packet-handling failure detaches Java; Rust stays connected.
 - Server resource packs: Java's push and pop handlers are cancelled while bridged, and only mcr prompts, downloads
   and answers. After mcr's reload succeeds, `MSG_PACKS` gives Java the applied pack files, which it loads with
   `DownloadedPackSource.pushLocalPack` (and pops when they leave the list), so Java's entities and GUI use them too.

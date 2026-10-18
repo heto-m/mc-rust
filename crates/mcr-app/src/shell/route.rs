@@ -104,20 +104,25 @@ impl Route {
     }
 }
 
-fn mcr_menu() -> ConfirmScreen {
-    ConfirmScreen::new(
-        "mcr",
-        "",
-        vec![
-            (
-                "lang:menu.options".into(),
-                Box::new(|| vec![ScreenAction::OpenOptions]),
-            ),
-            ("Mods...".into(), Box::new(|| vec![ScreenAction::OpenMods])),
-            ("lang:gui.done".into(), Box::new(|| vec![ScreenAction::Pop])),
-        ],
-    )
-    .with_panel()
+type MenuChoice = (String, Box<dyn Fn() -> Vec<ScreenAction>>);
+
+/// Launcher only on Java's title screen: leaving restarts Java, which a world must not see.
+fn mcr_menu(launcher: bool) -> ConfirmScreen {
+    let mut buttons: Vec<MenuChoice> = vec![
+        (
+            "lang:menu.options".into(),
+            Box::new(|| vec![ScreenAction::OpenOptions]),
+        ),
+        ("Mods...".into(), Box::new(|| vec![ScreenAction::OpenMods])),
+    ];
+    if launcher {
+        buttons.push((
+            "Launcher...".into(),
+            Box::new(|| vec![ScreenAction::Launcher]),
+        ));
+    }
+    buttons.push(("lang:gui.done".into(), Box::new(|| vec![ScreenAction::Pop])));
+    ConfirmScreen::new("mcr", "", buttons).with_panel()
 }
 
 impl Shell {
@@ -190,7 +195,10 @@ impl Shell {
     fn open_native(&mut self, kind: NativeKind) {
         match kind {
             NativeKind::Mods => self.open_mods(),
-            NativeKind::Menu => self.show_native(Box::new(mcr_menu())),
+            NativeKind::Menu => {
+                let menu = mcr_menu(self.play.is_none() && self.sp.is_none());
+                self.show_native(Box::new(menu));
+            }
             NativeKind::Settings => {
                 let screen = OptionsScreen::new(self.settings.clone(), self.languages());
                 self.show_native(Box::new(screen));

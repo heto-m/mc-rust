@@ -42,6 +42,11 @@ use crate::singleplayer::{EULA_URL, FileWorlds, Launch, LaunchInput, Session, Up
 use mcr_modbridge::world::{WorldEvent, WorldRequest};
 use mcr_singleplayer::level::Difficulty;
 
+/// Only a direct join of the running local server's own port counts as singleplayer for chat trust.
+fn is_local_server(host: &str, port: u16, local_port: Option<u16>, transfer: bool) -> bool {
+    !transfer && host == "127.0.0.1" && local_port == Some(port)
+}
+
 /// Why the local server stopped, as the player reads it.
 fn stop_text(reason: Option<String>) -> String {
     match reason.filter(|r| !r.trim().is_empty()) {
@@ -97,6 +102,8 @@ pub struct Shell {
     started: Instant,
     last_frame: Instant,
     pub quit: bool,
+    /// The title screen asked for the launcher; the app leaves this shell.
+    pub to_launcher: bool,
     pub shot: Option<PathBuf>,
     pub failure: Option<String>,
     autopilot: Option<Autopilot>,
@@ -120,6 +127,8 @@ pub struct Shell {
     sp_java_failure: Option<String>,
     /// The local world was pausing last frame (a capture for its icon is taken when it starts).
     sp_was_paused: bool,
+    builtin: mcr_client::BuiltinData,
+    text_renderer: mcr_client::TextRenderer,
 }
 
 impl std::fmt::Debug for Shell {
@@ -180,7 +189,11 @@ impl Shell {
             index: index.clone(),
         };
         let now = Instant::now();
+        let builtin = assets.builtin.clone();
+        let text_renderer = gui.text_renderer();
         let mut shell = Self {
+            builtin,
+            text_renderer,
             applied_vsync: None,
             parts: Some(Parts {
                 renderer,
@@ -201,6 +214,7 @@ impl Shell {
             started: now,
             last_frame: now,
             quit: false,
+            to_launcher: false,
             shot: None,
             failure: None,
             autopilot: None,
@@ -505,6 +519,10 @@ impl Shell {
 
     pub fn set_autopilot(&mut self, autopilot: Autopilot) {
         self.autopilot = Some(autopilot);
+    }
+
+    pub fn take_autopilot(&mut self) -> Option<Autopilot> {
+        self.autopilot.take()
     }
 
     pub fn script_finished(&self) -> bool {
@@ -965,8 +983,14 @@ impl Shell {
         config.name = self.cfg.name.clone();
         config.online = self.cfg.online.clone();
         config.only_show_secure_chat = options.only_show_secure_chat;
-        config.local_server =
-            self.sp.is_some() && matches!(config.host.as_str(), "127.0.0.1" | "localhost");
+        config.builtin_data = Some(self.builtin.clone());
+        config.text_renderer = Some(self.text_renderer.clone());
+        config.local_server = is_local_server(
+            &config.host,
+            config.port,
+            self.sp.as_ref().and_then(Session::local_port),
+            transfer.is_some(),
+        );
         config.wire = if self.sp.is_some() {
             WireChoice::Canonical
         } else {
@@ -1039,7 +1063,7 @@ impl Shell {
                 let cfg = PlayConfig {
                     render_distance: self.cfg.render_distance,
                     game_dir: self.cfg.game_dir.clone(),
-                    local_server: self.sp.is_some(),
+                    local_server: client.config.local_server,
                 };
                 self.sp_status = None;
                 self.play = Some(Play::new(parts, &cfg, client));
@@ -1388,6 +1412,9 @@ impl Shell {
                     }
                 }
                 ScreenAction::Quit => self.quit = true,
+                ScreenAction::Launcher => {
+                    self.to_launcher = self.play.is_none() && self.sp.is_none()
+                }
                 _ => {}
             }
         }
@@ -1703,7 +1730,16 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::stop_text;
+    use super::{is_local_server, stop_text};
+
+    #[test]
+    fn only_the_running_local_port_is_the_local_server() {
+        assert!(is_local_server("127.0.0.1", 40000, Some(40000), false));
+        assert!(!is_local_server("127.0.0.1", 25565, Some(40000), false));
+        assert!(!is_local_server("localhost", 40000, Some(40000), false));
+        assert!(!is_local_server("127.0.0.1", 40000, Some(40000), true));
+        assert!(!is_local_server("127.0.0.1", 40000, None, false));
+    }
 
     #[test]
     fn stop_reason_keeps_lines_and_escapes_controls() {

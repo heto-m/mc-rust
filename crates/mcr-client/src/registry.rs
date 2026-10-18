@@ -5,6 +5,7 @@ use mcr_protocol::configuration::RegistryData;
 use mcr_protocol::play::clientbound::ui::UpdateRecipes;
 use mcr_protocol::types::component::HolderSet;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::sync::Arc;
 
 const MAX_REGISTRIES: usize = 256;
 const MAX_ENTRIES: usize = 1 << 16;
@@ -18,10 +19,68 @@ const MAX_TAG_IDS: usize = 1 << 20;
 const MAX_RECIPE_SETS: usize = 64;
 const MAX_RECIPE_SET_ITEMS: usize = 1 << 14;
 const MAX_STONECUTTER_INPUTS: usize = 1 << 12;
+/// Vanilla's synced registries hold about 600 entries; the rest of a hostile list stays without data.
+const MAX_BUILTIN_LOOKUPS: usize = 4096;
+const MAX_ID_LEN: usize = 256;
 
 pub const DIMENSION_TYPE: &str = "minecraft:dimension_type";
 pub const BIOME: &str = "minecraft:worldgen/biome";
 pub const CHAT_TYPE: &str = "minecraft:chat_type";
+
+/// The client's own copy of a known pack: the compound of a registry entry the server sent without data.
+#[derive(Clone)]
+pub struct BuiltinData(Arc<EntryLookup>);
+
+type EntryLookup = dyn Fn(&str, &str) -> Option<Compound> + Send + Sync;
+
+impl BuiltinData {
+    /// `lookup(registry, entry)` with full ids such as `minecraft:chat_type` and `minecraft:emote_command`.
+    pub fn new(lookup: impl Fn(&str, &str) -> Option<Compound> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(lookup))
+    }
+
+    pub fn get(&self, registry: &str, entry: &str) -> Option<Compound> {
+        (self.0)(registry, entry)
+    }
+}
+
+impl std::fmt::Debug for BuiltinData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BuiltinData")
+    }
+}
+
+impl PartialEq for BuiltinData {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+fn split_id(id: &str) -> Option<(&str, &str)> {
+    let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
+    let ok = |s: &str, slash: bool| {
+        !s.is_empty()
+            && s.bytes().all(|b| {
+                matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.') || (slash && b == b'/')
+            })
+            && (!slash
+                || s.split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != ".."))
+    };
+    (id.len() <= MAX_ID_LEN && ok(namespace, false) && ok(path, true)).then_some((namespace, path))
+}
+
+/// Where a data pack keeps an entry: `data/<entry ns>/<registry dir>/<entry path>.json`, with the registry dir
+/// as vanilla's `Registries.elementsDirPath` names it.
+pub fn data_pack_path(registry: &str, entry: &str) -> Option<String> {
+    let (registry_ns, registry_path) = split_id(registry)?;
+    let (namespace, path) = split_id(entry)?;
+    Some(if registry_ns == "minecraft" {
+        format!("data/{namespace}/{registry_path}/{path}.json")
+    } else {
+        format!("data/{namespace}/{registry_ns}/{registry_path}/{path}.json")
+    })
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegistryItem {
@@ -62,9 +121,18 @@ pub struct Registries {
     recipe_sets: FxHashMap<String, FxHashSet<i32>>,
     stonecutter_inputs: Vec<HolderSet>,
     pub enabled_features: Vec<String>,
+    builtin: Option<BuiltinData>,
+    builtin_lookups: usize,
 }
 
 impl Registries {
+    pub fn with_builtin(builtin: Option<BuiltinData>) -> Self {
+        Self {
+            builtin,
+            ..Self::default()
+        }
+    }
+
     pub fn get(&self, name: &str) -> Option<&Registry> {
         self.registries.get(name)
     }
@@ -123,7 +191,7 @@ impl Registries {
     }
 
     pub fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self::with_builtin(self.builtin.take());
     }
 
     pub fn apply_registry_data(&mut self, packet: &RegistryData) {
@@ -143,10 +211,10 @@ impl Registries {
             if entries_used + index >= MAX_TOTAL_ENTRIES {
                 break;
             }
-            let mut data = entry
-                .data
-                .as_ref()
-                .and_then(|nbt| nbt.0.clone().into_compound());
+            let mut data = match &entry.data {
+                Some(nbt) => nbt.0.clone().into_compound(),
+                None => self.builtin_entry(&name, entry.id.as_str()),
+            };
             if let Some(compound) = &data {
                 let mut bytes = Vec::new();
                 mcr_nbt::write_network(
@@ -170,6 +238,15 @@ impl Registries {
             });
         }
         self.registries.insert(name, registry);
+    }
+
+    fn builtin_entry(&mut self, registry: &str, entry: &str) -> Option<Compound> {
+        let builtin = self.builtin.as_ref()?;
+        if self.builtin_lookups >= MAX_BUILTIN_LOOKUPS {
+            return None;
+        }
+        self.builtin_lookups += 1;
+        builtin.get(registry, entry)
     }
 
     pub fn apply_tags(&mut self, packet: &UpdateTags) {
@@ -322,6 +399,94 @@ mod tests {
         assert_eq!(biomes.id_of("minecraft:desert"), Some(1));
         assert_eq!(biomes.get(0).unwrap().id.as_str(), "minecraft:plains");
         assert!(biomes.get(-1).is_none());
+    }
+
+    fn counting_builtin() -> (BuiltinData, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        let builtin = BuiltinData::new(move |registry, entry| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut c = Compound::new();
+            c.insert("registry", registry.to_owned());
+            c.insert("entry", entry.to_owned());
+            Some(c)
+        });
+        (builtin, calls)
+    }
+
+    #[test]
+    fn entries_without_data_come_from_the_builtin_pack() {
+        let (builtin, calls) = counting_builtin();
+        let mut regs = Registries::with_builtin(Some(builtin));
+        let mut sent = Compound::new();
+        sent.insert("server", 1i32);
+        regs.apply_registry_data(&RegistryData {
+            registry: Identifier::parse(CHAT_TYPE).unwrap(),
+            entries: vec![
+                entry("minecraft:emote_command", None),
+                entry("minecraft:chat", Some(sent.clone())),
+            ],
+        });
+        let chat = regs.get(CHAT_TYPE).unwrap();
+        let filled = chat.get(0).unwrap().data.as_ref().unwrap();
+        assert_eq!(filled.get_str("registry"), Some(CHAT_TYPE));
+        assert_eq!(filled.get_str("entry"), Some("minecraft:emote_command"));
+        assert_eq!(chat.get(1).unwrap().data.as_ref(), Some(&sent));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        regs.clear();
+        regs.apply_registry_data(&RegistryData {
+            registry: Identifier::parse(CHAT_TYPE).unwrap(),
+            entries: vec![entry("minecraft:emote_command", None)],
+        });
+        assert!(regs.get(CHAT_TYPE).unwrap().get(0).unwrap().data.is_some());
+    }
+
+    #[test]
+    fn builtin_lookups_are_capped() {
+        let (builtin, calls) = counting_builtin();
+        let mut regs = Registries::with_builtin(Some(builtin));
+        regs.apply_registry_data(&RegistryData {
+            registry: Identifier::parse("minecraft:r").unwrap(),
+            entries: (0..MAX_ENTRIES)
+                .map(|i| entry(&format!("minecraft:e{i}"), None))
+                .collect(),
+        });
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            MAX_BUILTIN_LOOKUPS
+        );
+        let r = regs.get("minecraft:r").unwrap();
+        assert!(r.get(0).unwrap().data.is_some());
+        assert!(r.get(MAX_BUILTIN_LOOKUPS as i32).unwrap().data.is_none());
+    }
+
+    #[test]
+    fn data_pack_paths_follow_vanilla_and_refuse_escapes() {
+        assert_eq!(
+            data_pack_path(CHAT_TYPE, "minecraft:emote_command").as_deref(),
+            Some("data/minecraft/chat_type/emote_command.json")
+        );
+        assert_eq!(
+            data_pack_path(BIOME, "plains").as_deref(),
+            Some("data/minecraft/worldgen/biome/plains.json")
+        );
+        assert_eq!(
+            data_pack_path("mod:things", "other:a/b").as_deref(),
+            Some("data/other/mod/things/a/b.json")
+        );
+        for bad in [
+            "minecraft:../x",
+            "minecraft:a/../../x",
+            "minecraft:/abs",
+            "minecraft:a//b",
+            "Minecraft:x",
+            "minecraft:x\\y",
+            "minecraft:",
+        ] {
+            assert_eq!(data_pack_path(CHAT_TYPE, bad), None, "{bad}");
+        }
+        assert_eq!(data_pack_path("minecraft:..", "minecraft:x"), None);
+        assert_eq!(data_pack_path(CHAT_TYPE, &"a".repeat(300)), None);
     }
 
     #[test]

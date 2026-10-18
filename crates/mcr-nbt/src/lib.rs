@@ -4,6 +4,7 @@ mod compound;
 mod decode;
 mod encode;
 mod io;
+pub mod json;
 pub mod mutf8;
 pub mod raw;
 pub mod snbt;

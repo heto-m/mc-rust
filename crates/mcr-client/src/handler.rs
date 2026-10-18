@@ -19,6 +19,7 @@ use mcr_protocol::types::component::AttributeModifier;
 use mcr_protocol::types::entity_data::EntityDataValue;
 use mcr_protocol::types::game::GameType;
 use mcr_protocol::types::registry::KnownPack;
+use mcr_protocol::types::text::Style;
 use mcr_world::{ChunkColumn, ChunkData, ChunkPos, LightData};
 use uuid::Uuid;
 
@@ -1605,7 +1606,7 @@ impl ClientState {
 
     pub(crate) fn format_chat(&self, bound: &BoundChatType, content: Component) -> Component {
         use mcr_protocol::types::text::Arg;
-        let (key, params) = match &bound.chat_type {
+        let (key, params, style) = match &bound.chat_type {
             IdOr::Inline(t) => (
                 t.chat.translation_key.clone(),
                 t.chat
@@ -1613,6 +1614,7 @@ impl ClientState {
                     .iter()
                     .map(|p| format!("{p:?}").to_lowercase())
                     .collect::<Vec<_>>(),
+                decoration_style(&t.chat.style.0),
             ),
             IdOr::Id(id) => {
                 let decoration = self
@@ -1626,10 +1628,18 @@ impl ClientState {
                     .and_then(|d| d.get_list("parameters"))
                     .map(|l| l.as_strings().to_vec());
                 match (key, params) {
-                    (Some(k), Some(p)) => (k.to_owned(), p),
+                    (Some(k), Some(p)) => (
+                        k.to_owned(),
+                        p,
+                        decoration
+                            .and_then(|d| d.get("style"))
+                            .map(decoration_style)
+                            .unwrap_or_default(),
+                    ),
                     _ => (
                         "chat.type.text".to_owned(),
                         vec!["sender".into(), "content".into()],
+                        Style::default(),
                     ),
                 }
             }
@@ -1645,11 +1655,25 @@ impl ClientState {
             })
             .collect();
         let fallback = vec!["%s"; args.len()].join(" ");
-        Component::from_content(mcr_protocol::types::text::Content::Translatable {
+        let mut line = Component::from_content(mcr_protocol::types::text::Content::Translatable {
             key,
             fallback: Some(fallback),
             args,
-        })
+        });
+        line.style = style;
+        line
+    }
+}
+
+/// A chat type decoration's `style` compound, read the way text components read theirs.
+fn decoration_style(style: &mcr_nbt::Value) -> Style {
+    match style {
+        mcr_nbt::Value::Compound(c) if !c.is_empty() => {
+            let mut c = c.clone();
+            c.insert("text", "");
+            Component::from_nbt_lenient(&mcr_nbt::Value::Compound(c)).style
+        }
+        _ => Style::default(),
     }
 }
 

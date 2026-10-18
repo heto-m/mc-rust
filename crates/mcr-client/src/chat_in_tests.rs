@@ -371,3 +371,112 @@ fn system_and_disguised_lines_carry_the_system_tag() {
     );
     assert_eq!(shown(&out)[0].1, Some(ChatTag::System));
 }
+
+#[test]
+fn chat_types_left_out_by_known_packs_use_the_builtin_decoration() {
+    use mcr_buf::Identifier;
+    use mcr_protocol::configuration::RegistryData;
+    use mcr_protocol::types::registry::RegistryEntry;
+    use mcr_protocol::types::text::{Color, NamedColor};
+    let builtin = crate::BuiltinData::new(|registry, entry| {
+        let doc: &[u8] = match (registry, entry) {
+            ("minecraft:chat_type", "minecraft:msg_command_incoming") => {
+                br#"{"chat":{"parameters":["sender","content"],"style":{"color":"gray","italic":true},
+                    "translation_key":"commands.message.display.incoming"}}"#
+            }
+            _ => return None,
+        };
+        mcr_nbt::json::compound_from_slice(doc)
+    });
+    let config = ClientConfig {
+        builtin_data: Some(builtin),
+        ..ClientConfig::default()
+    };
+    let mut s = ClientState::new(&config, PROFILE);
+    s.secure.on_login(false, false, now_millis());
+    add_player(&mut s, ALEX, "Alex", false);
+    s.registries.apply_registry_data(&RegistryData {
+        registry: Identifier::parse("minecraft:chat_type").unwrap(),
+        entries: vec![RegistryEntry {
+            id: Identifier::parse("minecraft:msg_command_incoming").unwrap(),
+            data: None,
+        }],
+    });
+    let out = run(&mut s, P::PlayerChat(chat(0, 0, "hi", None)));
+    let message = out
+        .events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Chat { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .unwrap();
+    match &message.content {
+        Content::Translatable { key, args, .. } => {
+            assert_eq!(key, "commands.message.display.incoming");
+            assert_eq!(args.len(), 2);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(message.style.italic, Some(true));
+    assert_eq!(message.style.color, Some(Color::Named(NamedColor::Gray)));
+}
+
+fn chat_type_state(key: &'static str, extra: &[(&'static str, &'static str)]) -> ClientState {
+    use mcr_buf::Identifier;
+    use mcr_protocol::configuration::RegistryData;
+    use mcr_protocol::types::registry::RegistryEntry;
+    let mut config = online_config(Some(valid_keys()));
+    config.text_renderer = Some(crate::secure_chat::tests::ui_renderer(extra));
+    config.builtin_data = Some(crate::BuiltinData::new(move |_, _| {
+        let doc = format!(
+            r#"{{"chat":{{"parameters":["sender","content"],"translation_key":"{key}"}}}}"#
+        );
+        mcr_nbt::json::compound_from_slice(doc.as_bytes())
+    }));
+    let mut s = online_state(config);
+    s.registries.apply_registry_data(&RegistryData {
+        registry: Identifier::parse("minecraft:chat_type").unwrap(),
+        entries: vec![RegistryEntry {
+            id: Identifier::parse("evil:chat").unwrap(),
+            data: None,
+        }],
+    });
+    s
+}
+
+#[test]
+fn chat_type_that_never_shows_the_content_is_modified() {
+    let mut s = chat_type_state("evil.no_content", &[("evil.no_content", "Alex gives up")]);
+    let out = run(&mut s, P::PlayerChat(signed(0, 0, "hello")));
+    assert_eq!(
+        shown(&out)[0].1,
+        Some(ChatTag::Modified {
+            original: "hello".into()
+        })
+    );
+    let mut s = chat_type_state("chat.type.text", &[]);
+    let out = run(&mut s, P::PlayerChat(signed(0, 0, "hello")));
+    assert_eq!(shown(&out)[0].1, None);
+}
+
+#[test]
+fn only_secure_chat_still_checks_the_unsigned_font() {
+    let mut config = online_config(Some(valid_keys()));
+    config.only_show_secure_chat = true;
+    let mut s = online_state(config);
+    let mut p = signed(0, 0, "hi");
+    p.unsigned_content = Some(
+        Component::text("hi").styled(mcr_protocol::types::text::Style {
+            font: Some(mcr_buf::Identifier::parse("minecraft:alt").unwrap()),
+            ..Default::default()
+        }),
+    );
+    let out = run(&mut s, P::PlayerChat(p));
+    assert_eq!(
+        shown(&out)[0].1,
+        Some(ChatTag::Modified {
+            original: "hi".into()
+        })
+    );
+}

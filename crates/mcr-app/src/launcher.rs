@@ -561,6 +561,55 @@ pub fn apply(opts: &mut Options, plan: LaunchPlan) -> Result<()> {
     Ok(())
 }
 
+/// The arguments of the process that shows the launcher again after Java ran: same data dir, and an
+/// offscreen run stays offscreen.
+pub fn relaunch_args(opts: &Options) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "--launcher".into(),
+        "--data-dir".into(),
+        opts.data_dir.clone().into(),
+    ];
+    if let Some(out) = &opts.screenshot {
+        args.extend([
+            "--screenshot".into(),
+            out.clone().into(),
+            "--size".into(),
+            format!("{}x{}", opts.size.0, opts.size.1).into(),
+        ]);
+    }
+    args
+}
+
+static START_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Java moves the process into its game dir, so a relaunch goes back to where mcr was started.
+pub fn remember_start_dir() {
+    if let Ok(dir) = std::env::current_dir() {
+        let _ = START_DIR.set(dir);
+    }
+}
+
+/// Replaces this process with a fresh `mcr --launcher`: a JVM cannot be created twice in one process.
+pub fn relaunch(opts: &Options) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut command = std::process::Command::new(exe);
+    command.args(relaunch_args(opts));
+    if let Some(dir) = START_DIR.get() {
+        command.current_dir(dir);
+    }
+    println!("launcher: restarting mcr for the launcher");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(command.exec().into())
+    }
+    #[cfg(not(unix))]
+    {
+        command.spawn()?;
+        Ok(())
+    }
+}
+
 /// `--profile <name>`: applies that profile and the active account without showing the launcher.
 pub fn apply_profile(opts: &mut Options, name: &str) -> Result<()> {
     let store = Store::open(&opts.data_dir);
@@ -597,6 +646,40 @@ pub fn apply_profile(opts: &mut Options, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relaunch_keeps_the_data_dir_and_offscreen_runs() {
+        let mut opts = crate::cli::parse(
+            ["--data-dir", "/d", "--connect", "h", "--mods", "/m"]
+                .iter()
+                .map(|s| s.to_string()),
+        )
+        .unwrap();
+        let args = |o: &Options| -> Vec<String> {
+            relaunch_args(o)
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(args(&opts), ["--launcher", "--data-dir", "/d"]);
+        opts.screenshot = Some("/o.png".into());
+        opts.size = (640, 480);
+        assert_eq!(
+            args(&opts),
+            [
+                "--launcher",
+                "--data-dir",
+                "/d",
+                "--screenshot",
+                "/o.png",
+                "--size",
+                "640x480"
+            ]
+        );
+        let reparsed = crate::cli::parse(args(&opts)).unwrap();
+        assert!(reparsed.shows_launcher());
+        assert_eq!(reparsed.data_dir, PathBuf::from("/d"));
+    }
 
     #[test]
     fn last_played_text() {
