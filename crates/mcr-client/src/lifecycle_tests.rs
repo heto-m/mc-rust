@@ -127,7 +127,7 @@ fn reconfiguration_drops_world_scoped_state() {
             rate: 1.0,
         },
     );
-    s.predictions.retain(BlockPos::new(1, 2, 3), 5, 0);
+    s.predictions.retain(BlockPos::new(1, 2, 3), 5, 0, [0.0; 3]);
     s.reset_for_reconfiguration();
     assert_eq!(s.camera_entity, None);
     assert_eq!(s.controlled_vehicle, None);

@@ -361,6 +361,9 @@ pub(crate) struct PhysicsIds {
     pub jump_boost: Option<i32>,
     pub levitation: Option<i32>,
     pub slow_falling: Option<i32>,
+    pub scale: Option<i32>,
+    pub block_range: Option<i32>,
+    pub entity_range: Option<i32>,
 }
 
 impl PhysicsIds {
@@ -386,6 +389,9 @@ impl PhysicsIds {
             jump_boost: effect("jump_boost"),
             levitation: effect("levitation"),
             slow_falling: effect("slow_falling"),
+            scale: attr("scale"),
+            block_range: attr("block_interaction_range"),
+            entity_range: attr("entity_interaction_range"),
         }
     }
 }
@@ -685,6 +691,7 @@ impl ClientState {
                 .unwrap_or(defaults.water_movement_efficiency),
             movement_efficiency: value(ids.movement_efficiency, None)
                 .unwrap_or(defaults.movement_efficiency),
+            scale: value(ids.scale, None).unwrap_or(defaults.scale),
             ..defaults
         };
         let level = |id: Option<i32>| {

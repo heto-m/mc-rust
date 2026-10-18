@@ -59,6 +59,7 @@ const LEVEL_EVENT_DESTROY_BLOCK: i32 = 2001;
 impl Client {
     pub(crate) fn next_sequence(&mut self) -> i32 {
         self.sequence = self.sequence.wrapping_add(1);
+        self.state.predictions.start(self.sequence);
         self.sequence
     }
 
@@ -303,9 +304,7 @@ impl Client {
     }
 
     fn can_act_on_block(&self, pos: BlockPos) -> bool {
-        use mcr_protocol::types::game::GameType;
-        let p = &self.state.player;
-        if matches!(p.game_mode, GameType::Adventure | GameType::Spectator) {
+        if self.state.block_action_restricted(pos) {
             return false;
         }
         let b = &self.state.world.border;
@@ -432,6 +431,14 @@ impl Client {
     pub fn pick_block(&mut self, pos: BlockPos, include_data: bool) -> Result<()> {
         self.send_play(&S::PickItemFromBlock(sb::PickItemFromBlock {
             pos,
+            include_data,
+        }))
+    }
+
+    /// Vanilla `handlePickItemFromEntity`.
+    pub fn pick_entity(&mut self, id: i32, include_data: bool) -> Result<()> {
+        self.send_play(&S::PickItemFromEntity(sb::PickItemFromEntity {
+            id,
             include_data,
         }))
     }

@@ -1,5 +1,5 @@
 use mcr_buf::BlockPos;
-use mcr_client::{Entities, Entity, PlayerList};
+use mcr_client::{ClientState, Entity, PlayerList};
 use mcr_data::{Aabb, StateId, Version};
 use mcr_entity_model::idx::ARMOR_STAND_FLAGS;
 use mcr_protocol::play::serverbound::Facing;
@@ -20,12 +20,12 @@ pub struct BlockHit {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Target {
     Block(BlockHit),
-    Entity { id: i32, distance: f64 },
-}
-
-/// Interaction range of `minecraft:block_interaction_range` and `entity_interaction_range`.
-pub fn reach(creative: bool) -> f64 {
-    if creative { 5.0 } else { 4.5 }
+    /// `hit` is where the ray met the entity's pick box, or the eye when it starts inside.
+    Entity {
+        id: i32,
+        distance: f64,
+        hit: [f64; 3],
+    },
 }
 
 struct Slab {
@@ -85,7 +85,7 @@ pub fn raycast_block(
     dir: [f64; 3],
     max: f64,
 ) -> Option<BlockHit> {
-    raycast_shapes(store, data, origin, dir, max, Version::outline_shape)
+    raycast_shapes(store, data, origin, dir, max, Version::outline_shape, true)
 }
 
 /// Like [`raycast_block`] but against collision shapes, which is vanilla's `ClipContext.Block.VISUAL` for the camera.
@@ -96,7 +96,15 @@ pub fn raycast_collision(
     dir: [f64; 3],
     max: f64,
 ) -> Option<BlockHit> {
-    raycast_shapes(store, data, origin, dir, max, Version::collision_shape)
+    raycast_shapes(
+        store,
+        data,
+        origin,
+        dir,
+        max,
+        Version::collision_shape,
+        false,
+    )
 }
 
 /// Vanilla `Camera.getMaxZoom`: eight rays from the eye's ±0.1 corners against collision shapes.
@@ -130,6 +138,7 @@ fn raycast_shapes(
     dir: [f64; 3],
     max: f64,
     shape: for<'d> fn(&'d Version, StateId) -> &'d [Aabb],
+    interaction: bool,
 ) -> Option<BlockHit> {
     let mut cell = [
         origin[0].floor() as i32,
@@ -173,6 +182,13 @@ fn raycast_shapes(
                     }
                 }
             }
+            if interaction
+                && let Some((t, face, _)) = best.as_mut()
+                && let Some((it, entered)) = interaction_clip(data, state, local, dir)
+                && it < *t
+            {
+                *face = entered;
+            }
             if let Some((t, face, inside)) = best {
                 let hit = [
                     local[0] + dir[0] * t,
@@ -199,6 +215,60 @@ fn raycast_shapes(
         t_next[axis] += t_delta[axis];
     }
     None
+}
+
+/// `getInteractionShape` overrides (in sixteenths): clicks into a cauldron, hopper, composter
+/// or scaffolding report the face of this shape when it is met first.
+fn interaction_boxes(data: &Version, state: StateId) -> Option<[[f64; 6]; 2]> {
+    const NONE: [f64; 6] = [0.0; 6];
+    let info = data.block_state(state)?;
+    let name = data.block_name(info.block)?;
+    let name = name.strip_prefix("minecraft:").unwrap_or(name);
+    let b = match name {
+        "cauldron" | "water_cauldron" | "lava_cauldron" | "powder_snow_cauldron" => {
+            [[2.0, 4.0, 2.0, 14.0, 16.0, 14.0], NONE]
+        }
+        "composter" | "scaffolding" => [[0.0, 0.0, 0.0, 16.0, 16.0, 16.0], NONE],
+        "hopper" => {
+            let inside = [2.0, 11.0, 2.0, 14.0, 16.0, 14.0];
+            let facing = data
+                .state_properties(state)
+                .find(|(k, _)| *k == "facing")
+                .map_or("down", |(_, v)| v);
+            let spout = match facing {
+                "north" => [6.0, 8.0, 0.0, 10.0, 10.0, 4.0],
+                "south" => [6.0, 8.0, 12.0, 10.0, 10.0, 16.0],
+                "west" => [0.0, 8.0, 6.0, 4.0, 10.0, 10.0],
+                "east" => [12.0, 8.0, 6.0, 16.0, 10.0, 10.0],
+                _ => NONE,
+            };
+            [inside, spout]
+        }
+        _ => return None,
+    };
+    Some(b.map(|v| v.map(|c| c / 16.0)))
+}
+
+/// The nearest entry into the interaction shape from outside it, in cell-local coordinates.
+fn interaction_clip(
+    data: &Version,
+    state: StateId,
+    local: [f64; 3],
+    dir: [f64; 3],
+) -> Option<(f64, Facing)> {
+    let mut best: Option<(f64, Facing)> = None;
+    for b in interaction_boxes(data, state)? {
+        if b == [0.0; 6] {
+            continue;
+        }
+        if let Some(s) = slab(local, dir, [b[0], b[1], b[2]], [b[3], b[4], b[5]])
+            && s.t_min >= 0.0
+            && best.is_none_or(|(t, _)| s.t_min < t)
+        {
+            best = Some((s.t_min, facing(s.axis, s.positive)));
+        }
+    }
+    best
 }
 
 const REDIRECTABLE_PROJECTILES: [&str; 3] = [
@@ -250,42 +320,39 @@ fn pick_radius(name: &str) -> f64 {
 }
 
 pub struct EntityPicker<'a> {
-    pub entities: &'a Entities,
-    pub players: &'a PlayerList,
-    pub data: &'a Version,
+    pub state: &'a ClientState,
     pub own_id: i32,
     pub own_vehicle: Option<i32>,
 }
 
 impl EntityPicker<'_> {
-    /// Nearest pickable entity strictly closer than `max`.
-    pub fn raycast(&self, origin: [f64; 3], dir: [f64; 3], max: f64) -> Option<(i32, f64)> {
+    /// Nearest pickable entity strictly closer than `max`, with where the ray met it.
+    pub fn raycast(
+        &self,
+        origin: [f64; 3],
+        dir: [f64; 3],
+        max: f64,
+    ) -> Option<(i32, f64, [f64; 3])> {
+        let data = self.state.data;
         let mut best: Option<(i32, f64)> = None;
-        for e in self.entities.iter() {
+        for e in self.state.entities.iter() {
             if e.id == self.own_id || Some(e.id) == self.own_vehicle {
                 continue;
             }
             let Some(kind) = u32::try_from(e.kind).ok() else {
                 continue;
             };
-            let (Some(info), Some(name)) = (
-                self.data.entity_type_info(kind),
-                self.data.entity_type_name(kind),
-            ) else {
+            let (Some(info), Some(name)) =
+                (data.entity_type_info(kind), data.entity_type_name(kind))
+            else {
                 continue;
             };
-            if !pickable(name, info.category, e, self.players) {
+            if !pickable(name, info.category, e, &self.state.players) {
                 continue;
             }
             let grow = pick_radius(name);
-            let half = f64::from(info.width) / 2.0 + grow;
-            let min = [e.pos[0] - half, e.pos[1] - grow, e.pos[2] - half];
-            let top = [
-                e.pos[0] + half,
-                e.pos[1] + f64::from(info.height) + grow,
-                e.pos[2] + half,
-            ];
-            let Some(s) = slab(origin, dir, min, top) else {
+            let bb = self.state.entity_box(e).inflate(grow);
+            let Some(s) = slab(origin, dir, bb.min, bb.max) else {
                 continue;
             };
             let t = s.t_min.max(0.0);
@@ -293,23 +360,36 @@ impl EntityPicker<'_> {
                 best = Some((e.id, t));
             }
         }
-        best
+        best.map(|(id, t)| (id, t, std::array::from_fn(|a| origin[a] + dir[a] * t)))
     }
 }
 
-/// `GameRenderer.pick`: an entity wins only when strictly nearer than the block hit.
+/// `LocalPlayer#pick`: one ray to the longer range; an entity wins only when strictly nearer than
+/// the block, and each hit must then lie within its own range.
 pub fn pick(
     store: &ChunkStore,
     picker: &EntityPicker<'_>,
     origin: [f64; 3],
     dir: [f64; 3],
-    max: f64,
+    block_range: f64,
+    entity_range: f64,
 ) -> Option<Target> {
-    let block = raycast_block(store, picker.data, origin, dir, max);
+    let sane = |r: f64| {
+        if r.is_finite() {
+            r.clamp(0.0, 64.0)
+        } else {
+            0.0
+        }
+    };
+    let (block_range, entity_range) = (sane(block_range), sane(entity_range));
+    let max = block_range.max(entity_range);
+    let block = raycast_block(store, picker.state.data, origin, dir, max);
     let entity = picker.raycast(origin, dir, block.map_or(max, |b| b.distance));
     match (block, entity) {
-        (_, Some((id, distance))) => Some(Target::Entity { id, distance }),
-        (Some(b), None) => Some(Target::Block(b)),
+        (_, Some((id, distance, hit))) => {
+            (distance < entity_range).then_some(Target::Entity { id, distance, hit })
+        }
+        (Some(b), None) => (b.distance < block_range).then_some(Target::Block(b)),
         (None, None) => None,
     }
 }
@@ -396,20 +476,114 @@ mod tests {
         Entity::new(id, uuid::Uuid::from_u128(id as u128), kind as i32, pos)
     }
 
-    fn pick_with(store: &ChunkStore, list: Vec<Entity>) -> Option<Target> {
-        let mut entities = Entities::default();
+    fn client_state(list: Vec<Entity>) -> ClientState {
+        let mut state = ClientState::new(&mcr_client::ClientConfig::default(), uuid::Uuid::nil());
         for e in list {
-            entities.insert(e);
+            state.entities.insert(e);
         }
-        let players = PlayerList::default();
+        state
+    }
+
+    fn pick_in(store: &ChunkStore, state: &ClientState, block: f64, entity: f64) -> Option<Target> {
         let picker = EntityPicker {
-            entities: &entities,
-            players: &players,
-            data: mcr_data::v26_3(),
+            state,
             own_id: 0,
             own_vehicle: None,
         };
-        pick(store, &picker, [5.5, 65.0, 0.5], [0.0, 0.0, 1.0], 4.5)
+        pick(
+            store,
+            &picker,
+            [5.5, 65.0, 0.5],
+            [0.0, 0.0, 1.0],
+            block,
+            entity,
+        )
+    }
+
+    fn pick_with(store: &ChunkStore, list: Vec<Entity>) -> Option<Target> {
+        pick_in(store, &client_state(list), 4.5, 4.5)
+    }
+
+    fn set_attribute(state: &mut ClientState, name: &str, value: f64) {
+        let id = mcr_data::v26_3()
+            .registry("minecraft:attribute")
+            .and_then(|r| r.id_of(&format!("minecraft:{name}")))
+            .unwrap() as i32;
+        let mut a = mcr_client::AttributeState::new(value, Vec::new());
+        a.range = mcr_client::attribute_range(name);
+        state.player.attributes.insert(id, a);
+    }
+
+    #[test]
+    fn entity_reach_follows_the_attribute() {
+        let (store, _) = world_with((5, 64, 5), "minecraft:air");
+        let mut cow = entity(7, "minecraft:cow", [5.5, 64.5, 4.0]);
+        cow.data.insert(9, EntityDataValue::Float(10.0));
+        let mut state = client_state(vec![cow]);
+        let (block, entity) = (
+            state.block_interaction_range(),
+            state.entity_interaction_range(),
+        );
+        assert_eq!((block, entity), (4.5, 3.0));
+        assert_eq!(pick_in(&store, &state, block, entity), None, "3.05 away");
+        set_attribute(&mut state, "entity_interaction_range", 5.0);
+        let entity = state.entity_interaction_range();
+        assert!(matches!(
+            pick_in(&store, &state, block, entity),
+            Some(Target::Entity { id: 7, .. })
+        ));
+        set_attribute(&mut state, "entity_interaction_range", f64::NAN);
+        assert_eq!(state.entity_interaction_range(), 0.0);
+    }
+
+    #[test]
+    fn baby_and_scaled_pick_boxes() {
+        let (store, _) = world_with((5, 64, 5), "minecraft:air");
+        let mut cow = entity(7, "minecraft:cow", [5.5, 64.0, 3.0]);
+        cow.data.insert(9, EntityDataValue::Float(10.0));
+        assert!(
+            pick_with(&store, vec![cow.clone()]).is_some(),
+            "adult reaches y 65"
+        );
+        cow.data.insert(16, EntityDataValue::Boolean(true));
+        assert_eq!(
+            pick_with(&store, vec![cow.clone()]),
+            None,
+            "baby is 0.7 tall"
+        );
+        let scale = mcr_data::v26_3()
+            .registry("minecraft:attribute")
+            .and_then(|r| r.id_of("minecraft:scale"))
+            .unwrap() as i32;
+        cow.attributes
+            .insert(scale, mcr_client::AttributeState::new(4.0, Vec::new()));
+        assert!(
+            pick_with(&store, vec![cow]).is_some(),
+            "scaled baby is 2.8 tall"
+        );
+    }
+
+    #[test]
+    fn entity_hit_point_is_where_the_ray_meets_the_box() {
+        let (store, _) = world_with((5, 64, 5), "minecraft:air");
+        let mut stand = entity(7, "minecraft:armor_stand", [5.5, 64.0, 3.0]);
+        stand.data.insert(9, EntityDataValue::Float(20.0));
+        let Some(Target::Entity { hit, .. }) = pick_with(&store, vec![stand]) else {
+            panic!("no hit");
+        };
+        assert!((hit[2] - 2.75).abs() < 1e-9, "{hit:?}");
+        assert!((hit[1] - 65.0).abs() < 1e-9, "{hit:?}");
+    }
+
+    #[test]
+    fn cauldron_bowl_reports_the_top_face() {
+        let data = mcr_data::v26_3();
+        let (store, _) = world_with((5, 64, 5), "minecraft:cauldron");
+        let hit = raycast_block(&store, data, [5.5, 66.0, 5.5], [0.0, -1.0, 0.0], 4.5).unwrap();
+        assert_eq!(hit.face, Facing::Up);
+        assert!(hit.cursor[1] < 0.5, "hit the bowl floor: {:?}", hit.cursor);
+        let side = raycast_block(&store, data, [5.5, 64.5, 3.0], [0.0, 0.0, 1.0], 4.5).unwrap();
+        assert_eq!(side.face, Facing::North);
     }
 
     #[test]

@@ -52,33 +52,33 @@ Scope: mcr-app play gameplay loop, mcr-client use_item and actions.
 
 Scope: mcr-app target, mcr-client actions, use_item and digging.
 
-- [ ] 4.1 I3 (G) Entity interactions send location (0,0,0)
-- [ ] 4.2 I4 (G) Adventure mode can never mine, even with can_break
-- [ ] 4.3 I5 (V) Entity reach is 4.5 in survival; range attributes ignored
-- [ ] 4.4 I6 (V) Entity pick boxes use the default type size
-- [ ] 4.5 I10 (V) Block placement prediction incomplete
-- [ ] 4.6 I11 (V) Use-without-item blocks missing from the consume table
-- [ ] 4.7 I13 (V) Pick block covers blocks only, without Ctrl data
-- [ ] 4.8 I18 (M) Buckets and boats aimed at fluid
-- [ ] 4.9 I21 (M) No interaction-shape override in the raycast
-- [ ] 4.10 I22 (M) A reverted prediction does not snap the player back
-- [ ] 4.11 I23 (M) Hotbar scroll moves several slots and keeps the accumulator
-- [ ] 4.12 Unit tests: attribute reach, scaled and baby pick boxes, relative interact location, can_break and can_place_on, consume table, interaction shape face
-- [ ] 4.13 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 4.1 I3 (G) Entity interactions send location (0,0,0)
+- [x] 4.2 I4 (G) Adventure mode can never mine, even with can_break
+- [x] 4.3 I5 (V) Entity reach is 4.5 in survival; range attributes ignored
+- [x] 4.4 I6 (V) Entity pick boxes use the default type size
+- [x] 4.5 I10 (V) Block placement prediction incomplete
+- [x] 4.6 I11 (V) Use-without-item blocks missing from the consume table
+- [x] 4.7 I13 (V) Pick block covers blocks only, without Ctrl data
+- [x] 4.8 I18 (M) Buckets and boats aimed at fluid
+- [x] 4.9 I21 (M) No interaction-shape override in the raycast
+- [x] 4.10 I22 (M) A reverted prediction does not snap the player back
+- [x] 4.11 I23 (M) Hotbar scroll moves several slots and keeps the accumulator
+- [x] 4.12 Unit tests: attribute reach, scaled and baby pick boxes, relative interact location, can_break and can_place_on, consume table, interaction shape face
+- [x] 4.13 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 5. Physics collisions
 
 Scope: mcr-physics collide, mover and world; mcr-client state.
 
-- [ ] 5.1 P1 (G) No collision with entities
-- [ ] 5.2 P2 (V) World border is not solid
-- [ ] 5.3 P3 (V) Entities never push the local player
-- [ ] 5.4 P4 (V) No push-out of suffocating blocks
-- [ ] 5.5 P9 (V) Scale attribute ignored for the player's box and eye height
-- [ ] 5.6 P19 (M) Attribute values not sanitised
-- [ ] 5.7 P22 (M) Floating bottom scaffolding cannot be stood on
-- [ ] 5.8 Unit tests: landing on a boat box, border stop, push velocity, push-out from a block, scaled box, hostile step height, unstable scaffolding; criterion bench for collide with entity boxes
-- [ ] 5.9 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 5.1 P1 (G) No collision with entities
+- [x] 5.2 P2 (V) World border is not solid
+- [x] 5.3 P3 (V) Entities never push the local player
+- [x] 5.4 P4 (V) No push-out of suffocating blocks
+- [x] 5.5 P9 (V) Scale attribute ignored for the player's box and eye height
+- [x] 5.6 P19 (M) Attribute values not sanitised
+- [x] 5.7 P22 (M) Floating bottom scaffolding cannot be stood on
+- [x] 5.8 Unit tests: landing on a boat box, border stop, push velocity, push-out from a block, scaled box, hostile step height, unstable scaffolding; criterion bench for collide with entity boxes
+- [x] 5.9 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 6. Invisible entities and entity render state
 

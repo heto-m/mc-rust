@@ -1,12 +1,14 @@
 //! Renderer-independent game client: connection driver, game state, 20 TPS tick and actions.
 
 mod actions;
+mod adventure;
 pub mod attach;
 #[cfg(test)]
 mod audit_tests;
 mod batch;
 mod chat_in;
 mod client;
+mod collisions;
 mod combat;
 #[cfg(test)]
 mod combat_tests;
@@ -17,11 +19,13 @@ mod dialogs;
 mod digging;
 #[cfg(test)]
 mod digging_tests;
+mod dims;
 mod edits;
 mod entity;
 mod entity_events;
 mod error;
 mod events;
+mod fluid_clip;
 mod gamestate;
 #[cfg(test)]
 mod gamestate_tests;
@@ -57,6 +61,8 @@ mod sleep;
 mod slot_display;
 mod social;
 mod state;
+#[cfg(test)]
+mod targeting_tests;
 mod toast;
 mod use_item;
 #[cfg(test)]
@@ -75,7 +81,9 @@ pub use dialogs::{
     DIALOG_REGISTRY, DialogEnd, DialogLink, DialogReply, DialogRequest, dialog_channel,
     resolve_dialog,
 };
-pub use entity::{AttributeState, Entities, Entity, FlightHistory, MobEffect, SimShape};
+pub use entity::{
+    AttributeState, Entities, Entity, FlightHistory, MobEffect, SimShape, attribute_range,
+};
 pub use error::{ClientError, Result};
 pub use events::{
     BlockEditor, ChatKind, ChatTag, ClientEvent, DamageEffects, DisconnectReason, sanitize_for_log,

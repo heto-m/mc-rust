@@ -11,9 +11,20 @@ use crate::state::ClientState;
 const MAX_PREDICTIONS: usize = 4096;
 const TOOL_COMPONENT: i32 = 28;
 
+/// One predicted position: the latest sequence touching it, the server's state to restore and
+/// where the player stood when it was first predicted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Verified {
+    sequence: i32,
+    state: u32,
+    player_pos: [f64; 3],
+}
+
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct BlockPredictions {
-    pending: FxHashMap<BlockPos, (i32, u32)>,
+    pending: FxHashMap<BlockPos, Verified>,
+    current: i32,
+    last_teleport: Option<i32>,
 }
 
 impl BlockPredictions {
@@ -25,11 +36,33 @@ impl BlockPredictions {
         self.pending.is_empty()
     }
 
-    pub(crate) fn retain(&mut self, pos: BlockPos, sequence: i32, server_state: u32) {
+    pub(crate) fn start(&mut self, sequence: i32) {
+        self.current = sequence;
+    }
+
+    /// `onTeleport`: predictions made before a teleport no longer move the player back.
+    pub(crate) fn on_teleport(&mut self) {
+        self.last_teleport = Some(self.current);
+    }
+
+    pub(crate) fn retain(
+        &mut self,
+        pos: BlockPos,
+        sequence: i32,
+        server_state: u32,
+        player_pos: [f64; 3],
+    ) {
         if let Some(entry) = self.pending.get_mut(&pos) {
-            entry.0 = sequence;
+            entry.sequence = sequence;
         } else if self.pending.len() < MAX_PREDICTIONS {
-            self.pending.insert(pos, (sequence, server_state));
+            self.pending.insert(
+                pos,
+                Verified {
+                    sequence,
+                    state: server_state,
+                    player_pos,
+                },
+            );
         }
     }
 
@@ -37,21 +70,24 @@ impl BlockPredictions {
     pub(crate) fn hold(&mut self, pos: BlockPos, state: u32) -> bool {
         match self.pending.get_mut(&pos) {
             Some(entry) => {
-                entry.1 = state;
+                entry.state = state;
                 true
             }
             None => false,
         }
     }
 
-    pub(crate) fn end_up_to(&mut self, sequence: i32) -> Vec<(BlockPos, u32)> {
+    /// Ends predictions up to `sequence`: each position, its state, and where to put the player
+    /// back if that state now traps them.
+    pub(crate) fn end_up_to(&mut self, sequence: i32) -> Vec<(BlockPos, u32, Option<[f64; 3]>)> {
+        let snap = self.last_teleport.is_none_or(|t| t < sequence);
         let done: Vec<_> = self
             .pending
             .iter()
-            .filter(|(_, (seq, _))| *seq <= sequence)
-            .map(|(p, (_, s))| (*p, *s))
+            .filter(|(_, v)| v.sequence <= sequence)
+            .map(|(p, v)| (*p, v.state, snap.then_some(v.player_pos)))
             .collect();
-        for (p, _) in &done {
+        for (p, ..) in &done {
             self.pending.remove(p);
         }
         done
@@ -234,16 +270,43 @@ impl ClientState {
         let Some(old) = self.chunks.block(pos.x, pos.y, pos.z) else {
             return;
         };
-        self.predictions.retain(pos, sequence, old.0);
+        let at = self.player.physics.pos;
+        self.predictions.retain(pos, sequence, old.0, at);
         self.chunks.set_block(pos.x, pos.y, pos.z, new);
     }
 
+    /// `endPredictionsUpTo` and `ClientLevel#syncBlockState`: a restored block that now overlaps
+    /// the player moves them back to where they stood when predicting.
     pub(crate) fn finish_predictions(&mut self, sequence: i32) -> Vec<(BlockPos, u32)> {
         let done = self.predictions.end_up_to(sequence);
-        for (pos, state) in &done {
+        let mut out = Vec::with_capacity(done.len());
+        for (pos, state, back) in done {
+            let changed = self
+                .chunks
+                .block(pos.x, pos.y, pos.z)
+                .is_some_and(|b| b.0 != state);
             self.chunks
-                .set_block(pos.x, pos.y, pos.z, BlockState(*state));
+                .set_block(pos.x, pos.y, pos.z, BlockState(state));
+            if changed
+                && let Some(back) = back
+                && self.block_traps_player(pos, state)
+            {
+                self.player.physics.pos = back;
+            }
+            out.push((pos, state));
         }
-        done
+        out
+    }
+
+    fn block_traps_player(&self, pos: BlockPos, state: u32) -> bool {
+        let bb = self.player.physics.bounding_box();
+        let o = [f64::from(pos.x), f64::from(pos.y), f64::from(pos.z)];
+        self.data.collision_shape(state).iter().any(|b| {
+            mcr_physics::Aabb::new(
+                std::array::from_fn(|a| o[a] + f64::from(b.min[a])),
+                std::array::from_fn(|a| o[a] + f64::from(b.max[a])),
+            )
+            .intersects(&bb)
+        })
     }
 }

@@ -455,6 +455,7 @@ mod tests {
                     amount: 0.4,
                     operation: AttributeOperation::AddMultipliedTotal,
                 }],
+                range: None,
             },
         );
         p.data.insert(15, EntityDataValue::Float(4.0));

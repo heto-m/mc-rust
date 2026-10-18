@@ -55,7 +55,18 @@ impl PlayerPhysics {
         }
     }
 
+    /// Vanilla `noCollision`: blocks, collidable entities and the world border.
     pub(crate) fn no_collision<W: CollisionWorld + ?Sized>(&self, w: &W, bb: &Aabb) -> bool {
+        let probe = bb.inflate(1.0e-7);
+        if self.entity_colliders.iter().any(|e| e.intersects(&probe)) {
+            return false;
+        }
+        if let Some(border) = self.border
+            && border.is_close(self.pos, bb)
+            && border.boxes().iter().any(|b| b.intersects(bb))
+        {
+            return false;
+        }
         !any_collision(w, self.data, bb, &self.ctx())
     }
 
@@ -167,6 +178,19 @@ impl PlayerPhysics {
             .expand_towards([0.0, -F_1E5, 0.0]);
         let ctx = self.ctx();
         self.colliders.gather(w, self.data, &hull, &ctx);
+        let probe = hull.inflate(1.0e-7);
+        for e in &self.entity_colliders {
+            if e.intersects(&probe) {
+                self.colliders.add_box(*e);
+            }
+        }
+        if let Some(border) = self.border
+            && border.is_close(self.pos, &hull)
+        {
+            for b in border.boxes() {
+                self.colliders.add_box(b);
+            }
+        }
         let step = if len_sqr(movement) == 0.0 {
             movement
         } else {

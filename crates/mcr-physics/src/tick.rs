@@ -1,3 +1,5 @@
+use crate::aabb::Aabb;
+use crate::collide::any_suffocating;
 use crate::data::{FLUID_NONE, flag};
 use crate::player::{PlayerPhysics, SPRINT_WINDOW};
 use crate::trig::{self, DEG_TO_RAD};
@@ -114,6 +116,14 @@ impl PlayerPhysics {
             && self.can_fit(w, Pose::Crouching)
             && (self.keys.sneak || !self.can_fit(w, Pose::Standing));
         self.keys = *input;
+        if !self.spectator && !self.passenger {
+            let bb = self.bounding_box();
+            let reach = (bb.max[0] - bb.min[0]) * 0.35;
+            let [x, _, z] = self.pos;
+            for (sx, sz) in [(-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0), (1.0, 1.0)] {
+                self.move_towards_closest_space(w, x + sx * reach, z + sz * reach);
+            }
+        }
         let mv = normalized(
             impulse(input.left, input.right),
             impulse(input.forward, input.backward),
@@ -207,6 +217,61 @@ impl PlayerPhysics {
             self.abilities.flying = false;
             self.abilities_changed = true;
         }
+    }
+
+    fn suffocates_at<W: CollisionWorld + ?Sized>(&self, w: &W, x: i32, z: i32) -> bool {
+        let bb = self.bounding_box();
+        let area = Aabb::new(
+            [f64::from(x), bb.min[1], f64::from(z)],
+            [f64::from(x) + 1.0, bb.max[1], f64::from(z) + 1.0],
+        )
+        .inflate(-1.0e-7);
+        any_suffocating(w, self.data, &area)
+    }
+
+    /// Vanilla `LocalPlayer#moveTowardsClosestSpace`: nudges the player out of a suffocating block.
+    fn move_towards_closest_space<W: CollisionWorld + ?Sized>(&mut self, w: &W, x: f64, z: f64) {
+        let (bx, bz) = (x.floor() as i32, z.floor() as i32);
+        if !self.suffocates_at(w, bx, bz) {
+            return;
+        }
+        let (xd, zd) = (x - f64::from(bx), z - f64::from(bz));
+        let candidates = [(xd, -1, 0), (1.0 - xd, 1, 0), (zd, 0, -1), (1.0 - zd, 0, 1)];
+        let mut best: Option<(i32, i32)> = None;
+        let mut closest = f64::MAX;
+        for (distance, dx, dz) in candidates {
+            if distance < closest && !self.suffocates_at(w, bx + dx, bz + dz) {
+                closest = distance;
+                best = Some((dx, dz));
+            }
+        }
+        match best {
+            Some((dx, 0)) => self.vel[0] = 0.1 * f64::from(dx),
+            Some((_, dz)) => self.vel[2] = 0.1 * f64::from(dz),
+            None => {}
+        }
+    }
+
+    /// Vanilla `Entity#push(Entity)` as a remote entity at `from` shoves the local player.
+    pub fn push_from<W: CollisionWorld + ?Sized>(&mut self, w: &W, from: [f64; 3]) {
+        if self.spectator || self.passenger || self.on_climbable(w) {
+            return;
+        }
+        let (mut xa, mut za) = (from[0] - self.pos[0], from[2] - self.pos[2]);
+        let mut dd = xa.abs().max(za.abs());
+        if !dd.is_finite() || dd < f64::from(0.01f32) {
+            return;
+        }
+        dd = dd.sqrt();
+        xa /= dd;
+        za /= dd;
+        let pow = (1.0 / dd).min(1.0);
+        xa *= pow;
+        za *= pow;
+        xa *= f64::from(0.05f32);
+        za *= f64::from(0.05f32);
+        self.vel[0] -= xa;
+        self.vel[2] -= za;
     }
 
     fn slow_due_to_item(&self) -> bool {

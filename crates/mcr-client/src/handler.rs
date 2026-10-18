@@ -514,8 +514,12 @@ impl ClientState {
                 }
             }
             P::UpdateAttributes(p) => {
+                let names = self.data.registry("minecraft:attribute");
                 let apply = |attrs: &mut dyn FnMut(i32, AttributeState)| {
                     for a in p.attributes.0.iter() {
+                        let range = names
+                            .and_then(|r| r.name_of(u32::try_from(a.attribute).ok()?))
+                            .and_then(crate::entity::attribute_range);
                         attrs(
                             a.attribute,
                             AttributeState {
@@ -526,6 +530,7 @@ impl ClientState {
                                     .take(64)
                                     .cloned()
                                     .collect::<Vec<AttributeModifier>>(),
+                                range,
                             },
                         );
                     }
@@ -1472,6 +1477,7 @@ impl ClientState {
             self.player
                 .apply_teleport(p.position, p.delta_movement, p.y_rot, p.x_rot, p.relatives);
         }
+        self.predictions.on_teleport();
         self.player.teleports_received += 1;
         self.player.last_teleport_id = Some(p.id);
         let phys = &self.player.physics;

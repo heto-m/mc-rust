@@ -437,7 +437,7 @@ impl Autopilot {
                             .java_camera
                             .map_or("none", |c| if c.input { "captured" } else { "moved" });
                         println!(
-                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?} mod input {:?} fov_scale {:.2} camera {:.2} {:.2} {:.2} java_camera {java_cam} java_roll {:.1} java_weather {} java_steps {} java_turn {} perspective {} view_roll {:.1} dyn_lights {} dead {} health {:.1} sleeping {} sleep_timer {} using {} miss {} strength {:.2} dig {:?}",
+                            "report: tick {} pos {:.2} {:.2} {:.2} yaw {:.1} pitch {:.1} light {block} {sky} teleports {} chunks {} screen {} container_updates {} corrections {} hotbar {:?} cursor {:?} mod input {:?} fov_scale {:.2} camera {:.2} {:.2} {:.2} java_camera {java_cam} java_roll {:.1} java_weather {} java_steps {} java_turn {} perspective {} view_roll {:.1} dyn_lights {} dead {} health {:.1} sleeping {} sleep_timer {} using {} miss {} strength {:.2} dig {:?} target {:?} eye {:.3}",
                             play.ticks,
                             p[0],
                             p[1],
@@ -479,6 +479,8 @@ impl Autopilot {
                                 .client
                                 .digging()
                                 .map(|d| (d.pos, d.ticks, d.progress)),
+                            play.target,
+                            state.player.physics.eye_height(),
                         );
                     }
                 }

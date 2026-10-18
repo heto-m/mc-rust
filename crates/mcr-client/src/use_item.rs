@@ -11,6 +11,7 @@ use mcr_protocol::types::game::{GameType, Hand};
 use mcr_protocol::types::{ItemStack, Vec3d};
 use mcr_world::BlockState;
 
+use crate::adventure::AdventureCheck;
 use crate::client::Client;
 use crate::error::Result;
 use crate::interaction::{entity_interact_swings, item_use_on_swings, item_use_swings};
@@ -148,6 +149,12 @@ fn block_consumes_use(name: &str) -> bool {
         || n.ends_with("_candle_cake")
 }
 
+/// Buckets and boats raycast for fluids themselves instead of using the crosshair target.
+fn aims_at_fluid(name: &str) -> bool {
+    let n = short(name);
+    (n.ends_with("bucket") && n != "milk_bucket") || n.ends_with("_boat") || n.ends_with("_raft")
+}
+
 fn is_instant_item(name: &str) -> bool {
     let n = short(name);
     n.ends_with("_bucket") && n != "milk_bucket"
@@ -261,8 +268,11 @@ impl Client {
                     self.push_event(crate::events::ClientEvent::BlockEditorOpened { pos, kind });
                     return Ok(Some(UseResult::Success));
                 }
-                if !suppress && hand == Hand::Main && block.is_some_and(block_consumes_use) {
-                    return Ok(Some(UseResult::Success));
+                if !suppress
+                    && hand == Hand::Main
+                    && let Some(result) = self.block_use_without_item(pos)
+                {
+                    return Ok(Some(result));
                 }
                 match self.try_place(hand, &held, pos, face) {
                     Placement::Placed => return Ok(Some(UseResult::Success)),
@@ -294,7 +304,15 @@ impl Client {
             match kind {
                 Some((UseKind::Instant, _)) => {
                     let gliding = self.state.player.physics.fall_flying;
-                    if held_name.is_some_and(|n| item_use_swings(n, block_target, gliding)) {
+                    let swings = held_name.is_some_and(|n| {
+                        let aimed = if aims_at_fluid(n) {
+                            self.state.fluid_item_succeeds(n)
+                        } else {
+                            block_target
+                        };
+                        item_use_swings(n, aimed, gliding)
+                    });
+                    if swings {
                         return Ok(Some(UseResult::Success));
                     }
                 }
@@ -309,6 +327,41 @@ impl Client {
             }
         }
         Ok(None)
+    }
+
+    /// The result of `useWithoutItem` for blocks that consume a bare-handed click.
+    fn block_use_without_item(&self, pos: BlockPos) -> Option<UseResult> {
+        let name = short(self.block_name_at(pos)?);
+        match name {
+            "flower_pot" => Some(UseResult::Consume),
+            "dragon_egg" => Some(UseResult::Success),
+            _ if name.starts_with("potted_") => Some(UseResult::Success),
+            "redstone_wire" => self
+                .redstone_wire_toggles(pos)
+                .then_some(UseResult::Success),
+            _ => block_consumes_use(name).then_some(UseResult::Success),
+        }
+    }
+
+    /// `RedstoneWireBlock#useWithoutItem`: a builder toggles a dot or a cross.
+    fn redstone_wire_toggles(&self, pos: BlockPos) -> bool {
+        if !self.state.may_build() {
+            return false;
+        }
+        let Some(state) = self.state.chunks.block(pos.x, pos.y, pos.z) else {
+            return false;
+        };
+        let mut connected = 0;
+        let mut sides = 0;
+        for (k, v) in self.state.data.state_properties(state.0) {
+            if matches!(k, "north" | "south" | "east" | "west") {
+                sides += 1;
+                if v != "none" {
+                    connected += 1;
+                }
+            }
+        }
+        sides == 4 && (connected == 0 || connected == 4)
     }
 
     fn send_interact(&mut self, id: i32, hand: Hand, location: [f64; 3]) -> Result<()> {
@@ -333,6 +386,13 @@ impl Client {
         face: Facing,
     ) -> Placement {
         if held.is_empty() || self.state.is_on_cooldown(held) {
+            return Placement::NotABlock;
+        }
+        if !self.state.may_build()
+            && !self
+                .state
+                .adventure_allows(held, AdventureCheck::CanPlaceOn, pos)
+        {
             return Placement::NotABlock;
         }
         let Some(block) = u32::try_from(held.item)
@@ -368,28 +428,12 @@ impl Client {
             return Placement::Placed;
         };
         let state = info.default_state;
+        if self.state.placement_obstructed(at, state) {
+            return Placement::Failed;
+        }
         if data.state_properties(state).count() != 0 {
             self.combat.placed = Some((at, state));
             return Placement::Placed;
-        }
-        let bb = self.state.player.physics.bounding_box();
-        let blocked = data.collision_shape(state).iter().any(|b| {
-            let shape = Aabb::new(
-                [
-                    f64::from(at.x) + f64::from(b.min[0]),
-                    f64::from(at.y) + f64::from(b.min[1]),
-                    f64::from(at.z) + f64::from(b.min[2]),
-                ],
-                [
-                    f64::from(at.x) + f64::from(b.max[0]),
-                    f64::from(at.y) + f64::from(b.max[1]),
-                    f64::from(at.z) + f64::from(b.max[2]),
-                ],
-            );
-            shape.intersects(&bb)
-        });
-        if blocked {
-            return Placement::Failed;
         }
         let sequence = self.sequence;
         self.state.predict_block(at, BlockState(state), sequence);
@@ -515,6 +559,63 @@ pub(crate) fn seconds_to_ticks(seconds: f32) -> i32 {
 }
 
 impl crate::state::ClientState {
+    /// `EntityGetter#isUnobstructed` for `state` placed at `at`: any non-spectator entity that
+    /// blocks building, the local player included.
+    pub(crate) fn placement_obstructed(&self, at: BlockPos, state: u32) -> bool {
+        let short_name = self
+            .data
+            .block_state(state)
+            .and_then(|i| self.data.block_name(i.block))
+            .map_or("", short);
+        if short_name == "scaffolding" {
+            return false;
+        }
+        let o = [f64::from(at.x), f64::from(at.y), f64::from(at.z)];
+        let shapes = self.data.collision_shape(state);
+        let hits = |bb: &Aabb| {
+            shapes.iter().any(|b| {
+                Aabb::new(
+                    std::array::from_fn(|a| o[a] + f64::from(b.min[a])),
+                    std::array::from_fn(|a| o[a] + f64::from(b.max[a])),
+                )
+                .intersects(bb)
+            })
+        };
+        if shapes.is_empty() {
+            return false;
+        }
+        if self.player.game_mode != GameType::Spectator && hits(&self.player.physics.bounding_box())
+        {
+            return true;
+        }
+        let near = Aabb::new(
+            [o[0] - 8.0, o[1] - 8.0, o[2] - 8.0],
+            [o[0] + 9.0, o[1] + 9.0, o[2] + 9.0],
+        );
+        self.entities
+            .iter()
+            .any(|e| near.contains(e.pos) && self.blocks_building(e) && hits(&self.entity_box(e)))
+    }
+
+    fn blocks_building(&self, e: &crate::entity::Entity) -> bool {
+        if self
+            .players
+            .get(e.uuid)
+            .is_some_and(|p| p.game_mode == GameType::Spectator)
+        {
+            return false;
+        }
+        let name = u32::try_from(e.kind)
+            .ok()
+            .and_then(|k| self.data.entity_type_name(k))
+            .map_or("", short);
+        self.is_living(e)
+            || name.ends_with("_boat")
+            || name.ends_with("_raft")
+            || name.ends_with("minecart")
+            || matches!(name, "falling_block" | "tnt" | "end_crystal")
+    }
+
     pub fn hand_stack(&self, hand: Hand) -> ItemStack {
         match hand {
             Hand::Main => self.held_stack().clone(),

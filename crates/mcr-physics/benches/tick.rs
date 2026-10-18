@@ -1,7 +1,7 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use mcr_physics::{CollisionWorld, PlayerInput, PlayerPhysics};
+use mcr_physics::{Aabb, BorderBounds, CollisionWorld, PlayerInput, PlayerPhysics};
 
 struct DenseWorld {
     stone: u32,
@@ -72,6 +72,25 @@ fn bench(c: &mut Criterion) {
                 p.snap_to([0.5, 64.0, 0.5], [0.0; 3], 0.0, 0.0);
             }
             black_box(p.tick(black_box(&sneak), &world));
+        });
+    });
+    c.bench_function("tick_entity_boxes_and_border", |b| {
+        let mut p = PlayerPhysics::new([0.5, 64.0, 0.5]);
+        p.border = BorderBounds::new(0.0, 0.0, 9.0, 2.9999984e7);
+        for i in 0..64 {
+            let (x, z) = (f64::from(i % 8) - 4.0, f64::from(i / 8) - 4.0);
+            p.entity_colliders.push(Aabb::new(
+                [x * 1.5, 64.0, z * 1.5],
+                [x * 1.5 + 1.375, 64.5625, z * 1.5 + 1.375],
+            ));
+        }
+        let mut n = 0u32;
+        b.iter(|| {
+            n += 1;
+            if n.is_multiple_of(200) {
+                p.snap_to([0.5, 65.0, 0.5], [0.0; 3], 37.0, 0.0);
+            }
+            black_box(p.tick(black_box(&input), &world));
         });
     });
 }

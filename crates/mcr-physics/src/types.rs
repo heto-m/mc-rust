@@ -52,6 +52,7 @@ pub struct Attributes {
     pub movement_efficiency: f64,
     pub friction_modifier: f64,
     pub air_drag_modifier: f64,
+    pub scale: f64,
 }
 
 impl Default for Attributes {
@@ -66,6 +67,7 @@ impl Default for Attributes {
             movement_efficiency: 0.0,
             friction_modifier: 1.0,
             air_drag_modifier: 1.0,
+            scale: 1.0,
         }
     }
 }

@@ -6,6 +6,9 @@ pub const EPS: f64 = 1.0e-7;
 const FALLING_POWDER_SNOW: [f64; 6] = [0.0, 0.0, 0.0, 1.0, 0.8999999761581421, 1.0];
 const LAVA_FLOOR: [f64; 6] = [0.0, 0.0, 0.0, 1.0, 0.5, 1.0];
 const FULL_CUBE: [f64; 6] = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+const UNSTABLE_SCAFFOLDING: [f64; 6] = [0.0, 0.0, 0.0, 1.0, 0.125, 1.0];
+/// Stands in for vanilla's infinite border shape; finite so collision arithmetic never sees `inf - inf`.
+const BORDER_FAR: f64 = 1.0e9;
 const ABOVE_EPS: f64 = 1.0e-5_f32 as f64;
 
 #[derive(Debug, Clone, Copy)]
@@ -62,8 +65,72 @@ fn effective<'a>(
         }
     } else if above && !ctx.descending {
         data.boxes(s)
+    } else if s.has(flag::SCAFFOLDING_UNSTABLE) && ctx.y > f64::from(pos[1]) - ABOVE_EPS {
+        std::slice::from_ref(&UNSTABLE_SCAFFOLDING)
     } else {
         &[]
+    }
+}
+
+/// The world border's square, as the local player collides with it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BorderBounds {
+    pub min_x: f64,
+    pub min_z: f64,
+    pub max_x: f64,
+    pub max_z: f64,
+}
+
+impl BorderBounds {
+    /// Bounds from a centre and side length; non-finite input yields `None`.
+    pub fn new(center_x: f64, center_z: f64, size: f64, absolute_max: f64) -> Option<Self> {
+        if !(center_x.is_finite() && center_z.is_finite() && size.is_finite()) {
+            return None;
+        }
+        let lim = absolute_max.abs();
+        let half = size.max(0.0) / 2.0;
+        Some(Self {
+            min_x: (center_x - half).clamp(-lim, lim),
+            min_z: (center_z - half).clamp(-lim, lim),
+            max_x: (center_x + half).clamp(-lim, lim),
+            max_z: (center_z + half).clamp(-lim, lim),
+        })
+    }
+
+    fn distance(&self, x: f64, z: f64) -> f64 {
+        (x - self.min_x)
+            .min(self.max_x - x)
+            .min(z - self.min_z)
+            .min(self.max_z - z)
+    }
+
+    fn within(&self, x: f64, z: f64, margin: f64) -> bool {
+        x >= self.min_x - margin
+            && x < self.max_x + margin
+            && z >= self.min_z - margin
+            && z < self.max_z + margin
+    }
+
+    /// Vanilla `isInsideCloseToBorder` for an entity at `pos` testing `region`.
+    pub fn is_close(&self, pos: [f64; 3], region: &Aabb) -> bool {
+        let xs = region.max[0] - region.min[0];
+        let zs = region.max[2] - region.min[2];
+        let size = if xs.abs() >= zs.abs() { xs } else { zs };
+        let margin = size.abs().max(1.0);
+        self.distance(pos[0], pos[2]) < margin * 2.0 && self.within(pos[0], pos[2], margin)
+    }
+
+    /// Everything outside the block-aligned square, as four slabs.
+    pub fn boxes(&self) -> [Aabb; 4] {
+        let (x0, x1) = (self.min_x.floor(), self.max_x.ceil());
+        let (z0, z1) = (self.min_z.floor(), self.max_z.ceil());
+        let f = BORDER_FAR;
+        [
+            Aabb::new([-f, -f, -f], [x0, f, f]),
+            Aabb::new([x1, -f, -f], [f, f, f]),
+            Aabb::new([x0, -f, -f], [x1, f, z0]),
+            Aabb::new([x0, -f, z1], [x1, f, f]),
+        ]
     }
 }
 
@@ -171,6 +238,43 @@ pub fn any_collision<W: CollisionWorld + ?Sized>(
     hit
 }
 
+/// Vanilla `collidesWithSuffocatingBlock` for a region inside one block column; suffocating
+/// shapes never overhang their cell, so only the cells the region covers are read.
+pub fn any_suffocating<W: CollisionWorld + ?Sized>(
+    world: &W,
+    data: &PhysicsData,
+    region: &Aabb,
+) -> bool {
+    let lo = region.min.map(floor);
+    let hi = region.max.map(floor);
+    let mut tmp: [Aabb; 8] = [Aabb::new([0.0; 3], [0.0; 3]); 8];
+    for x in lo[0]..=hi[0] {
+        for z in lo[2]..=hi[2] {
+            for y in lo[1]..=hi[1] {
+                let s = data.state(world.block_state(x, y, z));
+                if !s.has(flag::SUFFOCATING) {
+                    continue;
+                }
+                let raw = data.boxes(s);
+                if raw.is_empty() || raw.len() > tmp.len() {
+                    continue;
+                }
+                let off = [f64::from(x), f64::from(y), f64::from(z)];
+                for (i, b) in raw.iter().enumerate() {
+                    tmp[i] = Aabb::new(
+                        [b[0] + off[0], b[1] + off[1], b[2] + off[2]],
+                        [b[3] + off[0], b[4] + off[1], b[5] + off[2]],
+                    );
+                }
+                if shape_hits(&tmp[..raw.len()], is_full_cube(raw), region) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Returns the supporting block under `bb`, tie-broken like vanilla's `BlockPos.compareTo`.
 pub fn find_supporting_block<W: CollisionWorld + ?Sized>(
     world: &W,
@@ -216,6 +320,16 @@ impl Colliders {
             boxes.extend_from_slice(bs);
             false
         });
+    }
+
+    /// Adds one box shape (an entity or a border slab) gathered outside the block scan.
+    pub fn add_box(&mut self, b: Aabb) {
+        self.shapes.push(ShapeRef {
+            start: self.boxes.len() as u32,
+            len: 1,
+            full: false,
+        });
+        self.boxes.push(b);
     }
 
     fn shape_boxes(&self, s: &ShapeRef) -> &[Aabb] {

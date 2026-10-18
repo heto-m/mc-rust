@@ -7,6 +7,7 @@ pub const KEY_ESCAPE: i32 = 41;
 pub const KEY_ENTER: i32 = 40;
 pub const KEY_BACKSPACE: i32 = 42;
 pub const KEY_LEFT_CTRL: i32 = 224;
+pub const KEY_RIGHT_CTRL: i32 = 228;
 
 /// `mcr-settings` identifies keys by USB HID usage, so a physical key code maps one to one.
 pub fn key_from_winit(code: KeyCode) -> InputKey {

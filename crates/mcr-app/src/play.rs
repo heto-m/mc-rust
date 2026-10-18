@@ -37,7 +37,7 @@ use crate::entity_loops::EntityLoops;
 use crate::gui::{self, Gui};
 use crate::hand::{Hand as HeldHand, HandFrame, HandTick};
 use crate::hud::{Hud, HudInput};
-use crate::input::{KEY_ESCAPE, KEY_LEFT_CTRL, track_modifiers, ui_inputs};
+use crate::input::{KEY_ESCAPE, KEY_LEFT_CTRL, KEY_RIGHT_CTRL, track_modifiers, ui_inputs};
 use crate::mesh_world::MeshWorld;
 use crate::movement_sounds::MovementSounds;
 use crate::nametags::{self, TagParams};
@@ -47,7 +47,7 @@ use crate::overlays::Overlays;
 use crate::preview::Preview;
 use crate::render_system::{PipelineStats, RenderSystem};
 use crate::settings::{OptionsScreen, SharedSettings};
-use crate::target::{EntityPicker, Target, pick, reach, third_person_distance};
+use crate::target::{EntityPicker, Target, pick, third_person_distance};
 use crate::view::{StateView, SuggestEngine, ViewCache};
 use mcr_modbridge::frame::JavaCamera;
 use mcr_modbridge::sound::{SoundOwner, event_owner};
@@ -360,6 +360,21 @@ pub fn degrees_per_pixel(sensitivity: f64) -> f32 {
     (s * s * s * 8.0 * 0.15) as f32
 }
 
+/// `ScrollWheelHandler`: the accumulator restarts on a direction change and a whole notch moves
+/// one slot, whatever its size.
+fn scroll_wheel(acc: &mut f32, delta: f32) -> Option<i32> {
+    if *acc != 0.0 && delta.signum() != acc.signum() {
+        *acc = 0.0;
+    }
+    *acc += delta;
+    let whole = acc.trunc();
+    if whole == 0.0 {
+        return None;
+    }
+    *acc -= whole;
+    Some(whole.signum() as i32)
+}
+
 pub fn view_direction(yaw: f32, pitch: f32) -> [f64; 3] {
     let (yaw, pitch) = (f64::from(yaw).to_radians(), f64::from(pitch).to_radians());
     [
@@ -461,11 +476,12 @@ pub struct Play {
     pub open_mods: bool,
     debug_on: bool,
     tab_held: bool,
-    ctrl_held: bool,
+    /// Left and right Ctrl: vanilla `hasControlDown` accepts either.
+    ctrl_held: [bool; 2],
     closed: Option<String>,
     attack_click: bool,
     use_click: bool,
-    target: Option<Target>,
+    pub(crate) target: Option<Target>,
     ambience: Ambience,
     block_animation: BlockAnimation,
     loops: EntityLoops,
@@ -630,7 +646,7 @@ impl Play {
             open_mods: false,
             debug_on: false,
             tab_held: false,
-            ctrl_held: false,
+            ctrl_held: [false; 2],
             closed: None,
             transfer: None,
             sky_factor: 1.0,
@@ -996,7 +1012,7 @@ impl Play {
     fn update_eye(&mut self) {
         let state = &self.world.client.state;
         let player = &state.player;
-        let target = player.physics.pose.eye_height();
+        let target = player.physics.eye_height();
         self.eye_height += (target - self.eye_height) * 0.5;
         let [x, y, z] = player.pos();
         self.cur_eye = [x, y + f64::from(self.eye_height), z];
@@ -1425,10 +1441,19 @@ impl Play {
             use_down: self.held.is_active(self.keys.use_item),
         };
         let hit = match self.target {
-            Some(Target::Entity { id, .. }) => UseTarget::Entity {
-                id,
-                location: [0.0; 3],
-            },
+            Some(Target::Entity { id, hit, .. }) => {
+                let at = self
+                    .world
+                    .client
+                    .state
+                    .entities
+                    .get(id)
+                    .map_or(hit, |e| e.pos);
+                UseTarget::Entity {
+                    id,
+                    location: std::array::from_fn(|a| hit[a] - at[a]),
+                }
+            }
             Some(Target::Block(hit)) => UseTarget::Block {
                 pos: hit.pos,
                 face: hit.face,
@@ -1537,9 +1562,7 @@ impl Play {
         let state = &self.world.client.state;
         let dir = view_direction(self.yaw, self.pitch);
         let picker = EntityPicker {
-            entities: &state.entities,
-            players: &state.players,
-            data: self.data,
+            state,
             own_id: state.player.entity_id,
             own_vehicle: state.player.vehicle,
         };
@@ -1548,7 +1571,8 @@ impl Play {
             &picker,
             eye,
             dir,
-            reach(state.player.instabuild),
+            state.block_interaction_range(),
+            state.entity_interaction_range(),
         )
     }
 
@@ -1628,14 +1652,15 @@ impl Play {
             });
             return;
         }
-        self.scroll += lines * self.options.mouse_wheel_sensitivity as f32;
-        let steps = self.scroll.trunc();
-        self.scroll -= steps;
-        if steps != 0.0 {
-            let held = i32::from(self.world.client.state.player.held_slot);
-            let slot = (held - steps.signum() as i32 * steps.abs().min(9.0) as i32).rem_euclid(9);
-            self.net(|c| c.select_hotbar(slot as u8));
-        }
+        let Some(step) = scroll_wheel(
+            &mut self.scroll,
+            lines * self.options.mouse_wheel_sensitivity as f32,
+        ) else {
+            return;
+        };
+        let held = i32::from(self.world.client.state.player.held_slot);
+        let slot = (held - step).rem_euclid(9);
+        self.net(|c| c.select_hotbar(slot as u8));
     }
 
     pub fn key_event(&mut self, key: InputKey, pressed: bool, text: Option<&str>) {
@@ -1654,7 +1679,9 @@ impl Play {
             return;
         }
         if key == InputKey::Keyboard(KEY_LEFT_CTRL) {
-            self.ctrl_held = pressed;
+            self.ctrl_held[0] = pressed;
+        } else if key == InputKey::Keyboard(KEY_RIGHT_CTRL) {
+            self.ctrl_held[1] = pressed;
         }
         let indices: Vec<usize> = self.bindings.lookup(key).to_vec();
         for i in indices {
@@ -2377,7 +2404,7 @@ impl Play {
         } else if i == k.advancements {
             self.open_advancements();
         } else if i == k.drop {
-            let whole = self.ctrl_held;
+            let whole = self.ctrl_held.iter().any(|&d| d);
             if self.net(|c| c.drop_item(whole)) == Some(true)
                 && let Some(hand) = &mut self.hand
             {
@@ -2386,10 +2413,17 @@ impl Play {
         } else if i == k.swap {
             self.net(Client::swap_offhand);
         } else if i == k.pick {
-            if let Some(Target::Block(hit)) = self.target
-                && !self.world.client.is_using_item()
-            {
-                self.net(|c| c.pick_block(hit.pos, false));
+            let include_data = self.ctrl_held.iter().any(|&d| d);
+            if !self.world.client.is_using_item() {
+                match self.target {
+                    Some(Target::Block(hit)) => {
+                        self.net(|c| c.pick_block(hit.pos, include_data));
+                    }
+                    Some(Target::Entity { id, .. }) => {
+                        self.net(|c| c.pick_entity(id, include_data));
+                    }
+                    None => {}
+                }
             }
         } else if i == k.gui {
             self.hud_hidden = !self.hud_hidden;
@@ -2912,6 +2946,17 @@ fn center(pos: BlockPos) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scroll_moves_one_slot_and_resets_on_reversal() {
+        let mut acc = 0.0;
+        assert_eq!(scroll_wheel(&mut acc, 5.0), Some(1));
+        assert_eq!(acc, 0.0);
+        assert_eq!(scroll_wheel(&mut acc, 0.6), None);
+        assert_eq!(scroll_wheel(&mut acc, -0.5), None, "reversal drops the 0.6");
+        assert_eq!(scroll_wheel(&mut acc, -0.6), Some(-1));
+        assert!(acc.abs() < 0.2);
+    }
 
     fn mount_state(entity: &str, columns: usize) -> mcr_client::ClientState {
         let mut s =

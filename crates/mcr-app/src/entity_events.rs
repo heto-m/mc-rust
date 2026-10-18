@@ -250,7 +250,7 @@ impl Body {
                 pos,
                 width: 0.6,
                 height: 1.8,
-                eye: f64::from(p.physics.pose.eye_height()),
+                eye: f64::from(p.physics.eye_height()),
                 yaw: p.physics.yaw,
                 pitch: p.physics.pitch,
                 vel: p.physics.vel,

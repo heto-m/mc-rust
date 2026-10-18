@@ -118,31 +118,80 @@ pub struct MobEffect {
 pub struct AttributeState {
     pub base: f64,
     pub modifiers: Vec<AttributeModifier>,
+    /// `RangedAttribute` bounds; `None` for attributes this version does not know.
+    pub range: Option<(f64, f64)>,
+}
+
+/// Vanilla `RangedAttribute` bounds of the 26.3 attributes.
+pub fn attribute_range(name: &str) -> Option<(f64, f64)> {
+    let short = name.strip_prefix("minecraft:").unwrap_or(name);
+    Some(match short {
+        "armor" => (0.0, 30.0),
+        "armor_toughness" => (0.0, 20.0),
+        "attack_knockback" => (0.0, 5.0),
+        "attack_speed" | "block_break_speed" | "burning_time" | "flying_speed" => (0.0, 1024.0),
+        "mining_efficiency" | "movement_speed" | "oxygen_bonus" => (0.0, 1024.0),
+        "air_drag_modifier" | "attack_damage" | "follow_range" | "friction_modifier" => {
+            (0.0, 2048.0)
+        }
+        "max_absorption" | "tempt_range" => (0.0, 2048.0),
+        "below_name_distance" | "name_tag_distance" => (0.0, 512.0),
+        "block_interaction_range" | "entity_interaction_range" => (0.0, 64.0),
+        "bounciness" | "explosion_knockback_resistance" | "movement_efficiency" => (0.0, 1.0),
+        "sneaking_speed" | "spawn_reinforcements" | "sweeping_damage_ratio" => (0.0, 1.0),
+        "water_movement_efficiency" => (0.0, 1.0),
+        "camera_distance" => (0.0, 32.0),
+        "fall_damage_multiplier" => (0.0, 100.0),
+        "gravity" => (-1.0, 1.0),
+        "jump_strength" => (0.0, 32.0),
+        "knockback_resistance" => (-2.0, 1.0),
+        "luck" | "safe_fall_distance" => (-1024.0, 1024.0),
+        "max_health" => (1.0, 1024.0),
+        "scale" => (0.0625, 16.0),
+        "step_height" => (0.0, 10.0),
+        "submerged_mining_speed" => (0.0, 20.0),
+        "waypoint_transmit_range" | "waypoint_receive_range" => (0.0, 6.0e7),
+        _ => return None,
+    })
 }
 
 impl AttributeState {
-    /// Vanilla order: flat additions, then summed base multipliers, then each total multiplier.
+    pub fn new(base: f64, modifiers: Vec<AttributeModifier>) -> Self {
+        Self {
+            base,
+            modifiers,
+            range: None,
+        }
+    }
+
+    /// Vanilla order: flat additions, then summed base multipliers, then each total multiplier;
+    /// the result is sanitised like `RangedAttribute#sanitizeValue` (NaN becomes the minimum).
     pub fn value(&self, skip_modifier: Option<&str>) -> f64 {
         use mcr_protocol::types::component::AttributeOperation as Op;
+        let mods = || {
+            self.modifiers
+                .iter()
+                .filter(move |m| Some(m.id.as_str()) != skip_modifier)
+        };
         let mut value = self.base;
-        let mods = self
-            .modifiers
-            .iter()
-            .filter(|m| Some(m.id.as_str()) != skip_modifier);
-        let (mut mul_base, mut mul_total) = (0.0, Vec::new());
-        for m in mods {
+        let mut mul_base = 0.0;
+        for m in mods() {
             match m.operation {
                 Op::AddValue => value += m.amount,
                 Op::AddMultipliedBase => mul_base += m.amount,
-                Op::AddMultipliedTotal => mul_total.push(m.amount),
+                Op::AddMultipliedTotal => {}
             }
         }
-        let base_for_mul = value;
-        value += base_for_mul * mul_base;
-        for m in mul_total {
-            value *= 1.0 + m;
+        value += value * mul_base;
+        for m in mods().filter(|m| m.operation == Op::AddMultipliedTotal) {
+            value *= 1.0 + m.amount;
         }
-        value
+        match self.range {
+            Some((lo, _)) if value.is_nan() => lo,
+            Some((lo, hi)) => value.clamp(lo, hi),
+            None if value.is_nan() => 0.0,
+            None => value,
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::aabb::Aabb;
-use crate::collide::{Colliders, CollisionCtx};
+use crate::collide::{BorderBounds, Colliders, CollisionCtx};
 use crate::data::{PhysicsData, StateInfo, flag};
 use crate::types::ItemUse;
 use crate::types::{Abilities, Attributes, Effects, MoveKind, MovementOutput, PlayerInput, Pose};
@@ -51,6 +51,9 @@ pub struct PlayerPhysics {
     pub spin_attack_flag: bool,
     /// The server reports a sleeping position: vanilla `isSleeping`.
     pub sleeping: bool,
+    /// Boxes of nearby entities the player collides with (boats, shulkers), refreshed by the caller.
+    pub entity_colliders: Vec<Aabb>,
+    pub border: Option<BorderBounds>,
     pub(crate) fall_flying_started: bool,
     pub(crate) abilities_changed: bool,
     pub(crate) fluid: FluidState,
@@ -123,6 +126,8 @@ impl PlayerPhysics {
             spin_attack_ticks: 0,
             spin_attack_flag: false,
             sleeping: false,
+            entity_colliders: Vec::new(),
+            border: None,
             fall_flying_started: false,
             abilities_changed: false,
             fluid: FluidState::default(),
@@ -173,14 +178,29 @@ impl PlayerPhysics {
     }
 
     pub(crate) fn bounding_box_for(&self, pose: Pose, p: [f64; 3]) -> Aabb {
-        let (width, height) = self.dims.unwrap_or((pose.width(), pose.height()));
+        let (width, height) = self.dims.unwrap_or_else(|| {
+            (
+                pose.width() * self.scale(pose),
+                pose.height() * self.scale(pose),
+            )
+        });
         let w = f64::from(width / 2.0);
         let h = f64::from(height);
         Aabb::new([p[0] - w, p[1], p[2] - w], [p[0] + w, p[1] + h, p[2] + w])
     }
 
     pub fn eye_height(&self) -> f32 {
-        self.pose.eye_height()
+        self.pose.eye_height() * self.scale(self.pose)
+    }
+
+    /// The scale attribute; sleeping dimensions are fixed in vanilla and never scale.
+    fn scale(&self, pose: Pose) -> f32 {
+        let s = self.attributes.scale;
+        if pose == Pose::Sleeping || !s.is_finite() {
+            1.0
+        } else {
+            s.clamp(0.0625, 16.0) as f32
+        }
     }
 
     pub(crate) fn eye_y(&self) -> f64 {
@@ -196,7 +216,12 @@ impl PlayerPhysics {
     }
 
     pub(crate) fn max_up_step(&self) -> f32 {
-        self.attributes.step_height as f32
+        let step = self.attributes.step_height;
+        if step.is_finite() {
+            step.clamp(0.0, 10.0) as f32
+        } else {
+            0.0
+        }
     }
 
     pub(crate) fn ctx(&self) -> CollisionCtx {

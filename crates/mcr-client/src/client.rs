@@ -72,6 +72,7 @@ pub struct Client {
     finish_pending: Option<Instant>,
     /// Play packets skipped in mod mode because a mod's content made them undecodable to Rust.
     skipped_play: u64,
+    pusher_scratch: Vec<[f64; 3]>,
     joined: bool,
     conduct_pending: bool,
     pub ticks: u64,
@@ -191,6 +192,7 @@ impl Client {
             pending_pongs: Vec::new(),
             finish_pending: None,
             skipped_play: 0,
+            pusher_scratch: Vec::new(),
             joined: false,
             conduct_pending: false,
             ticks: 0,
@@ -399,6 +401,7 @@ impl Client {
             pending_pongs: Vec::new(),
             finish_pending: None,
             skipped_play: 0,
+            pusher_scratch: Vec::new(),
         }
     }
 
@@ -1103,6 +1106,15 @@ impl Client {
             self.state.player.physics.passenger = false;
         }
         self.state.player.physics.glider_equipped = self.glider_equipped();
+        let mut pushers = std::mem::take(&mut self.pusher_scratch);
+        self.state.refresh_collision_env(&mut pushers);
+        for &from in &pushers {
+            self.state
+                .player
+                .physics
+                .push_from(&self.state.chunks, from);
+        }
+        self.pusher_scratch = pushers;
         let player = &mut self.state.player;
         let out = player.physics.tick(&keys, &self.state.chunks);
         let entity_id = player.entity_id;

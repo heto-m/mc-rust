@@ -235,6 +235,7 @@ fn respawn_with_kept_attributes_keeps_their_modifiers() {
                 amount: 1.0,
                 operation: AttributeOperation::AddMultipliedTotal,
             }],
+            range: None,
         },
     );
     let packet = respawn(&s, Respawn::KEEP_ATTRIBUTE_MODIFIERS);

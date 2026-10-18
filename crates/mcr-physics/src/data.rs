@@ -27,11 +27,31 @@ pub mod flag {
     pub const FENCE: u32 = 1 << 21;
     pub const DRAG_DOWN: u32 = 1 << 22;
     pub const LILY_PAD: u32 = 1 << 23;
+    /// Vanilla `isSuffocating`: what the local player is pushed out of.
+    pub const SUFFOCATING: u32 = 1 << 24;
+    /// A floating scaffolding bottom piece, which keeps a thin floor.
+    pub const SCAFFOLDING_UNSTABLE: u32 = 1 << 25;
 }
 
 pub const FLUID_NONE: u8 = 0;
 pub const FLUID_WATER: u8 = 1;
 pub const FLUID_LAVA: u8 = 2;
+
+/// The `causes_suffocation` tag is every full collision cube, minus vanilla's `isSuffocating` overrides.
+fn suffocates(short: &str, full_cube: bool, extended: impl FnOnce() -> bool) -> bool {
+    match short {
+        "farmland" | "soul_sand" | "dirt_path" | "mud" => true,
+        "glass" | "tinted_glass" | "mangrove_roots" | "moving_piston" => false,
+        "piston" | "sticky_piston" => !extended(),
+        _ if short.ends_with("_leaves")
+            || short.ends_with("_stained_glass")
+            || short.ends_with("copper_grate") =>
+        {
+            false
+        }
+        _ => full_cube,
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct StateInfo {
@@ -183,6 +203,19 @@ impl PhysicsData {
             }
             if short.ends_with("_fence_gate") {
                 flags |= flag::FENCE_GATE;
+            }
+            if suffocates(short, flags & flag::FULL_CUBE != 0, || {
+                v.state_properties(id).any(|kv| kv == ("extended", "true"))
+            }) {
+                flags |= flag::SUFFOCATING;
+            }
+            if short == "scaffolding" {
+                let floating = v.state_properties(id).any(|kv| kv == ("bottom", "true"))
+                    && v.state_properties(id)
+                        .any(|(k, val)| k == "distance" && val != "0");
+                if floating {
+                    flags |= flag::SCAFFOLDING_UNSTABLE;
+                }
             }
             if short.ends_with("_sign") || short.ends_with("_wall_sign") {
                 flags |= flag::SIGN;
