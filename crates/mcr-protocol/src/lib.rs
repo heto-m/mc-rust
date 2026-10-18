@@ -13,6 +13,7 @@ pub mod login;
 pub mod play;
 pub mod status;
 pub mod types;
+pub mod version;
 
 pub use error::ProtocolError;
 pub use ids::{PacketIds, PacketSet};

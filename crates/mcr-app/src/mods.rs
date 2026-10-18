@@ -132,21 +132,23 @@ pub fn startup(opts: &Options) -> Result<Startup> {
         eprintln!("[mods] {line}");
     }
     let jars = report.jars();
-    let would_boot = !jars.is_empty();
+    let would_boot = !jars.is_empty() && !opts.vanilla;
     let prompt = would_boot && previous.needs_fallback_prompt();
-    if !would_boot {
+    if opts.vanilla {
+        eprintln!("[mods] the profile has no mods; not starting Java");
+    } else if !would_boot {
         eprintln!(
             "[mods] no enabled mods in {}; not starting Java",
             mods_dir.display()
         );
-        if previous.needs_fallback_prompt() {
-            session.reset();
-        }
+    }
+    if !would_boot && previous.needs_fallback_prompt() {
+        session.reset();
     }
     let boot = (would_boot && !prompt).then(|| BootPlan {
         jars,
         active_ids: report.active_ids(),
-        heap_mib: settings.heap_mib(),
+        heap_mib: opts.heap_mib.unwrap_or_else(|| settings.heap_mib()),
         session,
         explicit: opts.mods.is_some(),
         http_hosts: manager.policy.http_hosts().to_vec(),
@@ -210,8 +212,11 @@ impl ModHost {
             plan.jars.clone(),
         );
         config.username = opts.name.clone();
-        config.uuid = mcr_auth::offline::offline_uuid(&opts.name)
-            .unwrap_or_default()
+        config.uuid = opts
+            .online
+            .as_ref()
+            .and_then(|a| uuid::Uuid::parse_str(&a.profile_id).ok())
+            .unwrap_or_else(|| mcr_auth::offline::offline_uuid(&opts.name).unwrap_or_default())
             .hyphenated()
             .to_string();
         (config.width, config.height) = renderer.size();

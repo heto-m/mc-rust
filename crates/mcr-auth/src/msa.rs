@@ -87,10 +87,25 @@ pub fn poll_for_tokens(
     device: &DeviceCode,
     mut sleep: impl FnMut(Duration),
 ) -> Result<MsaTokens, AuthError> {
+    poll_until(http, client_id, device, |d| {
+        sleep(d);
+        true
+    })
+}
+
+/// Like [`poll_for_tokens`], but `wait` returning `false` cancels before the next request.
+pub fn poll_until(
+    http: &impl HttpClient,
+    client_id: &ClientId,
+    device: &DeviceCode,
+    mut wait: impl FnMut(Duration) -> bool,
+) -> Result<MsaTokens, AuthError> {
     let mut interval = device.interval.max(1);
     let mut elapsed = 0;
     while elapsed < device.expires_in {
-        sleep(Duration::from_secs(interval));
+        if !wait(Duration::from_secs(interval)) {
+            return Err(AuthError::Cancelled);
+        }
         elapsed += interval;
         let request = Request::post_form(
             TOKEN_URL,
@@ -223,6 +238,19 @@ mod tests {
             poll_for_tokens(&http, &id(), &device(), |_| {}),
             Err(AuthError::LoginExpired)
         ));
+    }
+
+    #[test]
+    fn cancel_stops_before_the_next_request() {
+        let http = MockHttp::default();
+        http.push("token", 400, PENDING);
+        let mut waits = 0;
+        let result = poll_until(&http, &id(), &device(), |_| {
+            waits += 1;
+            waits < 2
+        });
+        assert!(matches!(result, Err(AuthError::Cancelled)));
+        assert_eq!(http.seen.borrow().len(), 1);
     }
 
     #[test]

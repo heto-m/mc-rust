@@ -20,6 +20,7 @@ mod hand;
 mod hud;
 mod input;
 mod language;
+mod launcher;
 mod map;
 mod mesh_world;
 mod mod_input;
@@ -79,22 +80,37 @@ enum Scene {
     Synthetic(Box<SyntheticScene>),
     World(Box<Engine>),
     Shell(Box<Shell>),
+    Launcher(Box<launcher::scene::Launcher>),
 }
 
 impl Scene {
-    fn camera_mut(&mut self) -> &mut Camera {
+    fn camera_mut(&mut self) -> Option<&mut Camera> {
         match self {
-            Self::Synthetic(s) => &mut s.camera,
-            Self::World(engine) => &mut engine.game.camera,
-            Self::Shell(shell) => shell.camera_mut(),
+            Self::Synthetic(s) => Some(&mut s.camera),
+            Self::World(engine) => Some(&mut engine.game.camera),
+            Self::Shell(shell) => Some(shell.camera_mut()),
+            Self::Launcher(_) => None,
         }
     }
 
-    fn renderer_mut(&mut self) -> &mut Renderer {
+    fn resize(&mut self, width: u32, height: u32) {
         match self {
-            Self::Synthetic(s) => &mut s.renderer,
-            Self::World(engine) => &mut engine.render.renderer,
-            Self::Shell(shell) => shell.renderer_mut().expect("renderer"),
+            Self::Synthetic(s) => s.renderer.resize(width, height),
+            Self::World(engine) => engine.render.renderer.resize(width, height),
+            Self::Shell(shell) => shell
+                .renderer_mut()
+                .expect("renderer")
+                .resize(width, height),
+            Self::Launcher(l) => l.resize(width, height),
+        }
+    }
+
+    fn renderer_mut(&mut self) -> Option<&mut Renderer> {
+        match self {
+            Self::Synthetic(s) => Some(&mut s.renderer),
+            Self::World(engine) => Some(&mut engine.render.renderer),
+            Self::Shell(shell) => shell.renderer_mut(),
+            Self::Launcher(_) => None,
         }
     }
 }
@@ -114,11 +130,17 @@ struct App {
     cursor: CursorIcon,
     ime: Option<Option<[i32; 4]>>,
     boot: Option<mods::BootPlan>,
-    mods_app: mods_ui::ModsApp,
+    mods_app: Option<mods_ui::ModsApp>,
+    /// The script's steps left over after the launcher's Play.
+    autopilot: Option<autopilot::Autopilot>,
 }
 
 impl App {
-    fn new(opts: Options, launched: Instant, started: mods::Startup) -> Self {
+    fn new(opts: Options, launched: Instant, started: Option<mods::Startup>) -> Self {
+        let (boot, mods_app) = match started {
+            Some(s) => (s.boot, Some(s.app)),
+            None => (None, None),
+        };
         Self {
             opts,
             launched,
@@ -133,8 +155,9 @@ impl App {
             mod_host: None,
             cursor: CursorIcon::Default,
             ime: None,
-            boot: started.boot,
-            mods_app: started.app,
+            boot,
+            mods_app,
+            autopilot: None,
         }
     }
 
@@ -146,6 +169,49 @@ impl App {
                     .with_inner_size(LogicalSize::new(1280, 720)),
             )?,
         );
+        if self.mods_app.is_none() {
+            let size = window.inner_size();
+            let mut launcher = launcher::scene::Launcher::new(
+                Target::Surface {
+                    target: window.clone().into(),
+                    width: size.width,
+                    height: size.height,
+                },
+                &self.opts,
+            )?;
+            launcher.use_system_clipboard();
+            if let Some(path) = &self.opts.autopilot {
+                self.autopilot = Some(load_autopilot(path)?);
+            }
+            self.scene = Some(Scene::Launcher(Box::new(launcher)));
+            self.window = Some(window);
+            return Ok(());
+        }
+        self.start_game(window)
+    }
+
+    /// Leaves the launcher for the game with the profile Play applied.
+    fn leave_launcher(&mut self, plan: mcr_launcher::LaunchPlan) -> Result<()> {
+        self.scene = None;
+        let resolution = plan.resolution;
+        launcher::apply(&mut self.opts, plan)?;
+        let started = mods::startup(&self.opts)?;
+        self.boot = started.boot;
+        self.mods_app = Some(started.app);
+        let window = self.window.take().context("no window")?;
+        if let Some(r) = resolution {
+            let _ = window.request_inner_size(PhysicalSize::new(r.width, r.height));
+        }
+        let connecting = self.opts.connect.is_some() || self.opts.singleplayer.is_some();
+        if let Some(pilot) = &mut self.autopilot
+            && connecting
+        {
+            pilot.prepend(autopilot::Step::WaitReady);
+        }
+        self.start_game(window)
+    }
+
+    fn start_game(&mut self, window: Arc<Window>) -> Result<()> {
         let size = window.inner_size();
         let mut config = world_setup::renderer_config(&self.opts, RendererConfig::default());
         if self.boot.is_some() {
@@ -168,8 +234,9 @@ impl App {
             renderer.uses_draw_count(),
             renderer.has_timestamps()
         );
+        let mods_app = self.mods_app.clone().context("mod startup missing")?;
         if let Some(plan) = self.boot.take() {
-            self.mod_host = plan.start(&self.opts, &mut renderer, &self.mods_app)?;
+            self.mod_host = plan.start(&self.opts, &mut renderer, &mods_app)?;
         }
         self.scene = Some(if self.opts.world.is_none() && !self.opts.synthetic {
             Scene::Shell(Box::new(Shell::new(
@@ -177,7 +244,7 @@ impl App {
                 shell_config(
                     &self.opts,
                     self.mod_host.as_ref().map(mods::ModHost::net),
-                    self.mods_app.clone(),
+                    mods_app,
                 ),
             )?))
         } else if self.opts.synthetic {
@@ -193,7 +260,9 @@ impl App {
             )))
         });
         if let Some(Scene::Shell(shell)) = &mut self.scene {
-            if let Some(path) = &self.opts.autopilot {
+            if let Some(pilot) = self.autopilot.take() {
+                shell.set_autopilot(pilot);
+            } else if let Some(path) = &self.opts.autopilot {
                 shell.set_autopilot(load_autopilot(path)?);
             }
         } else {
@@ -287,8 +356,8 @@ impl App {
             KeyCode::Escape if pressed => self.set_grab(false),
             KeyCode::KeyV if pressed => {
                 self.opts.vsync = !self.opts.vsync;
-                if let Some(scene) = &mut self.scene {
-                    scene.renderer_mut().set_vsync(self.opts.vsync);
+                if let Some(renderer) = self.scene.as_mut().and_then(Scene::renderer_mut) {
+                    renderer.set_vsync(self.opts.vsync);
                 }
                 println!("vsync {}", if self.opts.vsync { "on" } else { "off" });
             }
@@ -301,6 +370,26 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
         let Some(scene) = &mut self.scene else { return };
+        if let Scene::Launcher(l) = scene {
+            let ticks = l.advance(dt);
+            if let Some(pilot) = &mut self.autopilot {
+                for _ in 0..ticks {
+                    pilot.step_launcher(l);
+                }
+            }
+            l.frame();
+            l.shot = None;
+            if l.quit {
+                self.exit = true;
+                return;
+            }
+            let Some(plan) = l.take_plan() else { return };
+            if let Err(e) = self.leave_launcher(plan) {
+                eprintln!("startup failed: {e:#}");
+                self.exit = true;
+            }
+            return;
+        }
         if let Scene::Shell(shell) = scene {
             shell.advance(dt);
             if shell.quit {
@@ -336,9 +425,11 @@ impl App {
             }
             return;
         }
-        self.fly.update(scene.camera_mut(), dt);
+        let Some(camera) = scene.camera_mut() else {
+            return;
+        };
+        self.fly.update(camera, dt);
         if let Some(speed) = self.opts.autofly {
-            let camera = scene.camera_mut();
             let f = camera.forward();
             camera.position += DVec3::new(f64::from(f.x), 0.0, f64::from(f.z)).normalize_or_zero()
                 * speed
@@ -353,7 +444,7 @@ impl App {
                     sky_light: 1.0,
                 })
                 .ok(),
-            Scene::Shell(_) => None,
+            Scene::Shell(_) | Scene::Launcher(_) => None,
             Scene::World(engine) => {
                 if let Err(e) = engine.tick() {
                     eprintln!("tick failed: {e:#}");
@@ -375,7 +466,7 @@ impl App {
         let Some(frame) = frame else { return };
         self.stats.record(dt, &frame);
         let pipeline = match scene {
-            Scene::Shell(_) => None,
+            Scene::Shell(_) | Scene::Launcher(_) => None,
             Scene::World(engine) => Some((
                 engine.pipeline_stats(),
                 engine.render.renderer.memory_stats(),
@@ -385,8 +476,10 @@ impl App {
                 s.renderer.memory_stats(),
             )),
         };
-        if let Some(line) = self.stats.report(pipeline) {
-            let p = scene.camera_mut().position;
+        if let Some(line) = self.stats.report(pipeline)
+            && let Some(camera) = scene.camera_mut()
+        {
+            let p = camera.position;
             println!("{line} | pos {:.1} {:.1} {:.1}", p.x, p.y, p.z);
         }
     }
@@ -407,11 +500,20 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 if let Some(scene) = &mut self.scene {
-                    scene.renderer_mut().resize(size.width, size.height);
+                    scene.resize(size.width, size.height);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(Scene::Shell(shell)) = &mut self.scene {
+                if let Some(Scene::Launcher(l)) = &mut self.scene {
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        l.key_input(
+                            input::key_from_winit(code),
+                            event.state == ElementState::Pressed,
+                            event.repeat,
+                            event.text.as_deref(),
+                        );
+                    }
+                } else if let Some(Scene::Shell(shell)) = &mut self.scene {
                     if let PhysicalKey::Code(code) = event.physical_key {
                         let pressed = event.state == ElementState::Pressed;
                         shell.key_input(
@@ -432,7 +534,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Ime(ime) => {
-                if let Some(Scene::Shell(shell)) = &mut self.scene {
+                if let (Some(Scene::Launcher(l)), Ime::Commit(text)) = (&mut self.scene, &ime) {
+                    l.ui_text(text);
+                } else if let Some(Scene::Shell(shell)) = &mut self.scene {
                     match ime {
                         Ime::Commit(text) => shell.ime_commit(&text),
                         Ime::Preedit(text, cursor) => shell.ime_preedit(&text, cursor),
@@ -446,13 +550,20 @@ impl ApplicationHandler for App {
                     shell.dropped_file(&path);
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => {
-                if let Some(Scene::Shell(shell)) = &mut self.scene {
-                    shell.cursor_moved(position.x, position.y);
-                }
-            }
+            WindowEvent::CursorMoved { position, .. } => match &mut self.scene {
+                Some(Scene::Shell(shell)) => shell.cursor_moved(position.x, position.y),
+                Some(Scene::Launcher(l)) => l.cursor_moved(position.x, position.y),
+                _ => {}
+            },
             WindowEvent::MouseInput { state, button, .. } => {
-                if let Some(Scene::Shell(shell)) = &mut self.scene {
+                if let Some(Scene::Launcher(l)) = &mut self.scene {
+                    l.key_input(
+                        input::mouse_from_winit(button),
+                        state == ElementState::Pressed,
+                        false,
+                        None,
+                    );
+                } else if let Some(Scene::Shell(shell)) = &mut self.scene {
                     if state == ElementState::Pressed && shell.wants_grab() && !self.grabbed {
                         self.set_grab(true);
                     } else if let Some(Scene::Shell(shell)) = &mut self.scene {
@@ -471,7 +582,9 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
                 };
-                if let Some(Scene::Shell(shell)) = &mut self.scene {
+                if let Some(Scene::Launcher(l)) = &mut self.scene {
+                    l.scroll(steps as f32);
+                } else if let Some(Scene::Shell(shell)) = &mut self.scene {
                     let (dx, dy) = mod_input::wheel(delta);
                     shell.wheel(dx, dy, steps as f32);
                 } else {
@@ -491,7 +604,9 @@ impl ApplicationHandler for App {
             if let Scene::Shell(shell) = scene {
                 shell.mouse_motion(delta.0, delta.1);
             } else {
-                self.fly.look(scene.camera_mut(), delta.0, delta.1);
+                if let Some(camera) = scene.camera_mut() {
+                    self.fly.look(camera, delta.0, delta.1);
+                }
             }
         }
     }
@@ -516,6 +631,7 @@ fn shell_config(
         jar: opts.jar.clone(),
         assets_dir: opts.assets_dir.clone(),
         name: opts.name.clone(),
+        online: opts.online.clone(),
         render_distance: opts.render_distance_set.then_some(opts.render_distance),
         connect: opts.connect.clone(),
         singleplayer: opts.singleplayer.clone(),
@@ -578,6 +694,12 @@ fn main() -> Result<()> {
         }
     };
     opts.absolutize()?;
+    if let Some(name) = opts.profile.clone()
+        && let Err(e) = launcher::apply_profile(&mut opts, &name)
+    {
+        eprintln!("{e:#}");
+        std::process::exit(2);
+    }
     if let Some(secs) = opts.soak {
         return soak::run(&opts, std::time::Duration::from_secs(secs));
     }
@@ -587,7 +709,11 @@ fn main() -> Result<()> {
         }
         return screenshot::run(&opts, &out, launched);
     }
-    let started = mods::startup(&opts)?;
+    let started = if opts.shows_launcher() {
+        None
+    } else {
+        Some(mods::startup(&opts)?)
+    };
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App::new(opts, launched, started);

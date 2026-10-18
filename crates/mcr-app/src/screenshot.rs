@@ -227,6 +227,15 @@ fn shell_timeline(shell: &mut crate::shell::Shell, secs: u32, origin: Instant) {
 const JAVA_FADE: Duration = Duration::from_secs(3);
 
 pub fn run_shell(opts: &crate::cli::Options, out: &Path, launched: Instant) -> Result<()> {
+    let mut opts = opts.clone();
+    let mut autopilot = match &opts.autopilot {
+        Some(path) => Some(crate::load_autopilot(path)?),
+        None => None,
+    };
+    if opts.launcher && !run_launcher(&mut opts, out, autopilot.as_mut())? {
+        return Ok(());
+    }
+    let opts = &opts;
     let (width, height) = opts.size;
     let mut config = world_setup::renderer_config(opts, RendererConfig::default());
     let started = crate::mods::startup(opts)?;
@@ -247,11 +256,65 @@ pub fn run_shell(opts: &crate::cli::Options, out: &Path, launched: Instant) -> R
         mod_host.as_ref().map(crate::mods::ModHost::net),
         started.app,
         launched,
+        autopilot,
     );
     if let Some(host) = mod_host {
         host.finish();
     }
     result
+}
+
+/// The launcher offscreen until Play applies a profile (`true`), or until the script ends or quits,
+/// which writes the launcher's last frame to `out` (`false`).
+fn run_launcher(
+    opts: &mut crate::cli::Options,
+    out: &Path,
+    mut autopilot: Option<&mut crate::autopilot::Autopilot>,
+) -> Result<bool> {
+    let (width, height) = opts.size;
+    let mut launcher =
+        crate::launcher::scene::Launcher::new(Target::Offscreen { width, height }, opts)?;
+    let started = Instant::now();
+    let mut last = started;
+    let mut frames = 0u32;
+    loop {
+        let now = Instant::now();
+        let ticks = launcher.advance((now - last).as_secs_f32());
+        last = now;
+        if let Some(pilot) = autopilot.as_deref_mut() {
+            for _ in 0..ticks {
+                pilot.step_launcher(&mut launcher);
+            }
+        }
+        launcher.frame();
+        frames += 1;
+        if let Some(path) = launcher.shot.take() {
+            write_png(&path, width, height, &launcher.read_offscreen()?)?;
+            println!("wrote {}", path.display());
+        }
+        if let Some(plan) = launcher.take_plan() {
+            drop(launcher);
+            crate::launcher::apply(opts, plan)?;
+            let connecting = opts.connect.is_some() || opts.singleplayer.is_some();
+            if let Some(pilot) = autopilot
+                && connecting
+            {
+                pilot.prepend(crate::autopilot::Step::WaitReady);
+            }
+            return Ok(true);
+        }
+        let script_done = autopilot.as_deref().is_none_or(|p| p.finished);
+        if launcher.quit || (script_done && frames > 30) {
+            launcher.frame();
+            write_png(out, width, height, &launcher.read_offscreen()?)?;
+            println!("wrote {} (launcher)", out.display());
+            return Ok(false);
+        }
+        if started.elapsed() > TIMEOUT {
+            bail!("timed out in the launcher");
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn shell_frames(
@@ -261,6 +324,7 @@ fn shell_frames(
     mod_net: Option<crate::mods::ModNet>,
     mods: crate::mods_ui::ModsApp,
     launched: Instant,
+    autopilot: Option<crate::autopilot::Autopilot>,
 ) -> Result<()> {
     use crate::shell::{Shell, ShellConfig};
     let (width, height) = opts.size;
@@ -269,6 +333,7 @@ fn shell_frames(
         jar: opts.jar.clone(),
         assets_dir: opts.assets_dir.clone(),
         name: opts.name.clone(),
+        online: opts.online.clone(),
         render_distance: opts.render_distance_set.then_some(opts.render_distance),
         connect: opts.connect.clone(),
         singleplayer: opts.singleplayer.clone(),
@@ -277,16 +342,12 @@ fn shell_frames(
     };
     let mut shell = Shell::new(renderer, config)?;
     let connecting = opts.connect.is_some() || opts.singleplayer.is_some();
-    let mut scripted = false;
-    if let Some(path) = &opts.autopilot {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let mut steps = crate::autopilot::parse(&text).map_err(anyhow::Error::msg)?;
-        if connecting && steps.first() != Some(&crate::autopilot::Step::Early) {
-            steps.insert(0, crate::autopilot::Step::WaitReady);
+    let scripted = autopilot.is_some();
+    if let Some(mut pilot) = autopilot {
+        if connecting && !opts.launcher {
+            pilot.prepend(crate::autopilot::Step::WaitReady);
         }
-        shell.set_autopilot(crate::autopilot::Autopilot::new(steps));
-        scripted = true;
+        shell.set_autopilot(pilot);
     }
     let started = Instant::now();
     let mut last = Instant::now();

@@ -104,6 +104,39 @@ impl<H: HttpClient> Authenticator<H> {
         Ok(account)
     }
 
+    /// A new device-code sign-in that ignores the cache; `wait` returning `false` cancels polling.
+    /// The account is saved to the cache path when one is set.
+    pub fn sign_in(
+        &self,
+        now: u64,
+        prompt: impl FnOnce(&DeviceCode),
+        wait: impl FnMut(Duration) -> bool,
+    ) -> Result<Account, AuthError> {
+        let device = msa::request_device_code(&self.http, &self.client_id)?;
+        prompt(&device);
+        let tokens = msa::poll_until(&self.http, &self.client_id, &device, wait)?;
+        let mut account = self.minecraft_account(tokens, now, None)?;
+        self.refresh_keys_if_needed(&mut account, now)?;
+        if let Some(path) = &self.cache_path {
+            account.save(path)?;
+        }
+        Ok(account)
+    }
+
+    /// The cached account with a usable token, refreshing it if expired; never starts a device login.
+    pub fn refresh_cached(&self, now: u64) -> Result<Account, AuthError> {
+        let path = self.cache_path.as_ref().ok_or(AuthError::NotSignedIn)?;
+        let cached = Account::load(path)?.ok_or(AuthError::NotSignedIn)?;
+        let mut account = if cached.token_valid(now) {
+            cached
+        } else {
+            self.refresh_account(&cached, now)?
+        };
+        self.refresh_keys_if_needed(&mut account, now)?;
+        account.save(path)?;
+        Ok(account)
+    }
+
     fn device_login(
         &self,
         now: u64,
@@ -287,6 +320,65 @@ mod tests {
             .unwrap();
         assert!(prompted);
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn refresh_cached_never_prompts() {
+        let path = temp_path("noprompt");
+        let _ = fs::remove_file(&path);
+        let a = auth(MockHttp::default(), &path);
+        assert!(matches!(a.refresh_cached(NOW), Err(AuthError::NotSignedIn)));
+
+        a.http()
+            .push(
+                "devicecode",
+                200,
+                r#"{"user_code":"U","device_code":"D","verification_uri":"v","expires_in":900}"#,
+            )
+            .push("oauth2/v2.0/token", 200, MSA);
+        script_chain(a.http());
+        a.http().push("player/certificates", 200, &keys_json());
+        let signed = a.sign_in(NOW, |_| {}, |_| true).unwrap();
+        assert_eq!(Account::load(&path).unwrap().unwrap().profile.name, "Notch");
+
+        let seen = a.http().seen.borrow().len();
+        let same = a.refresh_cached(NOW + 10).unwrap();
+        assert_eq!(same.minecraft_token, signed.minecraft_token);
+        assert_eq!(a.http().seen.borrow().len(), seen);
+
+        a.http()
+            .push("oauth2/v2.0/token", 400, r#"{"error":"invalid_grant"}"#);
+        assert!(matches!(
+            a.refresh_cached(NOW + 100_000),
+            Err(AuthError::RefreshRejected)
+        ));
+        assert!(
+            !a.http()
+                .seen
+                .borrow()
+                .iter()
+                .skip(seen)
+                .any(|r| r.url.contains("devicecode"))
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cancelled_sign_in_saves_nothing() {
+        let path = temp_path("cancel");
+        let _ = fs::remove_file(&path);
+        let http = MockHttp::default();
+        http.push(
+            "devicecode",
+            200,
+            r#"{"user_code":"U","device_code":"D","verification_uri":"v","expires_in":900}"#,
+        );
+        let a = auth(http, &path);
+        assert!(matches!(
+            a.sign_in(NOW, |_| {}, |_| false),
+            Err(AuthError::Cancelled)
+        ));
+        assert!(!path.exists());
     }
 
     #[test]

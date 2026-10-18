@@ -5,6 +5,8 @@ use mcr_render::glam::DVec3;
 
 pub const DEFAULT_JAR: &str = ".cache/versions/26.3/client.jar";
 pub const DEFAULT_ASSETS: &str = ".cache/assets";
+/// Holds the launcher files; the default game dir is its `client` folder.
+pub const DEFAULT_DATA_DIR: &str = "run";
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -36,6 +38,19 @@ pub struct Options {
     pub visibility_graph: bool,
     pub mods: Option<PathBuf>,
     pub soak: Option<u64>,
+    /// `--launcher`: show the launcher even where it is skipped by default.
+    pub launcher: bool,
+    pub profile: Option<String>,
+    pub data_dir: PathBuf,
+    /// A profile without mods: mod mode stays off whatever the game dir's mods folder holds.
+    pub vanilla: bool,
+    /// The profile's JVM heap, over the Mods screen's setting.
+    pub heap_mib: Option<u32>,
+    pub online: Option<mcr_client::OnlineAuth>,
+    pub name_set: bool,
+    pub game_dir_set: bool,
+    pub jar_set: bool,
+    pub size_set: bool,
 }
 
 impl Default for Options {
@@ -69,6 +84,16 @@ impl Default for Options {
             visibility_graph: true,
             mods: None,
             soak: None,
+            launcher: false,
+            profile: None,
+            data_dir: PathBuf::from(DEFAULT_DATA_DIR),
+            vanilla: false,
+            heap_mib: None,
+            online: None,
+            name_set: false,
+            game_dir_set: false,
+            jar_set: false,
+            size_set: false,
         }
     }
 }
@@ -76,7 +101,12 @@ impl Default for Options {
 impl Options {
     /// Mod mode moves the working directory to Java's game dir, so every path is fixed up front.
     pub fn absolutize(&mut self) -> std::io::Result<()> {
-        for path in [&mut self.jar, &mut self.game_dir, &mut self.assets_dir] {
+        for path in [
+            &mut self.jar,
+            &mut self.game_dir,
+            &mut self.assets_dir,
+            &mut self.data_dir,
+        ] {
             *path = std::path::absolute(&*path)?;
         }
         for path in [
@@ -92,6 +122,19 @@ impl Options {
         }
         Ok(())
     }
+
+    /// The launcher shows for `--launcher`, or for a windowed run without session flags.
+    pub fn shows_launcher(&self) -> bool {
+        self.launcher
+            || (self.screenshot.is_none()
+                && self.world.is_none()
+                && !self.synthetic
+                && self.soak.is_none()
+                && self.connect.is_none()
+                && self.singleplayer.is_none()
+                && self.mods.is_none()
+                && self.profile.is_none())
+    }
 }
 
 pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect host[:port]] [--render-distance N] [--no-vsync] [--no-occlusion] [--no-graph]
@@ -102,6 +145,8 @@ pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect ho
        singleplayer: --singleplayer <saves folder> starts that world's local server and joins it (game dir's saves/)
        soak: --connect host[:port] --soak secs runs offscreen, rejoins after kicks and prints soak-stats every 10 s
        mods: [--mods <dir>] uses <dir> instead of <game-dir>/mods; enabled mods boot under Fabric (needs `cargo xtask fabric-fetch`)
+       launcher: shown first without --connect/--singleplayer/--mods; --launcher forces it, --profile <name> plays one directly,
+           --data-dir <dir> holds launcher_profiles.json (default run); explicit --game-dir/--mods/--name/--jar/--size win
 camera angles are degrees; yaw 0 looks toward -Z, positive turns left";
 
 fn parse_camera(text: &str) -> Result<Camera, String> {
@@ -142,7 +187,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             "--no-occlusion" => opts.occlusion = false,
             "--no-graph" => opts.visibility_graph = false,
             "--bench-modes" => opts.bench_modes = true,
-            "--jar" => opts.jar = value(&arg, &mut args)?.into(),
+            "--jar" => {
+                opts.jar = value(&arg, &mut args)?.into();
+                opts.jar_set = true;
+            }
+            "--launcher" => opts.launcher = true,
+            "--profile" => opts.profile = Some(value(&arg, &mut args)?),
+            "--data-dir" => opts.data_dir = value(&arg, &mut args)?.into(),
             "--screenshot" => opts.screenshot = Some(value(&arg, &mut args)?.into()),
             "--camera" => opts.camera = Some(parse_camera(&value(&arg, &mut args)?)?),
             "--autofly" => {
@@ -154,8 +205,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             }
             "--connect" => opts.connect = Some(value(&arg, &mut args)?),
             "--singleplayer" => opts.singleplayer = Some(value(&arg, &mut args)?),
-            "--name" => opts.name = value(&arg, &mut args)?,
-            "--game-dir" => opts.game_dir = value(&arg, &mut args)?.into(),
+            "--name" => {
+                opts.name = value(&arg, &mut args)?;
+                opts.name_set = true;
+            }
+            "--game-dir" => {
+                opts.game_dir = value(&arg, &mut args)?.into();
+                opts.game_dir_set = true;
+            }
             "--assets-dir" => opts.assets_dir = value(&arg, &mut args)?.into(),
             "--mods" => opts.mods = Some(value(&arg, &mut args)?.into()),
             "--soak" => {
@@ -198,7 +255,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             "--bench-view" => opts
                 .bench_views
                 .push(parse_camera(&value(&arg, &mut args)?)?),
-            "--size" => opts.size = parse_size(&value(&arg, &mut args)?)?,
+            "--size" => {
+                opts.size = parse_size(&value(&arg, &mut args)?)?;
+                opts.size_set = true;
+            }
             "--render-distance" => {
                 opts.render_distance = value(&arg, &mut args)?
                     .parse()
@@ -220,6 +280,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
     }
     if opts.soak.is_some() && opts.connect.is_none() {
         return Err("--soak needs --connect".into());
+    }
+    if opts.launcher
+        && (opts.world.is_some() || opts.synthetic || opts.soak.is_some() || opts.profile.is_some())
+    {
+        return Err("--launcher excludes --world, --synthetic, --soak and --profile".into());
+    }
+    if !opts.game_dir_set {
+        opts.game_dir = opts.data_dir.join("client");
     }
     if opts.synthetic && opts.screenshot.is_some() {
         return Err("--screenshot needs --world or the menu flow".into());
@@ -262,6 +330,41 @@ mod tests {
         let o = parse_str("--mods run/mods").unwrap();
         assert_eq!(o.mods, Some(PathBuf::from("run/mods")));
         assert!(parse_str("--mods").is_err());
+    }
+
+    #[test]
+    fn launcher_flags() {
+        assert!(parse_str("").unwrap().shows_launcher());
+        for skip in [
+            "--connect h",
+            "--singleplayer w",
+            "--mods m",
+            "--profile p",
+            "--world w",
+            "--synthetic",
+            "--screenshot o.png",
+        ] {
+            assert!(!parse_str(skip).unwrap().shows_launcher(), "{skip}");
+        }
+        let o = parse_str("--launcher --connect h --screenshot o.png").unwrap();
+        assert!(o.shows_launcher());
+        for bad in [
+            "--launcher --profile p",
+            "--launcher --world w",
+            "--profile",
+        ] {
+            assert!(parse_str(bad).is_err(), "{bad}");
+        }
+        let o = parse_str("--data-dir d").unwrap();
+        assert_eq!(o.game_dir, PathBuf::from("d/client"));
+        assert!(!o.game_dir_set);
+        let o = parse_str("--data-dir d --game-dir g --name N --jar j --size 10x10").unwrap();
+        assert_eq!(o.game_dir, PathBuf::from("g"));
+        assert!(o.game_dir_set && o.name_set && o.jar_set && o.size_set);
+        assert_eq!(
+            parse_str("--profile Survival").unwrap().profile.as_deref(),
+            Some("Survival")
+        );
     }
 
     #[test]

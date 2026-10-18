@@ -66,6 +66,11 @@ pub fn parse_version(json: &[u8]) -> Result<VersionInfo> {
     })
 }
 
+/// Mojang's version manifest, size-capped and over HTTPS only.
+pub fn fetch_manifest() -> Result<Vec<u8>> {
+    http::get_bytes(MANIFEST_URL, MAX_MANIFEST)
+}
+
 /// The cached version JSON, or a fresh one from the manifest (checked against its SHA-1 there).
 pub fn version_info(layout: &Layout) -> Result<VersionInfo> {
     let path = layout.version_json();
@@ -74,7 +79,7 @@ pub fn version_info(layout: &Layout) -> Result<VersionInfo> {
     {
         return Ok(info);
     }
-    let manifest = http::get_bytes(MANIFEST_URL, MAX_MANIFEST)?;
+    let manifest = fetch_manifest()?;
     let entry = find_version(&manifest, VERSION)?;
     let json = http::get_bytes(&entry.url, MAX_VERSION_JSON)?;
     if !http::sha1_hex(&json).eq_ignore_ascii_case(&entry.sha1) {

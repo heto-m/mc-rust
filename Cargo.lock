@@ -1612,6 +1612,7 @@ dependencies = [
  "mcr-client",
  "mcr-data",
  "mcr-entity-model",
+ "mcr-launcher",
  "mcr-mesh",
  "mcr-modbridge",
  "mcr-nbt",
@@ -1809,6 +1810,20 @@ dependencies = [
  "libc",
  "libloading",
  "sha1 0.10.7",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "mcr-launcher"
+version = "0.1.0"
+dependencies = [
+ "mcr-auth",
+ "mcr-protocol",
+ "mcr-settings",
+ "rand",
+ "rsa",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

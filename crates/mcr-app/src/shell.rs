@@ -69,6 +69,8 @@ pub struct ShellConfig {
     pub jar: PathBuf,
     pub assets_dir: PathBuf,
     pub name: String,
+    /// A Microsoft account's session for online-mode servers.
+    pub online: Option<mcr_client::OnlineAuth>,
     pub render_distance: Option<i32>,
     pub connect: Option<String>,
     /// A `saves` folder to play straight away.
@@ -921,6 +923,7 @@ impl Shell {
             config = config.for_transfer(target);
         }
         config.name = self.cfg.name.clone();
+        config.online = self.cfg.online.clone();
         config.view_distance = self
             .cfg
             .render_distance

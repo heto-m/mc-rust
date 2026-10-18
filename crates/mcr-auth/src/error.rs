@@ -16,6 +16,10 @@ pub enum AuthError {
     LoginExpired,
     #[error("oauth error: {0}")]
     OAuth(String),
+    #[error("sign-in was cancelled")]
+    Cancelled,
+    #[error("the account is not signed in")]
+    NotSignedIn,
     #[error("refresh token rejected")]
     RefreshRejected,
     #[error("the Microsoft account has no Xbox account")]

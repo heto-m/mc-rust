@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use mcr_settings::InputKey;
 
+use crate::launcher::scene::Launcher;
 use crate::shell::Shell;
 use mcr_ui::{Key, MouseButton};
 
@@ -217,6 +218,84 @@ impl Autopilot {
             holding: Vec::new(),
             finished: false,
         }
+    }
+
+    /// Puts `step` before the remaining ones.
+    pub fn prepend(&mut self, step: Step) {
+        if self.steps.front() != Some(&Step::Early) {
+            self.steps.push_front(step);
+        }
+    }
+
+    /// Runs the UI steps against the launcher; any other step waits for the game (`true` once one does).
+    pub fn step_launcher(&mut self, l: &mut Launcher) -> bool {
+        if self.waiting > 0 {
+            self.waiting -= 1;
+            if self.waiting == 0 {
+                for key in self.holding.drain(..) {
+                    l.key_input(key, false, false, None);
+                }
+            }
+            if self.waiting > 0 || !self.holding.is_empty() {
+                return false;
+            }
+        }
+        let button = |right: bool| {
+            if right {
+                MouseButton::Right
+            } else {
+                MouseButton::Left
+            }
+        };
+        while let Some(step) = self.steps.pop_front() {
+            match step {
+                Step::Wait(ticks) | Step::Sleep(ticks) => {
+                    self.waiting = ticks.max(1);
+                    return false;
+                }
+                Step::Early => {}
+                Step::Tap(key) => {
+                    l.key_input(key, true, false, None);
+                    l.key_input(key, false, false, None);
+                }
+                Step::Press(keys) => {
+                    for key in keys {
+                        l.key_input(key, true, false, None);
+                    }
+                }
+                Step::Release(keys) => {
+                    for key in keys {
+                        l.key_input(key, false, false, None);
+                    }
+                }
+                Step::Type(text) => l.ui_text(&text),
+                Step::UiKey(key) => l.ui_key(key),
+                Step::Click { x, y, right } => l.screen_button(x, y, button(right), None),
+                Step::Hover { x, y } => l.screen_hover(x, y),
+                Step::Button {
+                    x,
+                    y,
+                    right,
+                    pressed,
+                } => l.screen_button(x, y, button(right), Some(pressed)),
+                Step::Wheel(lines) => l.scroll(lines),
+                Step::Shot(path) => {
+                    l.shot = Some(path);
+                    self.waiting = 2;
+                    return false;
+                }
+                Step::Quit => {
+                    self.finished = true;
+                    return false;
+                }
+                other => {
+                    self.steps.push_front(other);
+                    return true;
+                }
+            }
+        }
+        self.finished = true;
+        false
     }
 
     /// Runs at the start of every tick.
