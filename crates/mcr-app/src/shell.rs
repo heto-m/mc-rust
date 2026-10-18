@@ -964,6 +964,9 @@ impl Shell {
         }
         config.name = self.cfg.name.clone();
         config.online = self.cfg.online.clone();
+        config.only_show_secure_chat = options.only_show_secure_chat;
+        config.local_server =
+            self.sp.is_some() && matches!(config.host.as_str(), "127.0.0.1" | "localhost");
         config.view_distance = self
             .cfg
             .render_distance

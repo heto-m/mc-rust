@@ -5,6 +5,7 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use mcr_auth::keys::KeyRefresh;
 use mcr_auth::msa::ClientId;
 use mcr_auth::offline::validate_name;
 use mcr_auth::{AuthError, Authenticator, HttpClient};
@@ -81,10 +82,11 @@ impl AccountEntry {
         }
     }
 
-    /// Ready to launch: offline at once, Microsoft refreshed without ever prompting.
-    pub fn launch_account(
+    /// Ready to launch: offline at once, Microsoft refreshed without ever prompting, with its chat keys,
+    /// Mojang's services keys (empty when unavailable) and a refresher for in-game key renewal.
+    pub fn launch_account<H: HttpClient + Clone + Send + Sync + 'static>(
         &self,
-        http: impl HttpClient,
+        http: H,
         client_id: Option<ClientId>,
         data_dir: &Path,
         now: u64,
@@ -96,14 +98,28 @@ impl AccountEntry {
             });
         };
         let client_id = client_id.ok_or(AuthError::MissingClientId)?;
-        let account = Authenticator::new(http, client_id)
-            .with_cache(path)
+        let account = Authenticator::new(http.clone(), client_id.clone())
+            .with_cache(path.clone())
             .refresh_cached(now)?;
+        let services = mcr_auth::minecraft::fetch_services_keys(&http).unwrap_or_default();
+        let refresh = KeyRefresh::new(move || {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            Authenticator::new(http.clone(), client_id.clone())
+                .with_cache(path.clone())
+                .refresh_cached(now)
+                .ok()
+                .and_then(|a| a.keys)
+        });
         Ok(LaunchAccount {
             name: account.profile.name.clone(),
             online: Some(OnlineSession {
                 access_token: account.minecraft_token,
                 profile_id: account.profile.id,
+                keys: account.keys,
+                services: Arc::new(services),
+                refresh: Some(refresh),
             }),
         })
     }
@@ -404,7 +420,10 @@ pub(crate) mod tests {
         let online = launch.online.unwrap();
         assert_eq!(online.access_token.expose(), "MC-SECRET");
         assert_eq!(online.profile_id, UUID);
+        assert!(online.keys.is_some() && online.services.is_empty());
+        assert!(online.refresh.is_some());
         assert!(!format!("{online:?}").contains("SECRET"));
+        assert!(!format!("{online:?}").contains("PRIVATE KEY"));
 
         entry.forget(&dir).unwrap();
         assert!(!path.exists());

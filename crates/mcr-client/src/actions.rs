@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mcr_buf::{BlockPos, FixedBitSet, LengthPrefixed};
+use mcr_buf::{BlockPos, LengthPrefixed};
 use mcr_protocol::common as c;
 use mcr_protocol::dispatch::PlayServerbound as S;
 use mcr_protocol::play::serverbound as sb;
@@ -62,26 +62,27 @@ impl Client {
         self.sequence
     }
 
-    /// Unsigned, as vanilla sends without profile keys.
+    /// Vanilla's `sendChat`: signed when a chat session is running, always with the last-seen update.
     pub fn send_chat(&mut self, message: &str) -> Result<()> {
-        self.send_play(&S::Chat(sb::Chat {
-            message: message.to_owned(),
-            timestamp_ms: now_millis(),
-            salt: 0,
-            signature: None,
-            last_seen: sb::LastSeenUpdate {
-                offset: 0,
-                acknowledged: FixedBitSet::new(),
-                checksum: 0,
-            },
-        }))
+        let packet = self.state.secure.chat(message, now_millis());
+        self.send_play(&S::Chat(packet))
     }
 
-    /// `command` has no leading slash.
+    /// Vanilla's `sendCommand`; `command` has no leading slash. Commands with `minecraft:message`
+    /// arguments go signed, everything else as a plain command.
     pub fn send_command(&mut self, command: &str) -> Result<()> {
-        self.send_play(&S::ChatCommand(sb::ChatCommand {
-            command: command.trim_start_matches('/').to_owned(),
-        }))
+        let command = command.trim_start_matches('/');
+        let arguments = self.state.commands.signable_arguments(command);
+        if arguments.is_empty() {
+            return self.send_play(&S::ChatCommand(sb::ChatCommand {
+                command: command.to_owned(),
+            }));
+        }
+        let packet = self
+            .state
+            .secure
+            .signed_command(command, &arguments, now_millis());
+        self.send_play(&S::ChatCommandSigned(packet))
     }
 
     /// World Options' difficulty (0 peaceful to 3 hard); servers apply it only for gamemasters.

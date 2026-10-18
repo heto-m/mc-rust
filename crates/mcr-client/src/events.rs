@@ -14,6 +14,18 @@ pub enum DisconnectReason {
     Local,
 }
 
+/// Vanilla's chat line tags: the indicator bar and its tooltip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatTag {
+    System,
+    NotSecure,
+    /// The server changed a signed message; `original` is the signed text.
+    Modified {
+        original: String,
+    },
+    Error,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatKind {
     System,
@@ -200,7 +212,11 @@ pub enum ClientEvent {
         kind: ChatKind,
         sender: Option<Uuid>,
         message: Component,
+        tag: Option<ChatTag>,
+        signature: Option<Box<mcr_protocol::types::game::MessageSignature>>,
     },
+    /// The server deleted the chat line with this signature.
+    ChatDeleted(Box<mcr_protocol::types::game::MessageSignature>),
     Sound {
         sound: mcr_buf::IdOr<SoundEvent>,
         source: SoundSource,

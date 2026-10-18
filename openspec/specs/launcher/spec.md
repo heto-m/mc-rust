@@ -69,11 +69,15 @@ Microsoft sign-in SHALL use the device-code flow with the code and URL shown on 
 - **THEN** polling stops at its next wait and no account is added
 
 ### Requirement: Account refresh at launch
-At launch a Microsoft account SHALL be refreshed without prompting and its token and UUID SHALL be used for online-mode servers; a rejected refresh SHALL ask the user to sign in again.
+At launch a Microsoft account SHALL be refreshed without prompting and its token and UUID SHALL be used for online-mode servers; a rejected refresh SHALL ask the user to sign in again. The launch SHALL also pass the account's profile keys, Mojang's services keys and a key refresher to the client; failing to fetch keys or services keys SHALL NOT fail the launch. Offline accounts SHALL pass none.
 
 #### Scenario: Refresh at launch
 - **WHEN** Play is pressed with a Microsoft account whose Minecraft token expired
 - **THEN** the token is refreshed from the refresh token and the game joins online-mode servers with it
+
+#### Scenario: Keys reach the client
+- **WHEN** Play is pressed with a Microsoft account whose certificates are fetched
+- **THEN** the client config holds those keys and the services keys, and their debug output hides the private key
 
 ### Requirement: Launcher view
 The launcher view SHALL show the profile list, the active account and a Play button, drawn with mcr's UI. Play SHALL apply the selected profile (game dir, version jar, mods folder or vanilla, heap, resolution, account), record its last played time, and continue to the title screen, or in mod mode to Java's boot. Profiles SHALL only be switched before the game starts.

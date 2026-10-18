@@ -2,9 +2,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use mcr_nbt::Value;
-use mcr_protocol::play::clientbound::player::{
-    PackedSignature, PlayerInfoAction, PlayerInfoUpdate,
-};
+use mcr_protocol::play::clientbound::player::{PlayerInfoAction, PlayerInfoUpdate};
 use mcr_protocol::play::clientbound::ui::{
     BossBarColor, BossBarFlags, BossBarOverlay, DisplaySlot, NumberFormat, ObjectiveDisplay,
     ObjectiveRenderType, TeamAction, TeamColor, TeamParameters,
@@ -15,7 +13,7 @@ use mcr_protocol::types::text::{Color, NamedColor, Style};
 use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
-use crate::events::ChatKind;
+use crate::events::{ChatKind, ChatTag};
 
 const MAX_PLAYERS: usize = 8192;
 const MAX_BOSS_BARS: usize = 256;
@@ -30,9 +28,10 @@ pub struct ChatMessage {
     pub kind: ChatKind,
     pub sender: Option<Uuid>,
     pub content: Component,
-    /// Signature as received; never verified in offline mode.
+    /// Signature as received, kept only when it verified.
     pub signature: Option<Box<MessageSignature>>,
     pub timestamp_millis: Option<i64>,
+    pub tag: Option<ChatTag>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -57,13 +56,6 @@ impl ChatState {
             self.history.pop_front();
         }
         self.history.push_back(message);
-    }
-
-    pub fn delete(&mut self, signature: &PackedSignature) {
-        if let PackedSignature::Full(full) = signature {
-            self.history
-                .retain(|m| m.signature.as_deref().is_none_or(|s| s.0 != full.0));
-        }
     }
 }
 
@@ -756,6 +748,7 @@ mod tests {
             content: Component::text(text),
             signature: None,
             timestamp_millis: None,
+            tag: None,
         }
     }
 

@@ -22,6 +22,8 @@ pub enum ToastEvent {
     },
     /// The server ran low on disk space and may fail to save the world.
     LowDiskSpace,
+    /// Vanilla's warning that a server does not enforce secure chat.
+    InsecureServer,
 }
 
 pub fn stack_of(template: &ItemStackTemplate) -> ItemStack {

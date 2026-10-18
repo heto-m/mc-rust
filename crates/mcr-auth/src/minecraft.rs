@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::chat::ServicesKeys;
 use crate::error::AuthError;
 use crate::http::{HttpClient, Request};
 use crate::keys::PlayerKeys;
@@ -12,6 +13,7 @@ const LOGIN_URL: &str = "https://api.minecraftservices.com/authentication/login_
 const ENTITLEMENTS_URL: &str = "https://api.minecraftservices.com/entitlements/mcstore";
 const PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profile";
 const CERTIFICATES_URL: &str = "https://api.minecraftservices.com/player/certificates";
+const PUBLIC_KEYS_URL: &str = "https://api.minecraftservices.com/publickeys";
 
 #[derive(Debug, Clone)]
 pub struct MinecraftToken {
@@ -119,6 +121,18 @@ pub fn fetch_player_keys(http: &impl HttpClient, token: &Secret) -> Result<Playe
     PlayerKeys::from_response(&response.body)
 }
 
+/// Mojang's player-certificate keys; the endpoint needs no token.
+pub fn fetch_services_keys(http: &impl HttpClient) -> Result<ServicesKeys, AuthError> {
+    let response = http.send(&Request::get(PUBLIC_KEYS_URL))?;
+    if !response.is_success() {
+        return Err(AuthError::Status {
+            status: response.status,
+            url: PUBLIC_KEYS_URL.into(),
+        });
+    }
+    ServicesKeys::from_response(&response.body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +171,24 @@ mod tests {
             "069a79f4-44e9-4726-a5be-fca90e38aaf5"
         );
         assert_eq!(http.seen.borrow()[1].headers.last().unwrap().1, "Bearer MC");
+    }
+
+    #[test]
+    fn services_keys_fetch() {
+        let http = MockHttp::default();
+        http.push("publickeys", 200, r#"{"playerCertificateKeys":[]}"#)
+            .push("publickeys", 503, "");
+        assert!(fetch_services_keys(&http).unwrap().is_empty());
+        assert!(
+            http.seen.borrow()[0]
+                .headers
+                .iter()
+                .all(|(k, _)| k != "Authorization")
+        );
+        assert!(matches!(
+            fetch_services_keys(&http),
+            Err(AuthError::Status { status: 503, .. })
+        ));
     }
 
     #[test]

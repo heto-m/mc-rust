@@ -762,6 +762,15 @@ impl Client {
             return Err(ClientError::Closed);
         }
         self.pump()?;
+        if self.phase == Phase::Play
+            && self.ticks.is_multiple_of(20)
+            && let Some(update) = self
+                .state
+                .secure
+                .poll_refresh(Instant::now(), crate::secure_chat::now_millis())
+        {
+            self.send_play(&PlayServerbound::ChatSessionUpdate(update))?;
+        }
         if self.phase == Phase::Play && self.joined {
             self.state.tick();
             self.update_using_item();

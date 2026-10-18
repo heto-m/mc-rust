@@ -391,6 +391,9 @@ impl Screen for ChatScreen {
             let chat = self.chat.borrow();
             chat.draw(cx.frame, (cx.now_ms / 50) as u32, &self.options);
             chat.draw_scrollbar(cx.frame, &self.options);
+            if let Some(tooltip) = chat.hover(cx.frame, cx.mouse, &self.options) {
+                cx.set_tooltip(tooltip);
+            }
         }
         self.widgets.render(cx);
         self.draw_popup(cx);

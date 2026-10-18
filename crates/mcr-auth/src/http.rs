@@ -107,7 +107,7 @@ fn percent_encode(input: &str) -> String {
     out
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UreqClient {
     agent: ureq::Agent,
 }

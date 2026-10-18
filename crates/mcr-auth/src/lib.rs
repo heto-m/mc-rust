@@ -1,4 +1,5 @@
 pub mod account;
+pub mod chat;
 pub mod crypt;
 pub mod error;
 pub mod http;

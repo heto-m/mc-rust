@@ -5,6 +5,7 @@ pub mod attach;
 #[cfg(test)]
 mod audit_tests;
 mod batch;
+mod chat_in;
 mod client;
 pub mod commands;
 mod conduct;
@@ -45,6 +46,7 @@ mod registry;
 mod relay;
 mod riding;
 pub mod script;
+pub mod secure_chat;
 mod slot_display;
 mod social;
 mod state;
@@ -68,7 +70,7 @@ pub use dialogs::{
 pub use entity::{AttributeState, Entities, Entity, FlightHistory, MobEffect, SimShape};
 pub use error::{ClientError, Result};
 pub use events::{
-    BlockEditor, ChatKind, ClientEvent, DamageEffects, DisconnectReason, sanitize_for_log,
+    BlockEditor, ChatKind, ChatTag, ClientEvent, DamageEffects, DisconnectReason, sanitize_for_log,
 };
 pub use gamestate::{
     Advancements, GameplayState, GhostRecipe, MapData, Merchant, RecipeBook, SignEditor, Waypoints,

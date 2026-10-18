@@ -290,10 +290,41 @@ impl Hud {
         }
     }
 
-    pub fn add_chat(&mut self, ui: &mut Ui, message: &Component, tick: u32, options: &Options) {
+    pub fn add_chat(
+        &mut self,
+        ui: &mut Ui,
+        message: &Component,
+        tick: u32,
+        options: &Options,
+        tag: Option<mcr_ui::ChatLineTag>,
+        signature: Option<[u8; 256]>,
+    ) {
+        self.chat.borrow_mut().add_tagged(
+            ui,
+            message,
+            tick,
+            &chat_options(options, false),
+            tag,
+            signature,
+        );
+    }
+
+    pub fn delete_chat(
+        &mut self,
+        ui: &mut Ui,
+        signature: &[u8; 256],
+        tick: u32,
+        options: &Options,
+    ) {
         self.chat
             .borrow_mut()
-            .add(ui, message, tick, &chat_options(options, false));
+            .delete(ui, signature, tick, &chat_options(options, false));
+    }
+
+    pub fn tick_chat(&mut self, ui: &mut Ui, tick: u32, options: &Options) {
+        self.chat
+            .borrow_mut()
+            .process_deletions(ui, tick, &chat_options(options, false));
     }
 
     pub fn clear_chat(&mut self) {

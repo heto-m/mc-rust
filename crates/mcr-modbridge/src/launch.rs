@@ -90,6 +90,7 @@ impl LaunchManifest {
 
 pub const SAVES_PROPERTY: &str = "mcr.bridge.saves";
 pub const BACKUPS_PROPERTY: &str = "mcr.bridge.backups";
+pub const SERVICES_KEYS_PROPERTY: &str = "mcr.bridge.servicesKeys";
 
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -116,6 +117,8 @@ pub struct BridgeConfig {
     pub aot: Option<AotSettings>,
     /// mcr's saves folder, which Java's world screens list; its backups go to `backups` beside it.
     pub saves_dir: Option<PathBuf>,
+    /// An online account plays: Java fetches Mojang's key set to verify other players' chat.
+    pub services_keys: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +165,7 @@ impl BridgeConfig {
             proxy_port: None,
             aot: None,
             saves_dir: None,
+            services_keys: false,
         }
     }
 }
@@ -253,6 +257,9 @@ pub fn plan(
         properties.push(format!("-D{SAVES_PROPERTY}={}", utf8(saves)?));
         let backups = saves.parent().unwrap_or(saves).join("backups");
         properties.push(format!("-D{BACKUPS_PROPERTY}={}", utf8(&backups)?));
+    }
+    if config.services_keys {
+        properties.push(format!("-D{SERVICES_KEYS_PROPERTY}=true"));
     }
     properties.extend(manifest.jvm_args.iter().cloned());
     properties.extend(config.extra_jvm.iter().cloned());
@@ -390,6 +397,16 @@ mod tests {
         ] {
             assert!(p.properties.contains(&prop.to_owned()), "{prop}");
         }
+        assert!(
+            !p.properties
+                .contains(&"-Dmcr.bridge.servicesKeys=true".to_owned())
+        );
+        cfg.services_keys = true;
+        let p = plan(&m, &cfg, 0x1234_abcd).unwrap();
+        assert!(
+            p.properties
+                .contains(&"-Dmcr.bridge.servicesKeys=true".to_owned())
+        );
         cfg.saves_dir = Some("/g/saves".into());
         let p = plan(&m, &cfg, 0x1234_abcd).unwrap();
         assert!(

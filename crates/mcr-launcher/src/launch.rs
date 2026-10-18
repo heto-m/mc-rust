@@ -1,6 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use std::sync::Arc;
+
 use mcr_auth::Secret;
+use mcr_auth::chat::ServicesKeys;
+use mcr_auth::keys::{KeyRefresh, PlayerKeys};
 
 use crate::profile::{Profile, Resolution};
 use crate::versions::VersionList;
@@ -11,6 +15,11 @@ pub struct OnlineSession {
     pub access_token: Secret,
     /// 32 hex digits.
     pub profile_id: String,
+    /// Chat signing keys; `None` when the certificate service failed.
+    pub keys: Option<PlayerKeys>,
+    /// Mojang's keys for checking other players' chat keys; empty when unavailable.
+    pub services: Arc<ServicesKeys>,
+    pub refresh: Option<KeyRefresh>,
 }
 
 #[derive(Debug, Clone)]

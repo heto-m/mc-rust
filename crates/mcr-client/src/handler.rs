@@ -8,7 +8,7 @@ use mcr_protocol::play::clientbound::entity::{
     EntityPositionSync, MoveEntityPos, MoveEntityPosRot, MoveEntityRot, Relatives, TeleportEntity,
 };
 use mcr_protocol::play::clientbound::player::{
-    BoundChatType, CommonPlayerSpawnInfo, EntityAnchor, PlayerLookAt,
+    BoundChatType, CommonPlayerSpawnInfo, EntityAnchor, PlayerInfoAction, PlayerLookAt,
 };
 use mcr_protocol::play::clientbound::ui::{BossEventOperation, ObjectiveAction};
 use mcr_protocol::play::clientbound::world::SoundSource;
@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use crate::entity::{AttributeState, Entity, MAX_ENTITIES, MobEffect, end_of_delta, end_of_path};
 use crate::error::Result;
-use crate::events::{ChatKind, ClientEvent, DamageEffects};
+use crate::events::{ChatKind, ChatTag, ClientEvent, DamageEffects};
 use crate::inventory::Inventory;
 use crate::registry::{CHAT_TYPE, Dimension};
 use crate::social::{BossBar, ChatMessage, Score};
@@ -120,6 +120,9 @@ impl ClientState {
             P::UpdateRecipes(p) => self.registries.apply_recipes(&p),
             P::StartConfiguration(_) => {
                 self.registries.clear();
+                if let Some(ack) = self.secure.take_ack() {
+                    out.replies.push(S::ChatAck(ack));
+                }
                 out.replies
                     .push(S::ConfigurationAcknowledged(sb::ConfigurationAcknowledged));
                 out.event(ClientEvent::Reconfiguring);
@@ -733,33 +736,28 @@ impl ClientState {
 
             P::SystemChat(p) if p.overlay => self.set_overlay(p.content, out),
             P::SystemChat(p) => self.push_chat(ChatKind::System, None, p.content, None, None, out),
-            P::PlayerChat(p) => {
-                let content = p
-                    .unsigned_content
-                    .clone()
-                    .unwrap_or_else(|| Component::text(p.body.content.clone()));
-                let shown = self.format_chat(&p.chat_type, content);
-                self.push_chat(
-                    ChatKind::Player,
-                    Some(p.sender),
-                    shown,
-                    p.signature.map(Box::new),
-                    Some(p.body.timestamp_millis),
-                    out,
-                );
-            }
+            P::PlayerChat(p) => self.on_player_chat(p, out),
             P::DisguisedChat(p) => {
                 let shown = self.format_chat(&p.chat_type, p.message);
                 self.push_chat(ChatKind::Disguised, None, shown, None, None, out);
             }
             P::CustomChatCompletions(p) => self.apply_chat_completions(p.action, p.entries),
-            P::DeleteChat(p) => self.chat.delete(&p.message_signature),
+            P::DeleteChat(p) => self.on_delete_chat(&p.message_signature, out),
             P::PlayerInfoUpdate(p) => {
                 self.players.apply(&p);
+                if p.actions.get(PlayerInfoAction::InitializeChat.bit()) {
+                    for entry in &p.entries {
+                        if self.players.get(entry.uuid).is_some() {
+                            self.secure
+                                .init_session(entry.uuid, entry.chat_session.as_ref());
+                        }
+                    }
+                }
                 out.event(ClientEvent::PlayerListChanged);
             }
             P::PlayerInfoRemove(p) => {
                 self.players.remove(&p.profile_ids);
+                self.secure.remove_players(&p.profile_ids);
                 out.event(ClientEvent::PlayerListChanged);
             }
             P::TabList(p) => {
@@ -970,6 +968,16 @@ impl ClientState {
         self.server.reduced_debug_info = p.reduced_debug_info;
         self.server.online_mode = p.online_mode;
         self.server.enforces_secure_chat = p.enforces_secure_chat;
+        let now_ms = crate::secure_chat::now_millis();
+        if let Some(update) = self
+            .secure
+            .on_login(p.online_mode, p.enforces_secure_chat, now_ms)
+        {
+            out.replies.push(S::ChatSessionUpdate(update));
+        }
+        if self.secure.should_warn_insecure() {
+            out.event(ClientEvent::Toast(ToastEvent::InsecureServer));
+        }
         self.server.do_limited_crafting = p.do_limited_crafting;
         self.player.show_death_screen = p.show_death_screen;
         self.inventory = Inventory::default();
@@ -1175,6 +1183,8 @@ impl ClientState {
             kind: ChatKind::ActionBar,
             sender: None,
             message: text,
+            tag: None,
+            signature: None,
         });
     }
 
@@ -1551,6 +1561,7 @@ impl ClientState {
         out.event(ClientEvent::BossBarChanged(id));
     }
 
+    /// Server and client system lines carry vanilla's system tag.
     fn push_chat(
         &mut self,
         kind: ChatKind,
@@ -1560,21 +1571,39 @@ impl ClientState {
         timestamp_millis: Option<i64>,
         out: &mut Outbox,
     ) {
+        let tag = matches!(kind, ChatKind::System | ChatKind::Disguised).then_some(ChatTag::System);
+        self.push_chat_tagged(kind, sender, content, signature, timestamp_millis, tag, out);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_chat_tagged(
+        &mut self,
+        kind: ChatKind,
+        sender: Option<Uuid>,
+        content: Component,
+        signature: Option<Box<mcr_protocol::types::game::MessageSignature>>,
+        timestamp_millis: Option<i64>,
+        tag: Option<ChatTag>,
+        out: &mut Outbox,
+    ) {
         self.chat.push(ChatMessage {
             kind,
             sender,
             content: content.clone(),
-            signature,
+            signature: signature.clone(),
             timestamp_millis,
+            tag: tag.clone(),
         });
         out.event(ClientEvent::Chat {
             kind,
             sender,
             message: content,
+            tag,
+            signature,
         });
     }
 
-    fn format_chat(&self, bound: &BoundChatType, content: Component) -> Component {
+    pub(crate) fn format_chat(&self, bound: &BoundChatType, content: Component) -> Component {
         use mcr_protocol::types::text::Arg;
         let (key, params) = match &bound.chat_type {
             IdOr::Inline(t) => (

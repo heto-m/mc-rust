@@ -219,6 +219,7 @@ impl ModHost {
             .unwrap_or_else(|| mcr_auth::offline::offline_uuid(&opts.name).unwrap_or_default())
             .hyphenated()
             .to_string();
+        config.services_keys = opts.online.is_some();
         (config.width, config.height) = renderer.size();
         config.compose = true;
         config.http_hosts.extend(plan.http_hosts.iter().cloned());

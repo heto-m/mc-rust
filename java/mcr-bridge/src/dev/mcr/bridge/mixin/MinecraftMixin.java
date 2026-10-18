@@ -16,10 +16,24 @@ import org.jspecify.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.ModifyArg;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(Minecraft.class)
 abstract class MinecraftMixin {
+    /** Rust signs chat with the keys; Java only needs Mojang's key set to verify other players' chat. */
+    @ModifyArg(
+        method = "<init>",
+        at = @At(
+            value = "INVOKE",
+            target = "Lcom/mojang/authlib/services/MinecraftServicesDiscoveryService;create(Ljava/net/Proxy;Z)Lcom/mojang/authlib/services/MinecraftServicesDiscoveryService;"
+        ),
+        index = 1
+    )
+    private static boolean mcr$servicesKeys(boolean enabled) {
+        return enabled || Boolean.getBoolean("mcr.bridge.servicesKeys");
+    }
+
     @Inject(method = "runTick", at = @At("HEAD"))
     private void mcr$awaitFrame(boolean advanceGameTime, CallbackInfo ci) {
         McrPreload.milestone(McrPreload.GAME_LOOP);

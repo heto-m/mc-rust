@@ -174,13 +174,14 @@ impl<H: HttpClient> Authenticator<H> {
         })
     }
 
+    /// Vanilla plays without keys when the certificate service fails, so a failure never fails sign-in.
     fn refresh_keys_if_needed(&self, account: &mut Account, now: u64) -> Result<(), AuthError> {
         let stale = account.keys.as_ref().is_none_or(|k| k.should_refresh(now));
         if stale {
-            account.keys = Some(minecraft::fetch_player_keys(
-                &self.http,
-                &account.minecraft_token,
-            )?);
+            match minecraft::fetch_player_keys(&self.http, &account.minecraft_token) {
+                Ok(keys) => account.keys = Some(keys),
+                Err(_) => account.keys = account.keys.take().filter(|k| !k.is_expired(now)),
+            }
         }
         Ok(())
     }
@@ -245,6 +246,38 @@ mod tests {
             .unwrap();
         assert_eq!(again.minecraft_token, acct.minecraft_token);
         assert_eq!(a.http().seen.borrow().len(), 8);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn certificate_failure_keeps_valid_keys_and_drops_expired_ones() {
+        let path = temp_path("certfail");
+        let http = MockHttp::default();
+        http.push(
+            "devicecode",
+            200,
+            r#"{"user_code":"U","device_code":"D","verification_uri":"v","expires_in":900}"#,
+        )
+        .push("oauth2/v2.0/token", 200, MSA);
+        script_chain(&http);
+        http.push(
+            "player/certificates",
+            200,
+            &fixture_json("2027-01-15T12:00:00Z", "2027-01-15T10:00:00Z"),
+        );
+        let a = auth(http, &path);
+        let first = a.ensure_account(NOW, |_| {}, |_| {}).unwrap();
+        let keys = first.keys.clone().unwrap();
+
+        let due = keys.refreshed_after_ms as u64 / 1000 + 1;
+        a.http().push("player/certificates", 500, "");
+        let kept = a.refresh_cached(due).unwrap();
+        assert_eq!(kept.keys, Some(keys.clone()));
+
+        let expired = keys.expires_at_ms as u64 / 1000 + 1;
+        a.http().push("player/certificates", 500, "");
+        let dropped = a.refresh_cached(expired).unwrap();
+        assert!(dropped.keys.is_none());
         let _ = fs::remove_file(&path);
     }
 

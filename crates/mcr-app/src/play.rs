@@ -53,6 +53,26 @@ use mcr_modbridge::sound::{SoundOwner, event_owner};
 
 pub const TICK_SECONDS: f32 = 0.05;
 const LOW_DISK_SPACE_TOAST: u32 = 0x4c44_5321;
+const INSECURE_SERVER_TOAST: u32 = 0x5553_4357;
+
+fn line_tag(tag: mcr_client::ChatTag) -> mcr_ui::ChatLineTag {
+    match tag {
+        mcr_client::ChatTag::System => mcr_ui::ChatLineTag::System,
+        mcr_client::ChatTag::NotSecure => mcr_ui::ChatLineTag::NotSecure,
+        mcr_client::ChatTag::Modified { original } => mcr_ui::ChatLineTag::Modified { original },
+        mcr_client::ChatTag::Error => mcr_ui::ChatLineTag::Error,
+    }
+}
+
+/// Vanilla's chat log tags.
+fn tag_label(tag: &mcr_client::ChatTag) -> &'static str {
+    match tag {
+        mcr_client::ChatTag::System => "System",
+        mcr_client::ChatTag::NotSecure => "Not Secure",
+        mcr_client::ChatTag::Modified { .. } => "Modified",
+        mcr_client::ChatTag::Error => "Chat Error",
+    }
+}
 
 /// Uniform in [0, 1) for cosmetic jitter such as sound pitch.
 fn rand_unit() -> f32 {
@@ -1166,13 +1186,38 @@ impl Play {
                     entities.clear();
                 }
             }
-            ClientEvent::Chat { kind, message, .. } => {
+            ClientEvent::Chat {
+                kind,
+                message,
+                tag,
+                signature,
+                ..
+            } => {
                 let text: String = self.gui.ui.flatten(&message).iter().map(|c| c.ch).collect();
-                println!("chat: {}", sanitize_for_log(&text));
-                if kind != ChatKind::ActionBar {
-                    self.hud
-                        .add_chat(&mut self.gui.ui, &message, self.ticks as u32, &self.options);
+                match &tag {
+                    Some(t) if kind == ChatKind::Player => {
+                        println!("chat [{}]: {}", tag_label(t), sanitize_for_log(&text))
+                    }
+                    _ => println!("chat: {}", sanitize_for_log(&text)),
                 }
+                if kind != ChatKind::ActionBar {
+                    self.hud.add_chat(
+                        &mut self.gui.ui,
+                        &message,
+                        self.ticks as u32,
+                        &self.options,
+                        tag.map(line_tag),
+                        signature.map(|s| s.0),
+                    );
+                }
+            }
+            ClientEvent::ChatDeleted(signature) => {
+                self.hud.delete_chat(
+                    &mut self.gui.ui,
+                    &signature.0,
+                    self.ticks as u32,
+                    &self.options,
+                );
             }
             ClientEvent::ChatCleared => self.hud.clear_chat(),
             ClientEvent::LocalSound {
@@ -1774,8 +1819,14 @@ impl Play {
     pub fn local_chat(&mut self, message: &mcr_protocol::types::text::Component) {
         let text: String = self.gui.ui.flatten(message).iter().map(|c| c.ch).collect();
         println!("chat: {}", sanitize_for_log(&text));
-        self.hud
-            .add_chat(&mut self.gui.ui, message, self.ticks as u32, &self.options);
+        self.hud.add_chat(
+            &mut self.gui.ui,
+            message,
+            self.ticks as u32,
+            &self.options,
+            Some(mcr_ui::ChatLineTag::System),
+            None,
+        );
     }
 
     fn open_lan_screen(&mut self) {
@@ -2041,6 +2092,20 @@ impl Play {
             }
             ToastEvent::Recipe { station, result } => {
                 self.gui.toasts.add_recipe(station, result);
+            }
+            ToastEvent::InsecureServer => {
+                let lang = self.gui.ui.lang();
+                let text = |key: &str| lang.get(key).unwrap_or(key).to_owned();
+                let (title, message) = (
+                    text("multiplayer.unsecureserver.toast.title"),
+                    text("multiplayer.unsecureserver.toast"),
+                );
+                self.gui.toasts.add_system(
+                    &mut self.gui.ui,
+                    mcr_ui::SystemToastId::new(INSECURE_SERVER_TOAST),
+                    &title,
+                    Some(&message),
+                );
             }
             ToastEvent::LowDiskSpace => {
                 let lang = self.gui.ui.lang();
@@ -2555,6 +2620,8 @@ impl Play {
 
         self.update_gui_size();
         self.tick_toasts();
+        self.hud
+            .tick_chat(&mut self.gui.ui, self.ticks as u32, &self.options);
         let hidden = self.hud_hidden || self.java_gui;
         let chat_open = self.chat_open();
         let debug = self.debug_on.then(|| {

@@ -223,6 +223,165 @@ impl CommandTree {
     }
 }
 
+/// (node, byte position, message arguments found so far as (node, start)).
+type ParseState = (usize, usize, Vec<(usize, usize)>);
+
+impl CommandTree {
+    /// Vanilla's `SignableCommand.of`: the `minecraft:message` arguments, as (name, text), of the first
+    /// parse that consumes the whole command (no leading slash) and ends on an executable node.
+    pub fn signable_arguments(&self, command: &str) -> Vec<(String, String)> {
+        if self.nodes.is_empty() || command.is_empty() {
+            return Vec::new();
+        }
+        let mut stack: Vec<ParseState> = vec![(self.root, 0, Vec::new())];
+        let mut steps = 0;
+        while let Some((node, pos, found)) = stack.pop() {
+            steps += 1;
+            if steps > MAX_PARSE_STEPS {
+                break;
+            }
+            let children = self.children(node, 0);
+            let literal = children.iter().copied().find(|&c| {
+                matches!(&self.nodes[c].kind, NodeKind::Literal(l) if literal_end(command, pos, l).is_some())
+            });
+            let candidates: Vec<usize> = match literal {
+                Some(c) => vec![c],
+                None => children
+                    .into_iter()
+                    .filter(|&c| matches!(self.nodes[c].kind, NodeKind::Argument { .. }))
+                    .collect(),
+            };
+            let mut next = Vec::new();
+            for child in candidates {
+                let Some(end) = node_end(&self.nodes[child].kind, command, pos) else {
+                    continue;
+                };
+                let mut found = found.clone();
+                if matches!(
+                    self.nodes[child].kind,
+                    NodeKind::Argument {
+                        parser: ArgumentParser::Message,
+                        ..
+                    }
+                ) && found.len() < MAX_SIGNED_ARGUMENTS
+                {
+                    found.push((child, pos));
+                }
+                if end == command.len() {
+                    if self.nodes[child].executable {
+                        return found
+                            .into_iter()
+                            .filter_map(|(n, start)| match &self.nodes[n].kind {
+                                NodeKind::Argument { name, .. } => {
+                                    Some((name.clone(), command[start..].to_owned()))
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                    }
+                } else if command.as_bytes()[end] == b' ' && end + 1 < command.len() {
+                    next.push((child, end + 1, found));
+                }
+            }
+            for state in next.into_iter().rev() {
+                if stack.len() < MAX_STATES {
+                    stack.push(state);
+                }
+            }
+        }
+        Vec::new()
+    }
+}
+
+const MAX_PARSE_STEPS: usize = 4096;
+const MAX_SIGNED_ARGUMENTS: usize = 8;
+
+fn literal_end(command: &str, pos: usize, literal: &str) -> Option<usize> {
+    let end = pos + literal.len();
+    (command[pos..].starts_with(literal)
+        && (end == command.len() || command.as_bytes()[end] == b' '))
+        .then_some(end)
+}
+
+fn token_end(command: &str, pos: usize) -> usize {
+    command[pos..].find(' ').map_or(command.len(), |i| pos + i)
+}
+
+fn tokens_end(command: &str, pos: usize, count: usize) -> Option<usize> {
+    let mut end = token_end(command, pos);
+    for _ in 1..count {
+        if end + 1 >= command.len() {
+            return None;
+        }
+        end = token_end(command, end + 1);
+    }
+    Some(end)
+}
+
+/// End of a quoted string starting at `pos`, past its closing quote.
+fn quoted_end(command: &str, pos: usize) -> Option<usize> {
+    let bytes = command.as_bytes();
+    let quote = bytes[pos];
+    let mut i = pos + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b if b == quote => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// End of an entity selector such as `@a[distance=..5, limit=1]`, brackets and quotes included.
+fn selector_end(command: &str, pos: usize) -> Option<usize> {
+    let bytes = command.as_bytes();
+    let open = pos + 2;
+    if bytes.get(open) != Some(&b'[') {
+        return Some(token_end(command, pos));
+    }
+    let mut i = open + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => i = quoted_end(command, i)?,
+            b']' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn node_end(kind: &NodeKind, command: &str, pos: usize) -> Option<usize> {
+    use ArgumentParser as P;
+    if pos >= command.len() {
+        return None;
+    }
+    let parser = match kind {
+        NodeKind::Root => return None,
+        NodeKind::Literal(l) => return literal_end(command, pos, l),
+        NodeKind::Argument { parser, .. } => parser,
+    };
+    let first = command.as_bytes()[pos];
+    match parser {
+        P::Message
+        | P::String(StringKind::GreedyPhrase)
+        | P::Component
+        | P::Style
+        | P::NbtCompoundTag
+        | P::NbtTag
+        | P::Dialog => Some(command.len()),
+        P::String(StringKind::QuotablePhrase) if first == b'"' || first == b'\'' => {
+            quoted_end(command, pos)
+        }
+        P::Entity { .. } | P::GameProfile | P::ScoreHolder { .. } if first == b'@' => {
+            selector_end(command, pos)
+        }
+        P::Vec3 | P::BlockPos => tokens_end(command, pos, 3),
+        P::Vec2 | P::ColumnPos | P::Rotation => tokens_end(command, pos, 2),
+        _ => Some(token_end(command, pos)),
+    }
+}
+
 enum Consume {
     Words(usize),
     Rest,
@@ -412,6 +571,178 @@ mod tests {
             nodes: vec![root, gamemode, gamerule, give, mode, targets],
             root_index: 0,
         })
+    }
+
+    fn arg(
+        name: &str,
+        parser: ArgumentParser,
+        children: Vec<i32>,
+        executable: bool,
+    ) -> CommandNode {
+        CommandNode {
+            executable,
+            restricted: false,
+            children,
+            redirect: None,
+            kind: NodeKind::Argument {
+                name: name.into(),
+                parser,
+                suggestions: None,
+            },
+        }
+    }
+
+    /// The shape of 26.3's `msg`, `say`, `execute`, `time`, `tellraw` and `teleport` nodes.
+    fn signing_tree() -> CommandTree {
+        let players = || ArgumentParser::Entity {
+            single: false,
+            players_only: true,
+        };
+        let entities = || ArgumentParser::Entity {
+            single: false,
+            players_only: false,
+        };
+        let mut nodes = vec![
+            CommandNode {
+                executable: false,
+                restricted: false,
+                children: vec![1, 4, 6, 11, 14, 17],
+                redirect: None,
+                kind: NodeKind::Root,
+            },
+            lit("msg", vec![2], false),
+            arg("targets", players(), vec![3], false),
+            arg("message", ArgumentParser::Message, vec![], true),
+            lit("say", vec![5], false),
+            arg("message", ArgumentParser::Message, vec![], true),
+            lit("execute", vec![7, 9], false),
+            lit("as", vec![8], false),
+            arg("targets", entities(), vec![], false),
+            lit("run", vec![], false),
+            arg("unused", ArgumentParser::Bool, vec![], true),
+            lit("time", vec![12], false),
+            lit("query", vec![13], false),
+            lit("daytime", vec![], true),
+            lit("tellraw", vec![15], false),
+            arg("targets", players(), vec![16], false),
+            arg("message", ArgumentParser::Component, vec![], true),
+            lit("teleport", vec![18], false),
+            arg("location", ArgumentParser::Vec3, vec![19], true),
+            arg("reason", ArgumentParser::Message, vec![], true),
+        ];
+        nodes[8].redirect = Some(6);
+        nodes[9].redirect = Some(0);
+        CommandTree::from_packet(&Commands {
+            nodes,
+            root_index: 0,
+        })
+    }
+
+    fn signed(command: &str) -> Vec<(String, String)> {
+        signing_tree().signable_arguments(command)
+    }
+
+    fn pair(name: &str, value: &str) -> Vec<(String, String)> {
+        vec![(name.to_owned(), value.to_owned())]
+    }
+
+    #[test]
+    fn message_arguments_are_signable() {
+        assert_eq!(
+            signed("msg Alex hello there"),
+            pair("message", "hello there")
+        );
+        assert_eq!(signed("say  two spaces"), pair("message", " two spaces"));
+        assert_eq!(
+            signed("msg @a[distance=..5, limit=1] hi"),
+            pair("message", "hi")
+        );
+        assert_eq!(
+            signed("msg @a[name=\"x ] y\"] quoted"),
+            pair("message", "quoted")
+        );
+        assert_eq!(
+            signed("teleport 1 ~2 ^3 because"),
+            pair("reason", "because")
+        );
+    }
+
+    #[test]
+    fn redirects_reach_signable_arguments() {
+        assert_eq!(
+            signed("execute as @a[distance=..5, limit=1] run say hi"),
+            pair("message", "hi")
+        );
+        assert_eq!(
+            signed("execute as Alex as Steve run msg Alex yo"),
+            pair("message", "yo")
+        );
+    }
+
+    #[test]
+    fn commands_without_message_arguments_stay_plain() {
+        for command in [
+            "time query daytime",
+            "tellraw @a {\"text\":\"hi\"}",
+            "teleport 1 2 3",
+            "msg Alex",
+            "msg Alex ",
+            "say",
+            "nope hi",
+            "time query",
+            "",
+        ] {
+            assert!(signed(command).is_empty(), "{command:?}");
+        }
+        assert!(
+            CommandTree::default()
+                .signable_arguments("say hi")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn hostile_trees_and_inputs_stay_bounded() {
+        let mut nodes = vec![CommandNode {
+            executable: false,
+            restricted: false,
+            children: vec![1],
+            redirect: None,
+            kind: NodeKind::Root,
+        }];
+        nodes.push(CommandNode {
+            redirect: Some(0),
+            ..lit("a", vec![], false)
+        });
+        let tree = CommandTree::from_packet(&Commands {
+            nodes,
+            root_index: 0,
+        });
+        let long = vec!["a"; 5000].join(" ");
+        assert!(tree.signable_arguments(&long).is_empty());
+        let wide: Vec<CommandNode> = std::iter::once(CommandNode {
+            executable: false,
+            restricted: false,
+            children: (1..200).collect(),
+            redirect: None,
+            kind: NodeKind::Root,
+        })
+        .chain((1..200).map(|_| {
+            arg(
+                "w",
+                ArgumentParser::String(StringKind::SingleWord),
+                (1..200).collect(),
+                false,
+            )
+        }))
+        .collect();
+        let tree = CommandTree::from_packet(&Commands {
+            nodes: wide,
+            root_index: 0,
+        });
+        assert!(tree.signable_arguments(&vec!["x"; 50].join(" ")).is_empty());
+        assert!(signed("msg @a[unclosed hi").is_empty());
+        assert!(signed("say é ü 😀").len() == 1);
     }
 
     #[test]

@@ -535,6 +535,9 @@ pub fn apply(opts: &mut Options, plan: LaunchPlan) -> Result<()> {
         opts.online = plan.account.online.map(|s| mcr_client::OnlineAuth {
             access_token: s.access_token,
             profile_id: s.profile_id,
+            keys: s.keys,
+            services: s.services,
+            refresh: s.refresh,
         });
     }
     if !opts.size_set

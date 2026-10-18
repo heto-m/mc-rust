@@ -14,12 +14,18 @@ mcr-net = { path = "../mcr-net" }
 mcr-physics = { path = "../mcr-physics" }
 mcr-protocol = { path = "../mcr-protocol" }
 mcr-world = { path = "../mcr-world" }
+rand.workspace = true
 rustc-hash.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 uuid = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+base64.workspace = true
+rsa.workspace = true
+sha1 = { workspace = true, features = ["oid"] }
 
 [[bin]]
 name = "mcr-headless"

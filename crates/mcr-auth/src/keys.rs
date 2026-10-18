@@ -7,10 +7,33 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use std::fmt;
+use std::sync::Arc;
+
 use crate::error::AuthError;
 use crate::secret::Secret;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Fetches fresh keys for an in-game session; `None` when the services fail.
+#[derive(Clone)]
+pub struct KeyRefresh(Arc<dyn Fn() -> Option<PlayerKeys> + Send + Sync>);
+
+impl KeyRefresh {
+    pub fn new(fetch: impl Fn() -> Option<PlayerKeys> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(fetch))
+    }
+
+    pub fn fetch(&self) -> Option<PlayerKeys> {
+        (self.0)()
+    }
+}
+
+impl fmt::Debug for KeyRefresh {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("KeyRefresh")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerKeys {
     pub private_key_pem: Secret,
     pub public_key_pem: String,

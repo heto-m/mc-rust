@@ -1,6 +1,9 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use mcr_auth::Secret;
+use mcr_auth::chat::ServicesKeys;
+use mcr_auth::keys::{KeyRefresh, PlayerKeys};
 use mcr_protocol::common::{ChatVisibility, MainHand, ParticleStatus};
 use rustc_hash::FxHashMap;
 
@@ -8,6 +11,23 @@ use rustc_hash::FxHashMap;
 pub struct OnlineAuth {
     pub access_token: Secret,
     pub profile_id: String,
+    /// Chat signing keys; without them chat is unsigned.
+    pub keys: Option<PlayerKeys>,
+    /// Mojang's keys for checking other players' chat keys.
+    pub services: Arc<ServicesKeys>,
+    pub refresh: Option<KeyRefresh>,
+}
+
+impl OnlineAuth {
+    pub fn new(access_token: Secret, profile_id: String) -> Self {
+        Self {
+            access_token,
+            profile_id,
+            keys: None,
+            services: Arc::default(),
+            refresh: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +66,10 @@ pub struct ClientConfig {
     pub chat_visibility: ChatVisibility,
     pub main_hand: MainHand,
     pub particle_status: ParticleStatus,
+    /// Vanilla's Only Show Secure Chat option.
+    pub only_show_secure_chat: bool,
+    /// The managed singleplayer server: the player's own messages count as secure, as vanilla's integrated server.
+    pub local_server: bool,
 }
 
 impl Default for ClientConfig {
@@ -72,6 +96,8 @@ impl Default for ClientConfig {
             chat_visibility: ChatVisibility::Full,
             main_hand: MainHand::Right,
             particle_status: ParticleStatus::All,
+            only_show_secure_chat: false,
+            local_server: false,
         }
     }
 }
