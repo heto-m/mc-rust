@@ -1,16 +1,17 @@
-//! 26.2 (protocol 776) onto 26.3.
+//! 26.2 (protocol 776) onto 26.3. These rewrites read 26.2's layouts, which older translators share;
+//! each translator brings its own tables.
 
-mod entity;
-mod items;
-mod ui;
-mod world;
+pub(super) mod entity;
+pub(super) mod items;
+pub(super) mod ui;
+pub(super) mod world;
 
 use std::sync::OnceLock;
 
 use mcr_buf::{Result, read_varint, take, write_varint};
 
 use super::io;
-use super::translator::{Action, Remap, Rule, Translator};
+use super::translator::{Action, Cx, Rule, Translator};
 use crate::{Direction, ProtocolState};
 
 static TABLES: &[u8] = include_bytes!("tables.bin");
@@ -18,42 +19,11 @@ static TABLES: &[u8] = include_bytes!("tables.bin");
 pub fn translator() -> &'static Translator {
     static TRANSLATOR: OnceLock<Translator> = OnceLock::new();
     TRANSLATOR.get_or_init(|| {
-        Translator::new("26.2", TABLES, RULES).expect("26.2 tables and rules agree")
+        Translator::new("26.2", TABLES, &[RULES], &[]).expect("26.2 tables and rules agree")
     })
 }
 
-/// Registry maps the rewrites use, resolved once.
-pub(super) struct Maps {
-    pub item: Remap<'static>,
-    pub block: Remap<'static>,
-    pub entity: Remap<'static>,
-    pub sound: Remap<'static>,
-    pub particle: Remap<'static>,
-    pub component: Remap<'static>,
-    pub argument: Remap<'static>,
-    pub custom_stat: Remap<'static>,
-    pub states: Remap<'static>,
-}
-
-pub(super) fn maps() -> &'static Maps {
-    static MAPS: OnceLock<Maps> = OnceLock::new();
-    MAPS.get_or_init(|| {
-        let t = translator();
-        Maps {
-            item: t.registry("minecraft:item"),
-            block: t.registry("minecraft:block"),
-            entity: t.registry("minecraft:entity_type"),
-            sound: t.registry("minecraft:sound_event"),
-            particle: t.registry("minecraft:particle_type"),
-            component: t.registry("minecraft:data_component_type"),
-            argument: t.registry("minecraft:command_argument_type"),
-            custom_stat: t.registry("minecraft:custom_stat"),
-            states: t.block_states(),
-        }
-    })
-}
-
-const fn rule(
+pub(super) const fn rule(
     state: ProtocolState,
     direction: Direction,
     name: &'static str,
@@ -70,8 +40,15 @@ const fn rule(
 use Direction::{Clientbound as C, Serverbound as S};
 use ProtocolState::{Configuration, Handshake, Play};
 
-static RULES: &[Rule] = &[
+/// Rules for every translator whose layouts match 26.2's.
+pub(super) static RULES: &[Rule] = &[
     rule(Handshake, S, "intention", intention),
+    rule(
+        Configuration,
+        C,
+        "select_known_packs",
+        ui::select_known_packs_offer,
+    ),
     rule(Configuration, C, "update_tags", ui::update_tags),
     rule(
         Configuration,
@@ -82,10 +59,12 @@ static RULES: &[Rule] = &[
     rule(Play, C, "add_entity", entity::add_entity),
     rule(Play, C, "animate", animate),
     rule(Play, C, "award_stats", ui::award_stats),
+    rule(Play, C, "block_entity_data", world::block_entity_data),
     rule(Play, C, "block_event", world::block_event),
     rule(Play, C, "block_update", world::block_update),
     rule(Play, C, "commands", ui::commands),
     rule(Play, C, "container_set_content", ui::container_set_content),
+    rule(Play, C, "container_set_data", ui::container_set_data),
     rule(Play, C, "container_set_slot", ui::container_set_slot),
     rule(
         Play,
@@ -108,6 +87,7 @@ static RULES: &[Rule] = &[
     rule(Play, C, "move_entity_pos", entity::move_entity_pos),
     rule(Play, C, "move_entity_pos_rot", entity::move_entity_pos_rot),
     rule(Play, C, "move_entity_rot", entity::move_entity_rot),
+    rule(Play, C, "open_screen", ui::open_screen),
     rule(Play, C, "place_ghost_recipe", ui::place_ghost_recipe),
     rule(Play, C, "player_chat", ui::player_chat),
     rule(Play, C, "recipe_book_add", ui::recipe_book_add),
@@ -140,15 +120,15 @@ static RULES: &[Rule] = &[
     rule(Play, S, "sign_update", ui::sign_update),
 ];
 
-fn intention(t: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+fn intention(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     read_varint(r)?;
-    write_varint(w, t.protocol());
+    write_varint(w, cx.t.protocol());
     io::rest(r, w);
     Ok(Action::Rewritten)
 }
 
 /// 26.3 moved swings to `swing_animation` and renumbered the rest.
-fn animate(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+fn animate(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     let entity = read_varint(r)?;
     let action = take(r, 1)?[0];
     write_varint(w, entity);
@@ -173,7 +153,7 @@ fn animate(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
 }
 
 /// 26.3 inserted `CHANGE_DESTROY_DIRECTION` at ordinal 1.
-fn player_action(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+fn player_action(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     match read_varint(r)? {
         1 => Ok(Action::Drop),
         0 => {
@@ -190,7 +170,7 @@ fn player_action(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Actio
 }
 
 /// 26.2 has no `punch`; its `swing` with the main hand is what the server answers with a swing.
-fn punch(_: &Translator, _: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+fn punch(_: &mut Cx<'_>, _: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     write_varint(w, 0);
     Ok(Action::Replace("swing"))
 }

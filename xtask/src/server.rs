@@ -35,15 +35,17 @@ pub fn render_properties(existing: Option<&str>, port: u16) -> String {
         ("pause-when-empty-seconds", "-1"),
         ("white-list", "false"),
         ("enforce-whitelist", "false"),
-        ("accept-transfers", "true"),
+        ("accepts-transfers", "true"),
     ];
+    // An earlier version of this list wrote the key vanilla never reads.
+    let stale = ["accept-transfers"];
     let defaults = [("view-distance", "10"), ("simulation-distance", "10")];
     let mut lines: Vec<String> = existing
         .unwrap_or_default()
         .lines()
         .filter(|l| {
             let key = l.split('=').next().unwrap_or_default().trim();
-            !forced.iter().any(|(k, _)| *k == key)
+            !forced.iter().any(|(k, _)| *k == key) && !stale.contains(&key)
         })
         .map(str::to_owned)
         .collect();
@@ -136,6 +138,10 @@ mod tests {
         assert!(text.lines().any(|l| l == "server-port=25570"));
         assert!(text.lines().any(|l| l == "pause-when-empty-seconds=-1"));
         assert!(text.lines().any(|l| l == "view-distance=10"));
+        assert!(text.lines().any(|l| l == "accepts-transfers=true"));
+        let fixed = render_properties(Some("accept-transfers=true\naccepts-transfers=false\n"), 1);
+        assert!(!fixed.contains("accept-transfers"));
+        assert!(fixed.lines().any(|l| l == "accepts-transfers=true"));
     }
 
     #[test]

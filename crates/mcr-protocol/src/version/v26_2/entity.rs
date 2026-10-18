@@ -2,11 +2,13 @@
 
 use mcr_buf::{Identifier, Result, read_varint, take, write_varint};
 
-use super::{items, maps, world};
+use super::items::Codec;
+use super::world;
 use crate::play::clientbound::entity::LpVec3;
+use crate::types::component::AttributeModifier;
 use crate::types::entity_data::EntityDataValue;
 use crate::version::io::{self, Depth};
-use crate::version::translator::{Action, Translator};
+use crate::version::translator::{Action, Cx};
 
 const META_END: u8 = 0xff;
 const META_ITEM_STACK: i32 = 7;
@@ -17,10 +19,10 @@ const META_PARTICLES: i32 = 17;
 /// 26.3 appended `DYE_COLOR`; 26.2's serializers end before it.
 const OLD_SERIALIZER_COUNT: i32 = 43;
 
-pub fn add_entity(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn add_entity(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::varint(r, w)?;
     io::bytes(r, w, 16)?;
-    let kind = io::remap(r, w, "entity type", |id| maps().entity.forward(id))?;
+    let kind = io::remap(r, w, "entity type", |id| cx.m.entity.forward(id))?;
     io::bytes(r, w, 24)?;
     io::copy::<LpVec3>(r, w)?;
     io::bytes(r, w, 3)?;
@@ -29,14 +31,14 @@ pub fn add_entity(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Acti
         .entity_type_by_name("minecraft:falling_block")
         .map(|id| id as i32);
     if Some(kind) == falling_block {
-        write_varint(w, maps().states.forward(data).unwrap_or(0));
+        write_varint(w, cx.m.states.forward(data).unwrap_or(0));
     } else {
         write_varint(w, data);
     }
     Ok(Action::Rewritten)
 }
 
-pub fn set_entity_data(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn set_entity_data(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::varint(r, w)?;
     loop {
         let index = take(r, 1)?[0];
@@ -50,7 +52,7 @@ pub fn set_entity_data(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result
             META_ITEM_STACK => {
                 *r = peek;
                 write_varint(w, serializer);
-                items::stack(r, w, Depth::top())?;
+                Codec::fwd(cx.m).stack(r, w, Depth::top())?;
             }
             META_BLOCK_STATE | META_OPTIONAL_BLOCK_STATE => {
                 *r = peek;
@@ -59,8 +61,7 @@ pub fn set_entity_data(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result
                 let new = if serializer == META_OPTIONAL_BLOCK_STATE && old == 0 {
                     0
                 } else {
-                    maps()
-                        .states
+                    cx.m.states
                         .forward(old)
                         .ok_or(io::unknown("block state", old))?
                 };
@@ -69,13 +70,13 @@ pub fn set_entity_data(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result
             META_PARTICLE => {
                 *r = peek;
                 write_varint(w, serializer);
-                world::particle(r, w)?;
+                world::particle(cx.m, r, w, Depth::top())?;
             }
             META_PARTICLES => {
                 *r = peek;
                 write_varint(w, serializer);
                 for _ in 0..io::len(r, w, r.len())? {
-                    world::particle(r, w)?;
+                    world::particle(cx.m, r, w, Depth::top())?;
                 }
             }
             s if (0..OLD_SERIALIZER_COUNT).contains(&s) => io::copy::<EntityDataValue>(r, w)?,
@@ -84,12 +85,12 @@ pub fn set_entity_data(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result
     }
 }
 
-pub fn set_equipment(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn set_equipment(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::varint(r, w)?;
     loop {
         let slot = take(r, 1)?[0];
         w.push(slot);
-        items::stack(r, w, Depth::top())?;
+        Codec::fwd(cx.m).stack(r, w, Depth::top())?;
         if slot & 0x80 == 0 {
             return Ok(Action::Rewritten);
         }
@@ -97,7 +98,7 @@ pub fn set_equipment(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<A
 }
 
 /// 26.3 moved `on_ground` into a VarInt ahead of the delta (bit 0; step count 0 above it).
-pub fn move_entity_pos(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn move_entity_pos(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::varint(r, w)?;
     let delta = take(r, 6)?;
     let on_ground = io_bool(r)?;
@@ -106,7 +107,7 @@ pub fn move_entity_pos(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result
     Ok(Action::Rewritten)
 }
 
-pub fn move_entity_pos_rot(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn move_entity_pos_rot(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::varint(r, w)?;
     let delta = take(r, 6)?;
     let rot = take(r, 2)?;
@@ -117,7 +118,7 @@ pub fn move_entity_pos_rot(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Re
     Ok(Action::Rewritten)
 }
 
-pub fn move_entity_rot(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn move_entity_rot(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::varint(r, w)?;
     let rot = take(r, 2)?;
     w.push(u8::from(io_bool(r)?));
@@ -126,7 +127,7 @@ pub fn move_entity_rot(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result
 }
 
 /// 26.3 sends a position path (0 = linear) and no velocity.
-pub fn entity_position_sync(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn entity_position_sync(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::varint(r, w)?;
     write_varint(w, 0);
     io::bytes(r, w, 24)?;
@@ -166,7 +167,8 @@ fn spawn_info(r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-pub fn login(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+/// Everything up to and including the spawn info.
+pub fn login_head(r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
     io::bytes(r, w, 5)?;
     for _ in 0..io::len(r, w, r.len())? {
         io::copy::<Identifier>(r, w)?;
@@ -175,12 +177,27 @@ pub fn login(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
         io::varint(r, w)?;
     }
     io::bytes(r, w, 3)?;
-    spawn_info(r, w)?;
+    spawn_info(r, w)
+}
+
+pub fn login(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+    login_head(r, w)?;
     io::rest(r, w);
     Ok(Action::Rewritten)
 }
 
-pub fn respawn(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+/// Attribute ids shifted before 26.2 added five attributes.
+pub fn update_attributes(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+    io::varint(r, w)?;
+    for _ in 0..io::len(r, w, 128.min(r.len()))? {
+        io::remap(r, w, "attribute", |id| cx.m.attribute.forward(id))?;
+        io::bytes(r, w, 8)?;
+        io::copy::<Vec<AttributeModifier>>(r, w)?;
+    }
+    Ok(Action::Rewritten)
+}
+
+pub fn respawn(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     spawn_info(r, w)?;
     io::rest(r, w);
     Ok(Action::Rewritten)

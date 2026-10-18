@@ -2,11 +2,15 @@
 
 use mcr_buf::{Result, read_len, read_varint, read_varlong, take, write_varint, write_varlong};
 
-use super::{items, maps};
+use mcr_buf::{Encode, IdOr};
+use mcr_nbt::{Limits, Value};
+
+use super::items::{self, Codec};
+use crate::play::clientbound::world::{LevelEvent, Sound, SoundSource};
 use crate::types::Particle;
 use crate::types::particle::{BlockParticleKind, ITEM};
 use crate::version::io::{self, Depth};
-use crate::version::translator::{Action, Translator};
+use crate::version::translator::{Action, Cx, Maps};
 
 const BLOCK_ENTRIES: usize = 4096;
 const BIOME_ENTRIES: usize = 64;
@@ -14,11 +18,8 @@ const NEW_DIRECT_BITS: u8 = 16;
 const MAX_SECTION_BUFFER: usize = 2 * 1024 * 1024;
 const MAX_LIGHT_SECTIONS: usize = 4096 / 16 + 2;
 
-fn state(old: i32) -> Result<i32> {
-    maps()
-        .states
-        .forward(old)
-        .ok_or(io::unknown("block state", old))
+fn state(m: &Maps, old: i32) -> Result<i32> {
+    m.states.forward(old).ok_or(io::unknown("block state", old))
 }
 
 fn long_count(bits: u8, entries: usize) -> usize {
@@ -30,7 +31,7 @@ fn read_long(r: &mut &[u8]) -> Result<u64> {
 }
 
 /// One paletted container; block containers remap ids and widen the direct palette to 26.3's 16 bits.
-fn container(r: &mut &[u8], w: &mut Vec<u8>, blocks: bool) -> Result<()> {
+fn container(m: &Maps, r: &mut &[u8], w: &mut Vec<u8>, blocks: bool) -> Result<()> {
     let (entries, min_bits, max_indirect) = if blocks {
         (BLOCK_ENTRIES, 4, 8)
     } else {
@@ -40,7 +41,7 @@ fn container(r: &mut &[u8], w: &mut Vec<u8>, blocks: bool) -> Result<()> {
     if declared == 0 {
         w.push(0);
         if blocks {
-            write_varint(w, state(read_varint(r)?)?);
+            write_varint(w, state(m, read_varint(r)?)?);
         } else {
             io::varint(r, w)?;
         }
@@ -53,7 +54,7 @@ fn container(r: &mut &[u8], w: &mut Vec<u8>, blocks: bool) -> Result<()> {
         write_varint(w, len as i32);
         for _ in 0..len {
             if blocks {
-                write_varint(w, state(read_varint(r)?)?);
+                write_varint(w, state(m, read_varint(r)?)?);
             } else {
                 io::varint(r, w)?;
             }
@@ -78,7 +79,7 @@ fn container(r: &mut &[u8], w: &mut Vec<u8>, blocks: bool) -> Result<()> {
                 break;
             }
             let old = ((word >> (k * usize::from(declared))) & mask) as i32;
-            values[i] = state(old)? as u16;
+            values[i] = state(m, old)? as u16;
             i += 1;
         }
     }
@@ -94,14 +95,14 @@ fn container(r: &mut &[u8], w: &mut Vec<u8>, blocks: bool) -> Result<()> {
     Ok(())
 }
 
-fn sections(r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
+fn sections(m: &Maps, r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
     let len = read_len(r, MAX_SECTION_BUFFER)?;
     let mut buf = take(r, len)?;
     let mut out = Vec::with_capacity(len + len / 8);
     while !buf.is_empty() {
         io::bytes(&mut buf, &mut out, 4)?;
-        container(&mut buf, &mut out, true)?;
-        container(&mut buf, &mut out, false)?;
+        container(m, &mut buf, &mut out, true)?;
+        container(m, &mut buf, &mut out, false)?;
     }
     write_varint(w, out.len() as i32);
     w.extend_from_slice(&out);
@@ -136,74 +137,149 @@ fn light(r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-pub fn level_chunk_with_light(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn level_chunk_with_light(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::bytes(r, w, 8)?;
     for _ in 0..io::len(r, w, 16)? {
         io::varint(r, w)?;
         let words = io::len(r, w, 4096)?;
         io::bytes(r, w, words * 8)?;
     }
-    sections(r, w)?;
-    for _ in 0..io::len(r, w, 1 << 20)? {
-        io::bytes(r, w, 3)?;
-        io::varint(r, w)?;
-        io::copy::<mcr_nbt::OptionalNetworkNbt>(r, w)?;
+    sections(cx.m, r, w)?;
+    let n = read_len(r, r.len())?;
+    let mut body = Vec::new();
+    let mut kept = 0;
+    for _ in 0..n {
+        let xz_y = take(r, 3)?;
+        let mut entry = Vec::with_capacity(16);
+        entry.extend_from_slice(xz_y);
+        if block_entity(cx.m, r, &mut entry, true)? {
+            body.extend_from_slice(&entry);
+            kept += 1;
+        }
     }
+    write_varint(w, kept);
+    w.extend_from_slice(&body);
     light(r, w)?;
     Ok(Action::Rewritten)
 }
 
-pub fn light_update(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
-    io::varint(r, w)?;
-    io::varint(r, w)?;
-    light(r, w)?;
-    Ok(Action::Rewritten)
+/// A block entity type and tag; `false` when the type has no canonical entry (26.1's beds).
+fn block_entity(m: &Maps, r: &mut &[u8], w: &mut Vec<u8>, optional: bool) -> Result<bool> {
+    let old = read_varint(r)?;
+    let Some(kind) = m.block_entity.forward(old) else {
+        io::nbt(r, &mut Vec::new(), optional)?;
+        return Ok(false);
+    };
+    write_varint(w, kind);
+    if Some(kind) != m.canonical.decorated_pot {
+        io::nbt(r, w, optional)?;
+        return Ok(true);
+    }
+    let nbt_error = |e: mcr_nbt::NbtError| mcr_buf::DecodeError::Other(format!("nbt: {e}"));
+    match mcr_nbt::read_network(r, Limits::NETWORK).map_err(nbt_error)? {
+        Some(Value::Compound(mut tag)) => {
+            items::pot_sherds(&mut tag);
+            mcr_nbt::write_network(w, Some(&Value::Compound(tag)));
+        }
+        Some(_) => return Err(io::unknown("block entity tag", 0)),
+        None if optional => w.push(mcr_nbt::tag::END),
+        None => return Err(io::unknown("block entity tag", 0)),
+    }
+    Ok(true)
 }
 
-pub fn block_update(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn block_entity_data(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::bytes(r, w, 8)?;
-    write_varint(w, state(read_varint(r)?)?);
+    Ok(if block_entity(cx.m, r, w, false)? {
+        Action::Rewritten
+    } else {
+        Action::Drop
+    })
+}
+
+pub fn light_update(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+    io::varint(r, w)?;
+    io::varint(r, w)?;
+    light(r, w)?;
     Ok(Action::Rewritten)
 }
 
-pub fn section_blocks_update(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn block_update(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+    io::bytes(r, w, 8)?;
+    write_varint(w, state(cx.m, read_varint(r)?)?);
+    Ok(Action::Rewritten)
+}
+
+pub fn section_blocks_update(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::bytes(r, w, 8)?;
     for _ in 0..io::len(r, w, BLOCK_ENTRIES)? {
         let packed = read_varlong(r)?;
-        let new = state((packed >> 12) as i32)?;
+        let new = state(cx.m, (packed >> 12) as i32)?;
         write_varlong(w, i64::from(new) << 12 | (packed & 0xfff));
     }
     Ok(Action::Rewritten)
 }
 
-pub fn block_event(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn block_event(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::bytes(r, w, 10)?;
-    io::remap(r, w, "block", |id| maps().block.forward(id))?;
+    io::remap(r, w, "block", |id| cx.m.block.forward(id))?;
     Ok(Action::Rewritten)
 }
 
-/// Block break particles (2001) and block-state particle bursts (3008) carry a state id.
-pub fn level_event(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+/// Block break particles (2001) and block-state particle bursts (3008) carry a state id. 26.3 moved
+/// the sounds of splash particles (2002, 2007) and waxing (3003) into their own packets.
+pub fn level_event(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     let event = i32::from_be_bytes(take(r, 4)?.try_into().expect("4 bytes"));
     w.extend_from_slice(&event.to_be_bytes());
-    io::bytes(r, w, 8)?;
+    let packed = take(r, 8)?;
+    w.extend_from_slice(packed);
     let data = i32::from_be_bytes(take(r, 4)?.try_into().expect("4 bytes"));
     let data = match event {
-        2001 | 3008 => state(data)?,
+        2001 | 3008 => state(cx.m, data)?,
         _ => data,
     };
     w.extend_from_slice(&data.to_be_bytes());
-    io::rest(r, w);
+    io::bool(r, w)?;
+    let pos = <mcr_buf::BlockPos as mcr_buf::Decode>::decode(&mut &packed[..])?;
+    match event {
+        2002 | 2007 => cx.emit("level_event", |w| {
+            LevelEvent {
+                event: if event == 2002 { 1053 } else { 1054 },
+                pos,
+                data: 0,
+                global: false,
+            }
+            .encode(w)
+        })?,
+        3003 => {
+            if let Some(sound) = cx.m.canonical.wax_on_sound {
+                cx.emit("sound", |w| {
+                    Sound {
+                        sound: IdOr::Id(sound),
+                        source: SoundSource::Blocks,
+                        x: pos.x * 8 + 4,
+                        y: pos.y * 8 + 4,
+                        z: pos.z * 8 + 4,
+                        volume: 1.0,
+                        pitch: 1.0,
+                        seed: 0,
+                    }
+                    .encode(w)
+                })?;
+            }
+        }
+        _ => {}
+    }
     Ok(Action::Rewritten)
 }
 
-/// A particle type id and its options.
-pub fn particle(r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
-    let new = io::remap(r, w, "particle type", |id| maps().particle.forward(id))?;
+/// A particle type id and its options; item particles nest stacks, so they take the caller's depth.
+pub fn particle(m: &'static Maps, r: &mut &[u8], w: &mut Vec<u8>, d: Depth) -> Result<()> {
+    let new = io::remap(r, w, "particle type", |id| m.particle.forward(id))?;
     if BlockParticleKind::from_id(new).is_some() {
-        write_varint(w, state(read_varint(r)?)?);
+        write_varint(w, state(m, read_varint(r)?)?);
     } else if new == ITEM {
-        items::template(r, w, Depth::top())?;
+        Codec::fwd(m).template(r, w, d)?;
     } else {
         let start = *r;
         Particle::decode_options(new, r)?;
@@ -214,11 +290,11 @@ pub fn particle(r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
 
 /// 26.3 moved the particle first, split max speed per axis, made the count a VarInt and added the
 /// randomization type.
-pub fn level_particles(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn level_particles(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     let head = take(r, 2 + 24 + 12)?;
     let speed = take(r, 4)?;
     let count = i32::from_be_bytes(take(r, 4)?.try_into().expect("4 bytes"));
-    particle(r, w)?;
+    particle(cx.m, r, w, Depth::top())?;
     w.extend_from_slice(head);
     for _ in 0..3 {
         w.extend_from_slice(speed);
@@ -229,15 +305,15 @@ pub fn level_particles(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result
 }
 
 /// 26.2 explosions always play their sound.
-pub fn explode(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn explode(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::bytes(r, w, 24 + 4 + 4)?;
     if io::bool(r, w)? {
         io::bytes(r, w, 24)?;
     }
-    particle(r, w)?;
-    items::sound(r, w)?;
+    particle(cx.m, r, w, Depth::top())?;
+    Codec::fwd(cx.m).sound(r, w)?;
     for _ in 0..io::len(r, w, r.len())? {
-        particle(r, w)?;
+        particle(cx.m, r, w, Depth::top())?;
         io::bytes(r, w, 8)?;
         io::varint(r, w)?;
     }
@@ -245,8 +321,8 @@ pub fn explode(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action>
     Ok(Action::Rewritten)
 }
 
-pub fn sound(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
-    items::sound(r, w)?;
+pub fn sound(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+    Codec::fwd(cx.m).sound(r, w)?;
     io::rest(r, w);
     Ok(Action::Rewritten)
 }

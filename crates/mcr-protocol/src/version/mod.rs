@@ -6,9 +6,10 @@
 pub(crate) mod io;
 pub mod tables;
 mod translator;
+mod v26_1_2;
 mod v26_2;
 
-pub use translator::{TranslateError, Translated, Translator};
+pub use translator::{Frames, Session, TranslateError, Translated, Translator};
 
 use crate::{Direction, ProtocolState};
 
@@ -31,10 +32,22 @@ pub const VERSIONS: &[VersionInfo] = &[
         name: "26.2",
         protocol: 776,
     },
+    VersionInfo {
+        name: "26.1.2",
+        protocol: 775,
+    },
+    VersionInfo {
+        name: "26.1.1",
+        protocol: 775,
+    },
+    VersionInfo {
+        name: "26.1",
+        protocol: 775,
+    },
 ];
 
 /// The versions the launcher and server list offer, newest first.
-pub const SUPPORTED_VERSIONS: &[&str] = &[GAME_VERSION, "26.2"];
+pub const SUPPORTED_VERSIONS: &[&str] = &[GAME_VERSION, "26.2", "26.1.2", "26.1.1", "26.1"];
 
 pub fn is_supported(id: &str) -> bool {
     SUPPORTED_VERSIONS.contains(&id)
@@ -71,6 +84,7 @@ impl Wire {
         match protocol {
             PROTOCOL => Some(Self::Canonical),
             776 => Some(Self::Legacy(v26_2::translator())),
+            775 => Some(Self::Legacy(v26_1_2::translator())),
             _ => None,
         }
     }
@@ -93,33 +107,39 @@ impl Wire {
         }
     }
 
-    /// Turns a frame from the server into a canonical clientbound frame.
+    /// Turns a frame from the server into canonical clientbound frames; `out` holds rewritten payloads.
     #[inline]
     pub fn inbound<'a>(
         self,
         state: ProtocolState,
         id: i32,
         payload: &'a [u8],
-        scratch: &'a mut Vec<u8>,
+        session: &mut Session,
+        out: &'a mut Vec<u8>,
     ) -> Result<Translated<'a>, TranslateError> {
         match self {
             Self::Canonical => Ok(Translated::Packet(id, payload)),
-            Self::Legacy(t) => t.translate(state, Direction::Clientbound, id, payload, scratch),
+            Self::Legacy(t) => {
+                t.translate(state, Direction::Clientbound, id, payload, session, out)
+            }
         }
     }
 
-    /// Turns a canonical serverbound frame into the frame this wire sends.
+    /// Turns a canonical serverbound frame into the frames this wire sends.
     #[inline]
     pub fn outbound<'a>(
         self,
         state: ProtocolState,
         id: i32,
         payload: &'a [u8],
-        scratch: &'a mut Vec<u8>,
+        session: &mut Session,
+        out: &'a mut Vec<u8>,
     ) -> Result<Translated<'a>, TranslateError> {
         match self {
             Self::Canonical => Ok(Translated::Packet(id, payload)),
-            Self::Legacy(t) => t.translate(state, Direction::Serverbound, id, payload, scratch),
+            Self::Legacy(t) => {
+                t.translate(state, Direction::Serverbound, id, payload, session, out)
+            }
         }
     }
 
@@ -151,14 +171,18 @@ mod tests {
         let old = Wire::any_for_protocol(776).unwrap();
         assert_eq!((old.protocol(), old.version_name()), (776, "26.2"));
         assert_eq!(Wire::for_protocol(776).is_some(), is_supported("26.2"));
+        let older = Wire::any_for_protocol(775).unwrap();
+        assert_eq!((older.protocol(), older.version_name()), (775, "26.1.2"));
+        assert_eq!(version_by_protocol(775).map(|v| v.name), Some("26.1.2"));
     }
 
     #[test]
     fn canonical_wire_passes_frames_through() {
         let payload = [1u8, 2, 3];
         let mut scratch = Vec::new();
+        let mut session = Session::default();
         let out = Wire::Canonical
-            .inbound(ProtocolState::Play, 7, &payload, &mut scratch)
+            .inbound(ProtocolState::Play, 7, &payload, &mut session, &mut scratch)
             .unwrap();
         let Translated::Packet(id, bytes) = out else {
             panic!("dropped")

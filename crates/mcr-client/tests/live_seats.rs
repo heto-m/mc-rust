@@ -56,6 +56,10 @@ fn live_seat_heights() {
     live.console(&format!("op {name}"));
     live.until("loaded", 400, |l| l.client.state.player.loaded);
     live.console(&format!("gamemode survival {name}"));
+    // The floor is built after the teleport; on low terrain the drop would kill.
+    live.console(&format!(
+        "effect give {name} minecraft:resistance 30 4 true"
+    ));
     live.console(&format!("tp {name} 0.5 100 -16.5"));
     live.until("origin chunks", 400, |l| {
         l.client

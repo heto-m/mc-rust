@@ -85,8 +85,15 @@ impl VersionList {
         }
         for (i, id) in SUPPORTED_VERSIONS.iter().enumerate() {
             if !entries.iter().any(|e| e.id == *id) {
+                let at = match i.checked_sub(1) {
+                    Some(newer) => entries
+                        .iter()
+                        .position(|e| e.id == SUPPORTED_VERSIONS[newer])
+                        .map_or(entries.len(), |at| at + 1),
+                    None => 0,
+                };
                 entries.insert(
-                    i.min(entries.len()),
+                    at,
                     VersionEntry {
                         id: (*id).to_owned(),
                         kind: VersionKind::Release,
@@ -193,13 +200,19 @@ mod tests {
     fn releases_snapshots_and_support() {
         let list = VersionList::parse(manifest().as_bytes()).unwrap();
         let releases: Vec<_> = list.visible(false).map(|e| e.id.as_str()).collect();
-        assert_eq!(releases, ["26.4", "26.3", "26.2"]);
-        assert_eq!(list.visible(true).count(), 4);
+        let older: Vec<_> = SUPPORTED_VERSIONS
+            .iter()
+            .copied()
+            .filter(|v| !["26.3", "26.2"].contains(v))
+            .collect();
+        assert_eq!(releases[..3], ["26.4", "26.3", "26.2"]);
+        assert_eq!(releases[3..], older);
+        assert_eq!(list.visible(true).count(), 4 + older.len());
         let supported: Vec<_> = list.entries.iter().filter(|e| e.supported).collect();
         let listed = ["26.3", "26.2"];
         assert_eq!(
             supported.len(),
-            listed.iter().filter(|v| is_supported(v)).count()
+            listed.iter().filter(|v| is_supported(v)).count() + older.len()
         );
         assert_eq!(supported[0].id, GAME_VERSION);
         assert_eq!(list.latest_supported_release(), GAME_VERSION);

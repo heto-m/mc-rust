@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use mcr_buf::DecodeError;
+use mcr_buf::{DecodeError, read_varint, write_varint};
 
 use super::tables::{IdMap, VersionTables};
 use crate::{Direction, PacketIds, ProtocolState};
@@ -34,7 +34,50 @@ fn short(name: &str) -> &str {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Translated<'a> {
     Packet(i32, &'a [u8]),
+    /// The translated packet (if any) followed by packets the translator added.
+    Packets(Frames<'a>),
     Drop,
+}
+
+/// Packets from one translation, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frames<'a> {
+    first: Option<(i32, &'a [u8])>,
+    /// `[VarInt id][VarInt length][payload]` each, written by the translator.
+    rest: &'a [u8],
+}
+
+impl<'a> Iterator for Frames<'a> {
+    type Item = (i32, &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(first) = self.first.take() {
+            return Some(first);
+        }
+        let mut r = self.rest;
+        let id = read_varint(&mut r).ok()?;
+        let max = r.len();
+        let len = mcr_buf::read_len(&mut r, max).ok()?;
+        let (payload, tail) = r.split_at(len);
+        self.rest = tail;
+        Some((id, payload))
+    }
+}
+
+/// Per-connection translator state, shared by both directions; the canonical wire never touches it.
+#[derive(Debug, Default)]
+pub struct Session {
+    pub(crate) state: SessionState,
+    extra: Vec<u8>,
+}
+
+/// Everything a translator remembers about a connection; all of it bounded.
+#[derive(Debug, Default)]
+pub(crate) struct SessionState {
+    /// The open brewing stand window and whether its 26.3-only totals were sent.
+    pub brewing: Option<(i32, bool)>,
+    /// The `minecraft:core` pack version the server offered.
+    pub core_pack: Option<Box<str>>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -61,12 +104,44 @@ pub enum TranslateError {
 pub(crate) enum Action {
     /// The output is the packet's payload on the target side.
     Rewritten,
+    /// The source payload goes on unchanged under the target id.
+    Same,
     /// The output is the payload of another target-side packet, named without `minecraft:`.
     Replace(&'static str),
     Drop,
 }
 
-pub(crate) type Rewrite = fn(&Translator, &mut &[u8], &mut Vec<u8>) -> Result<Action, DecodeError>;
+/// What a rewrite can see besides its payload.
+pub(crate) struct Cx<'s> {
+    pub t: &'static Translator,
+    pub m: &'static Maps,
+    pub session: &'s mut SessionState,
+    state: ProtocolState,
+    direction: Direction,
+    extra: &'s mut Vec<u8>,
+}
+
+impl Cx<'_> {
+    /// Adds a target-side packet after the one being translated.
+    pub fn emit(
+        &mut self,
+        name: &'static str,
+        payload: impl FnOnce(&mut Vec<u8>),
+    ) -> Result<(), DecodeError> {
+        let id = self
+            .t
+            .target_id(self.state, self.direction, name)
+            .ok_or_else(|| DecodeError::Other(format!("no target packet {name}")))?;
+        let mut body = Vec::new();
+        payload(&mut body);
+        write_varint(self.extra, id);
+        write_varint(self.extra, body.len() as i32);
+        self.extra.extend_from_slice(&body);
+        Ok(())
+    }
+}
+
+pub(crate) type Rewrite = fn(&mut Cx<'_>, &mut &[u8], &mut Vec<u8>) -> Result<Action, DecodeError>;
 
 /// A rewrite for one packet: clientbound rules name the old packet, serverbound rules the canonical one.
 #[derive(Clone, Copy)]
@@ -116,11 +191,131 @@ impl Remap<'_> {
     }
 }
 
+/// Registry maps and old-only entries the rewrites use, resolved once per translator.
+#[derive(Debug)]
+pub(crate) struct Maps {
+    pub item: Remap<'static>,
+    pub block: Remap<'static>,
+    pub entity: Remap<'static>,
+    pub sound: Remap<'static>,
+    pub particle: Remap<'static>,
+    pub component: Remap<'static>,
+    pub argument: Remap<'static>,
+    pub custom_stat: Remap<'static>,
+    pub attribute: Remap<'static>,
+    pub block_entity: Remap<'static>,
+    pub menu: Remap<'static>,
+    pub states: Remap<'static>,
+    /// Old data component ids with no canonical entry of the same name.
+    pub old_swing_animation: Option<i32>,
+    pub old_map_color: Option<i32>,
+    pub canonical: CanonicalIds,
+}
+
+/// Canonical registry ids the rewrites compare against, looked up by name once.
+#[derive(Debug)]
+pub(crate) struct CanonicalIds {
+    pub brick: Option<i32>,
+    pub brewing_stand_menu: Option<i32>,
+    pub decorated_pot: Option<i32>,
+    pub potion_contents_predicate: Option<i32>,
+    pub wax_on_sound: Option<i32>,
+}
+
+impl CanonicalIds {
+    fn new() -> Self {
+        let id = |registry: &str, name: &str| {
+            mcr_data::v26_3()
+                .registry(registry)
+                .and_then(|r| r.id_of(name))
+                .map(|id| id as i32)
+        };
+        Self {
+            brick: id("minecraft:item", "minecraft:brick"),
+            brewing_stand_menu: id("minecraft:menu", "minecraft:brewing_stand"),
+            decorated_pot: id("minecraft:block_entity_type", "minecraft:decorated_pot"),
+            potion_contents_predicate: id(
+                "minecraft:data_component_predicate_type",
+                "minecraft:potion_contents",
+            ),
+            wax_on_sound: id("minecraft:sound_event", "minecraft:item.honeycomb.wax_on"),
+        }
+    }
+}
+
+impl Maps {
+    fn new(tables: &'static VersionTables) -> Self {
+        let registry = |name: &str| {
+            tables
+                .map(&VersionTables::registry_key(name))
+                .map_or(Remap::Identity, Remap::Map)
+        };
+        let old_component = |name: &str| old_entry(tables, "minecraft:data_component_type", name);
+        Self {
+            item: registry("minecraft:item"),
+            block: registry("minecraft:block"),
+            entity: registry("minecraft:entity_type"),
+            sound: registry("minecraft:sound_event"),
+            particle: registry("minecraft:particle_type"),
+            component: registry("minecraft:data_component_type"),
+            argument: registry("minecraft:command_argument_type"),
+            custom_stat: registry("minecraft:custom_stat"),
+            attribute: registry("minecraft:attribute"),
+            block_entity: registry("minecraft:block_entity_type"),
+            menu: registry("minecraft:menu"),
+            states: tables
+                .map("block_state")
+                .map_or(Remap::Identity, Remap::Map),
+            old_swing_animation: old_component("minecraft:swing_animation"),
+            old_map_color: old_component("minecraft:map_color"),
+            canonical: CanonicalIds::new(),
+        }
+    }
+}
+
+fn old_entry(tables: &VersionTables, registry: &str, name: &str) -> Option<i32> {
+    tables
+        .old_names(&VersionTables::registry_key(registry))
+        .iter()
+        .position(|n| n == name)
+        .map(|i| i as i32)
+}
+
+/// A registry entry renamed between an old version and the canonical one: `(registry, old, canonical)`.
+pub(crate) type Rename = (&'static str, &'static str, &'static str);
+
+fn apply_renames(tables: &mut VersionTables, renames: &[Rename]) -> Result<(), String> {
+    let data = mcr_data::v26_3();
+    for &(registry, old, new) in renames {
+        let old_id = old_entry(tables, registry, old)
+            .ok_or_else(|| format!("{registry}: no old entry {old}"))?;
+        let new_id = data
+            .registry(registry)
+            .and_then(|r| r.id_of(new))
+            .ok_or_else(|| format!("{registry}: no canonical entry {new}"))?;
+        let key = VersionTables::registry_key(registry);
+        let map = tables
+            .maps
+            .iter_mut()
+            .find(|(k, _)| *k == key)
+            .map(|(_, m)| m)
+            .ok_or_else(|| format!("{registry}: renamed but identical"))?;
+        let (o, n) = (old_id as usize, new_id as usize);
+        if o >= map.forward.len() || n >= map.back.len() {
+            return Err(format!("{registry}: rename out of range"));
+        }
+        map.forward[o] = n as u16;
+        map.back[n] = o as u16;
+    }
+    Ok(())
+}
+
 /// Translates one older version's frames to and from the canonical packet set.
 pub struct Translator {
     version: &'static str,
     protocol: i32,
-    tables: VersionTables,
+    tables: &'static VersionTables,
+    maps: Maps,
     routes: [Routes; 10],
     old_ids: [HashMap<String, i32>; 10],
 }
@@ -135,15 +330,20 @@ impl std::fmt::Debug for Translator {
 }
 
 impl Translator {
+    /// Built once per version and kept for the process, so the tables are leaked to `'static`.
+    /// Later rules for the same packet replace earlier ones.
     pub(crate) fn new(
         version: &'static str,
         tables: &[u8],
-        rules: &[Rule],
+        rules: &[&[Rule]],
+        renames: &[Rename],
     ) -> Result<Self, String> {
-        let tables = VersionTables::decode(tables).map_err(|e| e.to_string())?;
+        let mut tables = VersionTables::decode(tables).map_err(|e| e.to_string())?;
         if tables.old_name != version {
             return Err(format!("tables are for {}", tables.old_name));
         }
+        apply_renames(&mut tables, renames)?;
+        let tables: &'static VersionTables = Box::leak(Box::new(tables));
         let canonical = PacketIds::v26_3();
         let data = mcr_data::v26_3();
         let mut routes: [Routes; 10] = Default::default();
@@ -188,7 +388,7 @@ impl Translator {
                 r.passthrough = map.is_none();
             }
         }
-        for rule in rules {
+        for rule in rules.iter().copied().flatten() {
             let s = slot(rule.state, rule.direction);
             let name = short(rule.name);
             let source = if rule.direction == Direction::Clientbound && !routes[s].passthrough {
@@ -208,6 +408,7 @@ impl Translator {
             version,
             protocol: tables.old_protocol as i32,
             tables,
+            maps: Maps::new(tables),
             routes,
             old_ids,
         })
@@ -223,18 +424,17 @@ impl Translator {
 
     #[cfg(test)]
     pub(crate) fn tables(&self) -> &VersionTables {
-        &self.tables
+        self.tables
     }
 
-    pub(crate) fn registry(&self, name: &str) -> Remap<'_> {
+    #[cfg(test)]
+    pub(crate) fn maps(&self) -> &Maps {
+        &self.maps
+    }
+
+    pub(crate) fn registry(&self, name: &str) -> Remap<'static> {
         self.tables
             .map(&VersionTables::registry_key(name))
-            .map_or(Remap::Identity, Remap::Map)
-    }
-
-    pub(crate) fn block_states(&self) -> Remap<'_> {
-        self.tables
-            .map("block_state")
             .map_or(Remap::Identity, Remap::Map)
     }
 
@@ -273,12 +473,13 @@ impl Translator {
     }
 
     pub(crate) fn translate<'a>(
-        &self,
+        &'static self,
         state: ProtocolState,
         direction: Direction,
         id: i32,
         payload: &'a [u8],
-        scratch: &'a mut Vec<u8>,
+        session: &mut Session,
+        out: &'a mut Vec<u8>,
     ) -> Result<Translated<'a>, TranslateError> {
         let routes = &self.routes[slot(state, direction)];
         if routes.passthrough {
@@ -300,7 +501,8 @@ impl Translator {
                 Translated::Packet(route.target, payload)
             });
         };
-        scratch.clear();
+        out.clear();
+        session.extra.clear();
         let mut input = payload;
         let fail = |source| TranslateError::Packet {
             version: self.version,
@@ -309,15 +511,44 @@ impl Translator {
             direction,
             source,
         };
-        match rewrite(self, &mut input, scratch).map_err(fail)? {
-            Action::Rewritten if route.target != NO_ID => {
-                Ok(Translated::Packet(route.target, scratch))
-            }
-            Action::Rewritten | Action::Drop => Ok(Translated::Drop),
-            Action::Replace(name) => match self.target_id(state, direction, name) {
-                Some(target) => Ok(Translated::Packet(target, scratch)),
-                None => Err(fail(DecodeError::Other(format!("no target packet {name}")))),
-            },
+        let mut cx = Cx {
+            t: self,
+            m: &self.maps,
+            session: &mut session.state,
+            state,
+            direction,
+            extra: &mut session.extra,
+        };
+        let action = rewrite(&mut cx, &mut input, out).map_err(fail)?;
+        let target = match action {
+            Action::Rewritten | Action::Same if route.target != NO_ID => Some(route.target),
+            Action::Rewritten | Action::Same | Action::Drop => None,
+            Action::Replace(name) => Some(
+                self.target_id(state, direction, name)
+                    .ok_or_else(|| fail(DecodeError::Other(format!("no target packet {name}"))))?,
+            ),
+        };
+        if session.extra.is_empty() {
+            return Ok(match (target, action) {
+                (Some(target), Action::Same) => Translated::Packet(target, payload),
+                (Some(target), _) => Translated::Packet(target, out),
+                (None, _) => Translated::Drop,
+            });
         }
+        if action == Action::Same {
+            out.clear();
+            out.extend_from_slice(payload);
+        }
+        if target.is_none() {
+            out.clear();
+        }
+        let main = out.len();
+        out.extend_from_slice(&session.extra);
+        session.extra.clear();
+        let (head, rest) = out.split_at(main);
+        Ok(Translated::Packets(Frames {
+            first: target.map(|t| (t, head)),
+            rest,
+        }))
     }
 }

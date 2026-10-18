@@ -155,3 +155,10 @@ The soak SHALL fail when the RSS or GPU memory slope after warm-up exceeds the l
 #### Scenario: Missing reports
 - **WHEN** `.cache/versions/26.2/generated/reports` does not exist
 - **THEN** the command fails and tells the user to run `cargo xtask fetch` and `cargo xtask datagen` for 26.2
+
+### Requirement: Old registry names in version tables
+Besides id maps, the version tables SHALL carry the old version's entry names for the data component type, command argument type and block entity type registries.
+
+#### Scenario: Old registry names
+- **WHEN** the 26.2 tables are generated
+- **THEN** they hold 26.2's data component type names, including `minecraft:swing_animation`

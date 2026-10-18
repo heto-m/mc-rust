@@ -21,6 +21,13 @@ pub struct Reports<'a> {
     pub protocol: u32,
 }
 
+/// Registries whose old entry names go into the tables, for translators that look entries up by name.
+pub const NAMED_REGISTRIES: &[&str] = &[
+    "minecraft:block_entity_type",
+    "minecraft:command_argument_type",
+    "minecraft:data_component_type",
+];
+
 pub fn version_tables(old: &Reports<'_>, new: &Reports<'_>) -> Result<Vec<u8>> {
     let mut maps = BTreeMap::new();
     let old_packets = read_json(&old.dir.join("packets.json"))?;
@@ -40,11 +47,13 @@ pub fn version_tables(old: &Reports<'_>, new: &Reports<'_>) -> Result<Vec<u8>> {
             dense(&packet_ids(&old_packets, state, dir)?, key)?,
         ));
     }
+    let old_registries = read_json(&old.dir.join("registries.json"))?;
     registry_maps(
-        &read_json(&old.dir.join("registries.json"))?,
+        &old_registries,
         &read_json(&new.dir.join("registries.json"))?,
         &mut maps,
     )?;
+    names.extend(registry_names(&old_registries)?);
     let states = block_state_map(
         &read_json(&old.dir.join("blocks.json"))?,
         &read_json(&new.dir.join("blocks.json"))?,
@@ -61,6 +70,20 @@ pub fn version_tables(old: &Reports<'_>, new: &Reports<'_>) -> Result<Vec<u8>> {
         names,
     }
     .encode())
+}
+
+/// Old entry names of [`NAMED_REGISTRIES`], keyed like the registry maps.
+fn registry_names(old: &Map<String, Value>) -> Result<Vec<(String, Vec<String>)>> {
+    NAMED_REGISTRIES
+        .iter()
+        .filter_map(|&name| old.get(name).map(|reg| (name, reg)))
+        .map(|(name, reg)| {
+            Ok((
+                VersionTables::registry_key(name),
+                dense(&registry_ids(reg)?, name)?,
+            ))
+        })
+        .collect()
 }
 
 fn dense(map: &HashMap<String, usize>, what: &str) -> Result<Vec<String>> {
@@ -354,6 +377,28 @@ mod tests {
                 t.old_name
             );
         }
+    }
+
+    #[test]
+    fn named_registries_keep_old_names_in_id_order() {
+        let old = obj(json!({
+            "minecraft:data_component_type": {"entries": {
+                "minecraft:swing_animation": {"protocol_id": 1}, "minecraft:damage": {"protocol_id": 0}
+            }},
+            "minecraft:item": {"entries": {"minecraft:a": {"protocol_id": 0}}}
+        }));
+        let names = registry_names(&old).unwrap();
+        assert_eq!(
+            names,
+            [(
+                "registry/minecraft:data_component_type".to_owned(),
+                vec![
+                    "minecraft:damage".to_owned(),
+                    "minecraft:swing_animation".to_owned()
+                ]
+            )]
+        );
+        assert!(NAMED_REGISTRIES.is_sorted());
     }
 
     #[test]

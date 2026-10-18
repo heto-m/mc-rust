@@ -31,6 +31,10 @@ fn me() -> String {
 
 fn arena(live: &mut Live, floor: &str) {
     let name = me();
+    // The arena floor is built after the teleport; on low terrain the drop would kill.
+    live.console(&format!(
+        "effect give {name} minecraft:resistance 30 4 true"
+    ));
     live.console(&format!("tp {name} 0.5 101 -16.5"));
     live.until("origin chunks", 400, |l| {
         [(0, 0), (12, -12), (-12, 12)].iter().all(|&(x, z)| {

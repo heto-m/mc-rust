@@ -18,7 +18,7 @@ use mcr_protocol::handshake::{Intent, Intention};
 use mcr_protocol::login as l;
 use mcr_protocol::play::serverbound as sb;
 use mcr_protocol::types::Component;
-use mcr_protocol::version::{Translated, Wire};
+use mcr_protocol::version::{Session, Translated, Wire};
 use rustc_hash::FxHashSet;
 use uuid::Uuid;
 
@@ -49,7 +49,8 @@ pub struct Client {
     conn: Connection,
     ids: &'static PacketIds,
     wire: Wire,
-    /// Translated payloads; both stay empty on the canonical wire.
+    /// Translator state and translated payloads; all stay empty on the canonical wire.
+    session: Session,
     inbound_buf: Vec<u8>,
     outbound_buf: Vec<u8>,
     translate_warned: FxHashSet<(u8, i32)>,
@@ -162,6 +163,7 @@ impl Client {
             conn,
             ids,
             wire,
+            session: Session::default(),
             inbound_buf: Vec::new(),
             outbound_buf: Vec::new(),
             translate_warned: FxHashSet::default(),
@@ -280,11 +282,19 @@ impl Client {
     }
 
     fn send_raw(&mut self, state: ProtocolState, id: i32) -> Result<()> {
-        match self
-            .wire
-            .outbound(state, id, &self.scratch, &mut self.outbound_buf)?
-        {
+        match self.wire.outbound(
+            state,
+            id,
+            &self.scratch,
+            &mut self.session,
+            &mut self.outbound_buf,
+        )? {
             Translated::Packet(id, payload) => self.conn.send(id, payload)?,
+            Translated::Packets(frames) => {
+                for (id, payload) in frames {
+                    self.conn.send(id, payload)?;
+                }
+            }
             Translated::Drop => {}
         }
         Ok(())
@@ -362,28 +372,40 @@ impl Client {
             Phase::Closed => return Ok(()),
         };
         let mut buf = std::mem::take(&mut self.inbound_buf);
-        let result = match self.wire.inbound(state, frame.id, &frame.payload, &mut buf) {
-            Ok(Translated::Packet(id, payload)) => match self.phase {
-                Phase::Login => self.handle_login(id, payload),
-                Phase::Configuration => self.handle_config(id, payload),
-                _ => self.handle_play(id, payload),
-            },
-            Ok(Translated::Drop) => Ok(()),
-            Err(e) if state == ProtocolState::Play => {
-                if self.translate_warned.len() < 256
-                    && self.translate_warned.insert((state as u8, frame.id))
-                {
-                    eprintln!(
-                        "dropping untranslatable packet: {}",
-                        crate::events::sanitize_for_log(&e.to_string())
-                    );
+        let result =
+            match self
+                .wire
+                .inbound(state, frame.id, &frame.payload, &mut self.session, &mut buf)
+            {
+                Ok(Translated::Packet(id, payload)) => self.dispatch(id, payload),
+                Ok(Translated::Packets(frames)) => frames
+                    .into_iter()
+                    .try_for_each(|(id, payload)| self.dispatch(id, payload)),
+                Ok(Translated::Drop) => Ok(()),
+                Err(e) if state == ProtocolState::Play => {
+                    if self.translate_warned.len() < 256
+                        && self.translate_warned.insert((state as u8, frame.id))
+                    {
+                        eprintln!(
+                            "dropping untranslatable packet: {}",
+                            crate::events::sanitize_for_log(&e.to_string())
+                        );
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            Err(e) => Err(e.into()),
-        };
+                Err(e) => Err(e.into()),
+            };
         self.inbound_buf = buf;
         result
+    }
+
+    fn dispatch(&mut self, id: i32, payload: &[u8]) -> Result<()> {
+        match self.phase {
+            Phase::Login => self.handle_login(id, payload),
+            Phase::Configuration => self.handle_config(id, payload),
+            Phase::Play => self.handle_play(id, payload),
+            Phase::Closed => Ok(()),
+        }
     }
 
     fn handle_login(&mut self, id: i32, payload: &[u8]) -> Result<()> {
@@ -456,12 +478,15 @@ impl Client {
             ProtocolState::Login,
             id,
             &self.scratch,
+            &mut self.session,
             &mut self.outbound_buf,
         )? {
             Translated::Packet(id, payload) => {
                 self.conn.send_and_enable_encryption(id, payload, secret)?
             }
-            Translated::Drop => return Err(ClientError::Invalid("key packet dropped".into())),
+            Translated::Packets(_) | Translated::Drop => {
+                return Err(ClientError::Invalid("key packet not translated 1:1".into()));
+            }
         }
         Ok(())
     }

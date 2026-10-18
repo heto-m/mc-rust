@@ -1,68 +1,102 @@
 //! Containers, trades, recipes, advancements, commands, stats, tags and chat.
 
 use mcr_buf::{
-    BoundedString, IdOr, Identifier, Result, decode_str, encode_str, read_len, read_varint, take,
+    BoundedString, Encode, Identifier, Result, decode_str, encode_str, read_len, read_varint, take,
     write_varint,
 };
 
-use super::{items, maps, world};
+use super::items::Codec;
+use super::world;
 use crate::play::clientbound::player::SignedMessageBody;
-use crate::play::clientbound::ui::ArgumentParser;
-use crate::types::Component;
-use crate::types::component::{TrimPattern, component_type_id};
+use crate::play::clientbound::ui::{ArgumentParser, ContainerSetData};
+use crate::types::component::component_type_id;
 use crate::version::io::{self, Depth};
-use crate::version::translator::{Action, Remap, Translator};
+use crate::version::translator::{Action, Cx, Maps, Remap};
 
-pub fn container_set_content(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn container_set_content(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+    let c = Codec::fwd(cx.m);
     io::varint(r, w)?;
     io::varint(r, w)?;
     for _ in 0..io::len(r, w, r.len())? {
-        items::stack(r, w, Depth::top())?;
+        c.stack(r, w, Depth::top())?;
     }
-    items::stack(r, w, Depth::top())?;
+    c.stack(r, w, Depth::top())?;
     Ok(Action::Rewritten)
 }
 
-pub fn container_set_slot(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn container_set_slot(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::varint(r, w)?;
     io::varint(r, w)?;
     io::bytes(r, w, 2)?;
-    items::stack(r, w, Depth::top())?;
+    Codec::fwd(cx.m).stack(r, w, Depth::top())?;
     Ok(Action::Rewritten)
 }
 
-pub fn set_cursor_item(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
-    items::stack(r, w, Depth::top())?;
+pub fn set_cursor_item(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+    Codec::fwd(cx.m).stack(r, w, Depth::top())?;
     Ok(Action::Rewritten)
 }
 
-pub fn set_player_inventory(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn set_player_inventory(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::varint(r, w)?;
-    items::stack(r, w, Depth::top())?;
+    Codec::fwd(cx.m).stack(r, w, Depth::top())?;
     Ok(Action::Rewritten)
 }
 
-fn item_cost(r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
-    io::remap(r, w, "item", |id| maps().item.forward(id))?;
+/// Remembers a brewing stand window: 26.3 has two more data values for it.
+pub fn open_screen(cx: &mut Cx<'_>, r: &mut &[u8], _: &mut Vec<u8>) -> Result<Action> {
+    let window = read_varint(r)?;
+    let menu = read_varint(r)?;
+    let brewing = cx.m.canonical.brewing_stand_menu;
+    cx.session.brewing =
+        (brewing.is_some() && cx.m.menu.forward(menu) == brewing).then_some((window, false));
+    Ok(Action::Same)
+}
+
+/// 26.2 brews for a fixed 400 ticks on 20 fuel uses; 26.3 sends both totals as data values 2 and 3.
+pub const BREWING_TOTALS: [(i16, i16); 2] = [(2, 400), (3, 20)];
+
+pub fn container_set_data(cx: &mut Cx<'_>, r: &mut &[u8], _: &mut Vec<u8>) -> Result<Action> {
+    let window = read_varint(r)?;
+    take(r, 4)?;
+    if cx.session.brewing == Some((window, false)) {
+        cx.session.brewing = Some((window, true));
+        for (id, value) in BREWING_TOTALS {
+            cx.emit("container_set_data", |w| {
+                ContainerSetData {
+                    container_id: window,
+                    id,
+                    value,
+                }
+                .encode(w)
+            })?;
+        }
+    }
+    Ok(Action::Same)
+}
+
+fn item_cost(m: &'static Maps, r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
+    let c = Codec::fwd(m);
+    io::remap(r, w, "item", |id| m.item.forward(id))?;
     io::varint(r, w)?;
     let n = read_len(r, r.len())?;
     let mut body = Vec::new();
     let mut count = 0;
     for _ in 0..n {
-        count += items::component(r, &mut body, Depth::top())?;
+        count += c.component(r, &mut body, Depth::top())?;
     }
     write_varint(w, count);
     w.extend_from_slice(&body);
     Ok(())
 }
 
-pub fn merchant_offers(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn merchant_offers(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::varint(r, w)?;
     for _ in 0..io::len(r, w, r.len())? {
-        item_cost(r, w)?;
-        items::stack(r, w, Depth::top())?;
+        item_cost(cx.m, r, w)?;
+        Codec::fwd(cx.m).stack(r, w, Depth::top())?;
         if io::bool(r, w)? {
-            item_cost(r, w)?;
+            item_cost(cx.m, r, w)?;
         }
         io::bytes(r, w, 1 + 4 * 4 + 4 + 4)?;
     }
@@ -71,16 +105,16 @@ pub fn merchant_offers(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result
 }
 
 /// 26.3 moved an advancement's tree position out of its display, after every added entry.
-pub fn update_advancements(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn update_advancements(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::bool(r, w)?;
     for _ in 0..io::len(r, w, r.len())? {
         io::copy::<Identifier>(r, w)?;
         io::copy::<Option<Identifier>>(r, w)?;
         let mut position: &[u8] = &[0; 8];
         if io::bool(r, w)? {
-            io::copy::<Component>(r, w)?;
-            io::copy::<Component>(r, w)?;
-            items::template(r, w, Depth::top())?;
+            io::text(r, w)?;
+            io::text(r, w)?;
+            Codec::fwd(cx.m).template(r, w, Depth::top())?;
             io::varint(r, w)?;
             let flags = i32::from_be_bytes(take(r, 4)?.try_into().expect("4 bytes"));
             w.extend_from_slice(&flags.to_be_bytes());
@@ -98,41 +132,47 @@ pub fn update_advancements(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Re
 }
 
 /// 26.2 tag slot displays named a tag; 26.3 takes a holder set.
-fn slot_display(r: &mut &[u8], w: &mut Vec<u8>, d: Depth) -> Result<()> {
+fn slot_display(c: Codec, r: &mut &[u8], w: &mut Vec<u8>, d: Depth) -> Result<()> {
     let d = d.deeper()?;
     match io::varint(r, w)? {
         0 | 1 => {}
-        2 => slot_display(r, w, d)?,
+        2 => slot_display(c, r, w, d)?,
         3 => {
-            slot_display(r, w, d)?;
+            slot_display(c, r, w, d)?;
             let old = read_varint(r)?;
-            let new = match maps().component.forward(old) {
+            let new = match c.m.component.forward(old) {
                 Some(id) => id,
-                None if old == 40 => component_type_id("attack_animation").expect("canonical"),
+                None if Some(old) == c.m.old_swing_animation => {
+                    component_type_id("attack_animation").expect("canonical")
+                }
                 None => return Err(io::unknown("data component type", old)),
             };
             write_varint(w, new);
         }
         4 => {
-            io::remap(r, w, "item", |id| maps().item.forward(id))?;
+            io::remap(r, w, "item", |id| c.m.item.forward(id))?;
         }
-        5 => items::template(r, w, d)?,
+        5 => c.template(r, w, d)?,
         6 => {
             write_varint(w, 0);
             io::copy::<Identifier>(r, w)?;
         }
         7 | 9 => {
-            slot_display(r, w, d)?;
-            slot_display(r, w, d)?;
+            slot_display(c, r, w, d)?;
+            slot_display(c, r, w, d)?;
         }
         8 => {
-            slot_display(r, w, d)?;
-            slot_display(r, w, d)?;
-            io::copy::<IdOr<TrimPattern>>(r, w)?;
+            slot_display(c, r, w, d)?;
+            slot_display(c, r, w, d)?;
+            if io::varint(r, w)? == 0 {
+                io::copy::<Identifier>(r, w)?;
+                io::text(r, w)?;
+                io::bool(r, w)?;
+            }
         }
         10 => {
             for _ in 0..io::len(r, w, r.len())? {
-                slot_display(r, w, d)?;
+                slot_display(c, r, w, d)?;
             }
         }
         other => return Err(io::unknown("slot display", other)),
@@ -140,46 +180,47 @@ fn slot_display(r: &mut &[u8], w: &mut Vec<u8>, d: Depth) -> Result<()> {
     Ok(())
 }
 
-fn slot_displays(r: &mut &[u8], w: &mut Vec<u8>, n: usize) -> Result<()> {
+fn slot_displays(c: Codec, r: &mut &[u8], w: &mut Vec<u8>, n: usize) -> Result<()> {
     for _ in 0..n {
-        slot_display(r, w, Depth::top())?;
+        slot_display(c, r, w, Depth::top())?;
     }
     Ok(())
 }
 
-fn recipe_display(r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
+fn recipe_display(c: Codec, r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
     match io::varint(r, w)? {
         0 => {
             let n = io::len(r, w, r.len())?;
-            slot_displays(r, w, n + 2)?;
+            slot_displays(c, r, w, n + 2)?;
         }
         1 => {
             io::varint(r, w)?;
             io::varint(r, w)?;
             let n = io::len(r, w, r.len())?;
-            slot_displays(r, w, n + 2)?;
+            slot_displays(c, r, w, n + 2)?;
         }
         2 => {
-            slot_displays(r, w, 4)?;
+            slot_displays(c, r, w, 4)?;
             io::varint(r, w)?;
             io::bytes(r, w, 4)?;
         }
-        3 => slot_displays(r, w, 3)?,
-        4 => slot_displays(r, w, 5)?,
+        3 => slot_displays(c, r, w, 3)?,
+        4 => slot_displays(c, r, w, 5)?,
         other => return Err(io::unknown("recipe display", other)),
     }
     Ok(())
 }
 
-pub fn recipe_book_add(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn recipe_book_add(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+    let c = Codec::fwd(cx.m);
     for _ in 0..io::len(r, w, r.len())? {
         io::varint(r, w)?;
-        recipe_display(r, w)?;
+        recipe_display(c, r, w)?;
         io::varint(r, w)?;
         io::varint(r, w)?;
         if io::bool(r, w)? {
             for _ in 0..io::len(r, w, r.len())? {
-                items::holder_set(r, w, maps().item, "item")?;
+                c.holder_set(r, w, cx.m.item, "item")?;
             }
         }
         io::bytes(r, w, 1)?;
@@ -188,9 +229,9 @@ pub fn recipe_book_add(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result
     Ok(Action::Rewritten)
 }
 
-pub fn place_ghost_recipe(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn place_ghost_recipe(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::varint(r, w)?;
-    recipe_display(r, w)?;
+    recipe_display(Codec::fwd(cx.m), r, w)?;
     Ok(Action::Rewritten)
 }
 
@@ -233,7 +274,8 @@ const BREWING_SETS: [(&str, &[&str]); 2] = [
     ),
 ];
 
-pub fn update_recipes(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn update_recipes(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+    let c = Codec::fwd(cx.m);
     let sets = read_len(r, r.len())?;
     let mut body = Vec::new();
     let mut names = Vec::with_capacity(sets.min(64));
@@ -241,7 +283,7 @@ pub fn update_recipes(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<
         let name = <Identifier as mcr_buf::Decode>::decode(r)?;
         mcr_buf::Encode::encode(&name, &mut body);
         names.push(name);
-        ids(r, &mut body, maps().item)?;
+        ids(r, &mut body, cx.m.item)?;
     }
     let data = mcr_data::v26_3();
     let mut added = 0;
@@ -263,8 +305,8 @@ pub fn update_recipes(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<
     write_varint(w, (sets + added) as i32);
     w.extend_from_slice(&body);
     for _ in 0..io::len(r, w, r.len())? {
-        items::holder_set(r, w, maps().item, "item")?;
-        slot_display(r, w, Depth::top())?;
+        c.holder_set(r, w, cx.m.item, "item")?;
+        slot_display(c, r, w, Depth::top())?;
     }
     Ok(Action::Rewritten)
 }
@@ -285,12 +327,12 @@ fn ids(r: &mut &[u8], w: &mut Vec<u8>, map: Remap<'_>) -> Result<()> {
     Ok(())
 }
 
-pub fn update_tags(t: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn update_tags(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     for _ in 0..io::len(r, w, r.len())? {
         let registry = decode_str(r, mcr_buf::MAX_STRING_CHARS)?;
         encode_str(registry, w);
         let full = Identifier::parse(registry).map_err(|_| io::unknown("registry name", 0))?;
-        let map = t.registry(full.as_str());
+        let map = cx.t.registry(full.as_str());
         for _ in 0..io::len(r, w, r.len())? {
             io::copy::<Identifier>(r, w)?;
             ids(r, w, map)?;
@@ -299,7 +341,7 @@ pub fn update_tags(t: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Act
     Ok(Action::Rewritten)
 }
 
-pub fn commands(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn commands(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     for _ in 0..io::len(r, w, r.len())? {
         let flags = take(r, 1)?[0];
         w.push(flags);
@@ -314,7 +356,7 @@ pub fn commands(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action
             1 => io::copy::<String>(r, w)?,
             2 => {
                 io::copy::<String>(r, w)?;
-                let new = io::remap(r, w, "argument type", |id| maps().argument.forward(id))?;
+                let new = io::remap(r, w, "argument type", |id| cx.m.argument.forward(id))?;
                 let start = *r;
                 ArgumentParser::decode_properties(new, r)?;
                 w.extend_from_slice(&start[..start.len() - r.len()]);
@@ -329,8 +371,8 @@ pub fn commands(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action
     Ok(Action::Rewritten)
 }
 
-pub fn award_stats(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
-    let m = maps();
+pub fn award_stats(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+    let m = cx.m;
     let n = read_len(r, r.len())?;
     let mut body = Vec::new();
     let mut kept = 0;
@@ -357,7 +399,7 @@ pub fn award_stats(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Act
     Ok(Action::Rewritten)
 }
 
-pub fn player_chat(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn player_chat(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::varint(r, w)?;
     io::bytes(r, w, 16)?;
     io::varint(r, w)?;
@@ -365,7 +407,9 @@ pub fn player_chat(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Act
         io::bytes(r, w, 256)?;
     }
     io::copy::<SignedMessageBody>(r, w)?;
-    io::copy::<Option<Component>>(r, w)?;
+    if io::bool(r, w)? {
+        io::text(r, w)?;
+    }
     if io::varint(r, w)? == 2 {
         world::bit_set(r, w)?;
     }
@@ -374,14 +418,14 @@ pub fn player_chat(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Act
 }
 
 /// 26.3 echoes the player's position; 26.2 wants only the teleport id.
-pub fn accept_teleportation(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn accept_teleportation(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::varint(r, w)?;
     *r = &[];
     Ok(Action::Rewritten)
 }
 
 /// 26.3 moved the side after the lines and made it a VarInt (front = 1).
-pub fn sign_update(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn sign_update(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     let pos = take(r, 8)?;
     let mut lines = Vec::new();
     for _ in 0..4 {
@@ -394,31 +438,47 @@ pub fn sign_update(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Act
     Ok(Action::Rewritten)
 }
 
-pub fn set_creative_mode_slot(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn set_creative_mode_slot(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     io::bytes(r, w, 2)?;
-    Ok(if items::untrusted_stack_back(r, w)? {
+    Ok(if Codec::back(cx.m).untrusted_stack_back(r, w)? {
         Action::Rewritten
     } else {
         Action::Drop
     })
 }
 
-pub fn container_click(_: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub fn container_click(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+    let c = Codec::back(cx.m);
     io::varint(r, w)?;
     io::varint(r, w)?;
     io::bytes(r, w, 3)?;
     io::varint(r, w)?;
     for _ in 0..io::len(r, w, 128)? {
         io::bytes(r, w, 2)?;
-        items::hashed_stack_back(r, w)?;
+        c.hashed_stack_back(r, w)?;
     }
-    items::hashed_stack_back(r, w)?;
+    c.hashed_stack_back(r, w)?;
     Ok(Action::Rewritten)
 }
 
-/// Claiming 26.2's core pack makes the server leave out vanilla registry data, which the client
-/// fills from its own 26.3 copy; 26.2's data formats would not parse.
-pub fn select_known_packs(t: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+const MAX_PACK_VERSION: usize = 64;
+
+/// Remembers the core pack version the server offers, for [`select_known_packs`].
+pub fn select_known_packs_offer(cx: &mut Cx<'_>, r: &mut &[u8], _: &mut Vec<u8>) -> Result<Action> {
+    for _ in 0..read_len(r, 64.min(r.len()))? {
+        let namespace = decode_str(r, mcr_buf::MAX_STRING_CHARS)?;
+        let id = decode_str(r, mcr_buf::MAX_STRING_CHARS)?;
+        let version = decode_str(r, MAX_PACK_VERSION)?;
+        if (namespace, id) == ("minecraft", "core") {
+            cx.session.core_pack = Some(version.into());
+        }
+    }
+    Ok(Action::Same)
+}
+
+/// Claiming the old core pack makes the server leave out vanilla registry data, which the client
+/// fills from its own 26.3 copy; the old data formats would not parse.
+pub fn select_known_packs(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     for _ in 0..io::len(r, w, 64)? {
         let namespace = decode_str(r, mcr_buf::MAX_STRING_CHARS)?;
         let id = decode_str(r, mcr_buf::MAX_STRING_CHARS)?;
@@ -426,7 +486,8 @@ pub fn select_known_packs(t: &Translator, r: &mut &[u8], w: &mut Vec<u8>) -> Res
         encode_str(namespace, w);
         encode_str(id, w);
         if (namespace, id) == ("minecraft", "core") {
-            encode_str(t.version_name(), w);
+            let offered = cx.session.core_pack.as_deref();
+            encode_str(offered.unwrap_or(cx.t.version_name()), w);
         } else {
             encode_str(version, w);
         }
