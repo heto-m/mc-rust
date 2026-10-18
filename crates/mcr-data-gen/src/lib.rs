@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 
 #[path = "../../mcr-data/src/tables.rs"]
 pub mod tables;
+pub mod version_tables;
 
 use tables::{
     Aabb, DIRECTION_NAMES, PacketEntry, PropDef, Registry, STATE_NAMES, Tables, flag, fluid_bits,
@@ -143,7 +144,7 @@ impl ShapePool {
     }
 }
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
+pub(crate) fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
 }

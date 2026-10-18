@@ -16,6 +16,7 @@ mod soak;
 mod soak_churn;
 #[cfg(test)]
 mod testutil;
+mod version_tables;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -120,6 +121,13 @@ enum Command {
         #[arg(long, default_value = "3G")]
         mcr_memory: String,
     },
+    /// Write an older version's packet and registry id tables against the canonical version
+    VersionTables {
+        #[arg(long)]
+        version: String,
+        #[arg(long, default_value = "26.3")]
+        canonical: String,
+    },
     /// Run fetch, jdk, datagen and decompile in order
     Setup {
         #[arg(long)]
@@ -196,6 +204,9 @@ fn main() -> Result<()> {
                 mcr_memory,
             };
             soak::run(&layout, &ver, &opts)?;
+        }
+        Command::VersionTables { version, canonical } => {
+            version_tables::run(&layout, &version, &canonical)?;
         }
         Command::Setup { version, force } => {
             let ver = fetch::resolve_version(version.as_deref())?;

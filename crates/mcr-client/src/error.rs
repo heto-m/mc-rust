@@ -23,6 +23,12 @@ pub enum ClientError {
     Timeout(&'static str),
     #[error("{0}")]
     Invalid(String),
+    #[error("translation: {0}")]
+    Translate(#[from] mcr_protocol::version::TranslateError),
+    #[error("the server runs {} (protocol {protocol}), which mcr does not support", crate::events::sanitize_for_log(.version))]
+    UnsupportedServer { version: String, protocol: i32 },
+    #[error("Mod mode needs a {} server (this one runs {})", mcr_protocol::version::GAME_VERSION, crate::events::sanitize_for_log(.0))]
+    ModModeNeedsCanonical(String),
     #[error("server requires online mode; no account configured")]
     OnlineModeRequired,
     /// The server handed the player to another server; follow with [`crate::ClientConfig::for_transfer`].

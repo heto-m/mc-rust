@@ -63,6 +63,10 @@ fn live_component_item_clicks() {
     let mut live = Live::connect("Comp");
     live.console("op Comp");
     live.until("loaded", 400, |l| l.client.state.player.loaded);
+    if live.client.state.player.dead {
+        live.client.respawn().unwrap();
+        live.until("respawned", 200, |l| !l.client.state.player.dead);
+    }
     live.console("gamemode survival Comp");
     live.console("clear Comp");
     live.idle(10);

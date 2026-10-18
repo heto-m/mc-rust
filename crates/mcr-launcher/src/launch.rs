@@ -68,11 +68,12 @@ impl LaunchPlan {
         })
     }
 
-    /// The client jar this version loads its assets from.
+    /// The client jar assets load from: always the canonical version's, whichever version the
+    /// profile plays, because older versions are translated onto it.
     pub fn client_jar(&self, cache: &Path) -> PathBuf {
         cache
             .join("versions")
-            .join(&self.version)
+            .join(mcr_protocol::version::GAME_VERSION)
             .join("client.jar")
     }
 }
@@ -123,12 +124,29 @@ mod tests {
         assert_eq!(plan.game_dir, Path::new("/games/m"));
         assert_eq!(plan.mods.as_deref(), Some(Path::new("/games/m/mods")));
         assert_eq!(plan.heap_mib, 3072);
-        p.version = "26.2".into();
+        p.version = "1.8.9".into();
         assert_eq!(
             LaunchPlan::new(&p, &VersionList::builtin(), Path::new("/d"), offline()).unwrap_err(),
-            LaunchError::Unsupported("26.2".into())
+            LaunchError::Unsupported("1.8.9".into())
         );
         p.version = LATEST_RELEASE.into();
         assert!(LaunchPlan::new(&p, &VersionList::builtin(), Path::new("/d"), offline()).is_ok());
+    }
+
+    #[test]
+    fn every_supported_version_loads_canonical_assets() {
+        for &version in mcr_protocol::version::SUPPORTED_VERSIONS {
+            let mut p = Profile::new("v", "V");
+            p.version = version.into();
+            let plan =
+                LaunchPlan::new(&p, &VersionList::builtin(), Path::new("/d"), offline()).unwrap();
+            assert_eq!(plan.version, version);
+            assert_eq!(
+                plan.client_jar(Path::new("c")),
+                Path::new("c/versions")
+                    .join(GAME_VERSION)
+                    .join("client.jar")
+            );
+        }
     }
 }

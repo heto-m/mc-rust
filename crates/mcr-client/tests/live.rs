@@ -19,6 +19,7 @@ fn live_session() {
     let mut cfg = ClientConfig::default().with_addr(&env("MCR_LIVE_ADDR"));
     cfg.name = "Bot".into();
     cfg.view_distance = 10;
+    any_version(&mut cfg);
     let client = Client::connect(cfg).expect("join");
     let mut live = Live {
         client,
@@ -158,6 +159,7 @@ fn live_session() {
     cfg.port = port;
     cfg.transfer = true;
     cfg.view_distance = 10;
+    any_version(&mut cfg);
     let client = Client::connect(cfg).expect("rejoin after transfer");
     live.client = client;
     live.until("loaded after transfer", 400, |l| {
@@ -173,6 +175,7 @@ fn live_long_idle() {
     let mut cfg = ClientConfig::default().with_addr(&env("MCR_LIVE_ADDR"));
     cfg.name = "Idler".into();
     cfg.view_distance = 10;
+    any_version(&mut cfg);
     let client = Client::connect(cfg).expect("join");
     let mut live = Live {
         client,

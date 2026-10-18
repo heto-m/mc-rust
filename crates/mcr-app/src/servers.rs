@@ -25,6 +25,8 @@ pub struct FileServers {
     rx: Receiver<Reply>,
     next_favicon: u64,
     last_direct: String,
+    /// Protocol numbers from the latest pings, by address.
+    protocols: Vec<(String, i64)>,
 }
 
 impl FileServers {
@@ -55,6 +57,7 @@ impl FileServers {
             rx,
             next_favicon: 1,
             last_direct: String::new(),
+            protocols: Vec::new(),
         }
     }
 
@@ -65,6 +68,14 @@ impl FileServers {
             }
             let _ = std::fs::write(&self.path, bytes);
         }
+    }
+
+    /// The protocol the last ping of `address` reported.
+    pub fn pinged_protocol(&self, address: &str) -> Option<i32> {
+        self.protocols
+            .iter()
+            .find(|(a, _)| a == address)
+            .and_then(|&(_, p)| i32::try_from(p).ok())
     }
 
     pub fn pack_setting_for(&self, address: &str) -> PackSetting {
@@ -137,6 +148,11 @@ impl FileServers {
             }
             self.statuses[index] = Some(match result {
                 Ok(r) => {
+                    let address = self.entries[index].address.clone();
+                    self.protocols.retain(|(a, _)| *a != address);
+                    if self.protocols.len() < MAX_SERVERS {
+                        self.protocols.push((address, r.protocol));
+                    }
                     let favicon = r.favicon.map(|rgba| {
                         let id = self.next_favicon;
                         self.next_favicon += 1;
@@ -147,7 +163,7 @@ impl FileServers {
                         players: format!("{}/{}", r.online, r.max),
                         version: r.version,
                         ping_ms: Some(r.latency_ms),
-                        compatible: r.protocol == i64::from(mcr_data::v26_3().protocol()),
+                        compatible: is_compatible(r.protocol),
                         favicon,
                     }))
                 }
@@ -168,6 +184,11 @@ impl FileServers {
             let _ = tx.send((epoch, index, result));
         });
     }
+}
+
+/// A server is joinable when its protocol is one mcr has a wire for.
+pub fn is_compatible(protocol: i64) -> bool {
+    mcr_protocol::version::supported_protocols().any(|p| i64::from(p) == protocol)
 }
 
 fn to_ui(setting: ResourcePacks) -> PackSetting {

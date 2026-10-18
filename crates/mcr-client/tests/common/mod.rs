@@ -4,13 +4,14 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use mcr_buf::BlockPos;
-use mcr_client::{Client, ClientConfig, ClientEvent, PlayerInput};
+use mcr_client::{Client, ClientConfig, ClientEvent, PlayerInput, WireChoice};
 
 impl Live {
     pub fn connect(name: &str) -> Live {
         let mut cfg = ClientConfig::default().with_addr(&env("MCR_LIVE_ADDR"));
         cfg.name = name.into();
         cfg.view_distance = 6;
+        any_version(&mut cfg);
         let client = Client::connect(cfg).expect("join");
         Live {
             client,
@@ -28,6 +29,13 @@ pub struct Live {
     pub log: String,
     pub events: Vec<ClientEvent>,
     pub yaw: f32,
+}
+
+/// `MCR_LIVE_ANY_VERSION` joins older servers through their translator.
+pub fn any_version(cfg: &mut ClientConfig) {
+    if std::env::var_os("MCR_LIVE_ANY_VERSION").is_some() {
+        cfg.wire = WireChoice::Auto;
+    }
 }
 
 pub fn env(name: &str) -> String {

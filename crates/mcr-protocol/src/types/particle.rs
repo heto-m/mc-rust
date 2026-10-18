@@ -225,6 +225,13 @@ impl Encode for Particle {
 impl Decode<'_> for Particle {
     fn decode(input: &mut &[u8]) -> Result<Self> {
         let id = read_varint(input)?;
+        Self::decode_options(id, input)
+    }
+}
+
+impl Particle {
+    /// The options that follow particle type `id`.
+    pub(crate) fn decode_options(id: i32, input: &mut &[u8]) -> Result<Self> {
         if let Some(kind) = BlockParticleKind::from_id(id) {
             return Ok(Self::BlockState {
                 kind,

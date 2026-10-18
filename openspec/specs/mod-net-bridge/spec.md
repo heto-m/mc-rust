@@ -98,3 +98,10 @@ Rust's player state SHALL carry the held movement keys, and Java SHALL report th
 #### Scenario: Movement tutorial
 - **WHEN** a new player walks with the movement keys and turns the mouse
 - **THEN** Java's movement tutorial step completes and its toast goes away
+
+### Requirement: Canonical servers only
+Mod mode SHALL join only servers on the canonical protocol. A join whose wire is not canonical SHALL fail before login with a message saying mod mode needs a 26.3 server and naming the server's version.
+
+#### Scenario: Mods and a 26.2 server
+- **WHEN** `mcr --mods` connects to a 26.2 server
+- **THEN** the join fails before login with "Mod mode needs a 26.3 server (this one runs 26.2)"

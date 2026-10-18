@@ -18,9 +18,11 @@ use mcr_protocol::handshake::{Intent, Intention};
 use mcr_protocol::login as l;
 use mcr_protocol::play::serverbound as sb;
 use mcr_protocol::types::Component;
+use mcr_protocol::version::{Translated, Wire};
+use rustc_hash::FxHashSet;
 use uuid::Uuid;
 
-use crate::config::ClientConfig;
+use crate::config::{ClientConfig, WireChoice};
 use crate::error::{ClientError, Result};
 use crate::events::{ClientEvent, DisconnectReason};
 use crate::handler::core_pack;
@@ -46,6 +48,11 @@ const USE_ITEM_COMPLETE: i8 = 9;
 pub struct Client {
     conn: Connection,
     ids: &'static PacketIds,
+    wire: Wire,
+    /// Translated payloads; both stay empty on the canonical wire.
+    inbound_buf: Vec<u8>,
+    outbound_buf: Vec<u8>,
+    translate_warned: FxHashSet<(u8, i32)>,
     pub config: ClientConfig,
     pub state: ClientState,
     phase: Phase,
@@ -87,6 +94,23 @@ impl Client {
     /// Connects with a frame tap on the reader thread and a relay polled on the game thread.
     pub fn connect_hooked(config: ClientConfig, hooks: ClientHooks) -> Result<Self> {
         let ids = PacketIds::v26_3();
+        let wire = match config.wire {
+            WireChoice::Canonical => Wire::Canonical,
+            WireChoice::Protocol(protocol) => crate::ServerVersion {
+                name: mcr_protocol::version::version_by_protocol(protocol)
+                    .map_or_else(|| protocol.to_string(), |v| v.name.to_owned()),
+                protocol,
+            }
+            .wire()?,
+            WireChoice::Auto => {
+                crate::probe(&config.host, config.port, config.connect_timeout)?.wire()?
+            }
+        };
+        if !wire.is_canonical() && (hooks.relay.is_some() || hooks.frame_tap.is_some()) {
+            return Err(ClientError::ModModeNeedsCanonical(
+                wire.version_name().to_owned(),
+            ));
+        }
         let phase = Arc::new(AtomicU8::new(Phase::Login as u8));
         let compression_id = ids
             .id_by_name(
@@ -94,6 +118,7 @@ impl Client {
                 Direction::Clientbound,
                 "login_compression",
             )
+            .and_then(|id| wire.wire_clientbound_id(ProtocolState::Login, id))
             .ok_or_else(|| ClientError::Invalid("login_compression id".into()))?;
         let hook_phase = phase.clone();
         let hook = Box::new(move |id: i32, payload: &[u8]| {
@@ -136,6 +161,10 @@ impl Client {
         let mut client = Self {
             conn,
             ids,
+            wire,
+            inbound_buf: Vec::new(),
+            outbound_buf: Vec::new(),
+            translate_warned: FxHashSet::default(),
             config,
             state,
             phase: Phase::Login,
@@ -250,27 +279,33 @@ impl Client {
         self.conn.close();
     }
 
-    fn send_raw(&mut self, id: i32) -> Result<()> {
-        self.conn.send(id, &self.scratch)?;
+    fn send_raw(&mut self, state: ProtocolState, id: i32) -> Result<()> {
+        match self
+            .wire
+            .outbound(state, id, &self.scratch, &mut self.outbound_buf)?
+        {
+            Translated::Packet(id, payload) => self.conn.send(id, payload)?,
+            Translated::Drop => {}
+        }
         Ok(())
     }
 
     fn send_handshake(&mut self, p: &HandshakeServerbound) -> Result<()> {
         self.scratch.clear();
         let id = p.encode_into(self.ids, &mut self.scratch);
-        self.send_raw(id)
+        self.send_raw(ProtocolState::Handshake, id)
     }
 
     fn send_login(&mut self, p: &LoginServerbound<'_>) -> Result<()> {
         self.scratch.clear();
         let id = p.encode_into(self.ids, &mut self.scratch);
-        self.send_raw(id)
+        self.send_raw(ProtocolState::Login, id)
     }
 
     fn send_config(&mut self, p: &ConfigServerbound<'_>) -> Result<()> {
         self.scratch.clear();
         let id = p.encode_into(self.ids, &mut self.scratch);
-        self.send_raw(id)
+        self.send_raw(ProtocolState::Configuration, id)
     }
 
     /// Tells the mirror about a predicted action; call before its packet goes out.
@@ -288,7 +323,12 @@ impl Client {
         }
         self.scratch.clear();
         let id = p.encode_into(self.ids, &mut self.scratch);
-        self.send_raw(id)
+        self.send_raw(ProtocolState::Play, id)
+    }
+
+    /// The wire this connection speaks.
+    pub fn wire(&self) -> Wire {
+        self.wire
     }
 
     fn send_client_information(&mut self) -> Result<()> {
@@ -315,16 +355,36 @@ impl Client {
     }
 
     fn handle_frame(&mut self, frame: InboundFrame) -> Result<()> {
-        match self.phase {
-            Phase::Login => self.handle_login(frame),
-            Phase::Configuration => self.handle_config(frame),
-            Phase::Play => self.handle_play(frame),
-            Phase::Closed => Ok(()),
-        }
+        let state = match self.phase {
+            Phase::Login => ProtocolState::Login,
+            Phase::Configuration => ProtocolState::Configuration,
+            Phase::Play => ProtocolState::Play,
+            Phase::Closed => return Ok(()),
+        };
+        let mut buf = std::mem::take(&mut self.inbound_buf);
+        let result = match self.wire.inbound(state, frame.id, &frame.payload, &mut buf) {
+            Ok(Translated::Packet(id, payload)) => match self.phase {
+                Phase::Login => self.handle_login(id, payload),
+                Phase::Configuration => self.handle_config(id, payload),
+                _ => self.handle_play(id, payload),
+            },
+            Ok(Translated::Drop) => Ok(()),
+            Err(e) if state == ProtocolState::Play => {
+                if self.translate_warned.len() < 256
+                    && self.translate_warned.insert((state as u8, frame.id))
+                {
+                    eprintln!("dropping untranslatable packet: {e}");
+                }
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        };
+        self.inbound_buf = buf;
+        result
     }
 
-    fn handle_login(&mut self, frame: InboundFrame) -> Result<()> {
-        let packet = LoginClientbound::decode(frame.id, &frame.payload, self.ids)?;
+    fn handle_login(&mut self, id: i32, payload: &[u8]) -> Result<()> {
+        let packet = LoginClientbound::decode(id, payload, self.ids)?;
         match packet {
             LoginClientbound::LoginDisconnect(p) => {
                 self.set_phase(Phase::Closed);
@@ -389,13 +449,22 @@ impl Client {
         });
         self.scratch.clear();
         let id = packet.encode_into(self.ids, &mut self.scratch);
-        self.conn
-            .send_and_enable_encryption(id, &self.scratch, secret)?;
+        match self.wire.outbound(
+            ProtocolState::Login,
+            id,
+            &self.scratch,
+            &mut self.outbound_buf,
+        )? {
+            Translated::Packet(id, payload) => {
+                self.conn.send_and_enable_encryption(id, payload, secret)?
+            }
+            Translated::Drop => return Err(ClientError::Invalid("key packet dropped".into())),
+        }
         Ok(())
     }
 
-    fn handle_config(&mut self, frame: InboundFrame) -> Result<()> {
-        let packet = ConfigClientbound::decode(frame.id, &frame.payload, self.ids)?;
+    fn handle_config(&mut self, id: i32, payload: &[u8]) -> Result<()> {
+        let packet = ConfigClientbound::decode(id, payload, self.ids)?;
         match packet {
             ConfigClientbound::CookieRequest(p) => {
                 let payload = self.state.server.cookies.get(p.key.as_str()).cloned();
@@ -529,8 +598,8 @@ impl Client {
         Ok(())
     }
 
-    fn handle_play(&mut self, frame: InboundFrame) -> Result<()> {
-        let packet = PlayClientbound::decode(frame.id, &frame.payload, self.ids)?;
+    fn handle_play(&mut self, id: i32, payload: &[u8]) -> Result<()> {
+        let packet = PlayClientbound::decode(id, payload, self.ids)?;
         if let Some(link) = &self.config.pack_link {
             match packet {
                 PlayClientbound::ResourcePackPush(p) => {

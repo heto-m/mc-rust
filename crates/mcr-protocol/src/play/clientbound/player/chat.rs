@@ -254,10 +254,7 @@ mod tests {
         assert_eq!(roundtrip(&FilterMask::FullyFiltered), [1]);
         let mut bits = BitSet::new();
         bits.set(0, true);
-        assert_eq!(
-            roundtrip(&FilterMask::PartiallyFiltered(bits)),
-            [2, 1, 0, 0, 0, 0, 0, 0, 0, 1]
-        );
+        assert_eq!(roundtrip(&FilterMask::PartiallyFiltered(bits)), [2, 1, 1]);
     }
 
     #[test]

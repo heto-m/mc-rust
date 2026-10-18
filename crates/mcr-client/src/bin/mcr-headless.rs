@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::Parser;
 use mcr_client::script::{Runner, parse};
-use mcr_client::{Client, ClientConfig, ClientError, ClientEvent, sanitize_for_log};
+use mcr_client::{Client, ClientConfig, ClientError, ClientEvent, WireChoice, sanitize_for_log};
 
 const TICK: Duration = Duration::from_millis(50);
 
@@ -30,6 +30,7 @@ fn config(args: &Args) -> ClientConfig {
     cfg.name = args.name.clone();
     cfg.view_distance = args.view_distance;
     cfg.known_packs = !args.no_known_packs;
+    cfg.wire = WireChoice::Auto;
     cfg
 }
 

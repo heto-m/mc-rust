@@ -61,7 +61,7 @@ pub fn ping(address: &str) -> Result<PingResult, PingError> {
     };
     send(&|out| {
         mcr_protocol::dispatch::HandshakeServerbound::Intention(Intention {
-            protocol_version: mcr_data::v26_3().protocol() as i32,
+            protocol_version: mcr_protocol::version::PROTOCOL,
             host: addr.host.chars().take(255).collect(),
             port,
             intent: Intent::Status,

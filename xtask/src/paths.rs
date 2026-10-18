@@ -23,6 +23,14 @@ impl Layout {
         self.root.join(".cache")
     }
 
+    /// Where an older version's translation tables are committed.
+    pub fn version_tables(&self, ver: &str) -> PathBuf {
+        self.root
+            .join("crates/mcr-protocol/src/version")
+            .join(format!("v{}", ver.replace('.', "_")))
+            .join("tables.bin")
+    }
+
     pub fn version_dir(&self, ver: &str) -> PathBuf {
         self.cache_dir().join("versions").join(ver)
     }

@@ -332,6 +332,13 @@ impl Encode for ArgumentParser {
 impl Decode<'_> for ArgumentParser {
     fn decode(input: &mut &[u8]) -> Result<Self> {
         let id = read_varint(input)?;
+        Self::decode_properties(id, input)
+    }
+}
+
+impl ArgumentParser {
+    /// The properties that follow parser type `id`.
+    pub(crate) fn decode_properties(id: i32, input: &mut &[u8]) -> Result<Self> {
         Ok(match id {
             1 => {
                 let (min, max) = decode_bounds(input)?;

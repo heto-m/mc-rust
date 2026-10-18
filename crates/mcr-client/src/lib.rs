@@ -42,6 +42,7 @@ mod menu_tests;
 mod packs;
 mod pickup;
 mod player;
+mod probe;
 mod registry;
 mod relay;
 mod riding;
@@ -62,7 +63,7 @@ pub use commands::{CommandTree, Completion, SuggestSource, complete_chat};
 pub use conduct::{
     ConductEnd, ConductLink, ConductReply, ConductRequest, conduct_channel, conduct_hash,
 };
-pub use config::{ClientConfig, OnlineAuth, ResourcePackPolicy, TransferTarget};
+pub use config::{ClientConfig, OnlineAuth, ResourcePackPolicy, TransferTarget, WireChoice};
 pub use dialogs::{
     DIALOG_REGISTRY, DialogEnd, DialogLink, DialogReply, DialogRequest, dialog_channel,
     resolve_dialog,
@@ -83,6 +84,7 @@ pub use menu::MountInfo;
 pub use packs::{PackEnd, PackLink, PackReply, PackRequest, pack_channel};
 pub use pickup::Pickup;
 pub use player::LocalPlayer;
+pub use probe::{ServerVersion, probe};
 pub use registry::{Dimension, Registries, Registry, RegistryItem};
 pub use relay::{ClientHooks, LocalAction, Relay, Relayed};
 pub use riding::{Ride, Sim};

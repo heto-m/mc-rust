@@ -36,6 +36,17 @@ pub enum ResourcePackPolicy {
     Accept,
 }
 
+/// Which protocol the connection speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WireChoice {
+    #[default]
+    Canonical,
+    /// A protocol number already known, e.g. from the server list's ping.
+    Protocol(i32),
+    /// Ping the server's status first and use the protocol it reports.
+    Auto,
+}
+
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     pub host: String,
@@ -70,6 +81,7 @@ pub struct ClientConfig {
     pub only_show_secure_chat: bool,
     /// The managed singleplayer server: the player's own messages count as secure, as vanilla's integrated server.
     pub local_server: bool,
+    pub wire: WireChoice,
 }
 
 impl Default for ClientConfig {
@@ -98,6 +110,7 @@ impl Default for ClientConfig {
             particle_status: ParticleStatus::All,
             only_show_secure_chat: false,
             local_server: false,
+            wire: WireChoice::Canonical,
         }
     }
 }
@@ -118,6 +131,9 @@ impl ClientConfig {
         cfg.port = target.port;
         cfg.transfer = true;
         cfg.cookies = target.cookies.clone();
+        if cfg.wire != WireChoice::Canonical {
+            cfg.wire = WireChoice::Auto;
+        }
         cfg
     }
 

@@ -44,23 +44,30 @@ impl BitSet {
     }
 }
 
+/// Java's `BitSet.toByteArray`: least significant byte first, trailing zero bytes dropped.
 impl Encode for BitSet {
     fn encode(&self, out: &mut Vec<u8>) {
-        let used = self.0.iter().rposition(|&w| w != 0).map_or(0, |i| i + 1);
-        write_varint(out, used as i32);
-        for w in &self.0[..used] {
-            w.encode(out);
+        let mut bytes: Vec<u8> = self.0.iter().flat_map(|w| w.to_le_bytes()).collect();
+        while bytes.last() == Some(&0) {
+            bytes.pop();
         }
+        write_varint(out, bytes.len() as i32);
+        out.extend_from_slice(&bytes);
     }
 }
 
 impl Decode<'_> for BitSet {
     fn decode(input: &mut &[u8]) -> Result<Self> {
-        let len = read_len(input, input.len() / 8)?;
-        let mut words = Vec::with_capacity(len);
-        for _ in 0..len {
-            words.push(u64::decode(input)?);
-        }
+        let len = read_len(input, input.len())?;
+        let bytes = take(input, len)?;
+        let words = bytes
+            .chunks(8)
+            .map(|c| {
+                let mut word = [0; 8];
+                word[..c.len()].copy_from_slice(c);
+                u64::from_le_bytes(word)
+            })
+            .collect();
         Ok(Self(words))
     }
 }
@@ -326,7 +333,7 @@ mod tests {
         b.set(0, true);
         b.set(65, true);
         let bytes = to_bytes(&b);
-        assert_eq!(bytes, [2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]);
+        assert_eq!(bytes, [9, 1, 0, 0, 0, 0, 0, 0, 0, 2]);
         let back = from_bytes_exact::<BitSet>(&bytes).unwrap();
         assert!(back.get(0) && back.get(65) && !back.get(1));
         assert_eq!(to_bytes(&BitSet::new()), [0]);
@@ -335,6 +342,7 @@ mod tests {
     #[test]
     fn bitset_rejects_hostile_length() {
         assert!(BitSet::decode(&mut &[0x7f][..]).is_err());
+        assert!(from_bytes_exact::<BitSet>(&[1, 4]).unwrap().get(2));
     }
 
     #[test]

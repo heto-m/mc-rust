@@ -228,6 +228,11 @@ impl Decode<'_> for DataComponent {
     }
 }
 
+/// Validates one value of component type `id` without keeping it.
+pub(crate) fn skip_value(id: i32, input: &mut &[u8]) -> Result<()> {
+    DataComponent::decode_value(id, input).map(drop)
+}
+
 /// Components set on a stack beyond its item's defaults, and defaults it removes.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DataComponentPatch {

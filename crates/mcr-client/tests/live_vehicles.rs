@@ -41,6 +41,7 @@ fn live_boat_and_horse() {
     live.console("op Rider");
     live.until("loaded", 400, |l| l.client.state.player.loaded);
     live.console("gamemode survival Rider");
+    live.console("tp Rider ~ -60 ~");
     live.console("kill @e[type=!player]");
     live.idle(20);
     let p = live.pos();
@@ -103,10 +104,11 @@ fn live_boat_and_horse() {
         l.client.state.player.vehicle.is_none()
     });
 
+    let p = live.pos();
     live.console(&format!(
         "summon minecraft:horse {} -60 {} {{Tame:1b,equipment:{{saddle:{{id:\"minecraft:saddle\"}}}}}}",
-        x - 4,
-        z - 4
+        p[0].floor() as i32 + 2,
+        p[2].floor() as i32 + 2
     ));
     let horse = mount(&mut live, "minecraft:horse");
     let start = vehicle_pos(&live, horse);
@@ -139,4 +141,14 @@ fn live_boat_and_horse() {
         "server corrected the horse"
     );
     assert!(!live.log_text().contains("Vehicle of Rider moved wrongly"));
+    for (y, block) in [(-62, "dirt"), (-61, "grass_block")] {
+        live.console(&format!(
+            "fill {} {y} {} {} {y} {} minecraft:{block} replace minecraft:water",
+            x - 12,
+            z - 12,
+            x + 12,
+            z + 12
+        ));
+    }
+    live.idle(5);
 }

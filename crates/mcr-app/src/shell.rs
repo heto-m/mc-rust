@@ -14,7 +14,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use mcr_client::{
     Client, ClientConfig, ClientError, ConductEnd, ConductReply, DialogEnd, DialogReply,
-    DialogRequest, TransferTarget, conduct_channel, dialog_channel, sanitize_for_log,
+    DialogRequest, TransferTarget, WireChoice, conduct_channel, dialog_channel, sanitize_for_log,
 };
 use mcr_modbridge::ModFrames;
 use mcr_nbt::Value;
@@ -967,6 +967,14 @@ impl Shell {
         config.only_show_secure_chat = options.only_show_secure_chat;
         config.local_server =
             self.sp.is_some() && matches!(config.host.as_str(), "127.0.0.1" | "localhost");
+        config.wire = if self.sp.is_some() {
+            WireChoice::Canonical
+        } else {
+            match self.servers.borrow().pinged_protocol(address) {
+                Some(protocol) if transfer.is_none() => WireChoice::Protocol(protocol),
+                _ => WireChoice::Auto,
+            }
+        };
         config.view_distance = self
             .cfg
             .render_distance

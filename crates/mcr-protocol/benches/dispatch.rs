@@ -3,8 +3,9 @@ use std::hint::black_box;
 use std::path::Path;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use mcr_protocol::PacketIds;
 use mcr_protocol::dispatch::PlayClientbound;
+use mcr_protocol::version::{Translated, Wire};
+use mcr_protocol::{PacketIds, ProtocolState};
 
 fn captured_play_frames() -> Vec<(i32, Vec<u8>)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.cache/captures/26.3");
@@ -39,6 +40,19 @@ fn play_stream(c: &mut Criterion) {
         b.iter(|| {
             for (id, payload) in &frames {
                 black_box(PlayClientbound::decode(*id, payload, ids).unwrap());
+            }
+        });
+    });
+    let mut scratch = Vec::new();
+    group.bench_function("decode via canonical wire", |b| {
+        b.iter(|| {
+            for (id, payload) in &frames {
+                let wire = black_box(Wire::Canonical);
+                if let Ok(Translated::Packet(id, payload)) =
+                    wire.inbound(ProtocolState::Play, *id, payload, &mut scratch)
+                {
+                    black_box(PlayClientbound::decode(id, payload, ids).unwrap());
+                }
             }
         });
     });

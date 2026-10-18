@@ -196,12 +196,17 @@ mod tests {
         assert_eq!(releases, ["26.4", "26.3", "26.2"]);
         assert_eq!(list.visible(true).count(), 4);
         let supported: Vec<_> = list.entries.iter().filter(|e| e.supported).collect();
-        assert_eq!(supported.len(), 1);
+        let listed = ["26.3", "26.2"];
+        assert_eq!(
+            supported.len(),
+            listed.iter().filter(|v| is_supported(v)).count()
+        );
         assert_eq!(supported[0].id, GAME_VERSION);
         assert_eq!(list.latest_supported_release(), GAME_VERSION);
         assert_eq!(list.newer_unsupported_release(), Some("26.4"));
         assert_eq!(list.resolve(LATEST_RELEASE), Some(GAME_VERSION));
-        assert_eq!(list.resolve("26.2"), None);
+        assert_eq!(list.resolve("26.2"), is_supported("26.2").then_some("26.2"));
+        assert_eq!(list.resolve("b1.7.3"), None);
     }
 
     #[test]
@@ -213,13 +218,13 @@ mod tests {
             vec![r#"{"id":"1.0","type":"release"}"#; 10_000].join(",")
         );
         let list = VersionList::parse(huge.as_bytes()).unwrap();
-        assert_eq!(list.entries.len(), 2);
+        assert_eq!(list.entries.len(), 1 + SUPPORTED_VERSIONS.len());
         let many: Vec<String> = (0..10_000)
             .map(|i| format!(r#"{{"id":"v{i}","type":"snapshot"}}"#))
             .collect();
         let list = VersionList::parse(format!(r#"{{"versions":[{}]}}"#, many.join(",")).as_bytes())
             .unwrap();
-        assert_eq!(list.entries.len(), MAX_VERSIONS + 1);
+        assert_eq!(list.entries.len(), MAX_VERSIONS + SUPPORTED_VERSIONS.len());
         assert!(list.entries.iter().any(|e| e.id == GAME_VERSION));
     }
 
