@@ -21,6 +21,7 @@ import net.minecraft.client.gui.screens.ConfirmScreen;
 import net.minecraft.client.gui.screens.DisconnectedScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.TitleScreen;
+import net.minecraft.client.gui.screens.options.HasDifficultyReaction;
 import net.minecraft.client.gui.screens.worldselection.SelectWorldScreen;
 import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
 import net.minecraft.network.chat.Component;
@@ -58,6 +59,7 @@ public final class McrWorlds {
     private static Path pendingPackDir;
     private static DisconnectedScreen crashScreen;
     private static long crashUntil;
+    private static boolean difficultyLocked;
 
     private McrWorlds() {}
 
@@ -90,6 +92,24 @@ public final class McrWorlds {
         if (local() && publishedPort < 0) {
             Bridge.report(BridgeAbi.REPORT_WORLD, "lan\tmode=" + mode + "\tcheats=" + bit(cheats) + "\tport=" + port);
         }
+    }
+
+    /** World Options' difficulty for mcr's local world, which only mcr's server console can change for the owner. */
+    public static void requestDifficulty(int id) {
+        if (local()) {
+            Bridge.report(BridgeAbi.REPORT_WORLD, "difficulty\t" + id);
+        }
+    }
+
+    public static void requestDifficultyLock() {
+        if (local()) {
+            Bridge.report(BridgeAbi.REPORT_WORLD, "lockdifficulty");
+        }
+    }
+
+    /** mcr locked the local world's difficulty; the server learns it only at its next start. */
+    public static boolean difficultyLocked() {
+        return difficultyLocked && local();
     }
 
     /** The next connection Rust opens is the local world's. */
@@ -241,6 +261,7 @@ public final class McrWorlds {
     /** Save and Quit left the world; Java waits for mcr's server to stop. */
     public static void leftWorld(Minecraft minecraft) {
         publishedPort = -1;
+        difficultyLocked = false;
         if (crashScreen != null) {
             minecraft.gui.setScreen(crashScreen);
             return;
@@ -335,6 +356,7 @@ public final class McrWorlds {
             }
             case BridgeAbi.WORLD_READY -> {
                 state = State.LOCAL;
+                difficultyLocked = false;
                 deletePendingPacks();
                 if (screen instanceof McrWorldScreen progress && !progress.isSaving()) {
                     progress.setStatus(Component.translatable("connect.joining"));
@@ -351,6 +373,7 @@ public final class McrWorlds {
             case BridgeAbi.WORLD_STOPPED -> {
                 boolean wasPlaying = state == State.LOCAL || state == State.STOPPING;
                 state = State.IDLE;
+                difficultyLocked = false;
                 publishedPort = -1;
                 deletePendingPacks();
                 if (!m.text().isEmpty() && wasPlaying) {
@@ -366,6 +389,12 @@ public final class McrWorlds {
                 }
             }
             case BridgeAbi.WORLD_LAN -> lanAnswer(minecraft, m.text());
+            case BridgeAbi.WORLD_LOCKED -> {
+                difficultyLocked = true;
+                if (screen instanceof HasDifficultyReaction reaction) {
+                    reaction.onDifficultyChanged();
+                }
+            }
             default -> {}
         }
     }

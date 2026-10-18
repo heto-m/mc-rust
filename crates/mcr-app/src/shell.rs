@@ -40,6 +40,7 @@ use crate::servers::FileServers;
 use crate::settings::{OptionsScreen, Settings, SharedSettings};
 use crate::singleplayer::{EULA_URL, FileWorlds, Launch, LaunchInput, Session, Update};
 use mcr_modbridge::world::{WorldEvent, WorldRequest};
+use mcr_singleplayer::level::Difficulty;
 
 /// Why the local server stopped, as the player reads it.
 fn stop_text(reason: Option<String>) -> String {
@@ -645,6 +646,8 @@ impl Shell {
                     },
                     true,
                 ),
+                WorldRequest::Difficulty(id) => self.local_difficulty(id),
+                WorldRequest::LockDifficulty => self.lock_local_difficulty(),
                 WorldRequest::Cancel => {
                     self.pending_launch = None;
                     match &mut self.sp {
@@ -724,6 +727,43 @@ impl Shell {
     }
 
     /// Opens the local world to LAN; the outcome goes to chat, or to Java in mod mode.
+    /// The local world's session and connection, unless the world is hardcore or locked.
+    fn difficulty_target(&mut self) -> Option<(&mut Session, &mut Play)> {
+        let (Some(sp), Some(play)) = (&mut self.sp, &mut self.play) else {
+            return None;
+        };
+        let world = &play.world.client.state.world;
+        (!world.hardcore && !world.difficulty_locked && !sp.difficulty_locked())
+            .then_some((sp, play))
+    }
+
+    /// Java's World Options in a local world: gamemasters use vanilla's packet, which the console's
+    /// admin broadcast would otherwise echo into their chat.
+    fn local_difficulty(&mut self, id: u8) {
+        let Some((sp, play)) = self.difficulty_target() else {
+            eprintln!("singleplayer: difficulty change refused");
+            return;
+        };
+        if play.world.client.state.player.permission_level >= 2 {
+            if let Err(e) = play.world.client.change_difficulty(id) {
+                eprintln!("singleplayer: difficulty change failed: {e}");
+            }
+        } else if !sp.set_difficulty(Difficulty::from_id(i64::from(id))) {
+            eprintln!("singleplayer: difficulty change refused");
+        }
+    }
+
+    fn lock_local_difficulty(&mut self) {
+        let locked = self
+            .difficulty_target()
+            .is_some_and(|(sp, _)| sp.lock_difficulty());
+        if locked {
+            self.java_world(WorldEvent::DifficultyLocked);
+        } else {
+            eprintln!("singleplayer: difficulty lock refused");
+        }
+    }
+
     fn start_lan(&mut self, settings: &mcr_ui::LanSettings, from_java: bool) {
         let result = match &mut self.sp {
             Some(sp) => sp.open_lan(settings, &self.cfg.name),

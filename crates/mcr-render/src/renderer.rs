@@ -204,13 +204,32 @@ struct DrawDataGpu {
     pad: [u32; 3],
 }
 
+/// The translucent quads a section draws: `count` model quads from `base`, with its tint table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TranslucentDraw {
+    base: u32,
+    count: u32,
+    tint_base: u32,
+}
+
+/// Switches a section's translucent draw once the upload batch holding its quads is written.
+#[derive(Debug, Clone, Copy)]
+struct TranslucentCommit {
+    key: [i32; 3],
+    serial: u64,
+    draw: Option<TranslucentDraw>,
+}
+
 #[derive(Debug)]
 struct SectionSlot {
     index: u32,
+    /// Unique per slot lifetime, so commits queued before a removal never reach a later slot.
+    serial: u64,
     cube: Option<(u32, u32)>,
     model: Option<(u32, u32)>,
-    translucent: Option<(u32, u32)>,
     tint: Option<u32>,
+    /// What the translucent pass draws: the last mesh whose upload was written.
+    drawn: Option<TranslucentDraw>,
 }
 
 #[derive(Debug)]
@@ -328,7 +347,9 @@ pub struct Renderer {
     sections: HashMap<[i32; 3], SectionSlot>,
     free_slots: Vec<u32>,
     slot_count: u32,
-    uploader: Uploader,
+    uploader: Uploader<TranslucentCommit>,
+    commits: Vec<TranslucentCommit>,
+    next_serial: u64,
 
     timestamps: Option<Timestamps>,
     stats_gpu: wgpu::Buffer,
@@ -1067,6 +1088,8 @@ impl Renderer {
             free_slots: Vec::new(),
             slot_count: 0,
             uploader: Uploader::default(),
+            commits: Vec::new(),
+            next_serial: 0,
             timestamps,
             stats_gpu,
             readbacks,
@@ -1446,6 +1469,13 @@ impl Renderer {
                 }
             },
         };
+        let (serial, drawn) = match &old {
+            Some(old) => (old.serial, old.drawn),
+            None => {
+                self.next_serial += 1;
+                (self.next_serial, None)
+            }
+        };
         if let Some(old) = old {
             self.release(&old);
         }
@@ -1496,19 +1526,25 @@ impl Renderer {
             u64::from(index) * 64,
             bytemuck::bytes_of(&meta),
         );
-        self.uploader.end_batch();
-        let translucent = model
+        let draw = model
             .filter(|_| translucent_total > 0)
-            .map(|(base, _)| (base + model_main, translucent_total));
+            .map(|(base, _)| TranslucentDraw {
+                base: base + model_main,
+                count: translucent_total,
+                tint_base,
+            });
+        self.uploader
+            .end_batch_with(TranslucentCommit { key, serial, draw });
         self.graph.set_slot(key, Some(index));
         self.sections.insert(
             key,
             SectionSlot {
                 index,
+                serial,
                 cube,
                 model,
-                translucent,
                 tint,
+                drawn,
             },
         );
         Ok(())
@@ -1561,9 +1597,9 @@ impl Renderer {
 
     fn flush_uploads(&mut self) -> (usize, usize) {
         let (queue, geo) = (&self.queue, &self.geo);
-        let f = self
-            .uploader
-            .flush(self.config.upload_budget_bytes, |dest, offset, bytes| {
+        let f = self.uploader.flush(
+            self.config.upload_budget_bytes,
+            |dest, offset, bytes| {
                 let buffer = match dest {
                     Dest::Cube => &geo.cube_arena,
                     Dest::Model => &geo.model_arena,
@@ -1571,7 +1607,16 @@ impl Renderer {
                     Dest::Tints => &geo.tints,
                 };
                 queue.write_buffer(buffer, offset, bytes);
-            });
+            },
+            &mut self.commits,
+        );
+        for c in self.commits.drain(..) {
+            if let Some(slot) = self.sections.get_mut(&c.key)
+                && slot.serial == c.serial
+            {
+                slot.drawn = c.draw;
+            }
+        }
         (f.bytes, f.writes)
     }
 
@@ -1586,7 +1631,12 @@ impl Renderer {
     ) -> u32 {
         let mut visible: Vec<(f32, glam::Vec3, u32, u32, u32, u32)> = Vec::new();
         for (key, slot) in &self.sections {
-            let Some((base, count)) = slot.translucent else {
+            let Some(TranslucentDraw {
+                base,
+                count,
+                tint_base,
+            }) = slot.drawn
+            else {
                 continue;
             };
             if graph && !self.graph.reachable(slot.index) {
@@ -1602,9 +1652,6 @@ impl Renderer {
             {
                 continue;
             }
-            let tint_base = slot.tint.map_or(NO_TINT_TABLE, |t| {
-                (TINT_PALETTE_WORDS + t as usize * TINT_TABLE_WORDS) as u32
-            });
             visible.push((
                 (lo + glam::Vec3::splat(8.0)).length_squared(),
                 lo,

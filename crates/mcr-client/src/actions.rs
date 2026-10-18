@@ -84,6 +84,13 @@ impl Client {
         }))
     }
 
+    /// World Options' difficulty (0 peaceful to 3 hard); servers apply it only for gamemasters.
+    pub fn change_difficulty(&mut self, id: u8) -> Result<()> {
+        use mcr_protocol::types::game::Difficulty as D;
+        let difficulty = [D::Peaceful, D::Easy, D::Normal, D::Hard][usize::from(id.min(3))];
+        self.send_play(&S::ChangeDifficulty(sb::ChangeDifficulty { difficulty }))
+    }
+
     /// The main hand's attack swing.
     pub fn swing(&mut self) -> Result<()> {
         self.local_action(LocalAction::Swing {

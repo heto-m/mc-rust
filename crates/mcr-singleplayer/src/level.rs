@@ -168,13 +168,30 @@ pub fn rename(world: &Path, name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(SpError::data("the world name is empty"));
     }
+    edit_level(world, |data| {
+        data.insert("LevelName", Value::String(name));
+    })
+}
+
+/// Locks the difficulty like vanilla's lock button; only while no server has the world open.
+pub fn lock_difficulty(world: &Path) -> Result<()> {
+    edit_level(world, |data| {
+        match data.get_mut("difficulty_settings") {
+            Some(Value::Compound(settings)) => settings.insert("locked", Value::Byte(1)),
+            _ => data.insert("DifficultyLocked", Value::Byte(1)),
+        };
+    })
+}
+
+/// Rewrites `Data` in `level.dat`; the previous file is kept as `level.dat_old`.
+fn edit_level(world: &Path, edit: impl FnOnce(&mut Compound)) -> Result<()> {
     let path = world.join("level.dat");
     let bytes = read_bounded(&path, MAX_LEVEL_DAT)?;
     let (root_name, mut root) = read_disk(&bytes, LEVEL_LIMITS)?;
     let Some(Value::Compound(data)) = root.get_mut("Data") else {
         return Err(SpError::data("level.dat has no Data compound"));
     };
-    data.insert("LevelName", Value::String(name));
+    edit(data);
     let out = write_disk(&root_name, &root, Compression::Gzip)?;
     crate::safe::write_file(&world.join("level.dat_old"), &bytes)?;
     crate::safe::write_file(&path, &out)?;
@@ -479,6 +496,33 @@ pub(crate) mod tests {
             "Before"
         );
         assert!(rename(&world, "   ").is_err());
+        let _ = fs::remove_dir_all(&world);
+    }
+
+    #[test]
+    fn lock_difficulty_sets_the_modern_or_legacy_flag() {
+        let world = temp_dir("lock");
+        let locked = |world: &Path| {
+            let (_, root) =
+                read_disk(&fs::read(world.join("level.dat")).unwrap(), LEVEL_LIMITS).unwrap();
+            let data = root.get_compound("Data").unwrap();
+            (
+                data.get_compound("difficulty_settings")
+                    .and_then(|s| number(s, "locked")),
+                number(data, "DifficultyLocked"),
+            )
+        };
+        fs::write(world.join("level.dat"), level_dat(modern("W", 1))).unwrap();
+        lock_difficulty(&world).unwrap();
+        assert_eq!(locked(&world), (Some(1), None));
+        assert_eq!(read_level(&world).unwrap().difficulty, Difficulty::Hard);
+
+        let mut legacy = modern("Old", 1);
+        legacy.remove("difficulty_settings");
+        fs::write(world.join("level.dat"), level_dat(legacy)).unwrap();
+        lock_difficulty(&world).unwrap();
+        assert_eq!(locked(&world), (None, Some(1)));
+        assert!(fs::metadata(world.join("level.dat_old")).is_ok());
         let _ = fs::remove_dir_all(&world);
     }
 

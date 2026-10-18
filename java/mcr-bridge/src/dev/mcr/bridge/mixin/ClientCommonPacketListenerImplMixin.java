@@ -1,6 +1,7 @@
 package dev.mcr.bridge.mixin;
 
 import dev.mcr.bridge.BridgeAbi;
+import dev.mcr.bridge.McrWorlds;
 import dev.mcr.bridge.net.BridgeChannel;
 import dev.mcr.bridge.net.McrNet;
 import net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl;
@@ -8,7 +9,9 @@ import net.minecraft.network.Connection;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.common.ClientboundResourcePackPopPacket;
 import net.minecraft.network.protocol.common.ClientboundResourcePackPushPacket;
+import net.minecraft.network.protocol.game.ServerboundChangeDifficultyPacket;
 import net.minecraft.network.protocol.game.ServerboundChatCommandPacket;
+import net.minecraft.network.protocol.game.ServerboundLockDifficultyPacket;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -34,6 +37,14 @@ abstract class ClientCommonPacketListenerImplMixin {
     private void mcr$command(Packet<?> packet, CallbackInfo ci) {
         if (packet instanceof ServerboundChatCommandPacket command && McrNet.bridged()) {
             McrNet.sendChat(BridgeAbi.CHAT_COMMAND, command.command());
+            ci.cancel();
+        } else if (packet instanceof ServerboundChangeDifficultyPacket change && McrWorlds.local()) {
+            McrWorlds.requestDifficulty(change.difficulty().getId());
+            ci.cancel();
+        } else if (packet instanceof ServerboundLockDifficultyPacket lock && McrWorlds.local()) {
+            if (lock.isLocked()) {
+                McrWorlds.requestDifficultyLock();
+            }
             ci.cancel();
         }
     }

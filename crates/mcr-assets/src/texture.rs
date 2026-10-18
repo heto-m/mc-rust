@@ -510,7 +510,8 @@ struct GroupBuilder {
     height: u32,
     data: Vec<u8>,
     layers: u32,
-    cutouts: Vec<Option<CutoutMip>>,
+    /// One entry per sprite: its frame count and what its mips preserve.
+    sprites: Vec<(u32, Option<CutoutMip>)>,
 }
 
 #[derive(Debug)]
@@ -547,7 +548,7 @@ impl TextureArrayBuilder {
                 height: key.1,
                 data: Vec::new(),
                 layers: 0,
-                cutouts: Vec::new(),
+                sprites: Vec::new(),
             });
             self.groups.len() - 1
         });
@@ -556,6 +557,7 @@ impl TextureArrayBuilder {
         let mut transparency = Transparency::Opaque;
         let alpha_ref = sprite.mip.cutout_ref(&sprite.frames);
         let dark = sprite.mip.strategy == MipStrategy::DarkCutout;
+        let sheet_start = group.data.len();
         for frame in &sprite.frames {
             let start = group.data.len();
             group.data.extend_from_slice(frame);
@@ -563,14 +565,23 @@ impl TextureArrayBuilder {
                 darken_empty_texels(&mut group.data[start..]);
             }
             group.layers += 1;
-            group.cutouts.push(alpha_ref.map(|alpha_ref| CutoutMip {
-                alpha_ref,
-                coverage: alpha_coverage(frame, sprite.width, sprite.height, alpha_ref, 1.0),
-                bias: sprite.mip.cutoff_bias,
-                dark,
-            }));
             transparency = transparency.max(classify(frame));
         }
+        let frames = sprite.frames.len() as u32;
+        // Vanilla mips the whole animation strip with one coverage, so no frame thins out on its own.
+        let cut = alpha_ref.map(|alpha_ref| CutoutMip {
+            alpha_ref,
+            coverage: alpha_coverage(
+                &group.data[sheet_start..],
+                sprite.width,
+                sprite.height * frames,
+                alpha_ref,
+                1.0,
+            ),
+            bias: sprite.mip.cutoff_bias,
+            dark,
+        });
+        group.sprites.push((frames, cut));
         let slot = SpriteSlot {
             group: group_idx as u32,
             first_layer,
@@ -625,18 +636,22 @@ impl TextureArrayBuilder {
                     let prev = mips.last().unwrap();
                     let mut next = Vec::new();
                     let mut dims = (w, h);
-                    for (layer, cut) in prev.chunks_exact(layer_len).zip(&g.cutouts) {
+                    let mut layers = prev.chunks_exact(layer_len);
+                    for &(frames, cut) in &g.sprites {
                         let dark = cut.is_some_and(|c| c.dark);
-                        let (nw, nh, mut data) = if dark {
-                            downsample_dark(layer, w, h)
-                        } else {
-                            downsample(layer, w, h)
-                        };
-                        if let Some(cut) = cut {
-                            keep_coverage(&mut data, nw, nh, *cut);
+                        let sheet_start = next.len();
+                        for layer in layers.by_ref().take(frames as usize) {
+                            let (nw, nh, data) = if dark {
+                                downsample_dark(layer, w, h)
+                            } else {
+                                downsample(layer, w, h)
+                            };
+                            dims = (nw, nh);
+                            next.extend_from_slice(&data);
                         }
-                        dims = (nw, nh);
-                        next.extend_from_slice(&data);
+                        if let Some(cut) = cut {
+                            keep_coverage(&mut next[sheet_start..], dims.0, dims.1 * frames, cut);
+                        }
                     }
                     (w, h) = dims;
                     mips.push(next);

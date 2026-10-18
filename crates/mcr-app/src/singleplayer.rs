@@ -314,6 +314,7 @@ pub fn should_freeze(
 struct Prepared {
     spec: Spec,
     folder: String,
+    world_dir: PathBuf,
     port: u16,
     world_name: String,
     cheats: bool,
@@ -523,6 +524,7 @@ fn prepare(
     };
     Ok(Prepared {
         spec,
+        world_dir,
         world_name,
         cheats,
         rules: created.map(|w| w.game_rules).unwrap_or_default(),
@@ -573,6 +575,9 @@ pub struct Session {
     cheats: bool,
     rules: Vec<(String, String)>,
     lan: Option<Lan>,
+    world_dir: Option<PathBuf>,
+    /// Locked from World Options; written into `level.dat` once the server stopped.
+    difficulty_locked: bool,
 }
 
 const GAME_MODES: [&str; 4] = ["survival", "creative", "adventure", "spectator"];
@@ -631,6 +636,8 @@ impl Session {
             cheats: false,
             rules: Vec::new(),
             lan: None,
+            world_dir: None,
+            difficulty_locked: false,
         }
     }
 
@@ -714,12 +721,14 @@ impl Session {
                     let Prepared {
                         spec,
                         folder,
+                        world_dir,
                         port,
                         world_name,
                         cheats,
                         rules,
                     } = *prepared;
                     self.folder = Some(folder);
+                    self.world_dir = Some(world_dir);
                     self.world_name = world_name;
                     self.cheats = cheats;
                     self.rules = rules;
@@ -768,6 +777,7 @@ impl Session {
                     requested, reason, ..
                 } => {
                     self.state = State::Done;
+                    self.store_difficulty_lock();
                     Some(Update::Exited { requested, reason })
                 }
             },
@@ -776,11 +786,52 @@ impl Session {
                     requested, reason, ..
                 } => {
                     self.state = State::Done;
+                    self.store_difficulty_lock();
                     Some(Update::Exited { requested, reason })
                 }
                 _ => None,
             },
             State::Done => None,
+        }
+    }
+
+    fn running_server(&self) -> Option<&ManagedServer> {
+        match &self.state {
+            State::Running {
+                server,
+                ready: true,
+                ..
+            } => Some(server),
+            _ => None,
+        }
+    }
+
+    pub fn difficulty_locked(&self) -> bool {
+        self.difficulty_locked
+    }
+
+    /// World Options' difficulty through the console; refused once locked.
+    pub fn set_difficulty(&self, difficulty: Difficulty) -> bool {
+        !self.difficulty_locked
+            && self
+                .running_server()
+                .is_some_and(|s| s.console(&format!("difficulty {}", difficulty.name())))
+    }
+
+    /// The dedicated server has no lock command, so the lock waits for the server to stop.
+    pub fn lock_difficulty(&mut self) -> bool {
+        if self.running_server().is_none() {
+            return false;
+        }
+        self.difficulty_locked = true;
+        true
+    }
+
+    fn store_difficulty_lock(&mut self) {
+        if let (true, Some(dir)) = (std::mem::take(&mut self.difficulty_locked), &self.world_dir)
+            && let Err(e) = level::lock_difficulty(dir)
+        {
+            eprintln!("singleplayer: could not lock the difficulty: {e}");
         }
     }
 
@@ -828,6 +879,11 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+        if self.difficulty_locked {
+            // Dropping the server stops it and waits, and its last save would overwrite the lock.
+            drop(std::mem::replace(&mut self.state, State::Done));
+            self.store_difficulty_lock();
+        }
     }
 }
 

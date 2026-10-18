@@ -34,6 +34,10 @@ Rust SHALL forward a Java serverbound frame only if its phase tag equals Rust's 
 - **WHEN** a mod sends a play-phase custom payload on a non-brand channel
 - **THEN** the server receives it unchanged
 
+#### Scenario: Difficulty on a remote server
+- **WHEN** an operator on a remote server changes or locks the difficulty in Java's World Options
+- **THEN** the server receives Java's `change_difficulty` or `lock_difficulty` packet
+
 ### Requirement: Chat through Rust
 Chat messages and commands sent from Java SHALL be handed to Rust as text and sent by Rust's chat session, never forwarded as raw frames.
 

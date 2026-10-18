@@ -4,7 +4,9 @@ use std::collections::VecDeque;
 
 use std::path::PathBuf;
 
-use crate::abi::{WORLD_EULA, WORLD_FAILED, WORLD_LAN, WORLD_READY, WORLD_STATUS, WORLD_STOPPED};
+use crate::abi::{
+    WORLD_EULA, WORLD_FAILED, WORLD_LAN, WORLD_LOCKED, WORLD_READY, WORLD_STATUS, WORLD_STOPPED,
+};
 
 /// Longest name, seed or folder accepted from Java.
 pub const MAX_FIELD: usize = 256;
@@ -72,6 +74,10 @@ pub enum WorldRequest {
     Create(NewWorldRequest),
     Eula(bool),
     Lan(LanRequest),
+    /// World Options' difficulty for the local world, 0 peaceful to 3 hard.
+    Difficulty(u8),
+    /// World Options locked the local world's difficulty.
+    LockDifficulty,
     Cancel,
 }
 
@@ -218,6 +224,8 @@ impl WorldRequest {
             "create" => parse_create(lines).map(Self::Create),
             "eula" => flag(arg).map(Self::Eula),
             "lan" => parse_lan(arg).map(Self::Lan),
+            "difficulty" => arg.parse().ok().filter(|d| *d <= 3).map(Self::Difficulty),
+            "lockdifficulty" => Some(Self::LockDifficulty),
             "cancel" => Some(Self::Cancel),
             _ => None,
         }
@@ -237,6 +245,8 @@ pub enum WorldEvent {
     Stopped(Option<String>),
     /// Open to LAN's outcome: the port, or why it failed.
     Lan(Result<u16, String>),
+    /// The local world's difficulty is locked for the rest of the session.
+    DifficultyLocked,
 }
 
 fn clipped(text: &str) -> &str {
@@ -255,6 +265,7 @@ impl WorldEvent {
             Self::Ready => (WORLD_READY, ""),
             Self::Failed(t) => (WORLD_FAILED, t.as_str()),
             Self::Stopped(t) => (WORLD_STOPPED, t.as_deref().unwrap_or("")),
+            Self::DifficultyLocked => (WORLD_LOCKED, ""),
             Self::Lan(r) => {
                 let text = match r {
                     Ok(port) => format!("ok\t{port}"),
@@ -454,6 +465,28 @@ mod tests {
         assert_eq!(&ok[4..], b"ok\t25601");
         let failed = WorldEvent::Lan(Err("busy".into())).encode();
         assert_eq!(&failed[4..], b"failed\tbusy");
+    }
+
+    #[test]
+    fn parses_difficulty_requests() {
+        assert_eq!(
+            WorldRequest::parse("difficulty\t3"),
+            Some(WorldRequest::Difficulty(3))
+        );
+        assert_eq!(
+            WorldRequest::parse("lockdifficulty"),
+            Some(WorldRequest::LockDifficulty)
+        );
+        for bad in [
+            "difficulty\t4",
+            "difficulty\t-1",
+            "difficulty\t",
+            "difficulty\thard",
+        ] {
+            assert_eq!(WorldRequest::parse(bad), None, "{bad}");
+        }
+        let locked = WorldEvent::DifficultyLocked.encode();
+        assert_eq!(locked, WORLD_LOCKED.to_le_bytes());
     }
 
     #[test]

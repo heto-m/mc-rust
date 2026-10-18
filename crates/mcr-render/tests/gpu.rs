@@ -499,6 +499,88 @@ fn translucent_pass_blends_over_opaque() {
     assert!(blended[0] > 60, "opaque shows through: {blended:?}");
 }
 
+fn glass(layer: u16) -> ModelQuad {
+    ModelQuad::encode(&ModelQuadDesc {
+        corners: [
+            [7.0, 7.0, 10.0],
+            [9.5, 7.0, 10.0],
+            [7.0, 9.5, 10.0],
+            [9.5, 9.5, 10.0],
+        ],
+        uvs: [[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+        layer,
+        light: [LIGHT_FULL_SKY; 4],
+        shade_face: Face::PosZ,
+        flags: 0,
+        ao: [63; 4],
+        tint: 0,
+        cell: [7, 7, 10],
+    })
+    .unwrap()
+}
+
+#[test]
+fn translucent_draws_wait_for_their_upload() {
+    let config = RendererConfig {
+        upload_budget_bytes: 1,
+        ..RendererConfig::default()
+    };
+    let Some(mut r) = renderer_with(64, 64, config) else {
+        return;
+    };
+    r.set_texture_groups(&[flat_group(&[
+        [255, 0, 0, 255],
+        [0, 0, 255, 128],
+        [0, 255, 0, 128],
+    ])]);
+    let cam = Camera {
+        position: DVec3::new(8.0, 8.0, 20.0),
+        ..Camera::default()
+    };
+    let center = |r: &mut Renderer| {
+        frame(r, &cam);
+        let px = r.read_offscreen().unwrap();
+        let i = (32 * 64 + 32) * 4;
+        [px[i], px[i + 1], px[i + 2]]
+    };
+    let mut blue = wall(0, 0);
+    blue.translucent.push(glass(1));
+    let mut green = wall(0, 0);
+    green.translucent.extend([glass(2), glass(2)]);
+
+    r.set_section([0, 0, 0], &blue).unwrap();
+    let first = center(&mut r);
+    assert!(first[2] > 60 && first[1] < 10, "old water: {first:?}");
+
+    r.set_section([3, 0, 0], &wall(0, 0)).unwrap();
+    r.set_section([0, 0, 0], &green).unwrap();
+    let waiting = center(&mut r);
+    assert_eq!(
+        waiting, first,
+        "the old water stays until the new upload is written"
+    );
+    let switched = center(&mut r);
+    assert!(
+        switched[1] > 60 && switched[2] < 10,
+        "new water: {switched:?}"
+    );
+
+    r.set_section([4, 0, 0], &wall(0, 0)).unwrap();
+    r.set_section([0, 0, 0], &blue).unwrap();
+    r.remove_section([0, 0, 0]);
+    r.set_section([0, 0, 0], &green).unwrap();
+    for _ in 0..3 {
+        let px = center(&mut r);
+        let old_water = px[2] > 60 && px[1] < 10;
+        assert!(
+            !old_water,
+            "a removed section's pending water never draws: {px:?}"
+        );
+    }
+    let readded = center(&mut r);
+    assert!(readded[1] > 60 && readded[2] < 10, "{readded:?}");
+}
+
 fn wall(layer: u16, tint: u8) -> SectionMesh {
     let mut m = SectionMesh::default();
     m.push_cube(

@@ -315,6 +315,14 @@ server never starts.
   section with an Open to LAN button for mcr's world. `McrLanScreen` (game mode, cheats, port) reports
   `lan\tmode=<id>\tcheats=<0|1>\tport=<0|port>`; Rust starts its forwarder and announcer and answers `WORLD_LAN`
   (`ok\t<port>` or `failed\t<reason>`), which Java shows as vanilla's chat line.
+- **Difficulty (ABI 19).** World Options' difficulty button and lock are the owner's in mcr's world
+  (`DifficultyButtons.updateDifficultyButtonsState` sees `McrWorlds.local()` as permission). Their packets are
+  rerouted to `REPORT_WORLD` (`difficulty\t<id>`, `lockdifficulty`). Rust refuses them in hardcore or locked
+  worlds, changes the difficulty with the console's `difficulty <name>` (or vanilla's packet for a gamemaster,
+  whom the console's admin broadcast would message), and keeps a lock in the session: `WORLD_LOCKED` tells Java,
+  which reports the level locked until the session ends, and `level.dat` gets `difficulty_settings.locked` once
+  the server exited. The dedicated server has no lock command and applies `server.properties`' difficulty at
+  start whatever the lock, so the next start reports the lock from `level.dat`.
 - **Save and Quit.** `PauseScreen` sees `isLocalServer()` as true for its label only; `disconnectFromWorld` takes
   the saving path and then shows `McrWorldScreen` in saving mode. Rust's session end saves and stops the server,
   and `WORLD_STOPPED` sends Java to its title screen. A custom dialog's leave warning says Save and Quit too.
@@ -360,8 +368,8 @@ collection rate and leaves little headroom at join, more than 3 GiB buys nothing
 - With mods, Java has GUI authority: screens, HUD and chat come from Java. Native screens remain for mcr-only UI
   (mod manager, debug, crash fallback). On a Java crash, mcr detaches the bridge and continues natively.
 - Rust answers every vanilla protocol acknowledgement. From Java it forwards only custom payloads, custom query
-  answers, container and screen actions (including dialogs, advancement tabs and operator block editors), and
-  chat/commands (re-signed by Rust). A Java packet-handling failure detaches Java; Rust stays connected.
+  answers, container and screen actions (including dialogs, advancement tabs and operator block editors), game mode and
+  difficulty changes, and chat/commands (re-signed by Rust). A Java packet-handling failure detaches Java; Rust stays connected.
 - Server resource packs: Java's push and pop handlers are cancelled while bridged, and only mcr prompts, downloads
   and answers. After mcr's reload succeeds, `MSG_PACKS` gives Java the applied pack files, which it loads with
   `DownloadedPackSource.pushLocalPack` (and pops when they leave the list), so Java's entities and GUI use them too.
