@@ -51,7 +51,7 @@ pub(crate) fn team_color(color: TeamColor) -> u32 {
     }
 }
 
-fn custom_name(e: &Entity) -> Option<&Component> {
+pub(crate) fn custom_name(e: &Entity) -> Option<&Component> {
     match e.data.get(&2) {
         Some(EntityDataValue::OptionalComponent(Some(c))) => Some(c),
         _ => None,

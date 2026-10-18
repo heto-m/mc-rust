@@ -84,34 +84,34 @@ Scope: mcr-physics collide, mover and world; mcr-client state.
 
 Scope: mcr-entity-model scene and equipment, mcr-app entities.
 
-- [ ] 6.1 E1 (G) Invisible entities are drawn with their full body
-- [ ] 6.2 E7 (V) Burning entities show no fire
-- [ ] 6.3 E8 (V) Third-person held items never show use state; crossbow pose frozen
-- [ ] 6.4 E10 (V) Local player does not sit when riding in third person
-- [ ] 6.5 E15 (M) Upside-down names and shaking
-- [ ] 6.6 E16 (M) Walk animation for passengers and babies
-- [ ] 6.7 E17 (M) Armour flashes red when hurt
-- [ ] 6.8 E18 (M) Shadows: no distance fade or light term; option ignored
-- [ ] 6.9 E21 (M) Flat dropped-item stacks scattered in 3D
-- [ ] 6.10 Offscreen tests: invisible player draws held items only, spectator translucency, bow pull on a remote player, shadow fade
-- [ ] 6.11 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 6.1 E1 (G) Invisible entities are drawn with their full body
+- [x] 6.2 E7 (V) Burning entities show no fire
+- [x] 6.3 E8 (V) Third-person held items never show use state; crossbow pose frozen
+- [x] 6.4 E10 (V) Local player does not sit when riding in third person
+- [x] 6.5 E15 (M) Upside-down names and shaking
+- [x] 6.6 E16 (M) Walk animation for passengers and babies
+- [x] 6.7 E17 (M) Armour flashes red when hurt
+- [x] 6.8 E18 (M) Shadows: no distance fade or light term; option ignored
+- [x] 6.9 E21 (M) Flat dropped-item stacks scattered in 3D
+- [x] 6.10 Offscreen tests: invisible player draws held items only, spectator translucency, bow pull on a remote player, shadow fade
+- [x] 6.11 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 7. Effect vision and fog
 
 Scope: mcr-render environment, mcr-app effects.
 
-- [ ] 7.1 R1 (G) Mob effects never change vision: night vision, conduit power, blindness, darkness
-- [ ] 7.2 R2 (V) No lava or powder snow fog
-- [ ] 7.3 R3 (V) Underwater fog colour, biome and ramp wrong
-- [ ] 7.4 R4 (V) Biome sky and fog colours ignored
-- [ ] 7.5 R5 (V) Rain fog missing
-- [ ] 7.6 R6 (V) Superflat draws a black lower sky
-- [ ] 7.7 R7 (V) End sky flashes missing
-- [ ] 7.8 R14 (M) Fog colour details
-- [ ] 7.9 R18 (M) Block light does not flicker
-- [ ] 7.10 R25 (M) Environment chosen by level name
-- [ ] 7.11 Unit tests: lightmap with night vision and darkness, fog distances per environment, water vision ramp, biome sky colour, flat horizon
-- [ ] 7.12 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 7.1 R1 (G) Mob effects never change vision: night vision, conduit power, blindness, darkness
+- [x] 7.2 R2 (V) No lava or powder snow fog
+- [x] 7.3 R3 (V) Underwater fog colour, biome and ramp wrong
+- [x] 7.4 R4 (V) Biome sky and fog colours ignored
+- [x] 7.5 R5 (V) Rain fog missing
+- [x] 7.6 R6 (V) Superflat draws a black lower sky
+- [x] 7.7 R7 (V) End sky flashes missing
+- [x] 7.8 R14 (M) Fog colour details
+- [x] 7.9 R18 (M) Block light does not flicker
+- [x] 7.10 R25 (M) Environment chosen by level name
+- [x] 7.11 Unit tests: lightmap with night vision and darkness, fog distances per environment, water vision ramp, biome sky colour, flat horizon
+- [x] 7.12 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 8. Riding and vehicles
 

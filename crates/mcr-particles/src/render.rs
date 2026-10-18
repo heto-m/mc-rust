@@ -34,7 +34,7 @@ pub(crate) struct Gpu {
     blend: wgpu::RenderPipeline,
     instances: [wgpu::Buffer; 3],
     scratch: Vec<Instance>,
-    lightmap: Vec<[f32; 4]>,
+    lightmap: mcr_render::Lightmap,
     lightmap_env: Option<Environment>,
 }
 
@@ -244,7 +244,7 @@ impl Gpu {
             blend: make("fs_blend", Some(wgpu::BlendState::ALPHA_BLENDING)),
             instances,
             scratch: Vec::with_capacity(POOL_CAP),
-            lightmap: Vec::new(),
+            lightmap: [[1.0; 4]; 256],
             lightmap_env: None,
         }
     }

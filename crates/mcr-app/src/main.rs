@@ -52,6 +52,7 @@ mod status;
 mod target;
 mod text_display;
 mod view;
+mod vision;
 mod world_setup;
 
 use std::sync::Arc;

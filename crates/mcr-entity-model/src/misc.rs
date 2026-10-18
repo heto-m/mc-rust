@@ -136,26 +136,36 @@ fn item_entity(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     let bob_offset = hash01(v.id, 1) * std::f32::consts::TAU;
     let bob = (v.age_ticks / 10.0 + bob_offset).sin() * 0.1 + 0.1;
     let spin = v.age_ticks / 20.0 + bob_offset;
-    for i in 0..clone_count(stack.count) {
-        let off = if i == 0 {
-            Vec3::ZERO
-        } else {
-            Vec3::new(
-                (hash01(v.id, i as u32 * 3) * 2.0 - 1.0) * 0.15,
-                (hash01(v.id, i as u32 * 3 + 1) * 2.0 - 1.0) * 0.15,
-                (hash01(v.id, i as u32 * 3 + 2) * 2.0 - 1.0) * 0.15,
-            )
-        };
+    let count = clone_count(stack.count);
+    for i in 0..count {
         plan.free_items.push(FreeItem {
             source: ItemSource::Data(idx::ITEM_STACK),
             context: ItemContext::Ground,
-            local: Mat4::from_translation(Vec3::new(0.0, bob, 0.0) + off)
-                * Mat4::from_rotation_y(spin),
+            local: Mat4::from_translation(Vec3::new(0.0, bob, 0.0)) * Mat4::from_rotation_y(spin),
             ground_lift: true,
             billboard: false,
             post: Mat4::IDENTITY,
+            cluster: Some((i as u8, count as u8)),
         });
     }
+}
+
+/// Where copy `index` of `count` sits: scattered in 3D for models deeper than 1/16, else stacked
+/// along local Z with a small XY jitter (`ItemEntityRenderer#submitMultipleFromCount`).
+pub fn cluster_offset(id: i32, index: u8, count: u8, depth: f32) -> Vec3 {
+    let jitter = |salt: u32| hash01(id, u32::from(index) * 3 + salt) * 2.0 - 1.0;
+    if depth > 0.0625 {
+        if index == 0 {
+            return Vec3::ZERO;
+        }
+        return Vec3::new(jitter(0), jitter(1), jitter(2)) * 0.15;
+    }
+    let step = depth * 1.5;
+    let z = -(step * f32::from(count.saturating_sub(1)) / 2.0) + step * f32::from(index);
+    if index == 0 {
+        return Vec3::new(0.0, 0.0, z);
+    }
+    Vec3::new(jitter(0) * 0.075, jitter(1) * 0.075, z)
 }
 
 /// `OminousItemSpawnerRenderer`: the item cluster grows over 50 ticks while spinning 40 degrees a tick, fully lit.
@@ -167,25 +177,16 @@ fn ominous_item_spawner(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Pla
     };
     let scale = (v.age_ticks.clamp(0.0, 50.0) / 50.0).max(0.0);
     let spin = (v.age_ticks * 40.0).rem_euclid(360.0).to_radians();
-    for i in 0..clone_count(stack.count) {
-        let off = if i == 0 {
-            Vec3::ZERO
-        } else {
-            Vec3::new(
-                (hash01(v.id, i as u32 * 3) * 2.0 - 1.0) * 0.15,
-                (hash01(v.id, i as u32 * 3 + 1) * 2.0 - 1.0) * 0.15,
-                (hash01(v.id, i as u32 * 3 + 2) * 2.0 - 1.0) * 0.15,
-            )
-        };
+    let count = clone_count(stack.count);
+    for i in 0..count {
         plan.free_items.push(FreeItem {
             source: ItemSource::Data(idx::ITEM_STACK),
             context: ItemContext::Ground,
-            local: Mat4::from_scale(Vec3::splat(scale))
-                * Mat4::from_rotation_y(spin)
-                * Mat4::from_translation(off),
+            local: Mat4::from_scale(Vec3::splat(scale)) * Mat4::from_rotation_y(spin),
             ground_lift: true,
             billboard: false,
             post: Mat4::IDENTITY,
+            cluster: Some((i as u8, count as u8)),
         });
     }
 }
@@ -247,6 +248,7 @@ fn thrown_item(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         ground_lift: false,
         billboard: true,
         post: Mat4::IDENTITY,
+        cluster: None,
     });
 }
 
@@ -283,6 +285,7 @@ fn firework(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         ground_lift: false,
         billboard: true,
         post,
+        cluster: None,
     });
 }
 
@@ -426,6 +429,7 @@ fn item_frame(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
             ground_lift: false,
             billboard: false,
             post: Mat4::IDENTITY,
+            cluster: None,
         });
     }
 }
@@ -653,6 +657,7 @@ fn item_display(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         ground_lift: false,
         billboard: false,
         post: Mat4::IDENTITY,
+        cluster: None,
     });
 }
 
@@ -828,6 +833,25 @@ fn wither_skull(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
 mod tests {
     use super::*;
     use crate::scene::camera_orientation;
+
+    #[test]
+    fn flat_item_clusters_stack_along_z() {
+        let depth = 1.0 / 16.0;
+        let offsets: Vec<Vec3> = (0..4).map(|i| cluster_offset(7, i, 4, depth)).collect();
+        let step = depth * 1.5;
+        assert!((offsets[0].z + step * 1.5).abs() < 1e-6, "{:?}", offsets[0]);
+        for pair in offsets.windows(2) {
+            assert!((pair[1].z - pair[0].z - step).abs() < 1e-6);
+        }
+        assert!(
+            offsets
+                .iter()
+                .all(|o| o.x.abs() <= 0.075 && o.y.abs() <= 0.075)
+        );
+        assert_eq!(cluster_offset(7, 0, 4, 0.5), Vec3::ZERO);
+        let block = cluster_offset(7, 2, 4, 0.5);
+        assert!(block.abs().max_element() <= 0.15 && block != Vec3::ZERO);
+    }
 
     #[test]
     fn billboards_face_the_camera_upright() {

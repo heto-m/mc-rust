@@ -213,6 +213,15 @@ impl LocalPlayer {
         self.damage_cooldown = (self.damage_cooldown - 1).max(0);
     }
 
+    /// `MobEffectInstance#tickClient`: durations count down between server updates; -1 is endless.
+    pub fn tick_effects(&mut self) {
+        for e in self.effects.values_mut() {
+            if e.duration_ticks > 0 {
+                e.duration_ticks -= 1;
+            }
+        }
+    }
+
     pub fn apply_game_mode(&mut self, mode: GameType) {
         self.game_mode = mode;
         self.physics.spectator = mode == GameType::Spectator;

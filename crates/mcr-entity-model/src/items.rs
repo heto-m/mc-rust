@@ -35,6 +35,8 @@ pub struct ItemGeo {
     pub parts: Vec<GeoPart>,
     /// Lowest point of the model in block units after its ground transform, for dropped items.
     pub ground_offset: f32,
+    /// Z extent after the display transform; 1/16 or less lays dropped copies out flat.
+    pub depth: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -515,12 +517,15 @@ impl ItemGeometry {
             ItemContext::LeftHand | ItemContext::FirstPersonLeft
         );
         let mut min_y = f32::MAX;
+        let (mut min_z, mut max_z) = (f32::MAX, f32::MIN);
+        let mut special = false;
         let mut ground_scale = 1.0f32;
         for layer in layers {
             let model = match &layer.kind {
                 LayerKind::Model(id) => self.baked(id),
                 LayerKind::Special { base, kind } => {
                     if self.push_entity_special(&mut geo, layer, base, kind, context, stack) {
+                        special = true;
                         continue;
                     }
                     self.special_model(base, kind)
@@ -555,6 +560,8 @@ impl ItemGeometry {
                 for v in &quad.vertices {
                     let p = local.transform_point3(Vec3::from(v.pos));
                     min_y = min_y.min(p.y);
+                    min_z = min_z.min(p.z);
+                    max_z = max_z.max(p.z);
                     groups[slot].1.push(Vertex {
                         pos: v.pos,
                         bone: 0,
@@ -586,6 +593,10 @@ impl ItemGeometry {
         }
         let _ = min_y;
         geo.ground_offset = ground_scale * 0.25;
+        geo.depth = if max_z >= min_z { max_z - min_z } else { 0.0 };
+        if special {
+            geo.depth = geo.depth.max(1.0);
+        }
         (!geo.parts.is_empty()).then_some(geo)
     }
 }

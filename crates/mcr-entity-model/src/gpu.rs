@@ -87,6 +87,8 @@ pub struct PartInstance {
     pub origin: [f64; 3],
     /// Glow colour: the part is also drawn as a silhouette by [`EntityRenderer::draw_outlines`].
     pub outline: Option<[u8; 3]>,
+    /// Drawn only into the glow outline (an invisible glowing body).
+    pub hidden: bool,
 }
 
 #[repr(C)]
@@ -665,6 +667,7 @@ impl EntityRenderer {
         let flags = u32::from(inst.fullbright)
             | u32::from(inst.hurt) << 1
             | u32::from(inst.flash) << 2
+            | u32::from(inst.hidden) << 3
             | u32::from(inst.block_light.min(15)) << 8
             | u32::from(inst.sky_light.min(15)) << 12;
         self.frame_instances.push((

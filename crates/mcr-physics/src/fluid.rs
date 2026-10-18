@@ -1,4 +1,4 @@
-use crate::data::{FLUID_NONE, FLUID_WATER, PhysicsData, StateInfo, flag};
+use crate::data::{FLUID_LAVA, FLUID_NONE, FLUID_WATER, PhysicsData, StateInfo, flag};
 use crate::player::{FluidState, PlayerPhysics};
 use crate::world::CollisionWorld;
 
@@ -61,6 +61,21 @@ pub fn camera_in_water<W: CollisionWorld + ?Sized>(
     let s = data.state(w.block_state(p[0], p[1], p[2]));
     s.fluid == FLUID_WATER
         && pos[1] < f64::from(p[1]) + f64::from(camera_fluid_height(w, data, p, s))
+}
+
+/// Whether a near-plane point at `pos` is inside lava (vanilla `Camera.getFluidInCamera`).
+pub fn camera_in_lava<W: CollisionWorld + ?Sized>(
+    w: &W,
+    data: &PhysicsData,
+    pos: [f64; 3],
+) -> bool {
+    if !pos.iter().all(|v| v.is_finite()) {
+        return false;
+    }
+    let p = pos.map(|v| v.floor() as i32);
+    let s = data.state(w.block_state(p[0], p[1], p[2]));
+    s.fluid == FLUID_LAVA
+        && pos[1] <= f64::from(p[1]) + f64::from(camera_fluid_height(w, data, p, s))
 }
 
 fn blocks_fluid_flow(s: &StateInfo) -> bool {

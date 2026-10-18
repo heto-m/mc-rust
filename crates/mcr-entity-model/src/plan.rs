@@ -31,6 +31,8 @@ pub struct Part {
     pub hurt: bool,
     pub offset: Vec3,
     pub scale: f32,
+    /// Part of the body an invisible entity hides; equipment layers and eyes are not.
+    pub body: bool,
 }
 
 impl Part {
@@ -46,6 +48,7 @@ impl Part {
             hurt: true,
             offset: Vec3::ZERO,
             scale: 1.0,
+            body: true,
         }
     }
 
@@ -78,7 +81,16 @@ impl Part {
     }
 
     pub fn eyes(self) -> Self {
-        self.pipeline(Pipeline::Additive).fullbright().no_hurt()
+        self.pipeline(Pipeline::Additive)
+            .fullbright()
+            .no_hurt()
+            .not_body()
+    }
+
+    /// A layer that stays visible on an invisible entity (`EyesLayer`, equipment).
+    pub fn not_body(mut self) -> Self {
+        self.body = false;
+        self
     }
 }
 
@@ -247,6 +259,8 @@ pub struct FreeItem {
     pub ground_lift: bool,
     pub billboard: bool,
     pub post: Mat4,
+    /// Copy `index` of `count` in a dropped stack (`ItemEntityRenderer#submitMultipleFromCount`).
+    pub cluster: Option<(u8, u8)>,
 }
 
 /// Static textured geometry (paintings, block models) in block units around the entity origin.

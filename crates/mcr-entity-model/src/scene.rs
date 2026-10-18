@@ -14,7 +14,7 @@ use crate::plan::{AttachKind, ItemSource, Plan};
 use crate::pose::{Pose, evaluate};
 use crate::rig::{Binding, animate};
 use crate::texcache::TextureCache;
-use crate::view::{EntityView, Registries};
+use crate::view::{BodyVisibility, EntityView, Registries};
 
 #[derive(Debug)]
 pub(crate) struct ModelEntry {
@@ -57,10 +57,18 @@ pub struct SceneStats {
     pub models: usize,
 }
 
-/// Top surface height (0..=1) of the block cell `(x, y, z)`, or `None` when it is not solid.
-pub type BlockTop = Box<dyn Fn(i32, i32, i32) -> Option<f32> + Send + Sync>;
+/// Shadow receiver test for the air cell `(x, y, z)`: `Some(brightness)` when the block below is a
+/// visible full block and the cell's raw light is above 3, with `Lightmap.getBrightness` applied.
+pub type ShadowGround = Box<dyn Fn(i32, i32, i32) -> Option<f32> + Send + Sync>;
 
-const MAX_SHADOW_DROP: i32 = 4;
+/// `LivingEntityRenderer`'s 654311423 colour: an invisible body seen by a spectator.
+const INVISIBLE_ALPHA: u16 = 38;
+const MAX_SHADOW_PIECES: usize = 256;
+/// Frame order of the `fire_0` and `fire_1` strips (`.png.mcmeta`), one tick each.
+const FIRE_FRAMES: [u8; 32] = [
+    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+    10, 11, 12, 13, 14, 15,
+];
 const PARALLEL_MIN: usize = 256;
 
 type BoundMap = FxHashMap<(usize, &'static str), Option<BoundAnimation>>;
@@ -202,7 +210,7 @@ pub struct EntityScene {
     outline: Option<[u8; 3]>,
     sprite_models: FxHashMap<[u32; 4], ModelId>,
     bolts: FxHashMap<u32, ModelId>,
-    block_top: Option<BlockTop>,
+    shadow_ground: Option<ShadowGround>,
     shadows: bool,
     pub(crate) maps: crate::maps::MapTable,
     tags: Vec<TagSource>,
@@ -228,6 +236,14 @@ impl EntityScene {
         textures.register("dyn:hitbox", || {
             crate::assets::ImageRgba::solid(2, 2, [255, 40, 200, 110])
         });
+        for (key, path) in [
+            ("dyn:fire_0", "block/fire_0"),
+            ("dyn:fire_1", "block/fire_1"),
+        ] {
+            if let Some(grid) = assets.read_texture(path).as_ref().and_then(fire_grid) {
+                textures.register(key, || grid);
+            }
+        }
         Ok(EntityScene {
             gpu: EntityRenderer::new(device, queue, formats),
             bound: FxHashMap::default(),
@@ -246,7 +262,7 @@ impl EntityScene {
             outline: None,
             sprite_models: FxHashMap::default(),
             bolts: FxHashMap::default(),
-            block_top: None,
+            shadow_ground: None,
             shadows: true,
             maps: Default::default(),
             tags: Vec::new(),
@@ -265,9 +281,9 @@ impl EntityScene {
         self.camera_angles
     }
 
-    /// Lets entities cast blob shadows on the top surface of the block below them.
-    pub fn set_block_top(&mut self, block_top: Option<BlockTop>) {
-        self.block_top = block_top;
+    /// Lets entities cast shadows on the blocks below them.
+    pub fn set_shadow_ground(&mut self, ground: Option<ShadowGround>) {
+        self.shadow_ground = ground;
     }
 
     pub fn set_shadows(&mut self, enabled: bool) {
@@ -322,18 +338,18 @@ impl EntityScene {
         registries: &dyn Registries,
         entities: impl Iterator<Item = EntityView<'a>>,
     ) {
-        let top = self.block_top.take();
+        let top = self.shadow_ground.take();
         self.update_with(
             registries,
             entities,
             top.as_deref()
                 .map(|f| f as &dyn Fn(i32, i32, i32) -> Option<f32>),
         );
-        self.block_top = top;
+        self.shadow_ground = top;
     }
 
     /// Like [`Self::update`] with a borrowed ground lookup, for callers whose world cannot be
-    /// moved into a [`BlockTop`].
+    /// moved into a [`ShadowGround`].
     pub fn update_grounded<'a>(
         &mut self,
         registries: &dyn Registries,
@@ -477,12 +493,26 @@ impl EntityScene {
         self.outline = v.outline;
         for pj in &job.parts {
             let part = &plan.parts[pj.part];
+            let (mut pipeline, mut tint, mut hidden) = (part.pipeline, part.tint, false);
+            if part.body {
+                match v.body {
+                    BodyVisibility::Visible => {}
+                    BodyVisibility::Translucent => {
+                        if pipeline == crate::gpu::Pipeline::Cutout {
+                            pipeline = crate::gpu::Pipeline::Translucent;
+                        }
+                        tint[3] = (u16::from(tint[3]) * INVISIBLE_ALPHA / 255) as u8;
+                    }
+                    BodyVisibility::Hidden if self.outline.is_some() => hidden = true,
+                    BodyVisibility::Hidden => continue,
+                }
+            }
             self.gpu.push(&PartInstance {
                 model: self.models[pj.mi].id,
                 texture: pj.tex,
-                pipeline: part.pipeline,
+                pipeline,
                 bone_base: base + pj.bone_off,
-                tint: part.tint,
+                tint,
                 hurt: hurt && part.hurt,
                 flash: plan.flash_parts && part.hurt,
                 fullbright: part.fullbright,
@@ -491,6 +521,7 @@ impl EntityScene {
                 uv_offset: part.uv_offset,
                 origin: v.pos,
                 outline: self.outline,
+                hidden,
             });
             self.stats.parts += 1;
         }
@@ -502,6 +533,9 @@ impl EntityScene {
         }
         self.emit_free(v, plan);
         self.outline = None;
+        if v.on_fire {
+            self.push_flame(v);
+        }
         self.emit_shadow(v, plan, block_top);
         if let Some(name) = v.custom_name {
             let height = mcr_data::v26_3()
@@ -546,7 +580,11 @@ impl EntityScene {
                         ItemSource::Data(index) => v.stack(*index),
                     };
                     let Some(stack) = stack else { continue };
-                    self.items.item(stack, *context)
+                    let using = match source {
+                        ItemSource::Equipment(slot) => use_state(v, *slot),
+                        ItemSource::Data(_) => None,
+                    };
+                    self.items.item_using(stack, *context, using)
                 }
                 AttachKind::Block { state } => self.items.block(*state),
             };
@@ -595,6 +633,7 @@ impl EntityScene {
                 uv_offset: [0.0; 2],
                 origin,
                 outline: self.outline,
+                hidden: false,
             });
             self.stats.parts += 1;
             if glint {
@@ -619,6 +658,7 @@ impl EntityScene {
                     uv_offset: glint_scroll(age_ticks),
                     origin,
                     outline: self.outline,
+                    hidden: false,
                 });
                 self.stats.parts += 1;
             }
@@ -646,7 +686,10 @@ impl EntityScene {
             } else {
                 Mat4::IDENTITY
             };
-            let mut m = item.local * lift;
+            let cluster = item.cluster.map_or(Vec3::ZERO, |(i, n)| {
+                crate::misc::cluster_offset(v.id, i, n, geo.depth)
+            });
+            let mut m = item.local * Mat4::from_translation(cluster) * lift;
             if item.billboard {
                 m = m * self.billboard * item.post;
             }
@@ -754,6 +797,7 @@ impl EntityScene {
                         uv_offset: [0.0; 2],
                         origin: v.pos,
                         outline: self.outline,
+                        hidden: false,
                     });
                     self.stats.parts += 1;
                 }
@@ -866,6 +910,7 @@ impl EntityScene {
             uv_offset: [0.0; 2],
             origin: v.pos,
             outline: self.outline,
+            hidden: false,
         });
         self.stats.parts += 1;
     }
@@ -906,20 +951,22 @@ impl EntityScene {
             uv_offset: [0.0; 2],
             origin: v.pos,
             outline: self.outline,
+            hidden: false,
         });
         self.stats.parts += 1;
     }
 
+    /// `EntityRenderer#extractShadow`: one piece per receiving block, fading out by 16 blocks away.
     fn emit_shadow(
         &mut self,
         v: &EntityView<'_>,
         plan: &Plan,
-        top: Option<&dyn Fn(i32, i32, i32) -> Option<f32>>,
+        ground: Option<&dyn Fn(i32, i32, i32) -> Option<f32>>,
     ) {
-        if !self.shadows || v.invisible || plan.parts.is_empty() {
+        if !self.shadows || v.invisible {
             return;
         }
-        let Some(top) = top else { return };
+        let Some(ground) = ground else { return };
         let Some(name) = mcr_data::v26_3().entity_type_name(v.type_id as u32) else {
             return;
         };
@@ -932,37 +979,158 @@ impl EntityScene {
         else {
             return;
         };
-        let radius = radius * v.scale * plan.scale * plan.extra_scale.x.abs().max(1.0);
-        if radius <= 0.0 || v.death_time > 0.0 {
+        let radius = (radius * v.scale * plan.scale * plan.extra_scale.x.abs().max(1.0)).min(32.0);
+        if radius.is_nan() || radius <= 0.0 || !v.pos.iter().all(|c| c.is_finite()) {
             return;
         }
-        let (bx, bz) = (v.pos[0].floor() as i32, v.pos[2].floor() as i32);
-        let by = (v.pos[1] - 1e-4).floor() as i32;
-        let mut ground = None;
-        for dy in 0..=MAX_SHADOW_DROP {
-            if let Some(h) = top(bx, by - dy, bz) {
-                ground = Some(f64::from(by - dy) + f64::from(h.clamp(0.0, 1.0)));
-                break;
+        let strength = match name {
+            "minecraft:item" | "minecraft:experience_orb" => 0.75,
+            _ => 1.0,
+        };
+        let dist_sq: f64 = (0..3).map(|i| (v.pos[i] - self.camera[i]).powi(2)).sum();
+        let pow = ((1.0 - dist_sq / 256.0) * strength) as f32;
+        if pow <= 0.0 {
+            return;
+        }
+        let r = f64::from(radius);
+        let [ex, ey, ez] = v.pos;
+        let depth = f64::from((pow / 0.5 - 1.0).min(radius));
+        let (y0, y1) = ((ey - depth).floor() as i32, ey.floor() as i32);
+        let mut pieces = 0;
+        for z in (ez - r).floor() as i32..=(ez + r).floor() as i32 {
+            for x in (ex - r).floor() as i32..=(ex + r).floor() as i32 {
+                for y in y0..=y1 {
+                    if pieces >= MAX_SHADOW_PIECES {
+                        return;
+                    }
+                    let Some(light) = ground(x, y, z) else {
+                        continue;
+                    };
+                    let power = pow - (ey - f64::from(y)) as f32 * 0.5;
+                    let alpha = (power * 0.5 * light).clamp(0.0, 1.0);
+                    if alpha <= 0.0 {
+                        continue;
+                    }
+                    let rel = [
+                        (f64::from(x) - ex) as f32,
+                        (f64::from(y) - ey) as f32,
+                        (f64::from(z) - ez) as f32,
+                    ];
+                    self.push_shadow_piece(v, rel, radius, alpha);
+                    pieces += 1;
+                }
             }
         }
-        let Some(ground) = ground else { return };
-        let drop = (v.pos[1] - ground) as f32;
-        let strength = 0.5 * (1.0 - drop / (2.0 * radius.max(0.5)));
-        if drop < -0.05 || strength <= 0.0 {
+    }
+
+    /// The block top at `rel` clipped to the shadow square, its texture spread over `2 * radius`.
+    fn push_shadow_piece(&mut self, v: &EntityView<'_>, rel: [f32; 3], radius: f32, alpha: f32) {
+        let (xa, xb) = (rel[0].max(-radius), (rel[0] + 1.0).min(radius));
+        let (za, zb) = (rel[2].max(-radius), (rel[2] + 1.0).min(radius));
+        if xa >= xb || za >= zb {
             return;
         }
-        let alpha = (strength.clamp(0.0, 1.0) * 255.0) as u8;
-        let matrix = Mat4::from_translation(Vec3::new(0.0, -drop + 0.015, 0.0))
-            * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
-            * Mat4::from_scale(Vec3::splat(radius * 2.0));
-        self.push_sprite(
-            "misc/shadow",
-            [0.0, 0.0, 1.0, 1.0],
-            matrix,
-            [0, 0, 0, alpha],
-            crate::gpu::Pipeline::Translucent,
-            v,
-        );
+        let mut tex = self
+            .textures
+            .resolve("misc/shadow", &mut self.gpu, &self.assets);
+        let model = self.quad_model();
+        let Some((base, out)) = self.gpu.alloc_bones(1) else {
+            return;
+        };
+        out[0] = crate::gpu::Bone34::from_mat(&Mat4::from_cols(
+            Vec4::new(-(xb - xa), 0.0, 0.0, 0.0),
+            Vec4::new(0.0, 0.0, -(zb - za), 0.0),
+            Vec4::new(0.0, 1.0, 0.0, 0.0),
+            Vec4::new((xa + xb) * 0.5, rel[1] + 0.01, (za + zb) * 0.5, 1.0),
+        ));
+        let to_uv = |p: f32| -p / (2.0 * radius) + 0.5;
+        let uv_offset = [tex.uv_scale[0] * to_uv(xa), tex.uv_scale[1] * to_uv(za)];
+        tex.uv_scale = [
+            tex.uv_scale[0] * -(xb - xa) / (2.0 * radius),
+            tex.uv_scale[1] * -(zb - za) / (2.0 * radius),
+        ];
+        self.gpu.push(&PartInstance {
+            model,
+            texture: tex,
+            pipeline: crate::gpu::Pipeline::Translucent,
+            bone_base: base,
+            tint: [0, 0, 0, (alpha * 255.0) as u8],
+            hurt: false,
+            flash: false,
+            fullbright: true,
+            block_light: 15,
+            sky_light: 15,
+            uv_offset,
+            origin: v.pos,
+            outline: None,
+            hidden: false,
+        });
+        self.stats.parts += 1;
+    }
+
+    /// `FlameFeatureRenderer`: stacked fire sprites turned toward the camera around the vertical axis.
+    fn push_flame(&mut self, v: &EntityView<'_>) {
+        let Some(info) = u32::try_from(v.type_id)
+            .ok()
+            .and_then(|t| mcr_data::v26_3().entity_type_info(t))
+        else {
+            return;
+        };
+        let age = if crate::catalog::is_baby(v) { 0.5 } else { 1.0 };
+        let (w, h) = (info.width * v.scale * age, info.height * v.scale * age);
+        let s = w * 1.4;
+        if !(s > 0.0 && s.is_finite() && h.is_finite()) {
+            return;
+        }
+        let mut h = (h / s).min(64.0);
+        let frame = usize::from(FIRE_FRAMES[(v.age_ticks.max(0.0) as usize) % FIRE_FRAMES.len()]);
+        let (col, row) = ((frame % 8) as f32, (frame / 8) as f32);
+        let base = Mat4::from_scale(Vec3::splat(s))
+            * camera_orientation(self.camera_angles.0, 0.0)
+            * Mat4::from_translation(Vec3::new(0.0, 0.0, 0.3 - h.floor() * 0.02));
+        let model = self.quad_model();
+        let (mut r, mut y, mut z, mut k) = (0.5f32, 0.0f32, 0.0f32, 0u32);
+        while h > 0.0 {
+            let key = if k % 2 == 0 {
+                "dyn:fire_0"
+            } else {
+                "dyn:fire_1"
+            };
+            let mut tex = self.textures.resolve(key, &mut self.gpu, &self.assets);
+            let flip = if (k / 2) % 2 == 0 { -1.0 } else { 1.0 };
+            let Some((bone, out)) = self.gpu.alloc_bones(1) else {
+                return;
+            };
+            out[0] = crate::gpu::Bone34::from_mat(
+                &(base
+                    * Mat4::from_translation(Vec3::new(0.0, y + 0.7, z))
+                    * Mat4::from_scale(Vec3::new(2.0 * r * flip, 1.4, 1.0))),
+            );
+            let uv_offset = [tex.uv_scale[0] * col / 8.0, tex.uv_scale[1] * row / 4.0];
+            tex.uv_scale = [tex.uv_scale[0] / 8.0, tex.uv_scale[1] / 4.0];
+            self.gpu.push(&PartInstance {
+                model,
+                texture: tex,
+                pipeline: crate::gpu::Pipeline::Cutout,
+                bone_base: bone,
+                tint: [255; 4],
+                hurt: false,
+                flash: false,
+                fullbright: false,
+                block_light: 15,
+                sky_light: v.light[1],
+                uv_offset,
+                origin: v.pos,
+                outline: None,
+                hidden: false,
+            });
+            self.stats.parts += 1;
+            h -= 0.45;
+            y += 0.45;
+            r *= 0.9;
+            z -= 0.03;
+            k += 1;
+        }
     }
 
     pub(crate) fn quad_model(&mut self) -> ModelId {
@@ -1067,11 +1235,14 @@ pub(crate) fn camera_orientation(yaw: f32, pitch: f32) -> Mat4 {
 
 /// Maps model space (sixteenths, y down) to world space around the entity's own origin.
 fn entity_transform(v: &EntityView<'_>, plan: &Plan) -> Mat4 {
-    let yaw = if plan.skip_rotation {
+    let mut yaw = if plan.skip_rotation {
         0.0
     } else {
         v.body_yaw + plan.body_yaw_offset
     };
+    if v.shaking {
+        yaw += ((v.age_ticks.floor() * 3.25).cos() * std::f32::consts::PI * 0.4).to_degrees();
+    }
     let sleeping = v.pose() == mcr_protocol::types::entity_data::Pose::Sleeping;
     let mut m = Mat4::IDENTITY;
     if sleeping && let Some(bed) = v.bed {
@@ -1102,6 +1273,14 @@ fn entity_transform(v: &EntityView<'_>, plan: &Plan) -> Mat4 {
         m *= Mat4::from_rotation_y(angle.to_radians())
             * Mat4::from_rotation_z(plan.flip.to_radians())
             * Mat4::from_rotation_y(270f32.to_radians());
+    } else if v.upside_down {
+        let height = u32::try_from(v.type_id)
+            .ok()
+            .and_then(|t| mcr_data::v26_3().entity_type_info(t))
+            .map_or(1.8, |i| i.height);
+        let scale = (v.scale * plan.scale).max(1.0e-3);
+        m *= Mat4::from_translation(Vec3::new(0.0, (height * v.scale + 0.1) / scale, 0.0))
+            * Mat4::from_rotation_z(std::f32::consts::PI);
     }
     m *= plan.post_rot;
     m * Mat4::from_translation(plan.extra_offset)
@@ -1117,6 +1296,53 @@ impl std::fmt::Debug for EntityScene {
             .field("stats", &self.stats)
             .finish_non_exhaustive()
     }
+}
+
+/// Long enough for every item that animates with use (bows, crossbows, tridents, shields).
+const USE_DURATION: f32 = 72000.0;
+
+/// `(ticks used, ticks remaining)` when the holder is using the item in equipment `slot`.
+fn use_state(v: &EntityView<'_>, slot: usize) -> Option<(f32, f32)> {
+    if !v.living_flag(0) {
+        return None;
+    }
+    let off_hand = v.living_flag(1);
+    let used = match slot {
+        crate::view::slot::MAINHAND => !off_hand,
+        crate::view::slot::OFFHAND => off_hand,
+        _ => false,
+    };
+    used.then(|| {
+        let ticks = v.use_ticks.clamp(0.0, USE_DURATION);
+        (ticks, USE_DURATION - ticks)
+    })
+}
+
+/// Lays the `fire_0` strip out as 8 by 4 frames so it fits a small texture class.
+fn fire_grid(strip: &crate::assets::ImageRgba) -> Option<crate::assets::ImageRgba> {
+    let w = strip.width.min(128);
+    if w == 0
+        || strip.height < w * 32
+        || strip.rgba.len() < (strip.width * strip.height * 4) as usize
+    {
+        return None;
+    }
+    let (gw, gh) = (w * 8, w * 4);
+    let mut rgba = vec![0u8; (gw * gh * 4) as usize];
+    for f in 0..32 {
+        let (cx, cy) = ((f % 8) * w, (f / 8) * w);
+        for y in 0..w {
+            let src = (((f * w + y) * strip.width) * 4) as usize;
+            let dst = (((cy + y) * gw + cx) * 4) as usize;
+            rgba[dst..dst + (w * 4) as usize]
+                .copy_from_slice(&strip.rgba[src..src + (w * 4) as usize]);
+        }
+    }
+    Some(crate::assets::ImageRgba {
+        width: gw,
+        height: gh,
+        rgba,
+    })
 }
 
 pub(crate) fn glint_scroll(age: f32) -> [f32; 2] {

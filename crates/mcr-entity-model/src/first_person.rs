@@ -93,6 +93,7 @@ impl EntityScene {
                     uv_offset: [0.0; 2],
                     origin: [0.0; 3],
                     outline: None,
+                    hidden: false,
                 });
                 self.stats.parts += 1;
             }
@@ -157,6 +158,7 @@ impl EntityScene {
             uv_offset: [0.0; 2],
             origin,
             outline: None,
+            hidden: false,
         });
         self.stats.parts += 1;
     }

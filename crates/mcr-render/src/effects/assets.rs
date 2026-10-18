@@ -63,6 +63,7 @@ const MOON_NAMES: [&str; 8] = [
 pub struct EffectAssets {
     pub sun: EffectImage,
     pub moons: [EffectImage; 8],
+    pub end_flash: EffectImage,
     pub end_sky: EffectImage,
     pub clouds: EffectImage,
     pub rain: EffectImage,
@@ -89,6 +90,7 @@ impl EffectAssets {
                     clear,
                 )
             }),
+            end_flash: get("environment/celestial/end_flash", clear),
             end_sky: get("environment/end_sky", [20, 10, 30, 255]),
             clouds: get("environment/clouds", clear),
             rain: get("environment/rain", clear),

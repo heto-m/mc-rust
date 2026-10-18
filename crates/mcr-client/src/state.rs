@@ -642,6 +642,7 @@ impl ClientState {
             });
         }
         self.player.tick_hurt();
+        self.player.tick_effects();
         self.player.tick_sleep();
     }
 

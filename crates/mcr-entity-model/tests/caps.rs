@@ -48,6 +48,7 @@ fn hostile_instance_and_bone_counts_are_capped() {
             uv_offset: [0.0; 2],
             origin: [i as f64, 0.0, 0.0],
             outline: None,
+            hidden: false,
         });
     }
     assert!(r.instance_count() <= mcr_entity_model::MAX_INSTANCES);

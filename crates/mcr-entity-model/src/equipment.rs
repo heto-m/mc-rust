@@ -111,11 +111,10 @@ pub fn add_layers(
         };
         let Some(color) = color else { continue };
         let tex = format!("entity/equipment/{layer_type}/{}", short(&layer.texture));
-        let mut part = Part::new(model.to_owned(), tex);
+        let mut part = Part::new(model.to_owned(), tex).no_hurt().not_body();
         if layer.dyeable {
             part = part.tint(argb_rgb(color));
         }
-        part.hurt = true;
         plan.push(part);
     }
     if plan.parts.len() == before {
@@ -124,7 +123,8 @@ pub fn add_layers(
     if has_glint(stack) {
         let mut glint = Part::new(model.to_owned(), "misc/enchanted_glint_armor")
             .pipeline(Pipeline::Additive)
-            .no_hurt();
+            .no_hurt()
+            .not_body();
         glint.tint = [160, 100, 255, 150];
         glint.uv_offset = [
             (plan.anim.age * 0.01).fract(),
@@ -136,7 +136,10 @@ pub fn add_layers(
         && let Some(DataComponent::Trim(trim)) = component(stack, "trim")
         && let Some(key) = trim_texture(cx, &info, layer_type, trim)
     {
-        let part = Part::new(model.to_owned(), key).pipeline(Pipeline::Decal);
+        let part = Part::new(model.to_owned(), key)
+            .pipeline(Pipeline::Decal)
+            .no_hurt()
+            .not_body();
         plan.push(part);
     }
     true

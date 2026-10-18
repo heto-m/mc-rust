@@ -45,7 +45,10 @@ mod slot {
     pub const SNOW: usize = 7;
     pub const DESTROY: usize = 8;
     pub const BORDER: usize = 9;
+    pub const END_FLASH: usize = 10;
 }
+
+const END_FLASH_LAYER: f32 = 9.0;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -74,6 +77,7 @@ struct Plan {
     moon: bool,
     stars: bool,
     end: bool,
+    end_flash: bool,
     clouds: bool,
     rain: u32,
     snow: u32,
@@ -205,13 +209,16 @@ fn texture_array(
         view_formats: &[],
     });
     for (layer, image) in images.iter().enumerate() {
-        let (iw, ih) = (image.width.min(w), image.height.min(h));
-        let row = image.width as usize * 4;
         let mut data = vec![0u8; (w * h * 4) as usize];
-        for y in 0..ih as usize {
-            let n = iw as usize * 4;
-            data[y * w as usize * 4..y * w as usize * 4 + n]
-                .copy_from_slice(&image.rgba[y * row..y * row + n]);
+        let (iw, ih) = (image.width as usize, image.height as usize);
+        if iw > 0 && ih > 0 && image.rgba.len() >= iw * ih * 4 {
+            for y in 0..h as usize {
+                for x in 0..w as usize {
+                    let src = ((y * ih / h as usize) * iw + x * iw / w as usize) * 4;
+                    let dst = (y * w as usize + x) * 4;
+                    data[dst..dst + 4].copy_from_slice(&image.rgba[src..src + 4]);
+                }
+            }
         }
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -475,6 +482,7 @@ impl Effects {
     pub(crate) fn set_assets(&mut self, assets: &EffectAssets) {
         let mut celestial: Vec<&EffectImage> = vec![&assets.sun];
         celestial.extend(assets.moons.iter());
+        celestial.push(&assets.end_flash);
         let destroy: Vec<&EffectImage> = assets.destroy.iter().collect();
         let (d, q) = (&self.device, &self.queue);
         let textures = Textures {
@@ -693,6 +701,19 @@ impl Effects {
             Skybox::End => {
                 uniforms[slot::END] = FxUniform::new(Mat4::IDENTITY, [1.0; 4]);
                 self.plan.end = true;
+                if let Some([intensity, x, y]) = env.end_flash
+                    && intensity > 1.0e-5
+                    && [intensity, x, y].iter().all(|v| v.is_finite())
+                {
+                    let i = intensity.min(1.0);
+                    let model = Mat4::from_rotation_y((180.0 - y).to_radians())
+                        * Mat4::from_rotation_x((-90.0 - x).to_radians())
+                        * Mat4::from_translation(Vec3::new(0.0, 100.0, 0.0))
+                        * Mat4::from_scale(Vec3::new(60.0, 1.0, 60.0));
+                    uniforms[slot::END_FLASH] = FxUniform::new(model, [i; 4]);
+                    uniforms[slot::END_FLASH].misc[0] = END_FLASH_LAYER;
+                    self.plan.end_flash = true;
+                }
             }
             _ => {}
         }
@@ -716,7 +737,8 @@ impl Effects {
             }
             if self.clouds.quads > 0 && env.cloud_color[3] > 0.0 {
                 let mut u = FxUniform::new(Mat4::IDENTITY, env.cloud_color);
-                let fog_end = (self.cloud_settings.range_chunks.clamp(2, 128) * 16) as f32;
+                let range = (self.cloud_settings.range_chunks.clamp(2, 128) * 16) as f32;
+                let fog_end = range.min(env.cloud_fog_end);
                 u.extra = [
                     self.clouds.offset[0],
                     self.clouds.offset[1],
@@ -750,7 +772,7 @@ impl Effects {
             self.plan.border = (verts.len() / 4) as u32;
             uniforms[slot::BORDER] = FxUniform::new(Mat4::IDENTITY, [1.0; 4]);
         }
-        let mut bytes = vec![0u8; (SLOT * SLOTS) as usize];
+        let mut bytes = [0u8; (SLOT * SLOTS) as usize];
         for (i, u) in uniforms.iter().enumerate() {
             let at = i * SLOT as usize;
             bytes[at..at + size_of::<FxUniform>()].copy_from_slice(bytemuck::bytes_of(u));
@@ -768,6 +790,11 @@ impl Effects {
             pass.set_pipeline(&self.pipelines.end);
             pass.set_bind_group(1, &g.end, &at(slot::END));
             pass.draw(l.end_quad * 6..(l.end_quad + 6) * 6, 0..1);
+        }
+        if p.end_flash {
+            pass.set_pipeline(&self.pipelines.celestial);
+            pass.set_bind_group(1, &g.sky, &at(slot::END_FLASH));
+            pass.draw(l.sun_quad * 6..(l.sun_quad + 1) * 6, 0..1);
         }
         if p.sunrise {
             pass.set_pipeline(&self.pipelines.sunrise);

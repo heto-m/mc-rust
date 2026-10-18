@@ -29,7 +29,8 @@ pub use effects::{
     WorldBorderVisual,
 };
 pub use environment::{
-    CARDINAL_DEFAULT, CARDINAL_NETHER, Environment, OverworldBase, Rgb, Skybox, hex, srgb_lerp,
+    CARDINAL_DEFAULT, CARDINAL_NETHER, Environment, FogInputs, FogKind, Lightmap, Look,
+    OverworldBase, Rgb, Skybox, hex, srgb_lerp,
 };
 pub use external::{ExternalCtx, ExternalSubmitter, FrameBatch};
 pub use glow::GlowOutline;

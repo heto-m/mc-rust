@@ -34,7 +34,7 @@ pub use assets::{
     EquipmentInfo, EquipmentLayer, Equippable, ImageRgba, MAX_EQUIPMENT_MISSES, SceneAssets,
     TrimOverride, load_jar_texture, missing_image,
 };
-pub use catalog::{Catalog, PlanCx, Simple};
+pub use catalog::{Catalog, PlanCx, Simple, is_baby};
 pub use cube::{Vertex, unwrap_cube};
 pub use data::{
     AnimationDef, AnimationSet, ChannelDef, CubeDef, Interp, KeyframeDef, LayerDef, LayerSet,
@@ -48,17 +48,18 @@ pub use gpu::{
 pub use humanoids::default_skin;
 pub use items::clone_count;
 pub use maps::{MapDecoration, stack_map_id};
-pub use misc::{display_local, hidden_while_fresh};
+pub use misc::{cluster_offset, display_local, hidden_while_fresh};
 pub use model::{Bone, BoneId, Model};
 pub use plan::{Attach, AttachKind, FreeGeo, ItemContext, ItemSource, Part, Plan};
 pub use pose::{Pose, evaluate};
 pub use rig::{
     AnimIn, ArmPose, Binding, HumanoidStyle, IllagerPose, PiglinPose, Rig, Slot, animate,
 };
-pub use scene::{BlockTop, EntityScene, FrameParams, NameTag, SceneStats};
+pub use scene::{EntityScene, FrameParams, NameTag, SceneStats, ShadowGround};
 pub use texcache::TextureCache;
 pub use view::{
-    BedFacing, EntityData, EntityView, EventAnim, Glide, NoData, PlayerView, Registries, Skin, slot,
+    BedFacing, BodyVisibility, EntityData, EntityView, EventAnim, Glide, NoData, PlayerView,
+    Registries, Skin, slot,
 };
 
 pub use glam;

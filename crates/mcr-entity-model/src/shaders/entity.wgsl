@@ -68,7 +68,11 @@ fn to_linear(c: vec3<f32>) -> vec3<f32> {
 
 @vertex
 fn vs_main(v: VertexIn) -> VertexOut {
-    return transform(v);
+    var out = transform(v);
+    if (instances[v.instance].flags & 8u) != 0u {
+        out.clip = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+    }
+    return out;
 }
 
 fn transform(v: VertexIn) -> VertexOut {

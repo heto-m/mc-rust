@@ -9,12 +9,13 @@ use mcr_entity_model::mcr_protocol::types::ItemStack;
 use mcr_entity_model::mcr_protocol::types::entity_data::{EntityDataValue, Pose as DataPose};
 use mcr_entity_model::wgpu;
 use mcr_entity_model::{
-    DisplayTrack, EntityData, EntityScene, EntityView, FrameParams, Glide, LightInfo, NoData,
-    PlayerView, PoseLerp, Registries, SceneAssets, TargetFormats, display_local,
+    BodyVisibility, DisplayTrack, EntityData, EntityScene, EntityView, FrameParams, Glide,
+    LightInfo, NoData, PlayerView, PoseLerp, Registries, SceneAssets, TargetFormats, display_local,
     hidden_while_fresh, idx, slot, teleport_duration,
 };
 use mcr_physics::Pose as PhysPose;
 use mcr_protocol::play::serverbound::Facing;
+use mcr_protocol::types::game::GameType;
 use mcr_render::{Camera, Frustum};
 use mcr_ui::Ui;
 use mcr_world::{ChunkPos, ChunkStore};
@@ -115,6 +116,9 @@ pub struct Track {
     death: i32,
     seen: u64,
     living: bool,
+    /// `getTicksUsingItem`: ticks since the using flag came on; `use_off` is the hand.
+    use_ticks: u32,
+    use_off: bool,
     glide: GlideTrack,
     display: DisplayTrack,
     display_kind: DisplayKind,
@@ -236,6 +240,8 @@ impl Track {
             death: 0,
             seen: 0,
             living,
+            use_ticks: 0,
+            use_off: false,
             glide: GlideTrack::default(),
             display: DisplayTrack::default(),
             display_kind: DisplayKind::None,
@@ -248,14 +254,30 @@ impl Track {
         if self.age == 0 {
             *self = Track::new(local.feet, local.yaw, local.yaw, local.pitch, true);
         }
-        self.advance(local.feet, local.yaw, local.yaw, local.pitch, local.dead);
+        self.advance(
+            local.feet,
+            local.yaw,
+            local.yaw,
+            local.pitch,
+            local.dead,
+            1.0,
+        );
         self.glide.tick(local.gliding, local.crouching, local.vel);
         if !local.dead {
             self.death = 0;
         }
     }
 
-    fn advance(&mut self, pos: [f64; 3], yaw: f32, head: f32, pitch: f32, dead: bool) {
+    /// `walk_scale` is `WalkAnimationState#update`'s position scale: 3 for babies.
+    fn advance(
+        &mut self,
+        pos: [f64; 3],
+        yaw: f32,
+        head: f32,
+        pitch: f32,
+        dead: bool,
+        walk_scale: f32,
+    ) {
         self.prev_pos = self.pos;
         self.prev_yaw = self.yaw;
         self.prev_head = self.head;
@@ -267,7 +289,7 @@ impl Track {
         let dz = (self.pos[2] - self.prev_pos[2]) as f32;
         let target = ((dx * dx + dz * dz).sqrt() * 4.0).min(1.0);
         self.speed += (target - self.speed) * WALK_SMOOTHING;
-        self.walk += self.speed;
+        self.walk += self.speed * walk_scale;
         self.age = self.age.wrapping_add(1);
         self.swing = (self.swing - 1).max(0);
         self.hurt = (self.hurt - 1).max(0);
@@ -301,6 +323,16 @@ impl Track {
         if head_rel.abs() > HEAD_BODY_LIMIT {
             self.body += head_rel - head_rel.signum() * HEAD_BODY_LIMIT;
         }
+    }
+
+    fn tick_use(&mut self, flags: u8) {
+        let (using, off) = (flags & 1 != 0, flags & 2 != 0);
+        self.use_ticks = if using && (self.use_ticks == 0 || off == self.use_off) {
+            self.use_ticks.saturating_add(1)
+        } else {
+            u32::from(using)
+        };
+        self.use_off = off;
     }
 
     fn start_swing(&mut self, off_hand: bool) {
@@ -373,6 +405,15 @@ pub struct FrameCtx<'a> {
     pub spectator_outlines: bool,
     /// `getBackgroundOpacity(0.25)`: the default text display background.
     pub text_background_opacity: f32,
+    /// The local player's item use: off hand, then ticks used.
+    pub local_use: Option<(bool, f32)>,
+    pub entity_shadows: bool,
+    /// Sky light the time of day takes away (`Level#getSkyDarken`).
+    pub sky_darken: u8,
+    /// The dimension type's `ambient_light`.
+    pub ambient_light: f32,
+    /// `gameplay/piglins_zombify` of the dimension: piglins and hoglins shake.
+    pub piglins_zombify: bool,
 }
 
 /// `Entity.getTeamColor` when vanilla's `shouldEntityAppearGlowing` holds; `entry` is the
@@ -492,7 +533,22 @@ impl EntityLayer {
                 t.pose_lerp
                     .step(teleport_duration(&e.data), e.pos, e.yaw, e.pitch)
             };
-            t.advance(pos, yaw, e.head_yaw, pitch, dead);
+            let baby = living && mcr_entity_model::is_baby(&EntityView::new(e.kind, &e.data));
+            t.advance(
+                pos,
+                yaw,
+                e.head_yaw,
+                pitch,
+                dead,
+                if baby { 3.0 } else { 1.0 },
+            );
+            if living {
+                let flags = match e.data.get(&8) {
+                    Some(EntityDataValue::Byte(f)) => *f as u8,
+                    _ => 0,
+                };
+                t.tick_use(flags);
+            }
             if display_kind != DisplayKind::None {
                 t.display.tick(&e.data);
             }
@@ -565,6 +621,15 @@ impl EntityLayer {
     /// Builds this frame's instances; returns the drawn entity count.
     pub fn update(&mut self, cx: &FrameCtx<'_>, ui: &mut Ui) {
         self.refresh_local(cx.state);
+        let server = match self.local_data.get(&8) {
+            Some(EntityDataValue::Byte(f)) => *f as u8 & !3,
+            _ => 0,
+        };
+        let using = cx
+            .local_use
+            .map_or(0, |(off_hand, _)| 1 | u8::from(off_hand) << 1);
+        self.local_data
+            .insert(8, EntityDataValue::Byte((server | using) as i8));
         let Self {
             scene,
             tracks,
@@ -623,6 +688,8 @@ impl EntityLayer {
             );
             v.equipment = Some(&*local_equipment);
             v.bed = bed_of(cx.state, &v);
+            v.passenger = cx.state.player.vehicle.is_some();
+            v.use_ticks = cx.local_use.map_or(0.0, |(_, ticks)| ticks);
             apply_events(&mut v, cx.events.view(local_id, cx.partial));
             v.attack_time = cx.local_swing;
             v.player = PlayerView {
@@ -637,6 +704,12 @@ impl EntityLayer {
                 v.light[0] = 15;
             }
             v.outline = glow_color(cx, local_data, true, || Some(cx.state.name.clone()));
+            let spectator = cx.state.player.game_mode == GameType::Spectator;
+            decorate(cx, &mut v, "minecraft:player", true, spectator, || {
+                Some(cx.state.name.clone())
+            });
+            v.upside_down = is_upside_down_name(&cx.state.name) && v.player_part(0);
+            flip_head(&mut v);
             v
         });
         let views = tracks
@@ -709,13 +782,33 @@ impl EntityLayer {
                     view.light = display_light(e, view.light);
                 }
                 let is_player = e.kind == *player_type;
-                view.outline = glow_color(cx, &e.data, is_player, || {
+                let entry = || {
                     if is_player {
                         cx.state.players.name_of(e.uuid).map(str::to_owned)
                     } else {
                         Some(e.uuid.to_string())
                     }
-                });
+                };
+                view.outline = glow_color(cx, &e.data, is_player, entry);
+                let spectator = is_player
+                    && cx
+                        .state
+                        .players
+                        .get(e.uuid)
+                        .is_some_and(|p| p.game_mode == GameType::Spectator);
+                decorate(cx, &mut view, name, is_living(name), spectator, entry);
+                view.upside_down = if is_player {
+                    cx.state
+                        .players
+                        .name_of(e.uuid)
+                        .is_some_and(is_upside_down_name)
+                        && view.player_part(0)
+                } else {
+                    is_living(name)
+                        && crate::nametags::custom_name(e)
+                            .is_some_and(|c| is_upside_down_name(&c.to_plain_string()))
+                };
+                flip_head(&mut view);
                 Some(view)
             })
             .chain(local_view)
@@ -758,7 +851,11 @@ impl EntityLayer {
                 Some(view)
             }));
         let chunks = &cx.state.chunks;
-        scene.update_grounded(&registries, views, &|x, y, z| ground_top(chunks, x, y, z));
+        scene.set_shadows(cx.entity_shadows);
+        let (darken, ambient) = (cx.sky_darken, cx.ambient_light);
+        scene.update_grounded(&registries, views, &|x, y, z| {
+            shadow_ground(chunks, [x, y, z], darken, ambient)
+        });
         self.last_drawn = drawn.get();
         self.last_culled = culled.get();
     }
@@ -837,13 +934,126 @@ impl EntityLayer {
     }
 }
 
-fn ground_top(chunks: &ChunkStore, x: i32, y: i32, z: i32) -> Option<f32> {
-    let state = chunks.block(x, y, z)?;
-    mcr_data::v26_3()
-        .collision_shape(state.0)
-        .iter()
-        .map(|b| b.max[1])
-        .reduce(f32::max)
+/// `EntityRenderer#extractShadowPiece`: a visible full block below and raw light above 3 at `p`.
+fn shadow_ground(chunks: &ChunkStore, p: [i32; 3], sky_darken: u8, ambient: f32) -> Option<f32> {
+    let data = mcr_data::v26_3();
+    let below = chunks.block(p[0], p[1] - 1, p[2])?;
+    let info = data.block_state(below.0)?;
+    if info.is_air() || data.block_name(info.block) == Some("minecraft:barrier") {
+        return None;
+    }
+    let full = matches!(
+        data.collision_shape(below.0),
+        [b] if b.min == [0.0; 3] && b.max == [1.0; 3]
+    );
+    if !full {
+        return None;
+    }
+    let column = chunks.column(ChunkPos::new(p[0] >> 4, p[2] >> 4))?;
+    let (lx, lz) = ((p[0] & 15) as usize, (p[2] & 15) as usize);
+    let block = column.block_light(lx, p[1], lz).unwrap_or(0);
+    let sky = column.sky_light_or_above(lx, p[1], lz).unwrap_or(15);
+    let raw = block.max(sky.saturating_sub(sky_darken));
+    if raw <= 3 {
+        return None;
+    }
+    let v = f32::from(raw) / 15.0;
+    let curved = v / (4.0 - 3.0 * v);
+    Some(ambient + (1.0 - ambient) * curved)
+}
+
+/// An upside-down entity looks the other way relative to its body.
+fn flip_head(v: &mut EntityView<'_>) {
+    if v.upside_down {
+        v.pitch = -v.pitch;
+        v.head_yaw = 2.0 * v.body_yaw - v.head_yaw;
+    }
+}
+
+fn is_upside_down_name(name: &str) -> bool {
+    name == "Dinnerbone" || name == "Grumm"
+}
+
+/// Burning only without fire immunity (`EntityType#fireImmune`).
+fn fire_immune(name: &str) -> bool {
+    matches!(
+        name.strip_prefix("minecraft:").unwrap_or(name),
+        "area_effect_cloud"
+            | "blaze"
+            | "ender_dragon"
+            | "end_crystal"
+            | "ghast"
+            | "magma_cube"
+            | "shulker"
+            | "strider"
+            | "tnt"
+            | "vex"
+            | "warden"
+            | "wither"
+            | "wither_skeleton"
+            | "zoglin"
+            | "zombified_piglin"
+    )
+}
+
+/// Render state vanilla derives per frame: invisibility, fire, shaking and walk for riders and the dead.
+fn decorate(
+    cx: &FrameCtx<'_>,
+    v: &mut EntityView<'_>,
+    name: &str,
+    living: bool,
+    spectator: bool,
+    entry: impl FnOnce() -> Option<String>,
+) {
+    v.body = body_visibility(cx, v.invisible && living, entry);
+    v.on_fire = v.shared_flag(0) && !spectator && !fire_immune(name);
+    if !living {
+        return;
+    }
+    if v.passenger || v.death_time > 0.0 || v.float(9).is_some_and(|h| h <= 0.0) {
+        v.limb_swing = 0.0;
+        v.limb_amount = 0.0;
+    }
+    let flag = |index: u8| v.boolean(index);
+    let short = name.strip_prefix("minecraft:").unwrap_or(name);
+    let converting = match short {
+        "zombie" | "husk" | "drowned" => flag(18),
+        "zombie_villager" => flag(idx::ZOMBIE_VILLAGER_CONVERTING),
+        "skeleton" => flag(16),
+        "strider" => flag(idx::STRIDER_SUFFOCATING),
+        "piglin" | "piglin_brute" => cx.piglins_zombify && !flag(16) && !v.mob_flag(0),
+        "hoglin" => cx.piglins_zombify && !flag(18) && !v.mob_flag(0),
+        _ => false,
+    };
+    v.shaking = converting || v.int(7).is_some_and(|t| t >= 140);
+}
+
+/// `LivingEntityRenderer#getRenderType`: `Entity#isInvisibleTo` the local player.
+fn body_visibility(
+    cx: &FrameCtx<'_>,
+    invisible: bool,
+    entry: impl FnOnce() -> Option<String>,
+) -> BodyVisibility {
+    if !invisible {
+        return BodyVisibility::Visible;
+    }
+    if cx.state.player.game_mode == GameType::Spectator {
+        return BodyVisibility::Translucent;
+    }
+    let board = &cx.state.scoreboard;
+    let friendly = entry()
+        .and_then(|name| {
+            let team = board.team_of(&name)?;
+            (board.team_of(&cx.state.name) == Some(team))
+                .then(|| board.teams.get(team))
+                .flatten()
+        })
+        .is_some_and(|t| t.parameters.options & 2 != 0);
+    if friendly {
+        BodyVisibility::Translucent
+    } else {
+        BodyVisibility::Hidden
+    }
 }
 
 fn state_chunks(state: &ClientState) -> &ChunkStore {
@@ -1111,6 +1321,11 @@ fn make_view<'a>(
         0.0
     };
     v.invisible = v.shared_flag(5);
+    v.use_ticks = if t.use_ticks > 0 {
+        t.use_ticks as f32 - 1.0 + partial
+    } else {
+        0.0
+    };
     let gliding = v.shared_flag(7) || v.pose() == DataPose::FallFlying;
     v.glide = t.glide.view(partial, v.yaw, v.pitch, gliding);
     v
@@ -1222,7 +1437,7 @@ mod tests {
     fn walk_speed_converges_when_moving() {
         let mut t = Track::new([0.0; 3], 0.0, 0.0, 0.0, true);
         for i in 1..=20 {
-            t.advance([f64::from(i) * 0.25, 0.0, 0.0], 0.0, 0.0, 0.0, false);
+            t.advance([f64::from(i) * 0.25, 0.0, 0.0], 0.0, 0.0, 0.0, false, 1.0);
         }
         assert!(t.speed > 0.95, "{}", t.speed);
         assert!(t.walk > 10.0);
@@ -1232,7 +1447,7 @@ mod tests {
     fn body_follows_travel_direction() {
         let mut t = Track::new([0.0; 3], 0.0, 0.0, 0.0, true);
         for i in 1..=40 {
-            t.advance([0.0, 0.0, f64::from(i) * 0.3], 0.0, 0.0, 0.0, false);
+            t.advance([0.0, 0.0, f64::from(i) * 0.3], 0.0, 0.0, 0.0, false, 1.0);
         }
         assert!(wrap_degrees(t.body).abs() < 2.0, "{}", t.body);
     }
@@ -1240,7 +1455,7 @@ mod tests {
     #[test]
     fn head_stays_within_limit_of_body() {
         let mut t = Track::new([0.0; 3], 0.0, 0.0, 0.0, true);
-        t.advance([0.0; 3], 170.0, 170.0, 0.0, false);
+        t.advance([0.0; 3], 170.0, 170.0, 0.0, false, 1.0);
         assert!(wrap_degrees(t.yaw - t.body).abs() <= HEAD_BODY_LIMIT + 1e-3);
     }
 

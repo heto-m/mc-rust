@@ -171,6 +171,17 @@ impl BedFacing {
     }
 }
 
+/// How a living body is drawn: `LivingEntityRenderer#isBodyVisible` and `isInvisibleToPlayer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BodyVisibility {
+    #[default]
+    Visible,
+    /// Invisible, but the viewer is a spectator or sees friendly invisibles: drawn at 15% alpha.
+    Translucent,
+    /// Invisible: only equipment, held items and eyes are drawn (plus the glow outline).
+    Hidden,
+}
+
 #[derive(Clone, Copy)]
 pub struct EntityView<'a> {
     pub id: i32,
@@ -213,6 +224,13 @@ pub struct EntityView<'a> {
     pub light: [u8; 2],
     pub passenger: bool,
     pub invisible: bool,
+    pub body: BodyVisibility,
+    /// `Entity#displayFireAnimation`: on fire, not fire immune and not a spectator.
+    pub on_fire: bool,
+    /// Named Dinnerbone or Grumm.
+    pub upside_down: bool,
+    /// `LivingEntityRenderer#isShaking`: frozen or converting.
+    pub shaking: bool,
     pub custom_name: Option<&'a str>,
     pub player: PlayerView<'a>,
     /// Glow colour (`Entity.getTeamColor` of a glowing entity), drawn as an outline.
@@ -271,6 +289,10 @@ impl<'a> EntityView<'a> {
             light: [0, 15],
             passenger: false,
             invisible: false,
+            body: BodyVisibility::Visible,
+            on_fire: false,
+            upside_down: false,
+            shaking: false,
             outline: None,
             display: None,
             custom_name: None,
@@ -359,6 +381,12 @@ impl<'a> EntityView<'a> {
 
     pub fn living_flag(&self, bit: u8) -> bool {
         self.byte(8).is_some_and(|f| f as u8 >> bit & 1 != 0)
+    }
+
+    /// A player's model customisation bit (0 is the cape); shown when the server sent none.
+    pub fn player_part(&self, bit: u8) -> bool {
+        self.byte(crate::idx::PLAYER_MODEL_PARTS)
+            .is_none_or(|f| f as u8 >> bit & 1 != 0)
     }
 
     pub fn mob_flag(&self, bit: u8) -> bool {

@@ -438,6 +438,7 @@ impl BlockEntityScene {
             uv_offset: [0.0; 2],
             origin,
             outline: None,
+            hidden: false,
         });
     }
 
@@ -1240,6 +1241,7 @@ impl BlockEntityScene {
             uv_offset: [0.0, v_offset],
             origin,
             outline: None,
+            hidden: false,
         });
     }
 

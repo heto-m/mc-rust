@@ -58,7 +58,7 @@ fn row(h: &mut Harness, specs: &[Spec], name: &str, spacing: f64, _world_h: f64)
     const COLS: usize = 5;
     let registries = TestRegistries::vanilla();
     h.scene
-        .set_block_top(Some(Box::new(|_, y, _| (y < 0).then_some(1.0))));
+        .set_shadow_ground(Some(Box::new(|_, y, _| (y <= 0).then_some(1.0))));
     let (width, height) = (1800u32, 750u32);
     let mut all = Vec::new();
     let mut rows = 0;
@@ -257,6 +257,22 @@ fn items_frames_paintings_blocks() {
     let specs = [
         spec("minecraft:item").d(8, V::ItemStack(stack)),
         spec("minecraft:item").d(8, V::ItemStack(item("minecraft:stone"))),
+        spec("minecraft:item").d(
+            8,
+            V::ItemStack({
+                let mut s = item("minecraft:stone");
+                s.count = 16;
+                s
+            }),
+        ),
+        spec("minecraft:item").d(
+            8,
+            V::ItemStack({
+                let mut s = item("minecraft:paper");
+                s.count = 16;
+                s
+            }),
+        ),
         spec("minecraft:item_frame")
             .d(
                 8,

@@ -393,7 +393,8 @@ pub struct Play {
     entities: Option<EntityLayer>,
     block_entities: Option<BlockEntities>,
     overlays: Overlays,
-    water_ticks: u32,
+    vision: crate::vision::Vision,
+    end_flash_sound: Option<u32>,
     assets: Arc<Assets>,
     hand: Option<HeldHand>,
     preview: Option<Preview>,
@@ -580,7 +581,8 @@ impl Play {
             entities,
             block_entities,
             overlays: Overlays::new(),
-            water_ticks: 0,
+            vision: crate::vision::Vision::default(),
+            end_flash_sound: None,
             assets: overlay_assets,
             hand,
             preview,
@@ -925,11 +927,19 @@ impl Play {
         let raw = block.max(sky.saturating_sub(darken));
         self.overlays
             .tick_vignette(crate::overlays::level_brightness(raw));
-        self.water_ticks = if self.world.client.state.player.physics.eye_in_water() {
-            (self.water_ticks + 1).min(600)
-        } else {
-            0
-        };
+        self.vision.tick(state, self.cur_eye);
+        if self.vision.end_flash_started() {
+            self.end_flash_sound = Some(30);
+        }
+        if let Some(left) = self.end_flash_sound.as_mut() {
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                self.end_flash_sound = None;
+                if let Some(audio) = &mut self.audio {
+                    audio.play_voice("weather.end_flash");
+                }
+            }
+        }
         if let Some(hand) = &mut self.hand {
             let server_using = matches!(
                 state.player.data.get(&8),
@@ -2588,32 +2598,27 @@ impl Play {
 
         let partial = self.partial();
         let aspect = size.0 as f32 / size.1.max(1) as f32;
-        let mut env = effects::environment(
-            &self.world.client.state,
-            self.world.render_distance(),
-            self.effects.flash(),
-            self.options.gamma as f32,
-        );
-        if effects::camera_in_water(&self.world.client.state.chunks, camera.position.to_array()) {
-            let sky = crate::entities::light_at(
-                &self.world.client.state.chunks,
-                camera.position.to_array(),
-                0.0,
-            )[1];
-            effects::apply_underwater(&mut env, self.water_ticks, f32::from(sky));
-        }
-        env.boss_darkening =
-            self.boss_darkening.0 + (self.boss_darkening.1 - self.boss_darkening.0) * partial;
-        if self
+        let boss_fog = self
             .world
             .client
             .state
             .boss_bars
             .values()
-            .any(|b| b.flags.create_world_fog)
-        {
-            effects::apply_boss_fog(&mut env);
-        }
+            .any(|b| b.flags.create_world_fog);
+        let forward = camera.forward();
+        let env = self.vision.environment(&crate::vision::VisionFrame {
+            state: &self.world.client.state,
+            options: &self.options,
+            camera: camera.position.to_array(),
+            forward: forward.to_array(),
+            partial,
+            dt_ticks: dt / self.tick_seconds(),
+            render_distance: self.world.render_distance(),
+            lightning: self.effects.flash(),
+            boss_darkening: self.boss_darkening.0
+                + (self.boss_darkening.1 - self.boss_darkening.0) * partial,
+            boss_fog,
+        });
         self.sky_factor = env.sky_factor;
         self.prepare_visuals(&camera, partial, aspect, &env);
 
@@ -2830,6 +2835,17 @@ impl Play {
                     } else {
                         self.options.text_background_opacity as f32
                     },
+                    local_use: self.world.client.using_item().map(|u| {
+                        let held = self.world.client.ticks.saturating_sub(u.started_tick);
+                        (
+                            u.hand == mcr_protocol::types::game::Hand::Off,
+                            held as f32 + partial,
+                        )
+                    }),
+                    entity_shadows: self.options.entity_shadows,
+                    sky_darken: ((1.0 - self.sky_factor.clamp(0.0, 1.0)) * 15.0).round() as u8,
+                    ambient_light: self.vision.ambient_light(),
+                    piglins_zombify: self.vision.piglins_zombify(),
                 },
                 &mut self.gui.ui,
             );

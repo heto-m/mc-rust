@@ -16,7 +16,7 @@ use mcr_protocol::types::Particle;
 use mcr_protocol::types::component::{FireworkExplosion, FireworkShape};
 use mcr_render::glam::DVec3;
 use mcr_render::{
-    CloudMode, CloudSettings, DestroyDecal, EffectAssets, EffectImage, Environment, Precipitation,
+    CloudMode, CloudSettings, DestroyDecal, EffectAssets, EffectImage, Precipitation,
     WeatherSource, WorldBorderVisual,
 };
 use mcr_settings::Options;
@@ -985,51 +985,6 @@ pub fn camera_in_water(chunks: &mcr_world::ChunkStore, pos: [f64; 3]) -> bool {
     mcr_physics::camera_in_water(chunks, mcr_physics::PhysicsData::v26_3(), pos)
 }
 
-/// Vanilla's underwater fog: dark blue, starting behind the camera, opening up over 30 seconds.
-pub fn apply_underwater(env: &mut Environment, ticks_under: u32, sky_light: f32) {
-    let vision = (ticks_under.min(600) as f32 / 600.0).max(0.25);
-    let light = 0.1 + 0.9 * (sky_light / 15.0).clamp(0.0, 1.0) * env.sky_factor;
-    env.fog_color = [0.02 * light, 0.02 * light, 0.2 * light];
-    env.fog_start = -8.0;
-    env.fog_end = 96.0 * vision;
-}
-
-pub fn environment(
-    state: &ClientState,
-    render_distance: i32,
-    flash: bool,
-    brightness: f32,
-) -> Environment {
-    let mut env = match state.dimension.name.as_str() {
-        "minecraft:the_nether" => Environment::nether(),
-        "minecraft:the_end" => Environment::end(),
-        "minecraft:overworld" => {
-            let w = &state.world;
-            Environment::overworld(
-                w.day_time().unwrap_or(6000).max(0) as u64,
-                w.rain_level,
-                w.thunder_level,
-            )
-        }
-        _ => Environment::default(),
-    };
-    env = env.with_lightning_flash(flash);
-    env.set_render_distance_chunks(render_distance.max(2) as u32);
-    env.brightness = if brightness.is_finite() {
-        brightness.clamp(0.0, 1.0)
-    } else {
-        0.5
-    };
-    env
-}
-
-/// Boss events with the fog flag pull the environmental fog in to 10..96 blocks.
-pub fn apply_boss_fog(env: &mut Environment) {
-    env.fog_start = env.fog_start.min(10.0);
-    env.fog_end = env.fog_end.min(96.0);
-    env.sky_fog_end = env.fog_end;
-}
-
 /// One tick of `GameRenderer.bossOverlayWorldDarkening`: up by 0.05 while a boss darkens, down by 0.0125.
 pub fn tick_boss_darkening(current: f32, darken: bool) -> f32 {
     if darken {
@@ -1037,6 +992,23 @@ pub fn tick_boss_darkening(current: f32, darken: bool) -> f32 {
     } else {
         (current - 0.0125).max(0.0)
     }
+}
+
+pub fn particle_id(name: &str) -> Particle {
+    let id = mcr_data::v26_3()
+        .registry("minecraft:particle_type")
+        .and_then(|r| r.id_of(name))
+        .map_or(0, |id| id as i32);
+    Particle::Simple(id)
+}
+
+fn is_air(state: &ClientState, at: [f64; 3]) -> bool {
+    let [x, y, z] = at.map(|v| v.floor() as i32);
+    state.chunks.block(x, y, z).is_none_or(|b| {
+        mcr_data::v26_3()
+            .block_state(b.0)
+            .is_none_or(|s| s.is_air())
+    })
 }
 
 #[cfg(test)]
@@ -1089,20 +1061,6 @@ mod tests {
             d = tick_boss_darkening(d, false);
         }
         assert_eq!(d, 0.0);
-    }
-
-    #[test]
-    fn boss_fog_only_tightens() {
-        let mut env = Environment {
-            fog_start: 0.0,
-            fog_end: 1024.0,
-            ..Environment::default()
-        };
-        apply_boss_fog(&mut env);
-        assert_eq!(
-            (env.fog_start, env.fog_end, env.sky_fog_end),
-            (0.0, 96.0, 96.0)
-        );
     }
 
     #[test]
@@ -1163,36 +1121,4 @@ mod tests {
         o.cloud_range = 9999;
         assert_eq!(cloud_settings(&o).range_chunks, 128);
     }
-}
-
-#[cfg(test)]
-mod underwater_tests {
-    use super::*;
-
-    #[test]
-    fn underwater_fog_opens_over_thirty_seconds() {
-        let mut env = Environment::overworld(6000, 0.0, 0.0);
-        apply_underwater(&mut env, 0, 15.0);
-        assert!((env.fog_end - 24.0).abs() < 1e-3 && env.fog_start < 0.0);
-        apply_underwater(&mut env, u32::MAX, 15.0);
-        assert!((env.fog_end - 96.0).abs() < 1e-3);
-        assert!(env.fog_color[2] > env.fog_color[0]);
-    }
-}
-
-pub fn particle_id(name: &str) -> Particle {
-    let id = mcr_data::v26_3()
-        .registry("minecraft:particle_type")
-        .and_then(|r| r.id_of(name))
-        .map_or(0, |id| id as i32);
-    Particle::Simple(id)
-}
-
-fn is_air(state: &ClientState, at: [f64; 3]) -> bool {
-    let [x, y, z] = at.map(|v| v.floor() as i32);
-    state.chunks.block(x, y, z).is_none_or(|b| {
-        mcr_data::v26_3()
-            .block_state(b.0)
-            .is_none_or(|s| s.is_air())
-    })
 }
