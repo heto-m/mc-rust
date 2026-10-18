@@ -59,12 +59,12 @@ abstract class MinecraftWorldsMixin {
 
     @Redirect(method = "runTick", at = @At(value = "FIELD", target = "Lnet/minecraft/client/Minecraft;pause:Z", opcode = Opcodes.PUTFIELD))
     private void mcr$localPause(Minecraft self, boolean paused) {
-        pause = paused || (McrWorlds.local() && level != null && gui.isPausing());
+        pause = paused || (McrWorlds.local() && !McrWorlds.published() && level != null && gui.isPausing());
     }
 
     @ModifyArg(method = "pauseGame", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/gui/Gui;setPauseScreen(ZZ)V"), index = 1)
     private boolean mcr$canPause(boolean canPause) {
-        return canPause || McrWorlds.local();
+        return canPause || (McrWorlds.local() && !McrWorlds.published());
     }
 
     @Inject(method = "disconnectFromWorld", at = @At("HEAD"))

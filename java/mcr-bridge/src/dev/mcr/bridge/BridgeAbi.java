@@ -4,7 +4,7 @@ import dev.mcr.boot.Abi.Flavour;
 
 /** Mirror of mcr-modbridge's extension table and messages. Entries are append-only; Rust tests compare both. */
 public final class BridgeAbi {
-    public static final int VERSION = 17;
+    public static final int VERSION = 18;
     public static final String TABLE_PROPERTY = "mcr.bridge.table";
     public static final String COMPOSE_PROPERTY = "mcr.compose";
 
@@ -31,6 +31,7 @@ public final class BridgeAbi {
     public static final int WORLD_READY = 3;
     public static final int WORLD_FAILED = 4;
     public static final int WORLD_STOPPED = 5;
+    public static final int WORLD_LAN = 6;
     public static final int SYNC_MAX_LINES = 256;
 
     public static final int IN_TYPE = 0;

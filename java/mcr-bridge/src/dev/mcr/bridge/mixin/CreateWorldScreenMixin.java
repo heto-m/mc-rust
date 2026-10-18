@@ -27,9 +27,6 @@ abstract class CreateWorldScreenMixin extends Screen {
         super(title);
     }
 
-    @Shadow
-    private void removeTempDataPackDir() {}
-
     @Inject(method = "createWorldAndCleanup", at = @At("HEAD"), cancellable = true)
     private void mcr$createInMcr(
             LayeredRegistryAccess<RegistryLayer> finalLayers,
@@ -41,15 +38,17 @@ abstract class CreateWorldScreenMixin extends Screen {
         }
         ci.cancel();
         CreateWorldScreen self = (CreateWorldScreen) (Object) this;
-        String request = McrWorlds.refuseWhileBusy(minecraft) ? null : McrWorlds.createRequest(minecraft, self.getUiState());
+        String request = McrWorlds.refuseWhileBusy(minecraft)
+                ? null
+                : McrWorlds.createRequest(minecraft, self.getUiState(), tempDataPackDir);
         if (request == null) {
             if (minecraft.gui.screen() != self) {
                 minecraft.gui.setScreen(self);
             }
             return;
         }
-        boolean droppedPacks = tempDataPackDir != null;
-        removeTempDataPackDir();
-        McrWorlds.create(minecraft, request, droppedPacks);
+        Path packDir = tempDataPackDir;
+        tempDataPackDir = null;
+        McrWorlds.create(minecraft, request, packDir, McrWorlds.dropsPacks(self.getUiState()));
     }
 }

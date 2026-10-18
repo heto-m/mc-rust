@@ -8,11 +8,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use mcr_singleplayer::lan::{self, Announcer, Forwarder};
 use mcr_singleplayer::level::{self, Difficulty, GameMode, LevelInfo};
 use mcr_singleplayer::props::{self, LaunchProps, NewWorld, WorldType};
 use mcr_singleplayer::server::{Event, ManagedServer, STOP_GRACE, Spec, VanillaLaunch};
-use mcr_singleplayer::{Layout, java, memory, provision, safe, stale};
-use mcr_ui::{CreateWorldSettings, Favicon, NewGameMode, WorldEntry, WorldPreset, WorldStore};
+use mcr_singleplayer::{Layout, flat, java, memory, packs, provision, recreate, safe, stale};
+use mcr_ui::{
+    CreateWorldSettings, Favicon, LanSettings, NewGameMode, WorldEntry, WorldPreset, WorldStore,
+};
 
 pub const EULA_URL: &str = "https://aka.ms/MinecraftEULA";
 const MAX_UPDATES_PER_POLL: usize = 64;
@@ -107,6 +110,104 @@ impl WorldStore for FileWorlds {
         }
         level::delete_world(&self.layout.saves(), folder).map_err(|e| e.to_string())
     }
+
+    fn recreate(&self, folder: &str) -> Result<CreateWorldSettings, String> {
+        let world = safe::checked_world(&self.layout.saves(), folder).map_err(|e| e.to_string())?;
+        let r = recreate::read(&world).map_err(|e| e.to_string())?;
+        let cheats = self
+            .layout
+            .server_dir(folder)
+            .and_then(|d| props::read_properties_file(&d.join(props::WORLD_META)))
+            .as_deref()
+            .and_then(props::read_cheats)
+            .unwrap_or(r.level.cheats);
+        Ok(recreate_settings(&r, cheats, &world))
+    }
+
+    fn data_packs(&self) -> (Option<PathBuf>, Vec<String>) {
+        let dir = self.pack_dir();
+        let list = packs::list_packs(&dir);
+        (Some(dir), list)
+    }
+
+    fn open_pack_folder(&mut self) {
+        let dir = self.pack_dir();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("cannot create {}: {e}", dir.display());
+            return;
+        }
+        crate::mods_ui::open_path(&dir);
+    }
+
+    fn check_flat(&self, layers: &str) -> Result<(), String> {
+        flat::generator_settings(layers, &known_block).map(|_| ())
+    }
+}
+
+impl FileWorlds {
+    /// Where the native Data Packs screen takes packs from.
+    fn pack_dir(&self) -> PathBuf {
+        self.layout.game_dir().join("datapacks")
+    }
+}
+
+fn known_block(id: &str) -> bool {
+    mcr_data::v26_3().block_by_name(id).is_some()
+}
+
+/// Create New World's settings from a world read for Re-Create.
+fn recreate_settings(
+    r: &recreate::Recreate,
+    cheats: bool,
+    world: &std::path::Path,
+) -> CreateWorldSettings {
+    let mode = if r.level.hardcore {
+        NewGameMode::Hardcore
+    } else if r.level.game_mode == GameMode::Creative {
+        NewGameMode::Creative
+    } else {
+        NewGameMode::Survival
+    };
+    CreateWorldSettings {
+        name: r.level.name.clone(),
+        mode,
+        difficulty: match r.level.difficulty {
+            Difficulty::Peaceful => 0,
+            Difficulty::Easy => 1,
+            Difficulty::Normal => 2,
+            Difficulty::Hard => 3,
+        },
+        cheats: cheats && !r.level.hardcore,
+        preset: match r.world_type {
+            WorldType::Normal => WorldPreset::Normal,
+            WorldType::Flat => WorldPreset::Flat,
+            WorldType::LargeBiomes => WorldPreset::LargeBiomes,
+            WorldType::Amplified => WorldPreset::Amplified,
+        },
+        seed: r.seed.clone(),
+        structures: r.structures,
+        bonus_chest: r.bonus_chest,
+        game_rules: r.game_rules.clone(),
+        experiments: r.experiments.clone(),
+        data_packs: r.data_packs.clone(),
+        pack_dir: (!r.data_packs.is_empty()).then(|| world.join("datapacks")),
+        flat: r.generator_settings.as_deref().map(|g| {
+            flat::preset_string(g)
+                .filter(|_| plain_layers(g))
+                .unwrap_or_else(|| g.to_owned())
+        }),
+    }
+}
+
+/// Generator JSON with nothing a preset string cannot express.
+fn plain_layers(settings: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(settings)
+        .ok()
+        .and_then(|v| {
+            v.as_object()
+                .map(|o| o.keys().all(|k| k == "layers" || k == "biome"))
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +257,17 @@ fn new_world(s: &CreateWorldSettings) -> NewWorld {
         seed: s.seed.clone(),
         structures: s.structures,
         bonus_chest: s.bonus_chest,
+        game_rules: mcr_data::game_rules::changed_rules(
+            s.game_rules.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+        )
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect(),
+        experiments: packs::experiments(s.experiments.iter().map(String::as_str))
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        generator_settings: None,
     }
 }
 
@@ -180,6 +292,11 @@ pub fn java_create_settings(w: &mcr_modbridge::world::NewWorldRequest) -> Create
         seed: w.seed.clone(),
         structures: w.structures,
         bonus_chest: w.bonus_chest,
+        game_rules: w.game_rules.clone(),
+        experiments: w.experiments.clone(),
+        data_packs: w.packs.clone(),
+        pack_dir: w.pack_dir.clone(),
+        flat: w.flat.clone(),
     }
 }
 
@@ -193,13 +310,20 @@ pub fn should_freeze(
     in_world && if java_gui { java_pausing } else { native_pause }
 }
 
+/// What a prepared launch hands to the session besides the server spec.
+struct Prepared {
+    spec: Spec,
+    folder: String,
+    port: u16,
+    world_name: String,
+    cheats: bool,
+    /// Game rules to set once a new world's server is ready.
+    rules: Vec<(String, String)>,
+}
+
 enum Prep {
     Status(String),
-    Ready {
-        spec: Box<Spec>,
-        folder: String,
-        port: u16,
-    },
+    Ready(Box<Prepared>),
     Failed(String),
 }
 
@@ -230,11 +354,36 @@ fn progress<'a>(
     }
 }
 
+/// Checks a new world's superflat layers and data packs before its folder exists.
+fn check_new(s: &CreateWorldSettings) -> Result<Option<String>, String> {
+    let generator = match (&s.flat, s.preset) {
+        (Some(text), WorldPreset::Flat) => Some(
+            flat::generator_settings(text, &known_block)
+                .map_err(|e| format!("The superflat layers cannot be used: {e}"))?,
+        ),
+        _ => None,
+    };
+    if !s.data_packs.is_empty() {
+        let dir = s
+            .pack_dir
+            .as_deref()
+            .ok_or("the data packs have no folder")?;
+        if s.data_packs.len() > packs::MAX_PACKS {
+            return Err(format!("at most {} data packs", packs::MAX_PACKS));
+        }
+        for name in &s.data_packs {
+            packs::check_pack(dir, name)
+                .map_err(|e| format!("The world cannot be created: {e}"))?;
+        }
+    }
+    Ok(generator)
+}
+
 fn prepare(
     input: &LaunchInput,
     tx: &Sender<Prep>,
     cancel: &AtomicBool,
-) -> Result<(Spec, String, u16), String> {
+) -> Result<Prepared, String> {
     let layout = &input.layout;
     let saves = layout.saves();
     let refused = |e: mcr_singleplayer::SpError| format!("The world cannot be used: {e}");
@@ -246,11 +395,18 @@ fn prepare(
             (folder.clone(), world, server, Some(level), None)
         }
         Launch::New(s) => {
-            let new = new_world(s);
+            let mut new = new_world(s);
+            new.generator_settings = check_new(s)?;
             let folder = mcr_singleplayer::layout::folder_for(&new.name, |c| {
                 saves.join(c).symlink_metadata().is_ok()
             });
             let (world, server) = safe::open_world(&saves, &folder, true).map_err(refused)?;
+            if let Some(dir) = s.pack_dir.as_deref().filter(|_| !s.data_packs.is_empty())
+                && let Err(e) = packs::install(&world, dir, &s.data_packs)
+            {
+                let _ = level::delete_world(&saves, &folder);
+                return Err(format!("The data packs could not be copied: {e}"));
+            }
             (folder, world, server, None, Some(new))
         }
     };
@@ -360,7 +516,19 @@ fn prepare(
             ""
         }
     );
-    Ok((spec, folder, port))
+    let world_name = match (&created, &level) {
+        (Some(w), _) => w.name.clone(),
+        (None, Some(l)) if !l.name.trim().is_empty() => l.name.clone(),
+        _ => folder.clone(),
+    };
+    Ok(Prepared {
+        spec,
+        world_name,
+        cheats,
+        rules: created.map(|w| w.game_rules).unwrap_or_default(),
+        folder,
+        port,
+    })
 }
 
 /// What the shell hears from a session.
@@ -388,6 +556,12 @@ enum State {
     Done,
 }
 
+/// The LAN forwarder and its announcement while the world is open to LAN.
+struct Lan {
+    forwarder: Forwarder,
+    announcer: Option<Announcer>,
+}
+
 pub struct Session {
     pub folder: Option<String>,
     state: State,
@@ -395,6 +569,31 @@ pub struct Session {
     cancel: Arc<AtomicBool>,
     /// Show the world list once the server has stopped.
     pub return_to_list: bool,
+    world_name: String,
+    cheats: bool,
+    rules: Vec<(String, String)>,
+    lan: Option<Lan>,
+}
+
+const GAME_MODES: [&str; 4] = ["survival", "creative", "adventure", "spectator"];
+
+/// A name the console can take as one player argument (no selectors, no spaces).
+fn plain_player(name: &str) -> bool {
+    (1..=16).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// The console lines that apply Open to LAN's choices for `host`.
+pub fn lan_commands(settings: &LanSettings, host: &str, world_cheats: bool) -> Vec<String> {
+    let mode = GAME_MODES[usize::from(settings.mode.min(3))];
+    let mut lines = vec![format!("defaultgamemode {mode}")];
+    if plain_player(host) {
+        lines.push(format!("gamemode {mode} {host}"));
+        if settings.cheats != world_cheats {
+            let verb = if settings.cheats { "op" } else { "deop" };
+            lines.push(format!("{verb} {host}"));
+        }
+    }
+    lines
 }
 
 impl std::fmt::Debug for Session {
@@ -417,11 +616,7 @@ impl Session {
         };
         std::thread::spawn(move || {
             let msg = match prepare(&input, &tx, &flag) {
-                Ok((spec, folder, port)) => Prep::Ready {
-                    spec: Box::new(spec),
-                    folder,
-                    port,
-                },
+                Ok(prepared) => Prep::Ready(Box::new(prepared)),
                 Err(e) => Prep::Failed(e),
             };
             let _ = tx.send(msg);
@@ -432,6 +627,69 @@ impl Session {
             frozen: false,
             cancel,
             return_to_list: false,
+            world_name: String::new(),
+            cheats: false,
+            rules: Vec::new(),
+            lan: None,
+        }
+    }
+
+    /// The port LAN players join on, while the world is open to LAN.
+    pub fn lan_port(&self) -> Option<u16> {
+        self.lan.as_ref().map(|l| l.forwarder.port())
+    }
+
+    /// Opens the running world to LAN and applies the game mode and cheats; returns the port.
+    pub fn open_lan(&mut self, settings: &LanSettings, host: &str) -> Result<u16, String> {
+        let State::Running {
+            server,
+            ready: true,
+            port,
+        } = &self.state
+        else {
+            return Err("the world is not running".into());
+        };
+        if let Some(port) = self.lan_port() {
+            return Ok(port);
+        }
+        let bind = lan::bind_address(settings.port.unwrap_or(0));
+        let target = std::net::SocketAddr::from(([127, 0, 0, 1], *port));
+        let host_uuid = mcr_auth::offline::offline_uuid(host).map_err(|e| e.to_string())?;
+        let gate = lan::Gate {
+            host: host.to_owned(),
+            host_uuid: host_uuid.into_bytes(),
+        };
+        let forwarder = Forwarder::start(bind, target, gate).map_err(|e| e.to_string())?;
+        let lan_port = forwarder.port();
+        let motd = lan::lan_motd(host, &self.world_name);
+        let announcer = Announcer::start(
+            &motd,
+            lan_port,
+            lan::announce_target(bind),
+            lan::ANNOUNCE_INTERVAL,
+        )
+        .map_err(|e| eprintln!("singleplayer: LAN announcement: {e}"))
+        .ok();
+        for line in lan_commands(settings, host, self.cheats) {
+            server.console(&line);
+        }
+        if self.frozen && server.console("tick unfreeze") {
+            self.frozen = false;
+        }
+        println!("singleplayer: open to LAN on {bind} (port {lan_port})");
+        self.lan = Some(Lan {
+            forwarder,
+            announcer,
+        });
+        Ok(lan_port)
+    }
+
+    fn close_lan(&mut self) {
+        if let Some(mut lan) = self.lan.take() {
+            if let Some(a) = &mut lan.announcer {
+                a.stop();
+            }
+            lan.forwarder.stop();
         }
     }
 
@@ -452,9 +710,20 @@ impl Session {
         match &mut self.state {
             State::Preparing(rx) => match rx.try_recv() {
                 Ok(Prep::Status(text)) => Some(Update::Status(text)),
-                Ok(Prep::Ready { spec, folder, port }) => {
+                Ok(Prep::Ready(prepared)) => {
+                    let Prepared {
+                        spec,
+                        folder,
+                        port,
+                        world_name,
+                        cheats,
+                        rules,
+                    } = *prepared;
                     self.folder = Some(folder);
-                    match ManagedServer::start(*spec) {
+                    self.world_name = world_name;
+                    self.cheats = cheats;
+                    self.rules = rules;
+                    match ManagedServer::start(spec) {
                         Ok(server) => {
                             self.state = State::Running {
                                 server,
@@ -490,6 +759,9 @@ impl Session {
                 Event::Preparing(None) => Some(Update::Status("Loading the world…".into())),
                 Event::Ready => {
                     *ready = true;
+                    for (rule, value) in std::mem::take(&mut self.rules) {
+                        server.console(&format!("gamerule {rule} {value}"));
+                    }
                     Some(Update::Ready(*port))
                 }
                 Event::Exited {
@@ -512,8 +784,9 @@ impl Session {
         }
     }
 
-    /// Freezes the server tick while a pause screen is open.
+    /// Freezes the server tick while a pause screen is open (never while open to LAN).
     pub fn set_paused(&mut self, paused: bool) {
+        let paused = paused && self.lan.is_none();
         let State::Running {
             server,
             ready: true,
@@ -536,6 +809,7 @@ impl Session {
     /// Saves and stops the server (killed after a grace period); a preparing session is cancelled.
     pub fn stop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+        self.close_lan();
         match std::mem::replace(&mut self.state, State::Done) {
             State::Running { server, .. } => {
                 if self.frozen {
@@ -572,6 +846,7 @@ mod tests {
             seed: "x".into(),
             structures: false,
             bonus_chest: true,
+            ..CreateWorldSettings::default()
         };
         let w = new_world(&s);
         assert!(w.hardcore);
@@ -599,6 +874,11 @@ mod tests {
             seed: "7".into(),
             structures: false,
             bonus_chest: true,
+            game_rules: vec![("keep_inventory".into(), "true".into())],
+            experiments: vec!["trade_rebalance".into()],
+            packs: vec!["a.zip".into()],
+            pack_dir: Some("/tmp/packs".into()),
+            flat: Some("{\"layers\":[]}".into()),
         });
         assert_eq!(s.mode, NewGameMode::Creative);
         assert_eq!(s.preset, WorldPreset::Flat);
@@ -606,9 +886,146 @@ mod tests {
             (s.difficulty, s.cheats, s.structures, s.bonus_chest),
             (1, true, false, true)
         );
+        assert_eq!(s.data_packs, ["a.zip"]);
+        assert_eq!(s.flat.as_deref(), Some("{\"layers\":[]}"));
         let w = new_world(&s);
         assert_eq!(w.world_type, WorldType::Flat);
         assert_eq!(w.game_mode, GameMode::Creative);
+        assert_eq!(
+            w.game_rules,
+            [("keep_inventory".to_owned(), "true".to_owned())]
+        );
+        assert_eq!(w.experiments, ["trade_rebalance"]);
+    }
+
+    #[test]
+    fn lan_commands_apply_mode_and_cheats_for_the_host_only() {
+        let creative = LanSettings {
+            mode: 1,
+            cheats: true,
+            port: None,
+        };
+        assert_eq!(
+            lan_commands(&creative, "Steve", false),
+            [
+                "defaultgamemode creative",
+                "gamemode creative Steve",
+                "op Steve"
+            ]
+        );
+        assert_eq!(
+            lan_commands(&creative, "Steve", true),
+            ["defaultgamemode creative", "gamemode creative Steve"]
+        );
+        let survival = LanSettings {
+            mode: 0,
+            cheats: false,
+            port: Some(25601),
+        };
+        assert_eq!(
+            lan_commands(&survival, "Steve", true),
+            [
+                "defaultgamemode survival",
+                "gamemode survival Steve",
+                "deop Steve"
+            ]
+        );
+        for hostile in ["@a", "x y", "", "seventeen_chars__"] {
+            assert_eq!(
+                lan_commands(&creative, hostile, false),
+                ["defaultgamemode creative"],
+                "{hostile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn creation_extras_are_validated() {
+        let s = CreateWorldSettings {
+            game_rules: vec![
+                ("keep_inventory".into(), "true".into()),
+                ("random_tick_speed".into(), "3".into()),
+                ("bogus".into(), "1".into()),
+            ],
+            experiments: vec!["trade_rebalance".into(), "evil".into()],
+            ..CreateWorldSettings::default()
+        };
+        let w = new_world(&s);
+        assert_eq!(
+            w.game_rules,
+            [("keep_inventory".to_owned(), "true".to_owned())]
+        );
+        assert_eq!(w.experiments, ["trade_rebalance"]);
+        let flat = CreateWorldSettings {
+            preset: WorldPreset::Flat,
+            flat: Some("minecraft:bedrock,minecraft:not_a_block".into()),
+            ..CreateWorldSettings::default()
+        };
+        assert!(check_new(&flat).is_err(), "unknown blocks are refused");
+        let flat = CreateWorldSettings {
+            flat: Some("minecraft:bedrock,3*minecraft:stone;minecraft:desert".into()),
+            ..flat
+        };
+        let json = check_new(&flat).unwrap().unwrap();
+        assert!(json.contains("minecraft:desert"));
+        let normal = CreateWorldSettings {
+            preset: WorldPreset::Normal,
+            ..flat
+        };
+        assert_eq!(
+            check_new(&normal).unwrap(),
+            None,
+            "layers only for superflat"
+        );
+        let packs = CreateWorldSettings {
+            data_packs: vec!["missing.zip".into()],
+            pack_dir: Some(std::env::temp_dir()),
+            ..CreateWorldSettings::default()
+        };
+        assert!(check_new(&packs).is_err());
+    }
+
+    #[test]
+    fn recreate_maps_to_create_settings() {
+        let r = recreate::Recreate {
+            level: LevelInfo {
+                name: "Old".into(),
+                game_mode: GameMode::Creative,
+                difficulty: Difficulty::Easy,
+                ..LevelInfo::default()
+            },
+            seed: "42".into(),
+            structures: false,
+            bonus_chest: true,
+            world_type: WorldType::Flat,
+            generator_settings: Some(
+                r#"{"biome":"minecraft:plains","layers":[{"block":"minecraft:bedrock","height":1}]}"#
+                    .into(),
+            ),
+            game_rules: vec![("keep_inventory".into(), "true".into())],
+            experiments: vec!["trade_rebalance".into()],
+            data_packs: vec!["a.zip".into()],
+        };
+        let s = recreate_settings(&r, true, std::path::Path::new("/saves/Old"));
+        assert_eq!(s.name, "Old");
+        assert_eq!(
+            (s.mode, s.difficulty, s.cheats),
+            (NewGameMode::Creative, 1, true)
+        );
+        assert_eq!(
+            (s.seed.as_str(), s.structures, s.bonus_chest),
+            ("42", false, true)
+        );
+        assert_eq!(s.preset, WorldPreset::Flat);
+        assert_eq!(
+            s.flat.as_deref(),
+            Some("minecraft:bedrock;minecraft:plains")
+        );
+        assert_eq!(
+            s.pack_dir.as_deref(),
+            Some(std::path::Path::new("/saves/Old/datapacks"))
+        );
+        assert_eq!(s.game_rules.len(), 1);
     }
 
     #[test]

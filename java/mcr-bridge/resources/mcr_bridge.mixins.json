@@ -23,6 +23,7 @@
     "CustomPayloadPacketMixin",
     "DeltaTrackerTimerMixin",
     "DeviceListMixin",
+    "DialogWarningScreenMixin",
     "DownloadedPackSourceMixin",
     "EntityRendererInvoker",
     "EntityMovementSoundsMixin",
@@ -81,6 +82,7 @@
     "WindowAccessor",
     "WindowMixin",
     "WorldBorderRendererMixin",
+    "WorldOptionsScreenMixin",
     "WorldOpenFlowsMixin"
   ],
   "injectors": {

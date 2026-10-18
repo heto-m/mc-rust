@@ -2,10 +2,18 @@
 
 use std::collections::VecDeque;
 
-use crate::abi::{WORLD_EULA, WORLD_FAILED, WORLD_READY, WORLD_STATUS, WORLD_STOPPED};
+use std::path::PathBuf;
+
+use crate::abi::{WORLD_EULA, WORLD_FAILED, WORLD_LAN, WORLD_READY, WORLD_STATUS, WORLD_STOPPED};
 
 /// Longest name, seed or folder accepted from Java.
 pub const MAX_FIELD: usize = 256;
+/// Longest superflat settings JSON accepted from Java.
+pub const MAX_FLAT: usize = 8 * 1024;
+/// Longest temporary data pack folder path accepted from Java.
+pub const MAX_PACK_DIR: usize = 4 * 1024;
+const MAX_RULES: usize = 128;
+const MAX_PACKS: usize = 64;
 /// Longest text sent to Java with one world message.
 pub const MAX_TEXT: usize = 4096;
 /// World messages waiting for Java's next frame.
@@ -38,6 +46,23 @@ pub struct NewWorldRequest {
     pub seed: String,
     pub structures: bool,
     pub bonus_chest: bool,
+    /// Changed game rules as `(id, value)`, unvalidated.
+    pub game_rules: Vec<(String, String)>,
+    pub experiments: Vec<String>,
+    /// Enabled data packs from Java's pack folder (the names after `file/`).
+    pub packs: Vec<String>,
+    /// Java's temporary pack folder, absolute.
+    pub pack_dir: Option<PathBuf>,
+    /// Superflat settings as the generator JSON.
+    pub flat: Option<String>,
+}
+
+/// Open to LAN's choices from Java; `mode` is the game mode id (0 survival to 3 spectator).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LanRequest {
+    pub mode: u8,
+    pub cheats: bool,
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +71,7 @@ pub enum WorldRequest {
     Play(String),
     Create(NewWorldRequest),
     Eula(bool),
+    Lan(LanRequest),
     Cancel,
 }
 
@@ -80,9 +106,14 @@ fn parse_create(lines: std::str::Lines<'_>) -> Option<NewWorldRequest> {
         seed: String::new(),
         structures: true,
         bonus_chest: false,
+        game_rules: Vec::new(),
+        experiments: Vec::new(),
+        packs: Vec::new(),
+        pack_dir: None,
+        flat: None,
     };
     let mut named = false;
-    for line in lines.take(32) {
+    for line in lines.take(32 + MAX_RULES) {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
@@ -113,10 +144,67 @@ fn parse_create(lines: std::str::Lines<'_>) -> Option<NewWorldRequest> {
             "seed" => w.seed = field(value)?,
             "structures" => w.structures = flag(value)?,
             "bonus" => w.bonus_chest = flag(value)?,
-            _ => {}
+            "experiments" => w.experiments = list(value)?,
+            "packs" => {
+                w.packs = list(value)?
+                    .into_iter()
+                    .filter_map(|p| p.strip_prefix("file/").and_then(folder))
+                    .collect();
+            }
+            "packdir" => {
+                let path = PathBuf::from(value);
+                let ok = value.len() <= MAX_PACK_DIR
+                    && path.is_absolute()
+                    && !value.chars().any(char::is_control);
+                w.pack_dir = ok.then_some(path);
+            }
+            "flat" => {
+                w.flat = (value.len() <= MAX_FLAT && !value.chars().any(char::is_control))
+                    .then(|| value.to_owned());
+            }
+            _ => {
+                if let Some(rule) = key.strip_prefix("rule.")
+                    && w.game_rules.len() < MAX_RULES
+                {
+                    w.game_rules.push((field(rule)?, field(value)?));
+                }
+            }
         }
     }
     named.then_some(w)
+}
+
+fn list(value: &str) -> Option<Vec<String>> {
+    value
+        .split(',')
+        .filter(|v| !v.is_empty())
+        .take(MAX_PACKS)
+        .map(field)
+        .collect()
+}
+
+fn parse_lan(arg: &str) -> Option<LanRequest> {
+    let mut lan = LanRequest {
+        mode: 0,
+        cheats: false,
+        port: None,
+    };
+    for part in arg.split('\t').take(8) {
+        let (key, value) = part.split_once('=')?;
+        match key {
+            "mode" => lan.mode = value.parse().ok().filter(|m| *m <= 3)?,
+            "cheats" => lan.cheats = flag(value)?,
+            "port" => {
+                lan.port = match value.parse::<u16>().ok()? {
+                    0 => None,
+                    p if p >= 1024 => Some(p),
+                    _ => return None,
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(lan)
 }
 
 impl WorldRequest {
@@ -129,6 +217,7 @@ impl WorldRequest {
             "play" => folder(arg).map(Self::Play),
             "create" => parse_create(lines).map(Self::Create),
             "eula" => flag(arg).map(Self::Eula),
+            "lan" => parse_lan(arg).map(Self::Lan),
             "cancel" => Some(Self::Cancel),
             _ => None,
         }
@@ -146,6 +235,8 @@ pub enum WorldEvent {
     Failed(String),
     /// The server exited; the reason is set when nobody asked it to stop.
     Stopped(Option<String>),
+    /// Open to LAN's outcome: the port, or why it failed.
+    Lan(Result<u16, String>),
 }
 
 fn clipped(text: &str) -> &str {
@@ -164,13 +255,24 @@ impl WorldEvent {
             Self::Ready => (WORLD_READY, ""),
             Self::Failed(t) => (WORLD_FAILED, t.as_str()),
             Self::Stopped(t) => (WORLD_STOPPED, t.as_deref().unwrap_or("")),
+            Self::Lan(r) => {
+                let text = match r {
+                    Ok(port) => format!("ok\t{port}"),
+                    Err(e) => format!("failed\t{e}"),
+                };
+                return encoded(WORLD_LAN, &text);
+            }
         };
-        let text = clipped(text);
-        let mut out = Vec::with_capacity(4 + text.len());
-        out.extend_from_slice(&kind.to_le_bytes());
-        out.extend_from_slice(text.as_bytes());
-        out
+        encoded(kind, text)
     }
+}
+
+fn encoded(kind: u32, text: &str) -> Vec<u8> {
+    let text = clipped(text);
+    let mut out = Vec::with_capacity(4 + text.len());
+    out.extend_from_slice(&kind.to_le_bytes());
+    out.extend_from_slice(text.as_bytes());
+    out
 }
 
 /// World messages in order; a status line replaces a status line still waiting.
@@ -254,6 +356,11 @@ mod tests {
                 seed: "-42".into(),
                 structures: false,
                 bonus_chest: true,
+                game_rules: Vec::new(),
+                experiments: Vec::new(),
+                packs: Vec::new(),
+                pack_dir: None,
+                flat: None,
             }))
         );
         assert_eq!(
@@ -274,6 +381,79 @@ mod tests {
             (w.mode, w.difficulty, w.structures),
             (NewMode::Survival, 2, true)
         );
+    }
+
+    #[test]
+    fn parses_create_extras() {
+        let text = "create\nname=W\nrule.keep_inventory=true\nrule.minecraft:advance_time=false\nexperiments=trade_rebalance,x\npacks=vanilla,file/a.zip,file/../b,fabric,file/Folder\npackdir=/tmp/mcworld-1\nflat={\"layers\":[]}";
+        let Some(WorldRequest::Create(w)) = WorldRequest::parse(text) else {
+            panic!("create");
+        };
+        assert_eq!(
+            w.game_rules,
+            [
+                ("keep_inventory".to_owned(), "true".to_owned()),
+                ("minecraft:advance_time".to_owned(), "false".to_owned())
+            ]
+        );
+        assert_eq!(w.experiments, ["trade_rebalance", "x"]);
+        assert_eq!(w.packs, ["a.zip", "Folder"]);
+        assert_eq!(
+            w.pack_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/mcworld-1"))
+        );
+        assert_eq!(w.flat.as_deref(), Some("{\"layers\":[]}"));
+        let Some(WorldRequest::Create(w)) =
+            WorldRequest::parse("create\nname=W\npackdir=relative/dir")
+        else {
+            panic!("create");
+        };
+        assert_eq!(w.pack_dir, None, "only absolute folders");
+        let many: String = (0..500).map(|i| format!("rule.r{i}=1\n")).collect();
+        let Some(WorldRequest::Create(w)) = WorldRequest::parse(&format!("create\nname=W\n{many}"))
+        else {
+            panic!("create");
+        };
+        assert!(w.game_rules.len() <= MAX_RULES);
+        let long_flat = format!("create\nname=W\nflat={}", "x".repeat(MAX_FLAT + 1));
+        let Some(WorldRequest::Create(w)) = WorldRequest::parse(&long_flat) else {
+            panic!("create");
+        };
+        assert_eq!(w.flat, None);
+    }
+
+    #[test]
+    fn parses_lan() {
+        assert_eq!(
+            WorldRequest::parse("lan\tmode=1\tcheats=1\tport=25601"),
+            Some(WorldRequest::Lan(LanRequest {
+                mode: 1,
+                cheats: true,
+                port: Some(25601)
+            }))
+        );
+        assert_eq!(
+            WorldRequest::parse("lan\tmode=0\tcheats=0\tport=0"),
+            Some(WorldRequest::Lan(LanRequest {
+                mode: 0,
+                cheats: false,
+                port: None
+            }))
+        );
+        for bad in [
+            "lan\tmode=4",
+            "lan\tport=80",
+            "lan\tport=x",
+            "lan\tcheats=2",
+            "lan\tjunk",
+        ] {
+            assert_eq!(WorldRequest::parse(bad), None, "{bad}");
+        }
+        let ok = WorldEvent::Lan(Ok(25601)).encode();
+        assert_eq!(&ok[..4], &WORLD_LAN.to_le_bytes());
+        assert_eq!(&ok[4..], b"ok\t25601");
+        let failed = WorldEvent::Lan(Err("busy".into())).encode();
+        assert_eq!(&failed[4..], b"failed\tbusy");
     }
 
     #[test]

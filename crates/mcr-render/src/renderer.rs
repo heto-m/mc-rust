@@ -337,6 +337,27 @@ pub struct Renderer {
     latest_gpu: Option<GpuTimes>,
     latest_gpu_frame: u64,
     frame_index: u64,
+    capture_requested: bool,
+    capture_pending: Option<PendingCapture>,
+    captured: Option<Capture>,
+}
+
+/// The world image of one frame, before UI: tightly packed 8-bit pixels in display encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capture {
+    pub width: u32,
+    pub height: u32,
+    /// Channel order is blue, green, red, alpha instead of RGBA.
+    pub bgra: bool,
+    pub pixels: Vec<u8>,
+}
+
+struct PendingCapture {
+    buffer: wgpu::Buffer,
+    row: u32,
+    width: u32,
+    height: u32,
+    bgra: bool,
 }
 
 impl std::fmt::Debug for Renderer {
@@ -1053,6 +1074,9 @@ impl Renderer {
             latest_gpu: None,
             latest_gpu_frame: 0,
             frame_index: 0,
+            capture_requested: false,
+            capture_pending: None,
+            captured: None,
         })
     }
 
@@ -1835,7 +1859,7 @@ impl Renderer {
                     ..Default::default()
                 });
                 surface_tex = Some(tex);
-                if self.post_chains.is_empty() {
+                if self.post_chains.is_empty() && !self.capture_requested {
                     self.post_window = None;
                     view
                 } else {
@@ -1852,7 +1876,8 @@ impl Renderer {
                             dimension: wgpu::TextureDimension::D2,
                             format: s.view_format,
                             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                                | wgpu::TextureUsages::TEXTURE_BINDING,
+                                | wgpu::TextureUsages::TEXTURE_BINDING
+                                | wgpu::TextureUsages::COPY_SRC,
                             view_formats: &[],
                         });
                         (t, PresentBlit::new(&self.device, s.view_format))
@@ -2109,6 +2134,9 @@ impl Renderer {
                 self.menu_blur,
             );
         }
+        if std::mem::take(&mut self.capture_requested) {
+            self.capture_pending = self.record_capture(&mut encoder);
+        }
         if let (Some(ext), Some(scene)) = (external.as_mut(), self.scene_texture()) {
             self.batch.hold(encoder);
             ext.before_ui(&ExternalCtx {
@@ -2195,6 +2223,9 @@ impl Renderer {
                     );
                 });
         }
+        if let Some(pending) = self.capture_pending.take() {
+            self.captured = self.finish_capture(&pending);
+        }
         if let Some(t) = surface_tex {
             self.queue.present(t);
         }
@@ -2272,6 +2303,90 @@ impl Renderer {
             pass.multi_draw_indexed_indirect(&self.geo.trans_cmds, 0, trans_n);
         }
         self.effects.draw_world(pass);
+    }
+
+    /// Copies the next frame's world image, before any UI, for [`Renderer::take_capture`].
+    pub fn request_capture(&mut self) {
+        self.capture_requested = true;
+    }
+
+    /// The image of the last frame a capture was requested for, once.
+    pub fn take_capture(&mut self) -> Option<Capture> {
+        self.captured.take()
+    }
+
+    fn record_capture(&self, encoder: &mut wgpu::CommandEncoder) -> Option<PendingCapture> {
+        let tex = self
+            .scene
+            .as_ref()
+            .or(self.post_window.as_ref())
+            .map(|(t, _)| t)
+            .or(self.offscreen.as_ref())?;
+        let bgra = matches!(
+            tex.format(),
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        let supported = bgra
+            || matches!(
+                tex.format(),
+                wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb
+            );
+        if !supported {
+            return None;
+        }
+        let (width, height) = (tex.width(), tex.height());
+        let row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("capture"),
+            size: u64::from(row) * u64::from(height),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            tex.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Some(PendingCapture {
+            buffer,
+            row,
+            width,
+            height,
+            bgra,
+        })
+    }
+
+    /// Waits for the submitted copy once; captures are rare (a world icon), so the stall is acceptable.
+    fn finish_capture(&self, pending: &PendingCapture) -> Option<Capture> {
+        pending
+            .buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        let mapped = pending.buffer.slice(..).get_mapped_range().ok()?;
+        let width = (pending.width * 4) as usize;
+        let mut pixels = Vec::with_capacity(width * pending.height as usize);
+        for y in 0..pending.height {
+            let start = (y * pending.row) as usize;
+            pixels.extend_from_slice(&mapped[start..start + width]);
+        }
+        Some(Capture {
+            width: pending.width,
+            height: pending.height,
+            bgra: pending.bgra,
+            pixels,
+        })
     }
 
     /// Returns tightly packed RGBA8 (sRGB-encoded) pixels of the offscreen target.

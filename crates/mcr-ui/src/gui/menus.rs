@@ -355,6 +355,7 @@ const PAUSE_ADVANCEMENTS: u32 = 2;
 const PAUSE_STATS: u32 = 3;
 const PAUSE_OPTIONS: u32 = 4;
 const PAUSE_DISCONNECT: u32 = 5;
+const PAUSE_LAN: u32 = 6;
 
 #[derive(Debug)]
 pub struct PauseScreen {
@@ -362,6 +363,7 @@ pub struct PauseScreen {
     gui: (i32, i32),
     pauses: bool,
     local_server: bool,
+    lan: bool,
 }
 
 impl PauseScreen {
@@ -371,7 +373,14 @@ impl PauseScreen {
             gui: (0, 0),
             pauses: pauses_game,
             local_server,
+            lan: false,
         }
+    }
+
+    /// Offers Open to LAN beside Options (a local world not yet published).
+    pub fn with_lan(mut self, offered: bool) -> Self {
+        self.lan = offered;
+        self
     }
 }
 
@@ -401,11 +410,19 @@ impl Screen for PauseScreen {
             [left + 106, top + 74, 98, 20],
             "lang:gui.stats",
         ));
+        let options_width = if self.lan { 98 } else { 204 };
         w.add(Button::new(
             PAUSE_OPTIONS,
-            [left, top + 98, 204, 20],
+            [left, top + 98, options_width, 20],
             "lang:menu.options",
         ));
+        if self.lan {
+            w.add(Button::new(
+                PAUSE_LAN,
+                [left + 106, top + 98, 98, 20],
+                "lang:menu.multiplayerOptions.button",
+            ));
+        }
         w.add(Button::new(
             PAUSE_DISCONNECT,
             [left, top + 122, 204, 20],
@@ -446,6 +463,7 @@ impl Screen for PauseScreen {
                 PAUSE_ADVANCEMENTS => out.push(ScreenAction::OpenAdvancements),
                 PAUSE_STATS => out.push(ScreenAction::OpenStats),
                 PAUSE_OPTIONS => out.push(ScreenAction::OpenOptions),
+                PAUSE_LAN => out.push(ScreenAction::OpenLan),
                 PAUSE_DISCONNECT => out.push(ScreenAction::Disconnect),
                 _ => {}
             }

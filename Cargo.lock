@@ -1762,6 +1762,7 @@ dependencies = [
 name = "mcr-data"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
@@ -1960,8 +1961,11 @@ name = "mcr-singleplayer"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "mcr-buf",
+ "mcr-data",
  "mcr-jvm",
  "mcr-nbt",
+ "mcr-protocol",
  "png",
  "serde_json",
  "sha1 0.10.7",

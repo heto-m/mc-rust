@@ -44,7 +44,10 @@ use mcr_modbridge::world::{WorldEvent, WorldRequest};
 /// Why the local server stopped, as the player reads it.
 fn stop_text(reason: Option<String>) -> String {
     match reason.filter(|r| !r.trim().is_empty()) {
-        Some(r) => format!("The local server stopped:\n{}", sanitize_for_log(&r)),
+        Some(r) => {
+            let lines: Vec<String> = r.lines().map(sanitize_for_log).collect();
+            format!("The local server stopped:\n{}", lines.join("\n"))
+        }
         None => "The local server stopped".to_owned(),
     }
 }
@@ -112,6 +115,8 @@ pub struct Shell {
     pending_launch: Option<Launch>,
     /// Why a Java-flow join failed; Java hears it once the server has stopped.
     sp_java_failure: Option<String>,
+    /// The local world was pausing last frame (a capture for its icon is taken when it starts).
+    sp_was_paused: bool,
 }
 
 impl std::fmt::Debug for Shell {
@@ -211,6 +216,7 @@ impl Shell {
             sp_java: false,
             pending_launch: None,
             sp_java_failure: None,
+            sp_was_paused: false,
             cfg,
         };
         shell.show_title();
@@ -629,6 +635,14 @@ impl Shell {
                         ))),
                     }
                 }
+                WorldRequest::Lan(lan) => self.start_lan(
+                    &mcr_ui::LanSettings {
+                        mode: lan.mode,
+                        cheats: lan.cheats,
+                        port: lan.port,
+                    },
+                    true,
+                ),
                 WorldRequest::Cancel => {
                     self.pending_launch = None;
                     match &mut self.sp {
@@ -679,6 +693,61 @@ impl Shell {
         }
     }
 
+    /// The running local world has no `icon.png` yet.
+    fn local_icon_missing(&self) -> bool {
+        let Some(folder) = self.sp.as_ref().and_then(|s| s.folder.as_deref()) else {
+            return false;
+        };
+        let saves = self.worlds.borrow().layout().saves();
+        mcr_singleplayer::layout::valid_folder(folder)
+            && saves
+                .join(folder)
+                .join("icon.png")
+                .symlink_metadata()
+                .is_err()
+    }
+
+    /// Writes the world icon captured during the session, if the world still has none.
+    fn save_world_icon(&self, icon: Option<Vec<u8>>) {
+        let (Some(icon), Some(folder)) = (icon, self.sp.as_ref().and_then(|s| s.folder.clone()))
+        else {
+            return;
+        };
+        let saves = self.worlds.borrow().layout().saves();
+        match mcr_singleplayer::icon::write_if_missing(&saves, &folder, &icon) {
+            Ok(true) => println!("singleplayer: wrote the icon of {folder}"),
+            Ok(false) => {}
+            Err(e) => eprintln!("singleplayer: world icon: {e}"),
+        }
+    }
+
+    /// Opens the local world to LAN; the outcome goes to chat, or to Java in mod mode.
+    fn start_lan(&mut self, settings: &mcr_ui::LanSettings, from_java: bool) {
+        let result = match &mut self.sp {
+            Some(sp) => sp.open_lan(settings, &self.cfg.name),
+            None => Err("no local world is running".into()),
+        };
+        if let Err(e) = &result {
+            eprintln!("singleplayer: open to LAN failed: {e}");
+        }
+        if let (Ok(_), Some(play)) = (&result, &mut self.play) {
+            play.lan_open = true;
+        }
+        if from_java {
+            self.java_world(WorldEvent::Lan(result));
+            return;
+        }
+        let Some(play) = &mut self.play else { return };
+        let message = match result {
+            Ok(port) => Component::translatable(
+                "menu.multiplayerOptions.publish.started.lan",
+                vec![mcr_protocol::types::text::Arg::Str(port.to_string())],
+            ),
+            Err(_) => Component::translatable("commands.publish.failed", Vec::new()),
+        };
+        play.local_chat(&message);
+    }
+
     fn sp_failed(&mut self, message: String) {
         eprintln!("singleplayer: {message}");
         self.connecting = None;
@@ -699,6 +768,14 @@ impl Shell {
             self.route.java.pausing,
             self.play.as_ref().is_some_and(Play::pause_open),
         );
+        let menu = self.play.as_mut().is_some_and(Play::take_pause_opened);
+        if (menu || (paused && !self.sp_was_paused))
+            && self.local_icon_missing()
+            && let Some(play) = &mut self.play
+        {
+            play.request_icon_capture();
+        }
+        self.sp_was_paused = paused;
         let updates = match &mut self.sp {
             Some(sp) => {
                 sp.set_paused(paused);
@@ -945,7 +1022,10 @@ impl Shell {
     }
 
     fn end_session(&mut self, reason: Option<String>) {
-        let Some(play) = self.play.take() else { return };
+        let Some(mut play) = self.play.take() else {
+            return;
+        };
+        self.save_world_icon(play.take_world_icon());
         self.parts = Some(play.finish());
         self.end_pack_session();
         self.update_menu_size();
@@ -992,6 +1072,9 @@ impl Shell {
         self.poll_packs();
         self.poll_dialogs();
         self.poll_conduct();
+        if let Some(settings) = self.play.as_mut().and_then(Play::take_lan_request) {
+            self.start_lan(&settings, false);
+        }
         if let Some(icon) = self.play.as_mut().and_then(Play::take_server_icon) {
             self.servers
                 .borrow_mut()
@@ -1561,5 +1644,19 @@ impl Shell {
     pub fn read_offscreen(&mut self) -> Result<Vec<u8>> {
         let renderer = self.renderer_mut().context("no renderer")?;
         Ok(renderer.read_offscreen()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stop_text;
+
+    #[test]
+    fn stop_reason_keeps_lines_and_escapes_controls() {
+        assert_eq!(stop_text(None), "The local server stopped");
+        assert_eq!(
+            stop_text(Some("a\u{1b}[31m\nb".into())),
+            "The local server stopped:\na\\u{1b}[31m\nb"
+        );
     }
 }

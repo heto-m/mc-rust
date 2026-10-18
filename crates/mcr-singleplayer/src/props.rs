@@ -4,7 +4,7 @@ use crate::level::{Difficulty, GameMode, LevelInfo};
 
 /// File in the server directory remembering mcr's own per-world choices.
 pub const WORLD_META: &str = "mcr-world.properties";
-pub const MAX_PLAYERS: u32 = 4;
+pub const MAX_PLAYERS: u32 = 8;
 const MAX_SEED_CHARS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -39,6 +39,12 @@ pub struct NewWorld {
     pub seed: String,
     pub structures: bool,
     pub bonus_chest: bool,
+    /// Changed game rules as `(id, value)`, already validated.
+    pub game_rules: Vec<(String, String)>,
+    /// Known experimental feature packs.
+    pub experiments: Vec<String>,
+    /// Validated superflat `generator-settings` JSON.
+    pub generator_settings: Option<String>,
 }
 
 impl Default for NewWorld {
@@ -53,6 +59,9 @@ impl Default for NewWorld {
             seed: String::new(),
             structures: true,
             bonus_chest: false,
+            game_rules: Vec::new(),
+            experiments: Vec::new(),
+            generator_settings: None,
         }
     }
 }
@@ -63,6 +72,8 @@ pub struct Creation {
     pub seed: String,
     pub world_type: WorldType,
     pub structures: bool,
+    pub generator_settings: Option<String>,
+    pub initial_enabled_packs: Option<String>,
 }
 
 /// Everything `server.properties` needs for one launch.
@@ -98,6 +109,13 @@ impl LaunchProps {
                 seed: world.seed.chars().take(MAX_SEED_CHARS).collect(),
                 world_type: world.world_type,
                 structures: world.structures,
+                generator_settings: world
+                    .generator_settings
+                    .clone()
+                    .filter(|_| world.world_type == WorldType::Flat),
+                initial_enabled_packs: crate::packs::initial_enabled_packs(
+                    &crate::packs::experiments(world.experiments.iter().map(String::as_str)),
+                ),
             }),
         }
     }
@@ -344,6 +362,12 @@ pub fn managed(props: &LaunchProps) -> Vec<(&'static str, String)> {
         keys.push(("level-seed", c.seed.clone()));
         keys.push(("level-type", c.world_type.preset().into()));
         keys.push(("generate-structures", b(c.structures)));
+        if let Some(settings) = &c.generator_settings {
+            keys.push(("generator-settings", settings.clone()));
+        }
+        if let Some(packs) = &c.initial_enabled_packs {
+            keys.push(("initial-enabled-packs", packs.clone()));
+        }
     }
     keys
 }
@@ -439,7 +463,7 @@ mod tests {
             ("online-mode", "false"),
             ("enforce-secure-profile", "false"),
             ("spawn-protection", "0"),
-            ("max-players", "4"),
+            ("max-players", "8"),
             ("hardcore", "true"),
             ("difficulty", "hard"),
             ("gamemode", "survival"),
@@ -452,6 +476,34 @@ mod tests {
         ] {
             assert_eq!(value(&text, k), [v], "{k}");
         }
+    }
+
+    #[test]
+    fn creation_extras_only_when_chosen() {
+        let plain = render_properties(None, &LaunchProps::for_new("p", &NewWorld::default(), 1));
+        assert!(value(&plain, "generator-settings").is_empty());
+        assert!(value(&plain, "initial-enabled-packs").is_empty());
+        let world = NewWorld {
+            world_type: WorldType::Flat,
+            generator_settings: Some(r#"{"layers":[],"biome":"minecraft:plains"}"#.into()),
+            experiments: vec!["trade_rebalance".into(), "evil".into()],
+            ..NewWorld::default()
+        };
+        let text = render_properties(None, &LaunchProps::for_new("f", &world, 1));
+        assert_eq!(
+            value(&text, "generator-settings"),
+            [r#"{"layers":[],"biome":"minecraft:plains"}"#]
+        );
+        assert_eq!(
+            value(&text, "initial-enabled-packs"),
+            ["vanilla,trade_rebalance"]
+        );
+        let normal = NewWorld {
+            world_type: WorldType::Normal,
+            ..world
+        };
+        let text = render_properties(None, &LaunchProps::for_new("n", &normal, 1));
+        assert!(value(&text, "generator-settings").is_empty(), "flat only");
     }
 
     #[test]

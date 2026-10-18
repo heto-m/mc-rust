@@ -17,7 +17,7 @@ In mod mode Java's Singleplayer button and every other path to its world list SH
 - **THEN** no integrated server starts and Java returns to its title screen
 
 ### Requirement: Java create options mapped
-Java's Create New World SHALL create the world through mcr with its name, game mode, difficulty, allow commands, world type, seed, structures and bonus chest. A world type or mode mcr cannot create SHALL be refused on Java's screen with a toast; data packs and experiments SHALL be reported as not applied.
+Java's Create New World SHALL create the world through mcr with its name, game mode, difficulty, allow commands, world type, seed, structures, bonus chest, changed game rules, enabled experiments, enabled data packs from its pack folder and custom superflat settings. A world type or mode mcr cannot create (single biome, debug) SHALL be refused on Java's screen with a toast and no folder.
 
 #### Scenario: Create a creative superflat world
 - **WHEN** the user creates a creative superflat world named "Flat" in Java
@@ -26,6 +26,17 @@ Java's Create New World SHALL create the world through mcr with its name, game m
 #### Scenario: Unsupported type
 - **WHEN** the user picks the single biome type and clicks Create
 - **THEN** Java stays on the create screen with a toast and no folder is created
+
+#### Scenario: Game rule from Java
+- **WHEN** the user turns off daylight cycle in Java's game rules and creates the world
+- **THEN** the server console receives `gamerule advance_time false` before the player joins
+
+### Requirement: Java data pack handover
+Enabled packs mcr cannot load (mod packs) SHALL be reported with a toast as not applied. Java SHALL keep its temporary pack folder, which mcr copies from, until the session is ready, failed or stopped, and then delete it.
+
+#### Scenario: Pack dropped onto Java's Data Packs screen
+- **WHEN** the user drops `tools.zip` onto Java's Data Packs screen, enables it and creates the world
+- **THEN** mcr copies it into `<world>/datapacks` and Java deletes its temporary folder once the world is ready
 
 ### Requirement: Java never writes an open world
 While mcr's local world is preparing, running or stopping, Java SHALL refuse to open any world folder, so it never writes `level.dat` or takes `session.lock` beside mcr's server.
@@ -46,7 +57,7 @@ For a world started from Java, mcr SHALL show no native screens; Java SHALL show
 - **THEN** Java shows the reason and its button returns to the world list
 
 ### Requirement: Pause in mod mode
-In a local world with Java's GUI, mcr SHALL send `tick freeze` while Java's GUI pauses (vanilla `Gui.isPausing()`) and `tick unfreeze` when it stops; Java's client SHALL pause like vanilla singleplayer. Open to LAN SHALL never be offered.
+In a local world with Java's GUI, mcr SHALL send `tick freeze` while Java's GUI pauses (vanilla `Gui.isPausing()`) and `tick unfreeze` when it stops; Java's client SHALL pause like vanilla singleplayer. Once the world is open to LAN, neither SHALL pause.
 
 #### Scenario: Pause menu
 - **WHEN** the player presses Esc in a local world and then clicks Back to Game
@@ -60,8 +71,22 @@ Java's pause screen SHALL offer Save and Quit to Title in a local world. Leaving
 - **THEN** the server saves and stops, Java shows Saving world until then, and the world can be opened again
 
 ### Requirement: Local connection loss
-When the local server stops unrequested or the connection to it is lost, Java SHALL show its disconnected screen whose button returns to the world list, and mcr SHALL stop the server.
+When the local server stops unrequested or the connection to it is lost, Java SHALL show a disconnected screen with mcr's reason ("The local server stopped" and the server's last lines) whose button reads Back to World List and returns to the world list, and mcr SHALL stop the server.
 
 #### Scenario: Server crash
 - **WHEN** the server process dies while the player is in the world
-- **THEN** Java shows the disconnected screen and Back leads to the world list
+- **THEN** Java shows "The local server stopped" with Back to World List, which leads to the world list
+
+### Requirement: Local labels on Java's warning screen
+In a local world, Java's custom-dialog warning screen SHALL label its leave button "Save and Quit to Title" like the pause screen.
+
+#### Scenario: Custom dialog warning
+- **WHEN** a server dialog's warning screen opens in a local world
+- **THEN** its leave button reads Save and Quit to Title
+
+### Requirement: Fresh levels from mods
+In mod mode `WorldOpenFlows.createFreshLevel` SHALL be refused with a toast before Java creates any folder.
+
+#### Scenario: Mod creates a level
+- **WHEN** a mod calls `createFreshLevel("ModWorld", …)`
+- **THEN** no `ModWorld` folder exists in the saves directory and Java shows the screen the mod passed

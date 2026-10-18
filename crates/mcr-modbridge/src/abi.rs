@@ -14,7 +14,7 @@ use crate::sections::SectionShared;
 use crate::sound::{self, SoundShared};
 
 /// Bump on any change to [`ENTRIES`] or the message layouts; Java refuses a mismatched table.
-pub const BRIDGE_VERSION: u32 = 17;
+pub const BRIDGE_VERSION: u32 = 18;
 pub const TABLE_PROPERTY: &str = "mcr.bridge.table";
 /// Set when Rust composes Java's frames: Java's main target and slots follow the lockstep.
 pub const COMPOSE_PROPERTY: &str = "mcr.compose";
@@ -46,6 +46,7 @@ pub const WORLD_EULA: u32 = 2;
 pub const WORLD_READY: u32 = 3;
 pub const WORLD_FAILED: u32 = 4;
 pub const WORLD_STOPPED: u32 = 5;
+pub const WORLD_LAN: u32 = 6;
 /// Java caps the lines of `MSG_KEYS`, `MSG_PACKS` and `REPORT_KEYS` at this many.
 pub const SYNC_MAX_LINES: usize = 256;
 
@@ -736,6 +737,7 @@ mod tests {
             ("WORLD_READY", WORLD_READY.into()),
             ("WORLD_FAILED", WORLD_FAILED.into()),
             ("WORLD_STOPPED", WORLD_STOPPED.into()),
+            ("WORLD_LAN", WORLD_LAN.into()),
             ("REPORT_WORLD", REPORT_WORLD.into()),
             ("SYNC_MAX_LINES", SYNC_MAX_LINES as i64),
             ("REPORT_KEYS", REPORT_KEYS.into()),

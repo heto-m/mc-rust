@@ -149,6 +149,7 @@ pub struct DialogScreen {
     footer_height: i32,
     title_rect: [i32; 4],
     warning: [i32; 4],
+    local_server: bool,
 }
 
 impl std::fmt::Debug for DialogScreen {
@@ -180,7 +181,14 @@ impl DialogScreen {
             footer_height: FOOTER,
             title_rect: [0; 4],
             warning: [0; 4],
+            local_server: false,
         }
+    }
+
+    /// In a local world the warning screen leaves with Save and Quit, like the pause menu.
+    pub fn local(mut self, local_server: bool) -> Self {
+        self.local_server = local_server;
+        self
     }
 
     pub fn dialog(&self) -> &Dialog {
@@ -808,7 +816,9 @@ impl Screen for DialogScreen {
                 let in_body = y >= HEADER as f32 && y < (h - self.footer_height) as f32;
                 if button == MouseButton::Left && contains(self.warning, x, y) {
                     out.push(ScreenAction::ClickSound);
-                    out.push(ScreenAction::Push(Box::new(warning_screen())));
+                    out.push(ScreenAction::Push(Box::new(warning_screen(
+                        self.local_server,
+                    ))));
                     return true;
                 }
                 if in_body {
@@ -863,7 +873,9 @@ impl DialogScreen {
             match kind {
                 WidgetEventKind::Pressed if id == WARNING => {
                     out.push(ScreenAction::ClickSound);
-                    out.push(ScreenAction::Push(Box::new(warning_screen())));
+                    out.push(ScreenAction::Push(Box::new(warning_screen(
+                        self.local_server,
+                    ))));
                 }
                 WidgetEventKind::Pressed => {
                     out.push(ScreenAction::ClickSound);
@@ -1121,13 +1133,18 @@ impl DialogScreen {
     }
 }
 
-fn warning_screen() -> ConfirmScreen {
+fn warning_screen(local_server: bool) -> ConfirmScreen {
+    let leave = if local_server {
+        "lang:menu.returnToMenu"
+    } else {
+        "lang:menu.disconnect"
+    };
     ConfirmScreen::new(
         "lang:menu.custom_screen_info.title",
         "lang:menu.custom_screen_info.contents",
         vec![
             (
-                "lang:menu.disconnect".into(),
+                leave.into(),
                 Box::new(|| vec![ScreenAction::DialogDisconnect]),
             ),
             ("lang:gui.back".into(), Box::new(|| vec![ScreenAction::Pop])),

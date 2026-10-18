@@ -6,6 +6,7 @@ mod chat_screen;
 mod clicks;
 mod conduct_screen;
 mod container;
+mod create_options;
 mod creative;
 mod credits;
 mod dialog;
@@ -13,6 +14,7 @@ mod dialog_screen;
 mod edit_box;
 mod env;
 mod input;
+mod lan_screen;
 mod list;
 mod menus;
 mod mods;
@@ -40,6 +42,7 @@ pub use chat_screen::{
 pub use clicks::click_event_actions;
 pub use conduct_screen::ConductScreen;
 pub use container::*;
+pub use create_options::{CLASSIC_FLAT, DataPacksScreen, FlatLayersScreen, GameRulesScreen};
 pub use creative::{CreativeScreen, HotbarStore, TabKind, creative_tabs};
 pub use credits::{
     CREDITS_PATH, CreditsLine, CreditsScreen, CreditsSource, POEM_PATH, POSTCREDITS_PATH, Scroll,
@@ -52,6 +55,7 @@ pub use env::{
     Clipboard, Env, GameView, MemoryClipboard, MerchantInfo, NoView, RenderCx, TradeOffer,
 };
 pub use input::{DoubleClickTracker, Key, Modifiers, MouseButton, UiInput, contains};
+pub use lan_screen::{LanSettings, PortCheck, ShareToLanScreen};
 pub use list::ScrollList;
 pub use menus::{
     ConfirmScreen, ConnectingScreen, DeathScreen, DirectConnectScreen, DisconnectedScreen,

@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 mod generated {
     pub mod v26_3;
 }
+pub mod game_rules;
 pub mod tables;
 mod version;
 
@@ -12,6 +13,13 @@ pub use version::{
     FluidStateInfo, ItemId, ItemInfo, ProtocolState, RegistryView, StateId, StateProperties,
     ToolInfo, ToolRuleInfo, Version,
 };
+
+/// Vanilla's experimental feature data packs in 26.3 (Experiments on Create New World).
+pub const FEATURE_PACKS_26_3: &[&str] = &[
+    "minecart_improvements",
+    "redstone_experiments",
+    "trade_rebalance",
+];
 
 pub fn v26_3() -> &'static Version {
     static VERSION: OnceLock<Version> = OnceLock::new();

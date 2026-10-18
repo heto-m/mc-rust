@@ -9,11 +9,15 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.events.GuiEventListener;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.TitleScreen;
+import net.minecraft.client.gui.screens.dialog.DialogScreen;
+import net.minecraft.client.gui.screens.worldselection.CreateWorldScreen;
 import net.minecraft.client.gui.screens.worldselection.SelectWorldScreen;
+import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
 import net.minecraft.client.gui.screens.worldselection.WorldSelectionList;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.LevelSettings;
 import net.minecraft.world.level.WorldDataConfiguration;
+import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.levelgen.WorldOptions;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
 import net.minecraft.world.level.storage.LevelStorageSource;
@@ -21,11 +25,15 @@ import net.minecraft.world.level.storage.LevelStorageSource;
 /**
  * Test hooks for Java's world screens (`-Dmcr.testmod.worldProbe=<folder>`): reports the world list and selects its
  * first entry, opens the folder like a mod would while mcr's world is busy, and loads a world through
- * {@code doWorldLoad} when the file {@code mcr-probe-load} appears in the game dir.
+ * {@code createFreshLevel} when the file {@code mcr-probe-load} appears in the game dir, and on Create New World
+ * turns Keep Inventory on and picks the world preset named in {@code mcr-probe-create}; {@code mcr-probe-warning}
+ * opens a custom dialog's leave warning.
  */
 final class WorldProbe {
     private static final String FOLDER = System.getProperty("mcr.testmod.worldProbe", "");
     private static final Path LOAD_TRIGGER = Path.of("mcr-probe-load");
+    private static final Path CREATE_TRIGGER = Path.of("mcr-probe-create");
+    private static final Path WARNING_TRIGGER = Path.of("mcr-probe-warning");
 
     private static Screen listed;
     private static Screen accessed;
@@ -52,6 +60,38 @@ final class WorldProbe {
             }
             loadThroughVanilla(client);
         }
+        if (Files.exists(WARNING_TRIGGER)) {
+            try {
+                Files.delete(WARNING_TRIGGER);
+            } catch (java.io.IOException e) {
+                return;
+            }
+            client.gui.setScreen(DialogScreen.WarningScreen.create(client, null, screen));
+        }
+        if (screen instanceof CreateWorldScreen create && Files.exists(CREATE_TRIGGER)) {
+            String preset;
+            try {
+                preset = Files.readString(CREATE_TRIGGER).trim();
+                Files.delete(CREATE_TRIGGER);
+            } catch (java.io.IOException e) {
+                return;
+            }
+            Bridge.info("create_probe", setCreateOptions(create.getUiState(), preset));
+        }
+    }
+
+    private static String setCreateOptions(WorldCreationUiState ui, String preset) {
+        ui.getGameRules().set(GameRules.KEEP_INVENTORY, true, null);
+        for (var list : java.util.List.of(ui.getNormalPresetList(), ui.getAltPresetList())) {
+            for (WorldCreationUiState.WorldTypeEntry entry : list) {
+                if (entry.preset() != null
+                        && entry.preset().unwrapKey().map(k -> k.identifier().getPath().equals(preset)).orElse(false)) {
+                    ui.setWorldType(entry);
+                    return "set " + preset;
+                }
+            }
+        }
+        return "no preset " + preset;
     }
 
     private static void listWorlds(Screen screen) {

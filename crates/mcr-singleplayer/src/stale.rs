@@ -286,13 +286,22 @@ mod tests {
     }
 
     fn fake_server(world: &Path, token: &str) -> std::process::Child {
-        Command::new("sh")
+        let child = Command::new("sh")
             .args(["-c", "sleep 5; :", "server.jar"])
             .arg(world_marker(world))
             .arg(format!("{TOKEN_ARG}{token}"))
             .stdin(Stdio::null())
             .spawn()
-            .unwrap()
+            .unwrap();
+        // The pid exists before exec replaces the forked test binary's command line.
+        let cmdline = format!("/proc/{}/cmdline", child.id());
+        for _ in 0..200 {
+            if fs::read(&cmdline).is_ok_and(|c| is_server_cmdline(&c)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        child
     }
 
     fn running(child: &mut std::process::Child) -> bool {

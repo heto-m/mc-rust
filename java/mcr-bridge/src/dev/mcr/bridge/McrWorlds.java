@@ -1,20 +1,35 @@
 package dev.mcr.bridge;
 
+import com.mojang.serialization.JsonOps;
+import java.io.IOException;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.client.gui.screens.AlertScreen;
 import net.minecraft.client.gui.screens.ConfirmScreen;
+import net.minecraft.client.gui.screens.DisconnectedScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.gui.screens.worldselection.SelectWorldScreen;
 import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.ComponentUtils;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.level.gamerules.GameRule;
+import net.minecraft.world.level.gamerules.GameRules;
+import net.minecraft.world.level.levelgen.FlatLevelSource;
+import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
 import net.minecraft.world.level.levelgen.presets.WorldPreset;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
 import org.slf4j.Logger;
@@ -30,6 +45,8 @@ public final class McrWorlds {
     private static final int MAX_INBOX = 64;
     private static final String EULA_URL = "https://aka.ms/MinecraftEULA";
     private static final SystemToast.SystemToastId TOAST = new SystemToast.SystemToastId();
+    private static final List<String> FEATURE_PACKS = List.of("minecart_improvements", "redstone_experiments", "trade_rebalance");
+    private static final long CRASH_SCREEN_HOLD_MS = 1000;
 
     enum State { IDLE, PREPARING, LOCAL, STOPPING }
 
@@ -37,6 +54,10 @@ public final class McrWorlds {
 
     private static final ArrayDeque<Message> inbox = new ArrayDeque<>();
     private static State state = State.IDLE;
+    private static int publishedPort = -1;
+    private static Path pendingPackDir;
+    private static DisconnectedScreen crashScreen;
+    private static long crashUntil;
 
     private McrWorlds() {}
 
@@ -53,6 +74,22 @@ public final class McrWorlds {
     /** In (or joining) a world on mcr's local server. */
     public static boolean local() {
         return state == State.LOCAL;
+    }
+
+    /** mcr's local world is open to LAN. */
+    public static boolean published() {
+        return local() && publishedPort > 0;
+    }
+
+    public static int publishedPort() {
+        return publishedPort;
+    }
+
+    /** Open to LAN's choices go to mcr, which answers with {@code WORLD_LAN}. */
+    public static void openLan(int mode, boolean cheats, int port) {
+        if (local() && publishedPort < 0) {
+            Bridge.report(BridgeAbi.REPORT_WORLD, "lan\tmode=" + mode + "\tcheats=" + bit(cheats) + "\tport=" + port);
+        }
     }
 
     /** The next connection Rust opens is the local world's. */
@@ -88,8 +125,11 @@ public final class McrWorlds {
         Bridge.report(BridgeAbi.REPORT_WORLD, "play\t" + folder);
     }
 
-    /** Java's Create New World options as a {@code create} request, or a toast and null for what mcr cannot create. */
-    public static String createRequest(Minecraft minecraft, WorldCreationUiState ui) {
+    /**
+     * Java's Create New World options as a {@code create} request, or a toast and null for what mcr cannot create.
+     * {@code packDir} is Java's temporary pack folder, if any.
+     */
+    public static String createRequest(Minecraft minecraft, WorldCreationUiState ui, Path packDir) {
         String preset = presetName(ui.getWorldType().preset() == null ? Optional.empty() : ui.getWorldType().preset().unwrapKey());
         if (preset == null || ui.getGameMode() == WorldCreationUiState.SelectedGameMode.DEBUG) {
             toast(minecraft, "This world type is not supported by mcr yet");
@@ -100,24 +140,96 @@ public final class McrWorlds {
             case CREATIVE -> "creative";
             default -> "survival";
         };
-        return "create\nname=" + oneLine(ui.getName().trim())
-                + "\nmode=" + mode
-                + "\ndifficulty=" + ui.getDifficulty().getId()
-                + "\ncheats=" + bit(ui.isAllowCommands())
-                + "\npreset=" + preset
-                + "\nseed=" + oneLine(ui.getSeed())
-                + "\nstructures=" + bit(ui.isGenerateStructures())
-                + "\nbonus=" + bit(ui.isBonusChest())
-                + "\n";
+        StringBuilder out = new StringBuilder("create\nname=").append(oneLine(ui.getName().trim()))
+                .append("\nmode=").append(mode)
+                .append("\ndifficulty=").append(ui.getDifficulty().getId())
+                .append("\ncheats=").append(bit(ui.isAllowCommands()))
+                .append("\npreset=").append(preset)
+                .append("\nseed=").append(oneLine(ui.getSeed()))
+                .append("\nstructures=").append(bit(ui.isGenerateStructures()))
+                .append("\nbonus=").append(bit(ui.isBonusChest()))
+                .append('\n');
+        GameRules rules = ui.getGameRules();
+        rules.availableRules().forEach(rule -> appendRule(out, rules, rule));
+        List<String> experiments = new ArrayList<>();
+        List<String> packs = new ArrayList<>();
+        for (String id : ui.getSettings().dataConfiguration().dataPacks().getEnabled()) {
+            if (id.startsWith("file/")) {
+                packs.add(id);
+            } else if (FEATURE_PACKS.contains(id)) {
+                experiments.add(id);
+            }
+        }
+        if (!experiments.isEmpty()) {
+            out.append("experiments=").append(String.join(",", experiments)).append('\n');
+        }
+        if (!packs.isEmpty() && packDir != null) {
+            out.append("packs=").append(oneLine(String.join(",", packs))).append('\n');
+            out.append("packdir=").append(oneLine(packDir.toAbsolutePath().toString())).append('\n');
+        }
+        if (preset.equals("flat") && ui.getSettings().selectedDimensions().overworld() instanceof FlatLevelSource flat) {
+            FlatLevelGeneratorSettings.CODEC
+                    .encodeStart(ui.getSettings().worldgenLoadContext().createSerializationContext(JsonOps.INSTANCE), flat.settings())
+                    .result()
+                    .ifPresent(json -> out.append("flat=").append(oneLine(json.toString())).append('\n'));
+        }
+        return out.toString();
     }
 
-    public static void create(Minecraft minecraft, String request, boolean droppedPacks) {
+    private static <T> void appendRule(StringBuilder out, GameRules rules, GameRule<T> rule) {
+        T value = rules.get(rule);
+        if (!value.equals(rule.defaultValue())) {
+            out.append("rule.").append(rule.id()).append('=').append(oneLine(rule.serialize(value))).append('\n');
+        }
+    }
+
+    /** Enabled packs mcr cannot load (mod packs), which a toast reports. */
+    public static boolean dropsPacks(WorldCreationUiState ui) {
+        return ui.getSettings().dataConfiguration().dataPacks().getEnabled().stream()
+                .anyMatch(id -> !id.equals("vanilla") && !id.startsWith("file/") && !FEATURE_PACKS.contains(id));
+    }
+
+    /** A mod creating a world through Java's integrated server: refused before any folder exists. */
+    public static void refuseFreshLevel(Minecraft minecraft, Screen parent) {
+        toast(minecraft, "mcr creates worlds only from Create New World");
+        minecraft.gui.setScreen(parent);
+    }
+
+    /** Starts creating; Java's temporary pack folder is kept until the session settles, then deleted. */
+    public static void create(Minecraft minecraft, String request, Path packDir, boolean droppedPacks) {
         state = State.PREPARING;
+        deletePendingPacks();
+        pendingPackDir = packDir;
         minecraft.gui.setScreen(McrWorldScreen.progress());
         if (droppedPacks) {
-            toast(minecraft, "Data packs and experiments are not applied by mcr");
+            toast(minecraft, "Data packs from mods are not applied by mcr");
         }
         Bridge.report(BridgeAbi.REPORT_WORLD, request);
+    }
+
+    private static void deletePendingPacks() {
+        Path dir = pendingPackDir;
+        pendingPackDir = null;
+        if (dir == null) {
+            return;
+        }
+        try {
+            Files.walkFileTree(dir, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                    Files.deleteIfExists(file);
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult postVisitDirectory(Path d, IOException e) throws IOException {
+                    Files.deleteIfExists(d);
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (IOException e) {
+            LOGGER.warn("could not delete {}", dir, e);
+        }
     }
 
     static void cancel(Minecraft minecraft) {
@@ -128,6 +240,11 @@ public final class McrWorlds {
 
     /** Save and Quit left the world; Java waits for mcr's server to stop. */
     public static void leftWorld(Minecraft minecraft) {
+        publishedPort = -1;
+        if (crashScreen != null) {
+            minecraft.gui.setScreen(crashScreen);
+            return;
+        }
         state = State.STOPPING;
         minecraft.gui.setScreen(McrWorldScreen.saving());
     }
@@ -174,6 +291,15 @@ public final class McrWorlds {
 
     /** Applies the messages received this frame, before the net bridge opens any connection. */
     static void pump(Minecraft minecraft) {
+        if (crashScreen != null) {
+            Screen current = minecraft.gui.screen();
+            if (System.currentTimeMillis() > crashUntil) {
+                crashScreen = null;
+            } else if (current != crashScreen
+                    && (current instanceof DisconnectedScreen || current instanceof TitleScreen || current instanceof McrWorldScreen)) {
+                minecraft.gui.setScreen(crashScreen);
+            }
+        }
         Message m;
         while ((m = inbox.poll()) != null) {
             try {
@@ -209,29 +335,67 @@ public final class McrWorlds {
             }
             case BridgeAbi.WORLD_READY -> {
                 state = State.LOCAL;
+                deletePendingPacks();
                 if (screen instanceof McrWorldScreen progress && !progress.isSaving()) {
                     progress.setStatus(Component.translatable("connect.joining"));
                 }
             }
             case BridgeAbi.WORLD_FAILED -> {
                 state = State.IDLE;
+                publishedPort = -1;
+                deletePendingPacks();
                 if (minecraft.level == null) {
                     fail(minecraft, m.text());
                 }
             }
             case BridgeAbi.WORLD_STOPPED -> {
+                boolean wasPlaying = state == State.LOCAL || state == State.STOPPING;
                 state = State.IDLE;
-                if (screen instanceof McrWorldScreen s) {
-                    if (s.isSaving()) {
-                        minecraft.gui.setScreen(new TitleScreen());
-                    } else if (!m.text().isEmpty()) {
+                publishedPort = -1;
+                deletePendingPacks();
+                if (!m.text().isEmpty() && wasPlaying) {
+                    crashed(minecraft, m.text());
+                } else if (screen instanceof McrWorldScreen s && s.isSaving()) {
+                    minecraft.gui.setScreen(new TitleScreen());
+                } else if (screen instanceof McrWorldScreen) {
+                    if (!m.text().isEmpty()) {
                         fail(minecraft, m.text());
                     } else {
                         minecraft.gui.setScreen(worldList());
                     }
                 }
             }
+            case BridgeAbi.WORLD_LAN -> lanAnswer(minecraft, m.text());
             default -> {}
+        }
+    }
+
+    /** The local server stopped by itself: mcr's reason, and a way back to the world list. */
+    private static void crashed(Minecraft minecraft, String reason) {
+        crashScreen = new DisconnectedScreen(
+                worldList(),
+                Component.translatable("disconnect.lost"),
+                Component.literal(reason),
+                Component.translatable("gui.toWorld"));
+        crashUntil = System.currentTimeMillis() + CRASH_SCREEN_HOLD_MS;
+        minecraft.gui.setScreen(crashScreen);
+    }
+
+    private static void lanAnswer(Minecraft minecraft, String text) {
+        Component message;
+        if (text.startsWith("ok\t")) {
+            String port = text.substring(3).trim();
+            try {
+                publishedPort = Integer.parseInt(port);
+            } catch (NumberFormatException e) {
+                return;
+            }
+            message = Component.translatable("menu.multiplayerOptions.publish.started.lan", ComponentUtils.copyOnClickText(port));
+        } else {
+            message = Component.translatable("commands.publish.failed");
+        }
+        if (minecraft.level != null) {
+            minecraft.gui.hud.getChat().addClientSystemMessage(message);
         }
     }
 

@@ -6,7 +6,7 @@ The vanilla server as a managed loopback child process: its configuration, memor
 ## Requirements
 
 ### Requirement: Local server configuration
-Each launch SHALL write `<world>/mcr-server/server.properties` keeping unknown user keys and forcing `server-ip=127.0.0.1`, a free loopback port, `online-mode=false`, `enforce-secure-profile=false`, a small `max-players`, `spawn-protection=0`, view and simulation distance from the client options, and console broadcasts off. Game mode, difficulty and hardcore SHALL come from the creation settings or from `level.dat`.
+Each launch SHALL write `<world>/mcr-server/server.properties` keeping unknown user keys and forcing `server-ip=127.0.0.1`, a free loopback port, `online-mode=false`, `enforce-secure-profile=false`, `max-players=8` (vanilla's integrated server), `spawn-protection=0`, view and simulation distance from the client options, and console broadcasts off. Game mode, difficulty and hardcore SHALL come from the creation settings or from `level.dat`.
 
 #### Scenario: Reopened world
 - **WHEN** a world whose `level.dat` says creative on hard is opened
@@ -18,6 +18,20 @@ A new world SHALL map its seed, world type, generate-structures flag, game mode,
 #### Scenario: Cheats on
 - **WHEN** a world is created with Allow Cheats on for player `Steve`
 - **THEN** `ops.json` holds Steve's offline UUID with level 4
+
+### Requirement: Creation experiments and superflat layers
+On the first launch a new world SHALL write chosen experiments as `initial-enabled-packs=vanilla,<packs>` (known feature packs only) and custom superflat layers as validated `generator-settings` JSON (at most 64 layers, total height at most 4064, namespaced ids).
+
+#### Scenario: Custom superflat layers
+- **WHEN** a superflat world is created with the preset `minecraft:bedrock,3*minecraft:stone;minecraft:desert`
+- **THEN** `generator-settings` holds those layers and biome as JSON
+
+### Requirement: Creation data packs and game rules
+A new world SHALL copy chosen data packs into `<world>/datapacks` before its first launch (a `.zip` up to 64 MiB starting with a zip header, or a real directory with `pack.mcmeta` within 10,000 entries and 256 MiB, never through symlinks, at most 64 packs), and SHALL send `gamerule <id> <value>` for each changed game rule (known 26.3 rules, values within their bounds) once the server is ready and before joining.
+
+#### Scenario: Keep inventory and a data pack
+- **WHEN** a world is created with keep inventory on and the data pack `tools.zip` selected
+- **THEN** `<world>/datapacks/tools.zip` exists before the server starts and the console receives `gamerule keep_inventory true` before the player joins
 
 ### Requirement: Managed server process
 At most one server SHALL run. It SHALL start in its own process group with stdin, stdout and stderr piped, `nogui`, its cwd in `<world>/mcr-server`, and output lines (bounded in length and total size) copied to `logs/console.log`. The client SHALL join once a `Done` line appears and SHALL kill the server if it is not ready within a bounded time, reporting progress from "Preparing spawn area" lines.
@@ -72,3 +86,14 @@ World folders SHALL be treated as untrusted. A world SHALL be a real directory d
 #### Scenario: Delete with an inner link
 - **WHEN** a world containing a symlink to an outside directory is deleted
 - **THEN** only the link is removed and the outside directory keeps its files
+
+### Requirement: World icon on save
+When a local world has no `icon.png`, mcr SHALL capture its own world image (without GUI) when the game starts pausing, crop it to the centre square, scale it to 64×64, and on Save and Quit write it as `<world>/icon.png` through the symlink-safe writer, only if the file is still missing.
+
+#### Scenario: First save
+- **WHEN** a new world is played, paused and saved and quit
+- **THEN** its folder holds a 64×64 `icon.png` and the world list shows it
+
+#### Scenario: Planted icon link
+- **WHEN** `<world>/icon.png` is a symbolic link
+- **THEN** nothing is written through it

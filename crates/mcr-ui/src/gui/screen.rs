@@ -70,6 +70,9 @@ pub enum ScreenAction {
     /// Play the world in this `saves` folder.
     PlayWorld(String),
     CreateWorld(Box<super::world_list::CreateWorldSettings>),
+    /// Open the local world's Open to LAN screen.
+    OpenLan,
+    StartLan(super::lan_screen::LanSettings),
     OpenOptions,
     OpenMods,
     OpenAdvancements,
@@ -161,6 +164,8 @@ impl std::fmt::Debug for ScreenAction {
             Self::CancelConnect => f.write_str("CancelConnect"),
             Self::PlayWorld(w) => f.debug_tuple("PlayWorld").field(w).finish(),
             Self::CreateWorld(s) => f.debug_tuple("CreateWorld").field(s).finish(),
+            Self::OpenLan => f.write_str("OpenLan"),
+            Self::StartLan(s) => f.debug_tuple("StartLan").field(s).finish(),
             Self::OpenOptions => f.write_str("OpenOptions"),
             Self::OpenMods => f.write_str("OpenMods"),
             Self::OpenAdvancements => f.write_str("OpenAdvancements"),

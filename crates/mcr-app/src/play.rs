@@ -355,6 +355,12 @@ pub struct Play {
     pub leave: bool,
     pub quit: bool,
     local_server: bool,
+    /// The local world is open to LAN: no pausing, no second Open to LAN.
+    pub lan_open: bool,
+    lan_request: Option<mcr_ui::LanSettings>,
+    capture_icon: bool,
+    world_icon: Option<Vec<u8>>,
+    pause_opened: bool,
     /// Set when the server sent us elsewhere; the shell reconnects there.
     pub transfer: Option<mcr_client::TransferTarget>,
     sky_factor: f32,
@@ -536,6 +542,11 @@ impl Play {
             leave: false,
             quit: false,
             local_server: cfg.local_server,
+            lan_open: false,
+            lan_request: None,
+            capture_icon: false,
+            world_icon: None,
+            pause_opened: false,
             pack_answers: Vec::new(),
             conduct_answers: Vec::new(),
             dialog_replies: Vec::new(),
@@ -1739,6 +1750,43 @@ impl Play {
         self.stack.pop();
     }
 
+    /// Start LAN World was pressed with these settings.
+    pub fn take_lan_request(&mut self) -> Option<mcr_ui::LanSettings> {
+        self.lan_request.take()
+    }
+
+    /// The pause menu opened since the last call.
+    pub fn take_pause_opened(&mut self) -> bool {
+        std::mem::take(&mut self.pause_opened)
+    }
+
+    /// Captures the next frame's world image as the world icon.
+    pub fn request_icon_capture(&mut self) {
+        self.capture_icon = true;
+    }
+
+    /// The latest captured 64×64 RGBA world icon.
+    pub fn take_world_icon(&mut self) -> Option<Vec<u8>> {
+        self.world_icon.take()
+    }
+
+    /// A client-side chat line, like vanilla's local system messages.
+    pub fn local_chat(&mut self, message: &mcr_protocol::types::text::Component) {
+        let text: String = self.gui.ui.flatten(message).iter().map(|c| c.ch).collect();
+        println!("chat: {}", sanitize_for_log(&text));
+        self.hud
+            .add_chat(&mut self.gui.ui, message, self.ticks as u32, &self.options);
+    }
+
+    fn open_lan_screen(&mut self) {
+        let state = &self.world.client.state;
+        let mode = state.player.game_mode as u8;
+        let cheats = state.player.permission_level >= 2;
+        let screen = mcr_ui::ShareToLanScreen::new(mode, cheats, state.world.hardcore)
+            .with_port_check(Box::new(mcr_singleplayer::lan::port_available));
+        self.push_screen(Box::new(screen));
+    }
+
     pub fn take_server_icon(&mut self) -> Option<Vec<u8>> {
         self.world.client.state.server.icon.take()
     }
@@ -1761,7 +1809,9 @@ impl Play {
         if self.stack.top_is_dialog() {
             self.stack.pop();
         }
-        self.push_screen(Box::new(mcr_ui::DialogScreen::new(dialog, links)));
+        self.push_screen(Box::new(
+            mcr_ui::DialogScreen::new(dialog, links).local(self.local_server),
+        ));
     }
 
     pub fn clear_dialog(&mut self) {
@@ -1867,7 +1917,9 @@ impl Play {
     pub fn open_pause(&mut self) {
         if !self.busy() && self.closed.is_none() {
             let local = self.local_server;
-            self.push_screen(Box::new(PauseScreen::new(local, local)));
+            let lan = local && !self.lan_open;
+            self.push_screen(Box::new(PauseScreen::new(lan, local).with_lan(lan)));
+            self.pause_opened = true;
         }
     }
 
@@ -2149,6 +2201,13 @@ impl Play {
                     self.stack.clear();
                 }
                 ScreenAction::Disconnect => self.leave = true,
+                ScreenAction::OpenLan if self.local_server && !self.lan_open => {
+                    self.open_lan_screen();
+                }
+                ScreenAction::StartLan(settings) => {
+                    self.lan_request = Some(settings);
+                    self.stack.clear();
+                }
                 ScreenAction::OpenOptions => {
                     let screen = OptionsScreen::new(self.settings.clone(), self.languages());
                     self.update_gui_size();
@@ -2640,7 +2699,15 @@ impl Play {
             partial,
             glow: &mut self.glow,
         };
-        self.render.draw_with(&camera, 1.0, Some(&mut overlay))
+        if std::mem::take(&mut self.capture_icon) {
+            self.render.renderer.request_capture();
+        }
+        let stats = self.render.draw_with(&camera, 1.0, Some(&mut overlay));
+        if let Some(c) = self.render.renderer.take_capture() {
+            self.world_icon =
+                mcr_singleplayer::icon::thumbnail(c.width, c.height, &c.pixels, c.bgra);
+        }
+        stats
     }
 
     fn prepare_visuals(&mut self, camera: &Camera, partial: f32, aspect: f32, env: &Environment) {

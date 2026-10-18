@@ -41,7 +41,8 @@ pub use quad::{
     cube_ao_brightness, light_block, light_sky, model_ao, pack_light,
 };
 pub use renderer::{
-    FrameInputs, FrameStats, GpuTimes, MemoryStats, RenderError, Renderer, RendererConfig, Target,
+    Capture, FrameInputs, FrameStats, GpuTimes, MemoryStats, RenderError, Renderer, RendererConfig,
+    Target,
 };
 pub use texture::{MAX_TEXTURE_GROUPS, TextureArrayData, TextureGroupData};
 

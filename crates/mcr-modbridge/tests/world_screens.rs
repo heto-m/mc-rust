@@ -1,5 +1,7 @@
-//! Java's world screens over mcr's saves: the list, Play and Create reaching mcr, mcr's progress, EULA and
-//! failures in Java, no Java world access while mcr's world is busy, and `doWorldLoad` blocked.
+//! Java's world screens over mcr's saves: the list, Play and Create (with game rules and superflat layers)
+//! reaching mcr, unsupported world types refused, mcr's progress, EULA, failures, the custom dialog warning's
+//! Save and Quit and a crashed local server in Java, no Java world access while mcr's world is busy, and a mod's
+//! `createFreshLevel` refused without a folder.
 
 mod gpu_common;
 
@@ -19,6 +21,8 @@ const CREATE: &str = "net.minecraft.client.gui.screens.worldselection.CreateWorl
 const PROGRESS: &str = "dev.mcr.bridge.McrWorldScreen";
 const CONFIRM: &str = "net.minecraft.client.gui.screens.ConfirmScreen";
 const ALERT: &str = "net.minecraft.client.gui.screens.AlertScreen";
+const WARNING: &str = "net.minecraft.client.gui.screens.dialog.DialogScreen$WarningScreen";
+const DISCONNECTED: &str = "net.minecraft.client.gui.screens.DisconnectedScreen";
 const FOLDER: &str = "Probe World";
 
 fn write_world(saves: &Path) {
@@ -176,16 +180,61 @@ fn java_world_screens_go_through_mcr() {
         "Java opened the world"
     );
 
+    l.click(l.button("Create New World"));
+    screen(&mut l, CREATE);
+    std::fs::write(game_dir.join("mcr-probe-create"), b"flat").unwrap();
+    l.wait_info("create_probe", "set flat");
+    l.click(l.button("Create New World"));
+    match request(&mut l) {
+        WorldRequest::Create(w) => {
+            assert!(
+                w.game_rules
+                    .contains(&("keep_inventory".into(), "true".into())),
+                "{:?}",
+                w.game_rules
+            );
+            let flat = w.flat.expect("superflat layers");
+            assert!(flat.contains("minecraft:grass_block"), "{flat}");
+        }
+        other => panic!("expected a create request, got {other:?}"),
+    }
+    screen(&mut l, PROGRESS);
+    send(&mut l, WorldEvent::Ready);
+    std::fs::write(game_dir.join("mcr-probe-warning"), b"").unwrap();
+    screen(&mut l, WARNING);
+    let widgets = l.rig.infos["screen_widgets"].clone();
+    assert!(widgets.contains("Save and Quit to Title"), "{widgets}");
+    send(
+        &mut l,
+        WorldEvent::Stopped(Some("The local server stopped".into())),
+    );
+    screen(&mut l, DISCONNECTED);
+    l.click(l.button("Back to World List"));
+    screen(&mut l, SELECT);
+
+    for preset in ["single_biome_surface", "debug_all_block_states"] {
+        l.click(l.button("Create New World"));
+        screen(&mut l, CREATE);
+        std::fs::write(game_dir.join("mcr-probe-create"), preset).unwrap();
+        l.wait_info("create_probe", &format!("set {preset}"));
+        l.click(l.button("Create New World"));
+        l.run_for(Duration::from_millis(500));
+        assert!(l.rig.worlds.is_empty(), "{preset} reached mcr");
+        assert_eq!(l.rig.screen, CREATE, "{preset}");
+        l.tap(ESCAPE);
+        screen(&mut l, SELECT);
+    }
+
     l.tap(ESCAPE);
     screen(&mut l, TITLE);
     std::fs::write(game_dir.join("mcr-probe-load"), b"").unwrap();
-    l.until("the doWorldLoad probe", |l| {
+    l.until("the createFreshLevel probe", |l| {
         l.rig.infos.contains_key("world_load")
     });
     assert_eq!(l.rig.infos["world_load"], "blocked");
     assert!(
-        !saves.join("mcr-probe-load").join("level.dat").exists(),
-        "an integrated server saved the world"
+        !saves.join("mcr-probe-load").exists(),
+        "createFreshLevel left a folder"
     );
 
     assert_eq!(l.rig.detached, None);

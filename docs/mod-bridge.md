@@ -275,21 +275,33 @@ server never starts.
   `CreateWorldScreen.createWorldAndCleanup` (after vanilla's confirmations, before the folder is created) are
   cancelled and sent as `REPORT_WORLD` (`play\t<folder>`, or `create` with `key=value` lines). The shell starts the
   session as a *Java flow*: no native screens, and every update goes back as `MSG_WORLD` (`WORLD_STATUS`,
-  `WORLD_EULA`, `WORLD_READY`, `WORLD_FAILED`, `WORLD_STOPPED`). Java shows them on `McrWorldScreen` (progress with
-  Cancel), a `ConfirmScreen` for the EULA and an `AlertScreen` for failures. World types other than default,
-  superflat, large biomes and amplified, and debug mode, are refused on the create screen with a toast; data
-  packs, experiments and game rule edits are not applied.
+  `WORLD_EULA`, `WORLD_READY`, `WORLD_FAILED`, `WORLD_STOPPED`, `WORLD_LAN`). Java shows them on `McrWorldScreen`
+  (progress with Cancel), a `ConfirmScreen` for the EULA and an `AlertScreen` for failures. World types other than
+  default, superflat, large biomes and amplified, and debug mode, are refused on the create screen with a toast.
+- **Create options (ABI 18).** The `create` request also carries `rule.<id>=<value>` for each changed game rule,
+  `experiments=` (enabled feature packs), `packs=` (`file/` packs) with `packdir=` (Java's temporary pack folder,
+  kept until the session settles, then deleted) and `flat=` (the superflat generator JSON). Rust validates all of
+  them: packs are copied into `<world>/datapacks`, rules go through `gamerule` at Ready, experiments become
+  `initial-enabled-packs` and layers `generator-settings`. Packs from mods only toast. A mod's
+  `WorldOpenFlows.createFreshLevel` is refused before any folder exists.
 - **No Java writes.** `McrWorlds` tracks `IDLE`, `PREPARING`, `LOCAL` and `STOPPING`. While not idle,
   `LevelStorageSource.createAccess`/`validateAndCreateAccess` throw ("the world is open in mcr") and Play/Create
   only toast. `Minecraft.doWorldLoad` is always cancelled in mod mode (access and stem closed, title screen).
 - **Joining.** After `WORLD_READY` Rust connects to the local port; the next `NET_OPEN` opens `ConnectScreen` with
-  the world list as parent, so a failed join or any later disconnect lands there.
+  the world list as parent, so a failed join or any later disconnect lands there. A `WORLD_STOPPED` with a reason
+  while playing (the server stopped by itself) shows `DisconnectedScreen` with mcr's reason and "Back to World
+  List", re-asserted for a second over vanilla's own disconnect screen.
 - **Pause.** Java publishes `Gui.isPausing()` as `JAVA_PAUSING`. In a local world the shell sends `tick freeze`
   while it holds and `tick unfreeze` when it clears. Java's own `pause` follows the same rule (its `runTick` store
-  is redirected), so `isPaused()`, sounds and F3+Esc behave as in vanilla singleplayer.
+  is redirected), so `isPaused()`, sounds and F3+Esc behave as in vanilla singleplayer. Neither rule applies
+  while the world is open to LAN.
+- **Open to LAN.** 26.3 has it in World Options, only with an integrated server, so a mixin adds a Multiplayer
+  section with an Open to LAN button for mcr's world. `McrLanScreen` (game mode, cheats, port) reports
+  `lan\tmode=<id>\tcheats=<0|1>\tport=<0|port>`; Rust starts its forwarder and announcer and answers `WORLD_LAN`
+  (`ok\t<port>` or `failed\t<reason>`), which Java shows as vanilla's chat line.
 - **Save and Quit.** `PauseScreen` sees `isLocalServer()` as true for its label only; `disconnectFromWorld` takes
   the saving path and then shows `McrWorldScreen` in saving mode. Rust's session end saves and stops the server,
-  and `WORLD_STOPPED` sends Java to its title screen. Open to LAN needs an integrated server, so it never appears.
+  and `WORLD_STOPPED` sends Java to its title screen. A custom dialog's leave warning says Save and Quit too.
 - `--singleplayer <folder>` in mod mode waits for Java's GUI, then runs the same flow (the first status message
   opens the progress screen).
 

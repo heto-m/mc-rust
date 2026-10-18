@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use super::create_options::{CreateExtras, DataPacksScreen, FlatLayersScreen, GameRulesScreen};
 use super::edit_box::EditBox;
 use super::env::{Env, RenderCx};
 use super::input::{Key, MouseButton, UiInput, contains};
@@ -40,6 +41,23 @@ pub trait WorldStore {
     fn refresh(&mut self);
     fn rename(&mut self, folder: &str, name: &str) -> Result<(), String>;
     fn delete(&mut self, folder: &str) -> Result<(), String>;
+
+    /// Create New World filled from a world's saved settings, or why it cannot be re-created.
+    fn recreate(&self, _folder: &str) -> Result<CreateWorldSettings, String> {
+        Err("Re-Create is not available".into())
+    }
+
+    /// The folder new worlds take data packs from, and the packs in it.
+    fn data_packs(&self) -> (Option<std::path::PathBuf>, Vec<String>) {
+        (None, Vec::new())
+    }
+
+    fn open_pack_folder(&mut self) {}
+
+    /// Checks superflat layers (a vanilla preset string) before Create.
+    fn check_flat(&self, _layers: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub type SharedWorlds = Rc<RefCell<dyn WorldStore>>;
@@ -104,6 +122,15 @@ pub struct CreateWorldSettings {
     pub seed: String,
     pub structures: bool,
     pub bonus_chest: bool,
+    /// Game rules that differ from the default, as `(id, value)`.
+    pub game_rules: Vec<(String, String)>,
+    /// Experimental feature packs to enable.
+    pub experiments: Vec<String>,
+    /// Data packs from `pack_dir` to copy into the new world.
+    pub data_packs: Vec<String>,
+    pub pack_dir: Option<std::path::PathBuf>,
+    /// Superflat layers: a vanilla preset string or the generator JSON; `None` for the default.
+    pub flat: Option<String>,
 }
 
 impl Default for CreateWorldSettings {
@@ -117,6 +144,11 @@ impl Default for CreateWorldSettings {
             seed: String::new(),
             structures: true,
             bonus_chest: false,
+            game_rules: Vec::new(),
+            experiments: Vec::new(),
+            data_packs: Vec::new(),
+            pack_dir: None,
+            flat: None,
         }
     }
 }
@@ -126,6 +158,7 @@ const CREATE: u32 = 2;
 const EDIT: u32 = 3;
 const DELETE: u32 = 4;
 const BACK: u32 = 5;
+const RECREATE: u32 = 6;
 
 pub struct SelectWorldScreen {
     worlds: SharedWorlds,
@@ -204,7 +237,7 @@ impl SelectWorldScreen {
 
     fn update_buttons(&mut self) {
         let has = self.selected.is_some();
-        for id in [PLAY, EDIT, DELETE] {
+        for id in [PLAY, EDIT, DELETE, RECREATE] {
             if let Some(b) = self.widgets.button_mut(id) {
                 b.active = has;
             }
@@ -265,7 +298,29 @@ impl SelectWorldScreen {
                         self.play(i, out);
                     }
                 }
-                CREATE => out.push(ScreenAction::Push(Box::new(CreateWorldScreen::new()))),
+                CREATE => out.push(ScreenAction::Push(Box::new(
+                    CreateWorldScreen::new().with_store(self.worlds.clone()),
+                ))),
+                RECREATE => {
+                    if let Some(entry) = self.selected.and_then(|i| self.entry(i)) {
+                        let result = self.worlds.borrow().recreate(&entry.folder);
+                        let screen: Box<dyn Screen> = match result {
+                            Ok(settings) => Box::new(
+                                CreateWorldScreen::with_settings(settings)
+                                    .with_store(self.worlds.clone()),
+                            ),
+                            Err(message) => Box::new(ConfirmScreen::new(
+                                "lang:selectWorld.recreate.error.title",
+                                &message,
+                                vec![(
+                                    "lang:gui.back".into(),
+                                    Box::new(|| vec![ScreenAction::Pop]),
+                                )],
+                            )),
+                        };
+                        out.push(ScreenAction::Push(screen));
+                    }
+                }
                 EDIT => {
                     if let Some(entry) = self.selected.and_then(|i| self.entry(i)) {
                         out.push(ScreenAction::Push(Box::new(EditWorldScreen::new(
@@ -401,13 +456,19 @@ impl Screen for SelectWorldScreen {
             [x + 154, y1, 150, 20],
             "lang:selectWorld.create",
         ));
-        w.add(Button::new(EDIT, [x, y2, 98, 20], "lang:selectWorld.edit"));
+        let x2 = width / 2 - 150;
+        w.add(Button::new(EDIT, [x2, y2, 72, 20], "lang:selectWorld.edit"));
         w.add(Button::new(
             DELETE,
-            [x + 103, y2, 98, 20],
+            [x2 + 76, y2, 72, 20],
             "lang:selectWorld.delete",
         ));
-        w.add(Button::new(BACK, [x + 206, y2, 98, 20], "lang:gui.back"));
+        w.add(Button::new(
+            RECREATE,
+            [x2 + 152, y2, 72, 20],
+            "lang:selectWorld.recreate",
+        ));
+        w.add(Button::new(BACK, [x2 + 228, y2, 72, 20], "lang:gui.back"));
         self.sync_list();
         self.update_buttons();
     }
@@ -655,6 +716,9 @@ const C_BONUS: u32 = 7;
 const C_SEED: u32 = 8;
 const C_CREATE: u32 = 9;
 const C_CANCEL: u32 = 10;
+const C_RULES: u32 = 11;
+const C_PACKS: u32 = 12;
+const C_CUSTOMIZE: u32 = 13;
 
 const MODES: [NewGameMode; 3] = [
     NewGameMode::Survival,
@@ -672,13 +736,23 @@ fn on_off() -> Vec<String> {
     vec!["lang:options.on".into(), "lang:options.off".into()]
 }
 
-#[derive(Debug)]
 pub struct CreateWorldScreen {
     widgets: WidgetSet,
     gui: (i32, i32),
     settings: CreateWorldSettings,
+    /// Game rules, packs and superflat layers, shared with the screens that edit them.
+    extras: Rc<RefCell<CreateExtras>>,
+    store: Option<SharedWorlds>,
     /// Cheats follow the game mode until the player sets them.
     cheats_touched: bool,
+}
+
+impl std::fmt::Debug for CreateWorldScreen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateWorldScreen")
+            .field("settings", &self.settings)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for CreateWorldScreen {
@@ -693,8 +767,33 @@ impl CreateWorldScreen {
             widgets: WidgetSet::default(),
             gui: (0, 0),
             settings: CreateWorldSettings::default(),
+            extras: Rc::default(),
+            store: None,
             cheats_touched: false,
         }
+    }
+
+    /// Filled in, as Re-Create does; cheats keep the given value.
+    pub fn with_settings(mut settings: CreateWorldSettings) -> Self {
+        let extras = CreateExtras {
+            game_rules: std::mem::take(&mut settings.game_rules),
+            experiments: std::mem::take(&mut settings.experiments),
+            data_packs: std::mem::take(&mut settings.data_packs),
+            pack_dir: settings.pack_dir.take(),
+            flat: settings.flat.take(),
+        };
+        Self {
+            settings,
+            extras: Rc::new(RefCell::new(extras)),
+            cheats_touched: true,
+            ..Self::new()
+        }
+    }
+
+    /// The store offering data packs and checking superflat layers.
+    pub fn with_store(mut self, store: SharedWorlds) -> Self {
+        self.store = Some(store);
+        self
     }
 
     pub fn settings(&self) -> &CreateWorldSettings {
@@ -724,7 +823,12 @@ impl CreateWorldScreen {
                 s.cheats = index == 0;
                 self.cheats_touched = true;
             }
-            C_TYPE => s.preset = PRESETS[index.min(PRESETS.len() - 1)],
+            C_TYPE => {
+                s.preset = PRESETS[index.min(PRESETS.len() - 1)];
+                if let Some(b) = self.widgets.button_mut(C_CUSTOMIZE) {
+                    b.active = s.preset == WorldPreset::Flat;
+                }
+            }
             C_STRUCTURES => s.structures = index == 0,
             C_BONUS => s.bonus_chest = index == 0,
             _ => {}
@@ -763,6 +867,17 @@ impl CreateWorldScreen {
             s.difficulty = 3;
             s.cheats = false;
         }
+        let extras = self.extras.borrow();
+        s.game_rules.clone_from(&extras.game_rules);
+        s.experiments.clone_from(&extras.experiments);
+        s.data_packs.clone_from(&extras.data_packs);
+        s.pack_dir = (!s.data_packs.is_empty())
+            .then(|| extras.pack_dir.clone())
+            .flatten();
+        s.flat = extras
+            .flat
+            .clone()
+            .filter(|_| s.preset == WorldPreset::Flat);
         s
     }
 }
@@ -847,7 +962,24 @@ impl Screen for CreateWorldScreen {
         seed.hint = Some("lang:selectWorld.seedInfo".into());
         seed.take_changed();
         self.widgets.add(seed);
-        let y = (height - 28).max(188);
+        self.widgets.add(Button::new(
+            C_RULES,
+            [left, 186, 100, 20],
+            "lang:selectWorld.gameRules",
+        ));
+        self.widgets.add(Button::new(
+            C_PACKS,
+            [left + 105, 186, 100, 20],
+            "lang:selectWorld.dataPacks",
+        ));
+        let mut customize = Button::new(
+            C_CUSTOMIZE,
+            [left + 210, 186, 100, 20],
+            "lang:selectWorld.customizeType",
+        );
+        customize.active = s.preset == WorldPreset::Flat;
+        self.widgets.add(customize);
+        let y = (height - 28).max(212);
         self.widgets.add(Button::new(
             C_CREATE,
             [left, y, 150, 20],
@@ -910,6 +1042,26 @@ impl Screen for CreateWorldScreen {
                 WidgetEventKind::Pressed if id == C_CANCEL => {
                     out.push(ScreenAction::ClickSound);
                     out.push(ScreenAction::Pop);
+                }
+                WidgetEventKind::Pressed if id == C_RULES => {
+                    out.push(ScreenAction::ClickSound);
+                    out.push(ScreenAction::Push(Box::new(GameRulesScreen::new(
+                        self.extras.clone(),
+                    ))));
+                }
+                WidgetEventKind::Pressed if id == C_PACKS => {
+                    out.push(ScreenAction::ClickSound);
+                    out.push(ScreenAction::Push(Box::new(DataPacksScreen::new(
+                        self.extras.clone(),
+                        self.store.clone(),
+                    ))));
+                }
+                WidgetEventKind::Pressed if id == C_CUSTOMIZE => {
+                    out.push(ScreenAction::ClickSound);
+                    out.push(ScreenAction::Push(Box::new(FlatLayersScreen::new(
+                        self.extras.clone(),
+                        self.store.clone(),
+                    ))));
                 }
                 _ => {}
             }
