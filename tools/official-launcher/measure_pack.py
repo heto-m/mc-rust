@@ -240,7 +240,10 @@ def watch_official(args):
 
 
 def pack_title(slug):
-    return json.loads((PACKS / slug / "pack.json").read_text())["name"]
+    # The name comes from the pack's manifest: keep it to characters that are inert in instance.cfg and paths.
+    name = json.loads((PACKS / slug / "pack.json").read_text()).get("name")
+    safe = re.sub(r"[^A-Za-z0-9 ._'()+-]", "", name if isinstance(name, str) else "").strip(" .")[:64]
+    return safe or slug
 
 
 def default_heap_mib(slug):
@@ -352,6 +355,7 @@ def prepare_prism(args):
         "OverrideJavaArgs": "true", "JvmArgs": java_args,
         "OverrideWindow": "true", "MinecraftWinWidth": "1280", "MinecraftWinHeight": "720", "LaunchMaximized": "false",
         "OverrideCommands": "true", "WrapperCommand": mango_env(mango, args.autostart_log),
+        "PreLaunchCommand": "", "PostExitCommand": "",
         "JoinServerOnLaunch": "true", "JoinServerOnLaunchAddress": f"127.0.0.1:{BENCH_PORT}",
         "ShowConsole": "false",
     })
@@ -360,6 +364,8 @@ def prepare_prism(args):
     if java:
         cfg.update({"OverrideJavaLocation": "true", "JavaPath": java})
     inst.mkdir(parents=True, exist_ok=True)
+    if any(c in str(k) + str(v) for k, v in cfg.items() for c in "\r\n"):
+        sys.exit(f"refusing to write {inst / 'instance.cfg'}: a value spans lines")
     (inst / "instance.cfg").write_text("[General]\n" + "".join(f"{k}={v}\n" for k, v in sorted(cfg.items())))
     (inst / "mmc-pack.json").write_text(json.dumps(prism_components(), indent=4) + "\n")
 
