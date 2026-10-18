@@ -15,11 +15,21 @@ use crate::types::component::{
 };
 use crate::types::item::ItemStackTemplate;
 use crate::version::io::{self, Depth};
-use crate::version::translator::{Maps, Remap};
+use crate::version::translator::{Era, Maps, Remap};
 
 fn new_component(name: &str) -> i32 {
     component_type_id(name).expect("canonical component")
 }
+
+/// Components 1.21.11 sent as an `EitherHolder`: a bool, then the holder or a resource key.
+const EITHER_HOLDERS: &[&str] = &[
+    "jukebox_playable",
+    "instrument",
+    "provides_trim_material",
+    "chicken/variant",
+    "zombie_nautilus/variant",
+    "damage_type",
+];
 
 /// One direction of the item codec: `back` reads canonical bytes and writes the old layout.
 #[derive(Clone, Copy)]
@@ -109,9 +119,74 @@ impl Codec {
     }
 
     pub fn template(self, r: &mut &[u8], w: &mut Vec<u8>, d: Depth) -> Result<()> {
-        self.item(r, w)?;
-        io::varint(r, w)?;
+        match (self.m.era, self.back) {
+            (Era::Templates, _) => {
+                self.item(r, w)?;
+                io::varint(r, w)?;
+            }
+            (Era::Stacks, false) => {
+                let count = read_varint(r)?;
+                if count <= 0 {
+                    return Err(io::unknown("empty item stack", count));
+                }
+                self.item(r, w)?;
+                write_varint(w, count);
+            }
+            (Era::Stacks, true) => {
+                let new = read_varint(r)?;
+                let old = self.m.item.back(new).ok_or(io::unknown("item", new))?;
+                io::varint(r, w)?;
+                write_varint(w, old);
+            }
+        }
         self.patch(r, w, d)
+    }
+
+    /// One `container` slot: an optional template, or 1.21.11's optional stack (empty when the count is not positive).
+    fn container_slot(self, r: &mut &[u8], w: &mut Vec<u8>, d: Depth) -> Result<()> {
+        match (self.m.era, self.back) {
+            (Era::Templates, _) => {
+                if io::bool(r, w)? {
+                    self.template(r, w, d)?;
+                }
+            }
+            (Era::Stacks, false) => {
+                let mut peek = *r;
+                if read_varint(&mut peek)? <= 0 {
+                    *r = peek;
+                    w.push(0);
+                } else {
+                    w.push(1);
+                    self.template(r, w, d)?;
+                }
+            }
+            (Era::Stacks, true) => {
+                if io::bool(r, &mut Vec::new())? {
+                    self.template(r, w, d)?;
+                } else {
+                    write_varint(w, 0);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 1.21.11's tag key against 26.1's holder set; a direct holder set has no tag key, so `false`.
+    fn tag_key(self, r: &mut &[u8], w: &mut Vec<u8>) -> Result<bool> {
+        if !self.back {
+            write_varint(w, 0);
+            io::copy::<Identifier>(r, w)?;
+            return Ok(true);
+        }
+        let n = read_len(r, r.len() + 1)?;
+        if n == 0 {
+            io::copy::<Identifier>(r, w)?;
+            return Ok(true);
+        }
+        for _ in 1..n {
+            read_varint(r)?;
+        }
+        Ok(false)
     }
 
     pub fn patch(self, r: &mut &[u8], w: &mut Vec<u8>, d: Depth) -> Result<()> {
@@ -170,8 +245,12 @@ impl Codec {
             }
             return Ok(2);
         }
+        let mark = w.len();
         write_varint(w, ids[0]);
-        self.value(canonical, r, w, d)?;
+        if !self.value(canonical, r, w, d)? {
+            w.truncate(mark);
+            return Ok(0);
+        }
         Ok(1)
     }
 
@@ -182,15 +261,27 @@ impl Codec {
         Ok(())
     }
 
-    fn value(self, canonical: i32, r: &mut &[u8], w: &mut Vec<u8>, d: Depth) -> Result<()> {
+    /// One component value; `false` when it has no target-side encoding and is left out.
+    fn value(self, canonical: i32, r: &mut &[u8], w: &mut Vec<u8>, d: Depth) -> Result<bool> {
         let m = self.m;
-        match COMPONENT_NAMES[canonical as usize] {
+        let name = COMPONENT_NAMES[canonical as usize];
+        let stacks = m.era == Era::Stacks;
+        if stacks && EITHER_HOLDERS.contains(&name) {
+            if self.back {
+                w.push(1);
+            } else if !io::bool(r, &mut Vec::new())? {
+                <Identifier as mcr_buf::Decode>::decode(r)?;
+                return Ok(false);
+            }
+        }
+        match name {
             "container" => {
                 for _ in 0..io::len(r, w, 256)? {
-                    if io::bool(r, w)? {
-                        self.template(r, w, d)?;
-                    }
+                    self.container_slot(r, w, d)?;
                 }
+            }
+            "damage_resistant" | "provides_banner_patterns" if stacks => {
+                return self.tag_key(r, w);
             }
             "bundle_contents" => self.templates(r, w, usize::MAX, d)?,
             "charged_projectiles" => self.templates(r, w, 1024, d)?,
@@ -264,7 +355,18 @@ impl Codec {
                 io::copy::<f32>(r, w)?;
                 io::copy::<Vec<DamageReduction>>(r, w)?;
                 io::copy::<ItemDamageFunction>(r, w)?;
-                io::copy::<Option<HolderSet>>(r, w)?;
+                if !stacks {
+                    io::copy::<Option<HolderSet>>(r, w)?;
+                } else if io::bool(r, &mut Vec::new())? {
+                    let mark = w.len();
+                    w.push(1);
+                    if !self.tag_key(r, w)? {
+                        w.truncate(mark);
+                        w.push(0);
+                    }
+                } else {
+                    w.push(0);
+                }
                 self.optional_sound(r, w)?;
                 self.optional_sound(r, w)?;
             }
@@ -326,7 +428,7 @@ impl Codec {
                 w.extend_from_slice(&start[..start.len() - r.len()]);
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// 26.2 lists up to four sherd item ids (brick = blank); 26.3 has four optional stacks.
@@ -548,7 +650,9 @@ impl Codec {
                 continue;
             }
             value.clear();
-            self.value(id, &mut bytes, &mut value, Depth::top())?;
+            if !self.value(id, &mut bytes, &mut value, Depth::top())? {
+                continue;
+            }
             if !bytes.is_empty() {
                 return Err(DecodeError::Other(
                     "component value has trailing bytes".into(),

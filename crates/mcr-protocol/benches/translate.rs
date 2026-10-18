@@ -12,6 +12,8 @@ use mcr_protocol::{Direction, PacketIds, ProtocolState};
 
 struct Old {
     tables: VersionTables,
+    /// 1.21.11: sections without a fluid count, stacks where 26.1 has templates.
+    stacks: bool,
 }
 
 impl Old {
@@ -76,7 +78,11 @@ fn chunk(old: &Old) -> Vec<u8> {
     let mut sections = Vec::new();
     let mut seed = 0x9e37_79b9_7f4a_7c15u64;
     for _ in 0..24 {
-        sections.extend([0x10, 0, 0, 0, 4]);
+        if old.stacks {
+            sections.extend([0x10, 0, 4]);
+        } else {
+            sections.extend([0x10, 0, 0, 0, 4]);
+        }
         varint(&mut sections, palette.len() as i32);
         for &s in &palette {
             varint(&mut sections, s);
@@ -147,6 +153,38 @@ fn inventory(old: &Old) -> Vec<u8> {
     p
 }
 
+/// A shulker box with 27 stacks of stone in its `container` component.
+fn shulker(old: &Old) -> Vec<u8> {
+    let mut p = Vec::new();
+    varint(&mut p, 0);
+    varint(&mut p, 1);
+    p.extend([0, 5]);
+    varint(&mut p, 1);
+    varint(&mut p, old.item("minecraft:shulker_box"));
+    p.extend([1, 0]);
+    varint(&mut p, old.component("container"));
+    varint(&mut p, 27);
+    for _ in 0..27 {
+        if old.stacks {
+            varint(&mut p, 64);
+            varint(&mut p, old.item("minecraft:stone"));
+        } else {
+            p.push(1);
+            varint(&mut p, old.item("minecraft:stone"));
+            varint(&mut p, 64);
+        }
+        p.extend([0, 0]);
+    }
+    p
+}
+
+/// A sheep's flags, air, baby flag and wool.
+fn entity_data() -> Vec<u8> {
+    let mut p = vec![7];
+    p.extend([0, 0, 0, 1, 1, 0x80, 0x0a, 16, 8, 0, 17, 0, 3, 0xff]);
+    p
+}
+
 fn frames(wire: Wire, old: &Old) -> Vec<(&'static str, i32, Vec<u8>)> {
     let ids = PacketIds::v26_3();
     let id = |name: &str| {
@@ -159,6 +197,8 @@ fn frames(wire: Wire, old: &Old) -> Vec<(&'static str, i32, Vec<u8>)> {
     vec![
         ("chunk", id("level_chunk_with_light"), chunk(old)),
         ("inventory", id("container_set_content"), inventory(old)),
+        ("shulker box", id("container_set_slot"), shulker(old)),
+        ("entity data", id("set_entity_data"), entity_data()),
         ("move", id("move_entity_pos"), vec![9, 0, 1, 0, 2, 0, 3, 1]),
         ("keep alive", id("keep_alive"), vec![0; 8]),
     ]
@@ -166,7 +206,7 @@ fn frames(wire: Wire, old: &Old) -> Vec<(&'static str, i32, Vec<u8>)> {
 
 fn translate(c: &mut Criterion) {
     let ids = PacketIds::v26_3();
-    let versions: [(&str, i32, &[u8]); 2] = [
+    let versions: [(&str, i32, &[u8]); 3] = [
         (
             "26.2",
             776,
@@ -177,11 +217,17 @@ fn translate(c: &mut Criterion) {
             775,
             include_bytes!("../src/version/v26_1_2/tables.bin"),
         ),
+        (
+            "1.21.11",
+            774,
+            include_bytes!("../src/version/v1_21_11/tables.bin"),
+        ),
     ];
     for (name, protocol, tables) in versions {
         let wire = Wire::any_for_protocol(protocol).unwrap();
         let old = Old {
             tables: VersionTables::decode(tables).unwrap(),
+            stacks: protocol < 775,
         };
         let mut group = c.benchmark_group(format!("translate {name}"));
         for (what, id, payload) in frames(wire, &old) {

@@ -478,7 +478,8 @@ impl Client {
             None => (PLAYER_MENU_ID, self.state.inventory.player.state_id),
         };
         let creative = self.state.player.instabuild;
-        let cx = crate::hashing::HashCx::new(self.state.data, &self.state.registries);
+        let cx = crate::hashing::HashCx::new(self.state.data, &self.state.registries)
+            .with_dialect(self.wire().hash_dialect());
         let prediction =
             self.state
                 .inventory
@@ -556,7 +557,8 @@ impl Client {
         input: ContainerInput,
     ) -> Result<()> {
         let before = self.state.inventory.player.slots.clone();
-        let cx = crate::hashing::HashCx::new(self.state.data, &self.state.registries);
+        let cx = crate::hashing::HashCx::new(self.state.data, &self.state.registries)
+            .with_dialect(self.wire().hash_dialect());
         self.state
             .inventory
             .predict_click(&cx, true, PLAYER_MENU_ID, slot, button, input);

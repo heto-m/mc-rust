@@ -596,3 +596,50 @@ fn default_valued_fields_are_omitted() {
         Some(crate::hashing::h_empty_map())
     );
 }
+
+/// Servers before 26.1 hash stacks with `ItemStack`'s codec, which writes a count of 1; before 26.3
+/// pot decorations hash as four item names.
+#[test]
+fn older_dialects_hash_counts_and_pot_items() {
+    use crate::hashing::{MapBuilder, h_int, h_list, h_str};
+    use mcr_protocol::version::HashDialect;
+    let regs = registries();
+    let data = mcr_data::v26_3();
+    let apple = data.item_by_name("minecraft:apple").unwrap() as i32;
+    let bundle = DataComponent::BundleContents(vec![ItemStackTemplate {
+        item: apple,
+        count: 1,
+        components: Default::default(),
+    }]);
+    let entry = |count: bool| {
+        let mut map = MapBuilder::default();
+        map.put("id", h_str("minecraft:apple"));
+        if count {
+            map.put("count", h_int(1));
+        }
+        h_list([map.build()])
+    };
+    let canonical = HashCx::new(data, &regs);
+    let old = HashCx::new(data, &regs).with_dialect(HashDialect {
+        stack_count_always: true,
+        pot_decorations_as_items: true,
+    });
+    assert_eq!(canonical.component_hash(&bundle), Some(entry(false)));
+    assert_eq!(old.component_hash(&bundle), Some(entry(true)));
+    let sherd = data.item_by_name("minecraft:angler_pottery_sherd").unwrap() as i32;
+    let pot = DataComponent::PotDecorations(PotDecorations {
+        back: None,
+        left: Some(ItemStackTemplate {
+            item: sherd,
+            count: 1,
+            components: Default::default(),
+        }),
+        right: None,
+        front: None,
+    });
+    let names = ["brick", "angler_pottery_sherd", "brick", "brick"];
+    assert_eq!(
+        old.component_hash(&pot),
+        Some(h_list(names.map(|n| h_str(&format!("minecraft:{n}")))))
+    );
+}

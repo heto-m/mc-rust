@@ -6,10 +6,11 @@
 pub(crate) mod io;
 pub mod tables;
 mod translator;
+mod v1_21_11;
 mod v26_1_2;
 mod v26_2;
 
-pub use translator::{Frames, Session, TranslateError, Translated, Translator};
+pub use translator::{Frames, HashDialect, Session, TranslateError, Translated, Translator};
 
 use crate::{Direction, ProtocolState};
 
@@ -44,10 +45,15 @@ pub const VERSIONS: &[VersionInfo] = &[
         name: "26.1",
         protocol: 775,
     },
+    VersionInfo {
+        name: "1.21.11",
+        protocol: 774,
+    },
 ];
 
 /// The versions the launcher and server list offer, newest first.
-pub const SUPPORTED_VERSIONS: &[&str] = &[GAME_VERSION, "26.2", "26.1.2", "26.1.1", "26.1"];
+pub const SUPPORTED_VERSIONS: &[&str] =
+    &[GAME_VERSION, "26.2", "26.1.2", "26.1.1", "26.1", "1.21.11"];
 
 pub fn is_supported(id: &str) -> bool {
     SUPPORTED_VERSIONS.contains(&id)
@@ -85,6 +91,7 @@ impl Wire {
             PROTOCOL => Some(Self::Canonical),
             776 => Some(Self::Legacy(v26_2::translator())),
             775 => Some(Self::Legacy(v26_1_2::translator())),
+            774 => Some(Self::Legacy(v1_21_11::translator())),
             _ => None,
         }
     }
@@ -143,6 +150,14 @@ impl Wire {
         }
     }
 
+    /// How the server hashes component values in container clicks.
+    pub fn hash_dialect(self) -> HashDialect {
+        match self {
+            Self::Canonical => HashDialect::default(),
+            Self::Legacy(t) => t.hash_dialect(),
+        }
+    }
+
     /// The id a canonical clientbound packet arrives under on this wire.
     pub fn wire_clientbound_id(self, state: ProtocolState, canonical: i32) -> Option<i32> {
         match self {
@@ -174,6 +189,9 @@ mod tests {
         let older = Wire::any_for_protocol(775).unwrap();
         assert_eq!((older.protocol(), older.version_name()), (775, "26.1.2"));
         assert_eq!(version_by_protocol(775).map(|v| v.name), Some("26.1.2"));
+        let oldest = Wire::any_for_protocol(774).unwrap();
+        assert_eq!((oldest.protocol(), oldest.version_name()), (774, "1.21.11"));
+        assert_eq!(Wire::for_protocol(774).is_some(), is_supported("1.21.11"));
     }
 
     #[test]

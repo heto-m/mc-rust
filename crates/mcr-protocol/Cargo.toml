@@ -9,6 +9,7 @@ publish.workspace = true
 mcr-buf.workspace = true
 mcr-data = { path = "../mcr-data" }
 mcr-nbt = { path = "../mcr-nbt" }
+rustc-hash.workspace = true
 thiserror.workspace = true
 uuid = "1"
 

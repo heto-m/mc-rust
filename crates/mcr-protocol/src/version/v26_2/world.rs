@@ -1,5 +1,7 @@
 //! Chunks, light, block changes, particles and sounds.
 
+use std::sync::OnceLock;
+
 use mcr_buf::{Result, read_len, read_varint, read_varlong, take, write_varint, write_varlong};
 
 use mcr_buf::{Encode, IdOr};
@@ -10,7 +12,7 @@ use crate::play::clientbound::world::{LevelEvent, Sound, SoundSource};
 use crate::types::Particle;
 use crate::types::particle::{BlockParticleKind, ITEM};
 use crate::version::io::{self, Depth};
-use crate::version::translator::{Action, Cx, Maps};
+use crate::version::translator::{Action, Cx, Era, Maps};
 
 const BLOCK_ENTRIES: usize = 4096;
 const BIOME_ENTRIES: usize = 64;
@@ -30,8 +32,109 @@ fn read_long(r: &mut &[u8]) -> Result<u64> {
     Ok(u64::from_be_bytes(take(r, 8)?.try_into().expect("8 bytes")))
 }
 
+/// Canonical block states holding a fluid, one bit each.
+fn fluid_states() -> &'static [u64] {
+    static FLUIDS: OnceLock<Vec<u64>> = OnceLock::new();
+    FLUIDS.get_or_init(|| {
+        let data = mcr_data::v26_3();
+        let mut bits = vec![0u64; data.state_count().div_ceil(64)];
+        for id in 0..data.state_count() {
+            if data
+                .block_state(id as u32)
+                .is_some_and(|s| s.fluid.is_some())
+            {
+                bits[id / 64] |= 1 << (id % 64);
+            }
+        }
+        bits
+    })
+}
+
+fn has_fluid(state: i32) -> bool {
+    let id = state as usize;
+    fluid_states()
+        .get(id / 64)
+        .is_some_and(|w| w & (1 << (id % 64)) != 0)
+}
+
+const MAX_LANE_TARGETS: usize = 4;
+
+/// Entries of a packed container whose palette index is flagged in `fluid`.
+fn count_flagged(data: &[u8], bits: u8, entries: usize, fluid: &[bool]) -> u16 {
+    let mut targets = [0u64; MAX_LANE_TARGETS];
+    let mut n = 0;
+    for (index, _) in fluid.iter().enumerate().filter(|(_, f)| **f) {
+        if n == MAX_LANE_TARGETS {
+            return count_flagged_scalar(data, bits, entries, fluid);
+        }
+        targets[n] = index as u64;
+        n += 1;
+    }
+    count_lanes(data, bits, entries, &targets[..n])
+}
+
+fn count_lanes(data: &[u8], bits: u8, entries: usize, targets: &[u64]) -> u16 {
+    let count = match bits {
+        1 => lanes::<1>(data, entries, targets),
+        2 => lanes::<2>(data, entries, targets),
+        3 => lanes::<3>(data, entries, targets),
+        4 => lanes::<4>(data, entries, targets),
+        5 => lanes::<5>(data, entries, targets),
+        6 => lanes::<6>(data, entries, targets),
+        7 => lanes::<7>(data, entries, targets),
+        _ => lanes::<8>(data, entries, targets),
+    };
+    count as u16
+}
+
+/// Counts entries equal to any target, comparing every `B`-bit lane of a word at once.
+fn lanes<const B: usize>(data: &[u8], entries: usize, targets: &[u64]) -> usize {
+    let per_long = 64 / B;
+    let lanes = (0..per_long).fold(0u64, |m, k| m | 1 << (k * B));
+    let differs = |word: u64, pattern: u64| {
+        let x = word ^ pattern;
+        (1..B).fold(x, |d, s| d | x >> s) & lanes
+    };
+    let words = data.as_chunks::<8>().0;
+    let (full, rem) = (entries / per_long, entries % per_long);
+    let full = full.min(words.len());
+    let mut count = 0;
+    for &t in targets {
+        let pattern = t * lanes;
+        let mismatched: u32 = words[..full]
+            .iter()
+            .map(|w| differs(u64::from_be_bytes(*w), pattern).count_ones())
+            .sum();
+        count += full * per_long - mismatched as usize;
+        if rem > 0
+            && let Some(w) = words.get(full)
+        {
+            let valid = (1u64 << (rem * B)) - 1;
+            count += rem - (differs(u64::from_be_bytes(*w), pattern) & valid).count_ones() as usize;
+        }
+    }
+    count
+}
+
+fn count_flagged_scalar(data: &[u8], bits: u8, entries: usize, fluid: &[bool]) -> u16 {
+    let per_long = 64 / usize::from(bits);
+    let mask = (1u64 << bits) - 1;
+    let mut count = 0u16;
+    let mut left = entries;
+    for word in data.as_chunks::<8>().0 {
+        let word = u64::from_be_bytes(*word);
+        for k in 0..per_long.min(left) {
+            let index = ((word >> (k * usize::from(bits))) & mask) as usize;
+            count += u16::from(fluid.get(index).copied().unwrap_or(false));
+        }
+        left = left.saturating_sub(per_long);
+    }
+    count
+}
+
 /// One paletted container; block containers remap ids and widen the direct palette to 26.3's 16 bits.
-fn container(m: &Maps, r: &mut &[u8], w: &mut Vec<u8>, blocks: bool) -> Result<()> {
+/// With `fluids`, returns how many entries hold a fluid (the count 1.21.11 did not send).
+fn container(m: &Maps, r: &mut &[u8], w: &mut Vec<u8>, blocks: bool, fluids: bool) -> Result<u16> {
     let (entries, min_bits, max_indirect) = if blocks {
         (BLOCK_ENTRIES, 4, 8)
     } else {
@@ -40,37 +143,53 @@ fn container(m: &Maps, r: &mut &[u8], w: &mut Vec<u8>, blocks: bool) -> Result<(
     let declared = take(r, 1)?[0];
     if declared == 0 {
         w.push(0);
-        if blocks {
-            write_varint(w, state(m, read_varint(r)?)?);
-        } else {
+        if !blocks {
             io::varint(r, w)?;
+            return Ok(0);
         }
-        return Ok(());
+        let new = state(m, read_varint(r)?)?;
+        write_varint(w, new);
+        return Ok(if fluids && has_fluid(new) {
+            BLOCK_ENTRIES as u16
+        } else {
+            0
+        });
     }
     if declared <= max_indirect {
         w.push(declared);
         let bits = declared.max(min_bits);
         let len = read_len(r, 1 << bits)?;
         write_varint(w, len as i32);
-        for _ in 0..len {
+        let mut fluid = [false; 256];
+        for flag in fluid.iter_mut().take(len) {
             if blocks {
-                write_varint(w, state(m, read_varint(r)?)?);
+                let new = state(m, read_varint(r)?)?;
+                write_varint(w, new);
+                *flag = fluids && has_fluid(new);
             } else {
                 io::varint(r, w)?;
             }
         }
-        return io::bytes(r, w, long_count(bits, entries) * 8);
+        let data = take(r, long_count(bits, entries) * 8)?;
+        w.extend_from_slice(data);
+        return Ok(if fluid[..len].contains(&true) {
+            count_flagged(data, bits, entries, &fluid[..len])
+        } else {
+            0
+        });
     }
     if !blocks || declared > 32 {
         if declared > 32 {
             return Err(io::unknown("palette bits", declared.into()));
         }
         w.push(declared);
-        return io::bytes(r, w, long_count(declared, entries) * 8);
+        io::bytes(r, w, long_count(declared, entries) * 8)?;
+        return Ok(0);
     }
     let per_long = 64 / usize::from(declared);
     let mask = (1u64 << declared) - 1;
     let mut values = [0u16; BLOCK_ENTRIES];
+    let mut fluid_count = 0u16;
     let mut i = 0;
     for _ in 0..long_count(declared, entries) {
         let word = read_long(r)?;
@@ -79,7 +198,9 @@ fn container(m: &Maps, r: &mut &[u8], w: &mut Vec<u8>, blocks: bool) -> Result<(
                 break;
             }
             let old = ((word >> (k * usize::from(declared))) & mask) as i32;
-            values[i] = state(m, old)? as u16;
+            let new = state(m, old)?;
+            fluid_count += u16::from(fluids && has_fluid(new));
+            values[i] = new as u16;
             i += 1;
         }
     }
@@ -92,17 +213,26 @@ fn container(m: &Maps, r: &mut &[u8], w: &mut Vec<u8>, blocks: bool) -> Result<(
         }
         w.extend_from_slice(&word.to_be_bytes());
     }
-    Ok(())
+    Ok(fluid_count)
 }
 
+/// 26.1 added a fluid count after each section's block count.
 fn sections(m: &Maps, r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
     let len = read_len(r, MAX_SECTION_BUFFER)?;
     let mut buf = take(r, len)?;
     let mut out = Vec::with_capacity(len + len / 8);
     while !buf.is_empty() {
-        io::bytes(&mut buf, &mut out, 4)?;
-        container(m, &mut buf, &mut out, true)?;
-        container(m, &mut buf, &mut out, false)?;
+        if m.era == Era::Stacks {
+            io::bytes(&mut buf, &mut out, 2)?;
+            let at = out.len();
+            out.extend_from_slice(&[0, 0]);
+            let fluids = container(m, &mut buf, &mut out, true, true)?;
+            out[at..at + 2].copy_from_slice(&fluids.to_be_bytes());
+        } else {
+            io::bytes(&mut buf, &mut out, 4)?;
+            container(m, &mut buf, &mut out, true, false)?;
+        }
+        container(m, &mut buf, &mut out, false, false)?;
     }
     write_varint(w, out.len() as i32);
     w.extend_from_slice(&out);
@@ -325,4 +455,38 @@ pub fn sound(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> 
     Codec::fwd(cx.m).sound(r, w)?;
     io::rest(r, w);
     Ok(Action::Rewritten)
+}
+
+#[cfg(test)]
+mod fluid_count_tests {
+    use super::*;
+
+    #[test]
+    fn lane_counts_match_the_scalar_count() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for bits in 1..=8u8 {
+            for entries in [BIOME_ENTRIES, BLOCK_ENTRIES] {
+                let data: Vec<u8> = (0..long_count(bits, entries) * 8)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        seed as u8
+                    })
+                    .collect();
+                let palette = 1usize << bits;
+                for flagged in [vec![0], vec![1], vec![0, palette - 1], vec![2, 3, 5]] {
+                    let mut fluid = vec![false; palette];
+                    for i in flagged {
+                        fluid[i.min(palette - 1)] = true;
+                    }
+                    assert_eq!(
+                        count_flagged(&data, bits, entries, &fluid),
+                        count_flagged_scalar(&data, bits, entries, &fluid),
+                        "{bits} bits, {entries} entries"
+                    );
+                }
+            }
+        }
+    }
 }

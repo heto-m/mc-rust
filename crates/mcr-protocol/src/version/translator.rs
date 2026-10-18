@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use rustc_hash::FxHashSet;
+
 use mcr_buf::{DecodeError, read_varint, write_varint};
 
 use super::tables::{IdMap, VersionTables};
@@ -78,6 +80,20 @@ pub(crate) struct SessionState {
     pub brewing: Option<(i32, bool)>,
     /// The `minecraft:core` pack version the server offered.
     pub core_pack: Option<Box<str>>,
+    /// Spawned entities whose data indices shift, at most [`MAX_SHIFTED_ENTITIES`].
+    pub shifted_entities: FxHashSet<i32>,
+    /// The sneak key from the last `player_input`.
+    pub sneaking: bool,
+}
+
+pub(crate) const MAX_SHIFTED_ENTITIES: usize = 1 << 16;
+
+impl SessionState {
+    pub fn track_shifted(&mut self, entity: i32) {
+        if self.shifted_entities.len() < MAX_SHIFTED_ENTITIES {
+            self.shifted_entities.insert(entity);
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -191,9 +207,28 @@ impl Remap<'_> {
     }
 }
 
+/// Where a version's `container_click` component hashes differ from 26.3's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HashDialect {
+    /// Stacks inside components hash their count even when it is 1 (`ItemStack` before 26.1's templates).
+    pub stack_count_always: bool,
+    /// `pot_decorations` hashes as four item names, brick for a blank side (before 26.3).
+    pub pot_decorations_as_items: bool,
+}
+
+/// How an old version encodes the values 26.1 reshaped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Era {
+    /// 1.21.11: item stacks where 26.1 has templates, `EitherHolder`s, tag keys.
+    Stacks,
+    /// 26.1 and newer.
+    Templates,
+}
+
 /// Registry maps and old-only entries the rewrites use, resolved once per translator.
 #[derive(Debug)]
 pub(crate) struct Maps {
+    pub era: Era,
     pub item: Remap<'static>,
     pub block: Remap<'static>,
     pub entity: Remap<'static>,
@@ -205,6 +240,7 @@ pub(crate) struct Maps {
     pub attribute: Remap<'static>,
     pub block_entity: Remap<'static>,
     pub menu: Remap<'static>,
+    pub slot_display: Remap<'static>,
     pub states: Remap<'static>,
     /// Old data component ids with no canonical entry of the same name.
     pub old_swing_animation: Option<i32>,
@@ -244,7 +280,7 @@ impl CanonicalIds {
 }
 
 impl Maps {
-    fn new(tables: &'static VersionTables) -> Self {
+    fn new(tables: &'static VersionTables, era: Era) -> Self {
         let registry = |name: &str| {
             tables
                 .map(&VersionTables::registry_key(name))
@@ -252,6 +288,7 @@ impl Maps {
         };
         let old_component = |name: &str| old_entry(tables, "minecraft:data_component_type", name);
         Self {
+            era,
             item: registry("minecraft:item"),
             block: registry("minecraft:block"),
             entity: registry("minecraft:entity_type"),
@@ -263,6 +300,7 @@ impl Maps {
             attribute: registry("minecraft:attribute"),
             block_entity: registry("minecraft:block_entity_type"),
             menu: registry("minecraft:menu"),
+            slot_display: registry("minecraft:slot_display"),
             states: tables
                 .map("block_state")
                 .map_or(Remap::Identity, Remap::Map),
@@ -334,6 +372,7 @@ impl Translator {
     /// Later rules for the same packet replace earlier ones.
     pub(crate) fn new(
         version: &'static str,
+        era: Era,
         tables: &[u8],
         rules: &[&[Rule]],
         renames: &[Rename],
@@ -408,7 +447,7 @@ impl Translator {
             version,
             protocol: tables.old_protocol as i32,
             tables,
-            maps: Maps::new(tables),
+            maps: Maps::new(tables, era),
             routes,
             old_ids,
         })
@@ -420,6 +459,13 @@ impl Translator {
 
     pub fn protocol(&self) -> i32 {
         self.protocol
+    }
+
+    pub fn hash_dialect(&self) -> HashDialect {
+        HashDialect {
+            stack_count_always: self.maps.era == Era::Stacks,
+            pot_decorations_as_items: true,
+        }
     }
 
     #[cfg(test)]

@@ -11,7 +11,7 @@ use crate::play::clientbound::player::SignedMessageBody;
 use crate::play::clientbound::ui::{ArgumentParser, ContainerSetData};
 use crate::types::component::component_type_id;
 use crate::version::io::{self, Depth};
-use crate::version::translator::{Action, Cx, Maps, Remap};
+use crate::version::translator::{Action, Cx, Era, Maps, Remap};
 
 pub fn container_set_content(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     let c = Codec::fwd(cx.m);
@@ -134,7 +134,7 @@ pub fn update_advancements(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> R
 /// 26.2 tag slot displays named a tag; 26.3 takes a holder set.
 fn slot_display(c: Codec, r: &mut &[u8], w: &mut Vec<u8>, d: Depth) -> Result<()> {
     let d = d.deeper()?;
-    match io::varint(r, w)? {
+    match io::remap(r, w, "slot display", |id| c.m.slot_display.forward(id))? {
         0 | 1 => {}
         2 => slot_display(c, r, w, d)?,
         3 => {
@@ -327,15 +327,85 @@ fn ids(r: &mut &[u8], w: &mut Vec<u8>, map: Remap<'_>) -> Result<()> {
     Ok(())
 }
 
+const DYES: &[&str] = &[
+    "white_dye",
+    "orange_dye",
+    "magenta_dye",
+    "light_blue_dye",
+    "yellow_dye",
+    "lime_dye",
+    "pink_dye",
+    "gray_dye",
+    "light_gray_dye",
+    "cyan_dye",
+    "purple_dye",
+    "blue_dye",
+    "brown_dye",
+    "green_dye",
+    "red_dye",
+    "black_dye",
+];
+
+/// Item tags 26.1 added for item sets 1.21.11 hard-coded; the client's menu rules read them.
+const STACKS_ITEM_TAGS: [(&str, &[&str]); 3] = [
+    ("minecraft:dyes", DYES),
+    ("minecraft:loom_dyes", DYES),
+    (
+        "minecraft:loom_patterns",
+        &[
+            "flower_banner_pattern",
+            "creeper_banner_pattern",
+            "skull_banner_pattern",
+            "mojang_banner_pattern",
+            "globe_banner_pattern",
+            "piglin_banner_pattern",
+            "flow_banner_pattern",
+            "guster_banner_pattern",
+            "field_masoned_banner_pattern",
+            "bordure_indented_banner_pattern",
+        ],
+    ),
+];
+
 pub fn update_tags(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     for _ in 0..io::len(r, w, r.len())? {
         let registry = decode_str(r, mcr_buf::MAX_STRING_CHARS)?;
         encode_str(registry, w);
         let full = Identifier::parse(registry).map_err(|_| io::unknown("registry name", 0))?;
         let map = cx.t.registry(full.as_str());
-        for _ in 0..io::len(r, w, r.len())? {
-            io::copy::<Identifier>(r, w)?;
-            ids(r, w, map)?;
+        if cx.m.era != Era::Stacks || full.as_str() != "minecraft:item" {
+            for _ in 0..io::len(r, w, r.len())? {
+                io::copy::<Identifier>(r, w)?;
+                ids(r, w, map)?;
+            }
+            continue;
+        }
+        let n = read_len(r, r.len())?;
+        let mut body = Vec::new();
+        let mut names = Vec::with_capacity(n.min(1024));
+        for _ in 0..n {
+            let name = <Identifier as mcr_buf::Decode>::decode(r)?;
+            name.encode(&mut body);
+            names.push(name);
+            ids(r, &mut body, map)?;
+        }
+        let missing: Vec<_> = STACKS_ITEM_TAGS
+            .iter()
+            .filter(|(tag, _)| !names.iter().any(|n| n.as_str() == *tag))
+            .collect();
+        write_varint(w, (n + missing.len()) as i32);
+        w.extend_from_slice(&body);
+        let data = mcr_data::v26_3();
+        for (tag, items) in missing {
+            encode_str(tag, w);
+            let ids: Vec<u32> = items
+                .iter()
+                .filter_map(|i| data.item_by_name(&format!("minecraft:{i}")))
+                .collect();
+            write_varint(w, ids.len() as i32);
+            for id in ids {
+                write_varint(w, id as i32);
+            }
         }
     }
     Ok(Action::Rewritten)

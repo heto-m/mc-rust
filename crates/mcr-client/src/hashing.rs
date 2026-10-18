@@ -12,6 +12,7 @@ use mcr_protocol::types::component::{
 use mcr_protocol::types::item::{HashedComponent, HashedItem, HashedPatchMap, HashedStack};
 use mcr_protocol::types::text::{ClickEvent, Color, Content, HoverEvent, NbtSource, ObjectContent};
 use mcr_protocol::types::{Component, ItemStack};
+use mcr_protocol::version::HashDialect;
 
 use crate::registry::Registries;
 
@@ -221,6 +222,8 @@ fn nbt_list(l: &List, depth: usize) -> Vec<u32> {
 pub struct HashCx<'a> {
     pub data: &'a Version,
     pub registries: &'a Registries,
+    /// The server's hashing where its version differs from 26.3's.
+    pub dialect: HashDialect,
     unsupported: Cell<u32>,
 }
 
@@ -229,8 +232,14 @@ impl<'a> HashCx<'a> {
         Self {
             data,
             registries,
+            dialect: HashDialect::default(),
             unsupported: Cell::new(0),
         }
+    }
+
+    pub fn with_dialect(mut self, dialect: HashDialect) -> Self {
+        self.dialect = dialect;
+        self
     }
 
     pub fn unsupported(&self) -> u32 {
@@ -296,7 +305,7 @@ impl<'a> HashCx<'a> {
     fn template(&self, item: i32, count: i32, patch: &DataComponentPatch) -> Option<u32> {
         let mut map = MapBuilder::default();
         map.put("id", self.registry_ref("minecraft:item", item)?);
-        if count != 1 {
+        if count != 1 || self.dialect.stack_count_always {
             map.put("count", h_int(count));
         }
         if !patch.is_empty() {

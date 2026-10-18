@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use mcr_buf::{Result, read_varint, take, write_varint};
 
 use super::io;
-use super::translator::{Action, Cx, Rule, Translator};
+use super::translator::{Action, Cx, Era, Rule, Translator};
 use crate::{Direction, ProtocolState};
 
 static TABLES: &[u8] = include_bytes!("tables.bin");
@@ -19,7 +19,8 @@ static TABLES: &[u8] = include_bytes!("tables.bin");
 pub fn translator() -> &'static Translator {
     static TRANSLATOR: OnceLock<Translator> = OnceLock::new();
     TRANSLATOR.get_or_init(|| {
-        Translator::new("26.2", TABLES, &[RULES], &[]).expect("26.2 tables and rules agree")
+        Translator::new("26.2", Era::Templates, TABLES, &[RULES], &[])
+            .expect("26.2 tables and rules agree")
     })
 }
 

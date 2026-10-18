@@ -8,7 +8,7 @@ use crate::play::clientbound::entity::LpVec3;
 use crate::types::component::AttributeModifier;
 use crate::types::entity_data::EntityDataValue;
 use crate::version::io::{self, Depth};
-use crate::version::translator::{Action, Cx};
+use crate::version::translator::{Action, Cx, Maps};
 
 const META_END: u8 = 0xff;
 const META_ITEM_STACK: i32 = 7;
@@ -46,43 +46,49 @@ pub fn set_entity_data(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Resul
         if index == META_END {
             return Ok(Action::Rewritten);
         }
-        let mut peek = *r;
-        let serializer = read_varint(&mut peek)?;
-        match serializer {
-            META_ITEM_STACK => {
-                *r = peek;
-                write_varint(w, serializer);
-                Codec::fwd(cx.m).stack(r, w, Depth::top())?;
-            }
-            META_BLOCK_STATE | META_OPTIONAL_BLOCK_STATE => {
-                *r = peek;
-                write_varint(w, serializer);
-                let old = read_varint(r)?;
-                let new = if serializer == META_OPTIONAL_BLOCK_STATE && old == 0 {
-                    0
-                } else {
-                    cx.m.states
-                        .forward(old)
-                        .ok_or(io::unknown("block state", old))?
-                };
-                write_varint(w, new);
-            }
-            META_PARTICLE => {
-                *r = peek;
-                write_varint(w, serializer);
-                world::particle(cx.m, r, w, Depth::top())?;
-            }
-            META_PARTICLES => {
-                *r = peek;
-                write_varint(w, serializer);
-                for _ in 0..io::len(r, w, r.len())? {
-                    world::particle(cx.m, r, w, Depth::top())?;
-                }
-            }
-            s if (0..OLD_SERIALIZER_COUNT).contains(&s) => io::copy::<EntityDataValue>(r, w)?,
-            s => return Err(io::unknown("entity data serializer", s)),
-        }
+        entity_data_value(cx.m, r, w)?;
     }
+}
+
+/// One serializer id in 26.2's numbering and its value.
+pub fn entity_data_value(m: &'static Maps, r: &mut &[u8], w: &mut Vec<u8>) -> Result<()> {
+    let mut peek = *r;
+    let serializer = read_varint(&mut peek)?;
+    match serializer {
+        META_ITEM_STACK => {
+            *r = peek;
+            write_varint(w, serializer);
+            Codec::fwd(m).stack(r, w, Depth::top())?;
+        }
+        META_BLOCK_STATE | META_OPTIONAL_BLOCK_STATE => {
+            *r = peek;
+            write_varint(w, serializer);
+            let old = read_varint(r)?;
+            let new = if serializer == META_OPTIONAL_BLOCK_STATE && old == 0 {
+                0
+            } else {
+                m.states
+                    .forward(old)
+                    .ok_or(io::unknown("block state", old))?
+            };
+            write_varint(w, new);
+        }
+        META_PARTICLE => {
+            *r = peek;
+            write_varint(w, serializer);
+            world::particle(m, r, w, Depth::top())?;
+        }
+        META_PARTICLES => {
+            *r = peek;
+            write_varint(w, serializer);
+            for _ in 0..io::len(r, w, r.len())? {
+                world::particle(m, r, w, Depth::top())?;
+            }
+        }
+        s if (0..OLD_SERIALIZER_COUNT).contains(&s) => io::copy::<EntityDataValue>(r, w)?,
+        s => return Err(io::unknown("entity data serializer", s)),
+    }
+    Ok(())
 }
 
 pub fn set_equipment(cx: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {

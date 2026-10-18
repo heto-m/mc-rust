@@ -1937,6 +1937,7 @@ dependencies = [
  "mcr-data",
  "mcr-nbt",
  "mcr-world",
+ "rustc-hash 2.1.3",
  "serde_json",
  "thiserror 2.0.21",
  "uuid",

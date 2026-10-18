@@ -6,13 +6,13 @@ use std::sync::OnceLock;
 use mcr_buf::{Result, read_varint, take, write_varint};
 
 use super::io;
-use super::translator::{Action, Cx, Rename, Rule, Translator};
+use super::translator::{Action, Cx, Era, Rename, Rule, Translator};
 use super::v26_2::{self, entity, rule};
 use crate::{Direction, ProtocolState};
 
 static TABLES: &[u8] = include_bytes!("tables.bin");
 
-const RENAMES: &[Rename] = &[(
+pub(super) const RENAMES: &[Rename] = &[(
     "minecraft:command_argument_type",
     "minecraft:color",
     "minecraft:team_color",
@@ -21,15 +21,21 @@ const RENAMES: &[Rename] = &[(
 pub fn translator() -> &'static Translator {
     static TRANSLATOR: OnceLock<Translator> = OnceLock::new();
     TRANSLATOR.get_or_init(|| {
-        Translator::new("26.1.2", TABLES, &[v26_2::RULES, RULES], RENAMES)
-            .expect("26.1.2 tables and rules agree")
+        Translator::new(
+            "26.1.2",
+            Era::Templates,
+            TABLES,
+            &[v26_2::RULES, RULES],
+            RENAMES,
+        )
+        .expect("26.1.2 tables and rules agree")
     })
 }
 
 use Direction::{Clientbound as C, Serverbound as S};
 use ProtocolState::{Login, Play};
 
-static RULES: &[Rule] = &[
+pub(super) static RULES: &[Rule] = &[
     rule(Login, C, "login_finished", login_finished),
     rule(Play, C, "login", login),
     rule(Play, C, "set_player_team", set_player_team),
@@ -45,7 +51,7 @@ fn login_finished(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Acti
 }
 
 /// 26.1 always set up chat signing keys, which 26.2 does only when told the server is in online mode.
-fn login(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
+pub(super) fn login(_: &mut Cx<'_>, r: &mut &[u8], w: &mut Vec<u8>) -> Result<Action> {
     entity::login_head(r, w)?;
     w.push(1);
     io::bool(r, w)?;

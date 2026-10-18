@@ -103,6 +103,15 @@ impl HashCx<'_> {
                 map.build()
             }
             D::Profile(p) => self.profile(p)?,
+            D::PotDecorations(p) if self.dialect.pot_decorations_as_items => {
+                let brick = self.data.item_by_name("minecraft:brick")? as i32;
+                let mut out = Vec::new();
+                for side in [&p.back, &p.left, &p.right, &p.front] {
+                    let item = side.as_ref().map_or(brick, |t| t.item);
+                    out.push(self.registry_ref("minecraft:item", item)?);
+                }
+                h_list(out)
+            }
             D::PotDecorations(p) => {
                 let mut map = MapBuilder::default();
                 for (key, slot) in [
