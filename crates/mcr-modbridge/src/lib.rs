@@ -1,4 +1,4 @@
-//! Runs the stock client under Fabric inside mcr's embedded JVM and paces it from Rust.
+//! Runs the stock client under Fabric or NeoForge inside mcr's embedded JVM and paces it from Rust.
 
 mod abi;
 pub mod compose;
@@ -7,6 +7,7 @@ pub mod frame;
 pub mod gpu;
 pub mod input;
 mod launch;
+mod loader;
 pub mod manager;
 pub mod net;
 mod pacer;
@@ -35,9 +36,10 @@ pub use events::BridgeEvent;
 pub use frame::{Perspective, Pipelining};
 pub use input::ModInput;
 pub use launch::{
-    AotSettings, BOOT_JAR, BRIDGE_JAR, BridgeConfig, LAUNCH_MANIFEST, LaunchManifest, LaunchPlan,
-    plan, prepare_game_dir,
+    AotSettings, BOOT_JAR, BRIDGE_JAR, BridgeConfig, FML_CONFIG, LAUNCH_MANIFEST, LaunchManifest,
+    LaunchPlan, MOD_FOLDERS_PROPERTY, plan, prepare_fml_config, prepare_game_dir,
 };
+pub use loader::{Loader, MixedLoaders};
 pub use mcr_jvm::{aot, preload};
 pub use net::NetLink;
 pub use pacer::{FRAME_RATE, TICK_RATE, TickClock};
@@ -133,7 +135,7 @@ impl Bridge {
     /// ignores `user.dir`.
     pub fn start(mut config: BridgeConfig) -> Result<Self, BridgeError> {
         config.make_absolute()?;
-        let manifest = LaunchManifest::load(&config.cache_dir)?;
+        let manifest = LaunchManifest::load_for(&config.cache_dir, config.loader)?;
         for jar in [launch::BOOT_JAR, launch::BRIDGE_JAR] {
             let path = config.cache_dir.join(jar);
             if !path.is_file() {
@@ -143,7 +145,13 @@ impl Bridge {
                 });
             }
         }
+        if config.loader == Loader::NeoForge {
+            launch::check_neoforge_bridge(&config.cache_dir.join(launch::BRIDGE_JAR))?;
+        }
         launch::prepare_game_dir(&config.game_dir)?;
+        if config.loader == Loader::NeoForge {
+            launch::prepare_fml_config(&config.game_dir)?;
+        }
         let home = HomeSearch::from_env(Some(&config.cache_dir)).locate()?;
         let table = abi::table();
         let http = proxy::HttpProxy::start(proxy::ProxyConfig {
@@ -167,6 +175,7 @@ impl Bridge {
         let warmup = config
             .aot
             .as_ref()
+            .filter(|_| config.loader == Loader::Fabric)
             .and_then(|settings| warmup(settings, &home, &plan));
         if let Some(w) = &warmup {
             options.extra.extend(w.plan.options());
@@ -184,8 +193,9 @@ impl Bridge {
         }
         tracing::info!(
             mods = config.mods.len(),
-            loader = manifest.loader_version,
-            "starting the Fabric bridge"
+            loader = %config.loader,
+            version = manifest.loader_version,
+            "starting the bridge"
         );
         std::env::set_current_dir(&config.game_dir)?;
         let vm = JavaVm::start(jvm)?;

@@ -313,12 +313,21 @@ pub(crate) mod testing {
     }
 
     pub fn write_jar(dir: &Path, name: &str, manifest: &str) {
+        write_entry(dir, name, "fabric.mod.json", manifest);
+    }
+
+    pub fn write_neoforge_jar(dir: &Path, name: &str, id: &str) {
+        let toml = format!("modLoader=\"javafml\"\n[[mods]]\nmodId=\"{id}\"\nversion=\"1.0.0\"\n");
+        write_entry(dir, name, "META-INF/neoforge.mods.toml", &toml);
+    }
+
+    fn write_entry(dir: &Path, name: &str, entry: &str, text: &str) {
         use std::io::Write;
         let file = std::fs::File::create(dir.join("mods").join(name)).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        zip.start_file("fabric.mod.json", zip::write::SimpleFileOptions::default())
+        zip.start_file(entry, zip::write::SimpleFileOptions::default())
             .unwrap();
-        zip.write_all(manifest.as_bytes()).unwrap();
+        zip.write_all(text.as_bytes()).unwrap();
         zip.finish().unwrap();
     }
 

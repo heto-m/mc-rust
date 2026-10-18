@@ -1,5 +1,6 @@
 package dev.mcr.bridge;
 
+import dev.mcr.bridge.fabric.FabricClasses;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Method;
@@ -10,8 +11,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import net.fabricmc.loader.impl.launch.FabricLauncher;
-import net.fabricmc.loader.impl.launch.FabricLauncherBase;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -112,8 +111,7 @@ public final class McrPreload {
             Bridge.info("preload_plugins", "left to the game: " + exclusions.acting);
         }
         int configs = Mixins.getConfigs().size();
-        FabricLauncher launcher = FabricLauncherBase.getLauncher();
-        ClassLoader loader = launcher.getTargetClassLoader();
+        ClassLoader loader = FabricClasses.loader();
         Counts counts = new Counts();
         String stopped = null;
         for (int seg = 0; seg < segments.size() && stopped == null; seg++) {
@@ -131,7 +129,7 @@ public final class McrPreload {
                 if (exclusions.skips(name)) {
                     counts.skipped++;
                 } else {
-                    stopped = load(name, launcher, loader, counts);
+                    stopped = load(name, loader, counts);
                 }
             }
             long ms = (System.nanoTime() - started) / 1_000_000;
@@ -153,8 +151,8 @@ public final class McrPreload {
     }
 
     /** Returns why preloading must stop, or null. */
-    private static String load(String name, FabricLauncher launcher, ClassLoader loader, Counts counts) {
-        if (launcher.isClassLoaded(name)) {
+    private static String load(String name, ClassLoader loader, Counts counts) {
+        if (FabricClasses.isLoaded(name)) {
             counts.present++;
             return null;
         }

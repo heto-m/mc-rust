@@ -35,6 +35,22 @@ impl Jar {
         ))
     }
 
+    pub fn neoforge(id: &str, version: &str) -> Self {
+        Self::neoforge_with(id, version, "")
+    }
+
+    /// A `neoforge.mods.toml` with extra TOML appended, e.g. a `[[dependencies.<id>]]` table.
+    pub fn neoforge_with(id: &str, version: &str, extra: &str) -> Self {
+        Self::new().file(
+            "META-INF/neoforge.mods.toml",
+            format!(
+                "modLoader=\"javafml\"\nloaderVersion=\"[1,)\"\nlicense=\"MIT\"\n\n[[mods]]\nmodId=\"{id}\"\n\
+                 version=\"{version}\"\ndisplayName=\"{id} mod\"\n{extra}"
+            )
+            .as_bytes(),
+        )
+    }
+
     pub fn manifest(self, json: &str) -> Self {
         self.file("fabric.mod.json", json.as_bytes())
     }

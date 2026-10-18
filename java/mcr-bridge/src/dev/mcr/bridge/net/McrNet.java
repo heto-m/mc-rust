@@ -4,7 +4,7 @@ import dev.mcr.boot.Ring;
 import dev.mcr.bridge.Bridge;
 import dev.mcr.bridge.BridgeAbi;
 import dev.mcr.bridge.McrWorlds;
-import dev.mcr.bridge.McrBridge;
+import dev.mcr.bridge.BridgeInit;
 import dev.mcr.bridge.McrParticles;
 import dev.mcr.bridge.mixin.ConnectionAccessor;
 import io.netty.buffer.ByteBuf;
@@ -36,7 +36,7 @@ public final class McrNet {
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT_UNALIGNED;
     private static final ValueLayout.OfByte BYTE = ValueLayout.JAVA_BYTE;
     private static final long MAX_OUT_SPILL = 16 << 20;
-    private static final boolean SELF_TEST = NetSeamSelfTest.MODE.equals(System.getProperty(McrBridge.TEST_PROPERTY));
+    private static final boolean SELF_TEST = NetSeamSelfTest.MODE.equals(System.getProperty(BridgeInit.TEST_PROPERTY));
 
     private static RenderThreadLoop loop;
     private static Bridge bridge;

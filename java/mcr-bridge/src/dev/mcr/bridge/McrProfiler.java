@@ -14,8 +14,6 @@ import jdk.jfr.consumer.RecordedFrame;
 import jdk.jfr.consumer.RecordedStackTrace;
 import jdk.jfr.consumer.RecordedThread;
 import jdk.jfr.consumer.RecordingStream;
-import net.fabricmc.loader.api.FabricLoader;
-import net.fabricmc.loader.api.ModContainer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,7 +30,7 @@ public final class McrProfiler {
     private static final String VANILLA = "minecraft";
     private static final String BRIDGE = "mcr_bridge";
     private static final String NATIVE = "(native: rust gpu calls)";
-    private static final Set<String> PLATFORM = Set.of("minecraft", "java", "fabricloader", "mixinextras");
+    private static final Set<String> PLATFORM = Set.of("minecraft", "java", "fabricloader", "mixinextras", "neoforge");
 
     private static volatile long renderThreadId = -1;
     private static final Map<String, String> owners = new ConcurrentHashMap<>();
@@ -48,14 +46,9 @@ public final class McrProfiler {
             return;
         }
         renderThreadId = render.threadId();
-        for (ModContainer mod : FabricLoader.getInstance().getAllMods()) {
-            ModContainer top = mod;
-            while (top.getContainingMod().isPresent()) {
-                top = top.getContainingMod().get();
-            }
-            String id = mod.getMetadata().getId();
-            topLevel.put(id, top.getMetadata().getId());
-            roots.add(Map.entry(id, mod.getRootPaths()));
+        for (Loaders.Mod mod : Loaders.mods()) {
+            topLevel.put(mod.id(), mod.topLevel());
+            roots.add(Map.entry(mod.id(), mod.roots()));
         }
         Thread t = new Thread(McrProfiler::run, "mcr-profiler");
         t.setDaemon(true);

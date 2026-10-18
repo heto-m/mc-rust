@@ -10,7 +10,7 @@ use mcr_modbridge::manager::{Manager, ModStatus, Report, SessionStore, SessionTr
 use mcr_modbridge::sound::SoundLink;
 use mcr_modbridge::world::WorldRequest;
 use mcr_modbridge::{
-    Bridge, BridgeConfig, BridgeEvent, ComposeStats, ModFrames, NetLink, SHUTDOWN_TIMEOUT,
+    Bridge, BridgeConfig, BridgeEvent, ComposeStats, Loader, ModFrames, NetLink, SHUTDOWN_TIMEOUT,
 };
 use mcr_render::Renderer;
 
@@ -22,7 +22,7 @@ static CACHE_ABS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// The JVM's AOT caches, under the game dir.
 pub const AOT_DIR: &str = "cache/jvm-aot";
 
-/// The headless Fabric boot running next to the native client; Java mirrors every connection.
+/// The headless Fabric or NeoForge boot running next to the native client; Java mirrors every connection.
 pub struct ModHost {
     stop: Arc<AtomicBool>,
     thread: JoinHandle<Bridge>,
@@ -102,6 +102,7 @@ pub struct Startup {
 /// What Java starts with, once the renderer exists.
 #[derive(Debug)]
 pub struct BootPlan {
+    loader: Loader,
     jars: Vec<PathBuf>,
     active_ids: Vec<String>,
     heap_mib: u32,
@@ -132,10 +133,13 @@ pub fn startup(opts: &Options) -> Result<Startup> {
         eprintln!("[mods] {line}");
     }
     let jars = report.jars();
-    let would_boot = !jars.is_empty() && !opts.vanilla;
+    let loader = report.loader();
+    let would_boot = !jars.is_empty() && !opts.vanilla && loader.is_some();
     let prompt = would_boot && previous.needs_fallback_prompt();
     if opts.vanilla {
         eprintln!("[mods] the profile has no mods; not starting Java");
+    } else if let Some(mixed) = &report.mixed {
+        eprintln!("[mods] {mixed}; not starting Java");
     } else if !would_boot {
         eprintln!(
             "[mods] no enabled mods in {}; not starting Java",
@@ -146,6 +150,7 @@ pub fn startup(opts: &Options) -> Result<Startup> {
         session.reset();
     }
     let boot = (would_boot && !prompt).then(|| BootPlan {
+        loader: loader.unwrap_or_default(),
         jars,
         active_ids: report.active_ids(),
         heap_mib: opts.heap_mib.unwrap_or_else(|| settings.heap_mib()),
@@ -157,11 +162,15 @@ pub fn startup(opts: &Options) -> Result<Startup> {
     Ok(Startup { boot, app })
 }
 
-/// One line per mod that is not loaded, or loaded with a policy caveat.
+/// One line per mod that is not loaded, or loaded with a policy caveat; a mixed set gets one line.
 fn report_lines(report: &Report) -> Vec<String> {
     report
         .entries
         .iter()
+        .filter(|e| {
+            let mixed = report.mixed.as_ref().map(ToString::to_string);
+            !matches!(&e.status, ModStatus::Excluded(r) if Some(r) == mixed.as_ref())
+        })
         .filter_map(|e| {
             let why = match (&e.status, &e.policy) {
                 (ModStatus::Active, Some(p)) => format!("{:?}: {}", p.status, p.reason),
@@ -211,6 +220,7 @@ impl ModHost {
             opts.game_dir.join("java"),
             plan.jars.clone(),
         );
+        config.loader = plan.loader;
         config.username = opts.name.clone();
         config.uuid = opts
             .online
@@ -245,9 +255,15 @@ impl ModHost {
         .context("sharing the GPU device with Java")
         .map_err(fail)?;
         let mut bridge = Bridge::start(config)
-            .context("starting the Fabric bridge")
+            .with_context(|| format!("starting the {} bridge", plan.loader))
             .map_err(fail)?;
         let recording = bridge.aot_plan().is_some_and(|p| p.records());
+        if plan.loader != Loader::Fabric {
+            eprintln!(
+                "[mods] {}: JVM AOT cache and class preload are off (Fabric only)",
+                plan.loader
+            );
+        }
         if let Some(line) = bridge.aot_plan().map(aot_line) {
             eprintln!("[mods] {line}");
         }
@@ -363,7 +379,7 @@ mod tests {
     use mcr_modbridge::manager::{SessionRecord, SessionState};
 
     use super::*;
-    use crate::mods_ui::testing::{manifest, temp, write_jar};
+    use crate::mods_ui::testing::{manifest, temp, write_jar, write_neoforge_jar};
 
     fn options(dir: &std::path::Path) -> Options {
         Options {
@@ -396,6 +412,29 @@ mod tests {
         let started = startup(&options(&dir)).unwrap();
         assert!(started.boot.is_none());
         assert!(!java_thread());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mixed_loaders_start_no_jvm_and_say_why_once() {
+        let dir = temp("startup-mixed");
+        write_jar(&dir, "a.jar", &manifest("alpha", ""));
+        write_neoforge_jar(&dir, "n.jar", "neomod");
+        let started = startup(&options(&dir)).unwrap();
+        assert!(started.boot.is_none());
+        assert!(!java_thread());
+        let manager = Manager::new(&dir, &dir.join("mods"));
+        let report = manager.scan(&manager.load_settings());
+        assert!(report.mixed.is_some());
+        assert!(
+            report_lines(&report).is_empty(),
+            "{:?}",
+            report_lines(&report)
+        );
+
+        std::fs::remove_file(dir.join("mods/a.jar")).unwrap();
+        let report = manager.scan(&manager.load_settings());
+        assert_eq!(report.loader(), Some(Loader::NeoForge));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

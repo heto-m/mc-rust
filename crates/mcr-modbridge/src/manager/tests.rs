@@ -79,6 +79,84 @@ fn oversized_or_broken_icons_are_dropped_not_fatal() {
 }
 
 #[test]
+fn neoforge_sets_resolve_with_jar_in_jar_and_loader_ids() {
+    let dir = temp_dir("neoforge-set");
+    let dep = |owner: &str, id: &str, range: &str| {
+        format!(
+            "[[dependencies.{owner}]]\nmodId=\"{id}\"\ntype=\"required\"\nversionRange=\"{range}\"\n"
+        )
+    };
+    let lib = Jar::neoforge("mezz_config", "0.6.6");
+    Jar::neoforge_with(
+        "jei",
+        "31.15.0.82",
+        &(dep("jei", "mezz_config", "[0.6.3,1.0.0)")
+            + &dep("jei", "neoforge", "[26.3.0.1-beta,)")
+            + &dep("jei", "minecraft", "[26.3]")),
+    )
+    .nested("META-INF/jarjar/mezz.jar", lib)
+    .file(
+        "META-INF/jarjar/metadata.json",
+        br#"{"jars":[{"path":"META-INF/jarjar/mezz.jar"}]}"#,
+    )
+    .write(&dir, "jei.jar");
+    Jar::neoforge_with(
+        "jade",
+        "${file.jarVersion}",
+        &dep("jade", "neoforge", "[26.3-beta, )"),
+    )
+    .file(
+        "META-INF/MANIFEST.MF",
+        b"Manifest-Version: 1.0\r\nImplementation-Version: 26.3.5+neoforge\r\n",
+    )
+    .write(&dir, "jade.jar");
+    Jar::neoforge_with("needy", "1.0", &dep("needy", "missing_lib", "[1,)"))
+        .write(&dir, "needy.jar");
+
+    Jar::new()
+        .file(
+            "META-INF/MANIFEST.MF",
+            b"Manifest-Version: 1.0\nSpecification-Title: MezzConfig\nImplementation-Version: 0.6.8\n\
+              FMLModType: GAMELIBRARY\n",
+        )
+        .write(&dir, "mezz-standalone.jar");
+
+    let report = Manager::new(&dir, &dir).scan(&ModSettings::default());
+    assert_eq!(status(&report, "jei"), &ModStatus::Active);
+    let lib = report
+        .entries
+        .iter()
+        .find(|e| e.info.file_name == "mezz-standalone.jar")
+        .unwrap();
+    assert_eq!(lib.status, ModStatus::Active);
+    assert_eq!(
+        (lib.info.name.as_str(), lib.info.version.as_str()),
+        ("MezzConfig", "0.6.8")
+    );
+    assert_eq!(status(&report, "jade"), &ModStatus::Active);
+    let jade = report.entries.iter().find(|e| e.info.id == "jade").unwrap();
+    assert_eq!(jade.info.version, "26.3.5+neoforge");
+    assert_eq!(
+        status(&report, "needy"),
+        &ModStatus::Excluded("missing dependency `missing_lib`".into())
+    );
+    assert_eq!(report.loader(), Some(crate::Loader::NeoForge));
+    assert!(report.mixed.is_none());
+
+    Jar::fabric("modmenu", "21.0.0").write(&dir, "modmenu.jar");
+    let mixed = Manager::new(&dir, &dir).scan(&ModSettings::default());
+    let err = mixed.mixed.clone().expect("a mixed set");
+    assert_eq!(err.fabric, "`modmenu` (modmenu.jar)");
+    assert!(err.neoforge.contains("jade"), "{err}");
+    assert!(mixed.jars().is_empty(), "a mixed set loads nothing");
+    assert_eq!(mixed.loader(), None);
+    assert_eq!(
+        status(&mixed, "modmenu"),
+        &ModStatus::Excluded(err.to_string())
+    );
+}
+
+#[test]
 fn recognises_other_loaders_and_unreadable_jars() {
     let neo = Jar::new().file(
         "META-INF/neoforge.mods.toml",
@@ -287,11 +365,12 @@ fn acceptance_five_jars() {
         .iter()
         .find(|e| e.info.file_name == "neo.jar")
         .unwrap();
-    assert_eq!(
-        neo.status,
-        ModStatus::Unsupported("NeoForge mods are not supported yet".into())
-    );
+    let ModStatus::Unsupported(why) = &neo.status else {
+        panic!("a NeoForge jar without [[mods]] loaded: {:?}", neo.status);
+    };
+    assert!(why.contains("no [[mods]] entry"), "{why}");
     assert_eq!(report.active_ids(), ["fabric-api", "modmenu"]);
+    assert_eq!(report.loader(), Some(crate::Loader::Fabric));
     let jars = report.jars();
     assert_eq!(jars.len(), 2);
     assert!(jars.iter().all(|j| j.starts_with(&dir)));

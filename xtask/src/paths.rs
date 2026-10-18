@@ -91,6 +91,14 @@ impl Layout {
         self.fabric_dir().join("launch.json")
     }
 
+    pub fn neoforge_dir(&self) -> PathBuf {
+        self.cache_dir().join("neoforge")
+    }
+
+    pub fn neoforge_launch_json(&self) -> PathBuf {
+        self.neoforge_dir().join("launch.json")
+    }
+
     pub fn test_mods_dir(&self) -> PathBuf {
         self.cache_dir().join("mods-test")
     }

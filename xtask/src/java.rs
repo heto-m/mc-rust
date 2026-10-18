@@ -15,6 +15,10 @@ const DEPS_FILE: &str = "deps.txt";
 const MANIFEST_FILE: &str = "MANIFEST.MF";
 const RESOURCES_DIR: &str = "resources";
 const FABRIC_LAUNCH: &str = "fabric/launch.json";
+const NEOFORGE_LAUNCH: &str = "neoforge/launch.json";
+/// Sources and resources compiled only when the module's NeoForge dependency is present.
+const NEOFORGE_SRC: &str = "src-neoforge";
+const NEOFORGE_RESOURCES: &str = "resources-neoforge";
 
 #[derive(Debug, Clone)]
 pub struct Tool {
@@ -45,6 +49,9 @@ pub enum Dep {
     FabricLaunch,
     /// `fabric-api-module <name>`: one module jar nested in the pinned Fabric API test mod.
     FabricApiModule(String),
+    /// `neoforge-launch [optional]`: FML's class path from `.cache/neoforge/launch.json`, plus the module's
+    /// `src-neoforge` and `resources-neoforge`; an optional one is skipped when NeoForge was never fetched.
+    NeoForgeLaunch { optional: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +140,8 @@ pub fn parse_deps(text: &str) -> Result<Vec<Dep>> {
             ["module", name] => deps.push(Dep::Module(name.to_owned())),
             ["fabric-launch"] => deps.push(Dep::FabricLaunch),
             ["fabric-api-module", name] => deps.push(Dep::FabricApiModule(name.to_owned())),
+            ["neoforge-launch"] => deps.push(Dep::NeoForgeLaunch { optional: false }),
+            ["neoforge-launch", "optional"] => deps.push(Dep::NeoForgeLaunch { optional: true }),
             _ => bail!("bad {DEPS_FILE} line `{line}`"),
         }
     }
@@ -189,7 +198,7 @@ pub fn build_order(modules: Vec<Module>) -> Result<Vec<Module>> {
         let ready = pending.iter().position(|m| {
             m.deps.iter().all(|d| match d {
                 Dep::Module(dep) => ordered.iter().any(|o| &o.name == dep),
-                Dep::FabricLaunch | Dep::FabricApiModule(_) => true,
+                Dep::FabricLaunch | Dep::FabricApiModule(_) | Dep::NeoForgeLaunch { .. } => true,
             })
         });
         match ready {
@@ -242,16 +251,33 @@ fn hash_file(hasher: &mut Sha1, base: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The source and resource roots this build compiles: NeoForge's only when its dependency resolved.
+fn roots(module: &Module, neoforge: bool) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut src = vec![module.src.clone()];
+    let mut resources = vec![module.dir.join(RESOURCES_DIR)];
+    if neoforge {
+        src.push(module.dir.join(NEOFORGE_SRC));
+        resources.push(module.dir.join(NEOFORGE_RESOURCES));
+    }
+    (src, resources)
+}
+
 /// Covers sources, resources, the manifest, `deps.txt` and every input the class path came from.
-pub fn module_hash(module: &Module, inputs: &[PathBuf]) -> Result<String> {
+pub fn module_hash(module: &Module, inputs: &[PathBuf], neoforge: bool) -> Result<String> {
     let mut hasher = Sha1::new();
     hasher.update(HASH_FORMAT.as_bytes());
     hasher.update(REQUIRED_MAJOR.to_le_bytes());
-    for path in java_sources(&module.src)? {
-        hash_file(&mut hasher, &module.dir, &path)?;
+    hasher.update([u8::from(neoforge)]);
+    let (src, resources) = roots(module, neoforge);
+    for dir in &src {
+        for path in java_sources(dir)? {
+            hash_file(&mut hasher, &module.dir, &path)?;
+        }
     }
-    for path in files_with_ext(&module.dir.join(RESOURCES_DIR), None)? {
-        hash_file(&mut hasher, &module.dir, &path)?;
+    for dir in &resources {
+        for path in files_with_ext(dir, None)? {
+            hash_file(&mut hasher, &module.dir, &path)?;
+        }
     }
     for name in [DEPS_FILE, MANIFEST_FILE] {
         let path = module.dir.join(name);
@@ -269,10 +295,12 @@ pub fn module_hash(module: &Module, inputs: &[PathBuf]) -> Result<String> {
         .collect())
 }
 
-/// The compile class path, plus the files whose contents pin it (dependency hashes, launch.json).
-fn class_path(module: &Module, dirs: &Dirs) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+/// The compile class path, the files whose contents pin it (dependency hashes, launch.json), and
+/// whether NeoForge's sources are part of this build.
+fn class_path(module: &Module, dirs: &Dirs) -> Result<(Vec<PathBuf>, Vec<PathBuf>, bool)> {
     let mut cp = Vec::new();
     let mut inputs = Vec::new();
+    let mut neoforge = false;
     for dep in &module.deps {
         match dep {
             Dep::Module(name) => {
@@ -295,9 +323,46 @@ fn class_path(module: &Module, dirs: &Dirs) -> Result<(Vec<PathBuf>, Vec<PathBuf
                 cp.push(jar.clone());
                 inputs.push(jar);
             }
+            Dep::NeoForgeLaunch { optional } => {
+                let launch = dirs.cache.join(NEOFORGE_LAUNCH);
+                let text = match fs::read_to_string(&launch) {
+                    Ok(text) => text,
+                    Err(e) if *optional && e.kind() == std::io::ErrorKind::NotFound => {
+                        println!(
+                            "[java] {}: building without NeoForge ({} missing; run `cargo xtask neoforge-fetch`)",
+                            module.name,
+                            launch.display()
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(e).with_context(|| {
+                            format!(
+                                "{} missing; run `cargo xtask neoforge-fetch` first",
+                                launch.display()
+                            )
+                        });
+                    }
+                };
+                cp.extend(launch_libraries(&text, dirs.cache)?);
+                inputs.push(launch);
+                neoforge = true;
+            }
         }
     }
-    Ok((cp, inputs))
+    Ok((cp, inputs, neoforge))
+}
+
+/// A launch manifest's class path without its game jar.
+pub fn launch_libraries(launch_json: &str, cache: &Path) -> Result<Vec<PathBuf>> {
+    let root: Value = serde_json::from_str(launch_json).context("launch.json is not JSON")?;
+    root["class_path"]
+        .as_array()
+        .context("launch.json has no class_path")?
+        .iter()
+        .map(|v| v.as_str().map(|s| cache.join(s)))
+        .collect::<Option<_>>()
+        .context("launch.json class_path holds a non-string")
 }
 
 /// Extracts `META-INF/jars/<name>-<version>.jar` from the Fabric API jar the launch manifest pins.
@@ -350,13 +415,7 @@ fn fabric_api_module(name: &str, dirs: &Dirs) -> Result<PathBuf> {
 
 pub fn launch_class_path(launch_json: &str, cache: &Path) -> Result<Vec<PathBuf>> {
     let root: Value = serde_json::from_str(launch_json).context("launch.json is not JSON")?;
-    let mut out: Vec<PathBuf> = root["class_path"]
-        .as_array()
-        .context("launch.json has no class_path")?
-        .iter()
-        .map(|v| v.as_str().map(|s| cache.join(s)))
-        .collect::<Option<_>>()
-        .context("launch.json class_path holds a non-string")?;
+    let mut out = launch_libraries(launch_json, cache)?;
     out.push(
         cache.join(
             root["game_jar"]
@@ -385,12 +444,16 @@ fn build_module(module: &Module, dirs: &Dirs, tc: &Toolchain) -> Result<Outcome>
     let out_dir = dirs.out;
     let jar = out_dir.join(format!("{}.jar", module.name));
     let hash_file = out_dir.join(format!("{}.hash", module.name));
-    let sources = java_sources(&module.src)?;
+    let (cp, inputs, neoforge) = class_path(module, dirs)?;
+    let (src_roots, resource_roots) = roots(module, neoforge);
+    let mut sources = Vec::new();
+    for dir in &src_roots {
+        sources.extend(java_sources(dir)?);
+    }
     if sources.is_empty() {
         bail!("module {} has no .java sources", module.name);
     }
-    let (cp, inputs) = class_path(module, dirs)?;
-    let hash = module_hash(module, &inputs)?;
+    let hash = module_hash(module, &inputs, neoforge)?;
     if jar.is_file() && fs::read_to_string(&hash_file).is_ok_and(|h| h.trim() == hash) {
         // Tests compare mtimes to spot stale jars; a touched-but-identical source must not trip them.
         fs::File::options()
@@ -433,9 +496,8 @@ fn build_module(module: &Module, dirs: &Dirs, tc: &Toolchain) -> Result<Outcome>
         jar_cmd.arg("--manifest").arg(&manifest);
     }
     jar_cmd.arg("-C").arg(&classes).arg(".");
-    let resources = module.dir.join(RESOURCES_DIR);
-    if resources.is_dir() {
-        jar_cmd.arg("-C").arg(&resources).arg(".");
+    for resources in resource_roots.iter().filter(|d| d.is_dir()) {
+        jar_cmd.arg("-C").arg(resources).arg(".");
     }
     run_tool(jar_cmd, "jar", &module.name)?;
 
@@ -479,6 +541,7 @@ log="$1"; shift
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-d" ]; then out="$2"; fi
   if [ "$1" = "-cp" ]; then echo "cp $2" >> "$log.cp"; fi
+  case "$1" in @*) cat "${1#@}" >> "$log.src";; esac
   shift
 done
 echo javac >> "$log"
@@ -638,6 +701,14 @@ echo jar > "$out"
                 Dep::FabricApiModule("fabric-api-base".into())
             ]
         );
+        assert_eq!(
+            parse_deps("neoforge-launch\nneoforge-launch optional\n").unwrap(),
+            [
+                Dep::NeoForgeLaunch { optional: false },
+                Dep::NeoForgeLaunch { optional: true }
+            ]
+        );
+        assert!(parse_deps("neoforge-launch maybe").is_err());
         assert!(parse_deps("modules a").is_err());
         let m = |name: &str, dep: &str| Module {
             name: name.into(),
@@ -647,6 +718,40 @@ echo jar > "$out"
         };
         assert!(build_order(vec![m("a", "b"), m("b", "a")]).is_err());
         assert!(build_order(vec![m("a", "missing")]).is_err());
+    }
+
+    #[test]
+    fn optional_neoforge_sources_follow_the_manifest() {
+        let dir = tempfile_dir("java-neoforge");
+        let java = dir.join("java");
+        write_module(&java, "one", "One.java", "class One {}");
+        let neo = java.join("one/src-neoforge/dev/mcr");
+        fs::create_dir_all(&neo).unwrap();
+        fs::write(neo.join("Neo.java"), "class Neo {}").unwrap();
+        fs::write(java.join("one/deps.txt"), "neoforge-launch optional\n").unwrap();
+        let (tc, log) = fake_toolchain(&dir);
+        let srcs = || fs::read_to_string(dir.join("javac.log.src")).unwrap_or_default();
+
+        assert_eq!(build(&dir, &tc).unwrap()[0].1, Outcome::Built);
+        assert_eq!(javac_runs(&log), 1);
+        assert!(!srcs().contains("Neo.java"), "{}", srcs());
+        assert_eq!(build(&dir, &tc).unwrap()[0].1, Outcome::UpToDate);
+
+        let cache = dir.join("cache/neoforge");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(
+            cache.join("launch.json"),
+            r#"{"class_path": ["neoforge/libraries/loader.jar"], "game_jar": "x.jar"}"#,
+        )
+        .unwrap();
+        assert_eq!(build(&dir, &tc).unwrap()[0].1, Outcome::Built);
+        let cp = fs::read_to_string(dir.join("javac.log.cp")).unwrap();
+        assert!(cp.contains("loader.jar") && !cp.contains("x.jar"), "{cp}");
+        assert!(srcs().contains("Neo.java"), "{}", srcs());
+
+        fs::write(java.join("one/deps.txt"), "neoforge-launch\n").unwrap();
+        fs::remove_file(cache.join("launch.json")).unwrap();
+        assert!(build(&dir, &tc).is_err(), "a required NeoForge dependency");
     }
 
     #[test]

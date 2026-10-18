@@ -121,3 +121,23 @@ would in vanilla).
 The block-entity section seen culled about once per frame in the first sweep is a legitimate cull: the shared
 sections drop dungeon spawners and mineshaft chests underground that mcr's visibility graph never reaches (seen at
 `mob_spawner@343,-33,508` with the player on the surface at y 98). The stage scenes cull nothing.
+
+## NeoForge
+
+Real NeoForge mods for 26.3 through `mcr --mods` (NeoForge 26.3.0.90, bridge ABI 19), all together, offscreen at
+854x480 against a vanilla 26.3 server in offline mode. An autopilot joined, looked at blocks, opened the inventory
+and the creative inventory, toggled F3 and third person and chatted. Change `mod-neoforge-1`, October 2026.
+
+| Mod | Version | Status | Reason |
+|---|---|---|---|
+| Just Enough Items | 31.15.0.82 | works | ingredient list in the inventory and creative screens; needs MezzConfig (standalone 0.6.8 or the copy it nests) |
+| Jade | 26.3.5 | works | block tooltip at the top of the screen |
+| AppleSkin | 3.0.10 | works | HUD saturation overlay |
+| BetterF3 | 20.0.0 | works | replaces the F3 screen; needs Cloth Config 26.3.159 |
+| Chat Heads | 1.3.2 | works | player heads next to chat lines |
+| 3D Skin Layers | 1.11.3 | loads | third person shows the player; layers not inspected; logs a missing optional EMF class |
+| Mouse Tweaks | 2.31 | loads | boots and joins; drag-click behaviour not exercised |
+| Controlling | 26.3.4 | loads | boots and joins with Searchables 1.0.3; key search not exercised |
+| Freecam | 1.5.0 | loads | boots and joins; not toggled |
+| EntityCulling | 1.11.3 | loads | boots and joins |
+| FerriteCore | 9.0.0 | loads | boots and joins |

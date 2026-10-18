@@ -1,7 +1,7 @@
 # Mod bridge architecture
 
-Design B (hybrid), Fabric first. The `mcr` process embeds a Java 25 JVM that runs the stock 26.3 `client.jar`
-under Fabric Loader (Knot) with the user's mods and our bridge mod. Rust stays the real client: it owns the window,
+Design B (hybrid), Fabric first, NeoForge second (see *NeoForge* below). The `mcr` process embeds a Java 25 JVM
+that runs the stock 26.3 `client.jar` under Fabric Loader (Knot) with the user's mods and our bridge mod. Rust stays the real client: it owns the window,
 the socket and protocol state, terrain, sky, weather and audio output. Java is a *shadow client*: it gets a copy of
 the server packet stream, ticks its own `ClientLevel` so mods see a normal game, and draws GUI, HUD, entities and
 mod overlays through a renderpearl backend that records wgpu work against our device.
@@ -383,13 +383,60 @@ collection rate and leaves little headroom at join, more than 3 GiB buys nothing
 - Performance and renderer mods that need OpenGL (Sodium, Iris, ImmediatelyFast, Distant Horizons, Xaero's,
   JourneyMap, FancyMenu) are blocked with a reason shown in the mod manager. Results for real mods are in
   [mod-compat.md](mod-compat.md).
-- The resolver treats `minecraft`, `fabricloader`, `java`, the bridge mod and `mixinextras` (bundled with the
-  pinned loader) as provided. Manifests are parsed as leniently as Fabric's: raw control characters in strings
+- The resolver treats `minecraft`, `fabricloader`, `neoforge`, `fml`, `java`, the bridge mod and `mixinextras`
+  (bundled with the pinned loader) as provided. Manifests are parsed as leniently as Fabric's: raw control characters in strings
   are accepted.
+
+## NeoForge
+
+NeoForge 26.3 (pinned 26.3.0.90, FancyModLoader 12) runs the same bridge through the same seams. The loader is
+chosen from the enabled mods (`mcr_modbridge::Loader`): NeoForge jars (`META-INF/neoforge.mods.toml`, or a
+manifest `FMLModType` library) mean NeoForge. A set that needs both is refused: every mod is listed as not
+loaded with one reason naming a mod of each loader, and no JVM starts. Everything after the JVM starts (rings,
+frames, net, sound, input) is loader-agnostic.
+
+- **Fetch.** `cargo xtask neoforge-fetch` downloads the installer (pinned sha512) into `.cache/neoforge/`, its
+  libraries and the vanilla ones by sha1, and runs the installer's own client processor (installertools
+  `PROCESS_MINECRAFT_JAR`, binary patches) to write `libraries/net/neoforged/minecraft-client-patched/…`. It then
+  writes `neoforge/launch.json` (`"loader": "neoforge"`, `game_args`, `library_dir`).
+- **Boot.** `McrBoot launch net.neoforged.fml.startup.Client --fml.* …` with FML's production layout:
+  `-DlibraryDirectory` (FML takes the patched game and `neoforge-<v>-universal.jar` from it), the profile's
+  JVM arguments (`--add-opens x` joined into `--add-opens=x`, since JNI takes one string per option) and
+  `-Dfml.modFolders=mcr0%%<bridge>:mcr1%%<mod>…` (one name per jar, or FML merges them), so Java's `mods/` stays
+  empty. FML 12 has no ModLauncher or SecureJarHandler: it puts the game, NeoForge and the mods in one module
+  layer (automatic modules) whose `TransformingClassLoader` falls back to the class path loader, so `mcr-boot`
+  on the class path is shared the way `fabric.systemLibraries` shares it under Knot. `Client.main` passes a null
+  `Instrumentation` (only FML's class-loading guard is skipped); FML's self-attach fallback, which would spawn the
+  `mcr` binary, is never reached. Before each start `config/fml.toml` gets `earlyWindowControl = false` (FML's
+  own SDL/OpenGL splash window) and `versionCheck = false`.
+- **Native access.** `--enable-native-access` names boot-layer modules only, and FML keeps its game layer's
+  controller, so NeoForge sessions pass `--illegal-native-access=allow`, the counterpart of Fabric's
+  `ALL-UNNAMED`. `-Dio.netty.transport.noNative=true` keeps netty off its native transports (Rust owns the
+  sockets); otherwise its kqueue probe fails inside NeoForge's debug log appender.
+- **Bridge jar.** One `mcr-bridge.jar` carries `fabric.mod.json` and `META-INF/neoforge.mods.toml`, and one
+  mixin config. FML runs the same sponge-mixin build (0.17.4+mixin.0.8.7) and bundles MixinExtras. The entry
+  classes fill `Loaders` (mod list, loader name) and run `BridgeInit`: `McrBridge` for Fabric and
+  `neoforge.McrBridgeNeoForge` (`@Mod`, built from `src-neoforge`) for NeoForge. Fabric-only calls live in
+  `dev.mcr.bridge.fabric`, loaded only when preloading. `deps.txt` marks `neoforge-launch optional`: without
+  `.cache/neoforge/launch.json` java-build leaves the NeoForge sources and `resources-neoforge` out and says
+  so, and a NeoForge boot then fails early naming the two commands.
+- **Patched classes.** NeoForge recompiles every vanilla class from patched sources. A mixin that names a method
+  NeoForge overloads must pick the overload by descriptor. `SectionRenderDispatcher.RenderSection.compileSync`
+  and `compileAsync` gained `List<AdditionalSectionRenderer>` overloads, which NeoForge's `LevelRenderer`
+  calls: `RenderSectionMixin` handles both (`require = 0` on NeoForge's), or real meshing would run and the
+  level loading screen would wait for the player's section forever.
+- **Warm-up.** The AOT cache and class preloading stay Fabric-only: their key and exclusions are written
+  against Knot, and FML's module layer has not been measured. NeoForge reaches the title in about 7–8 s
+  with seven mods.
+- **Results** (26.3.0.90, Ryzen 7 5800X): title screen composed in mcr, join of a vanilla 26.3 server through
+  the net bridge, Java's HUD, inventory and creative screens, F3, F5 and chat. Seen working: JEI (+ MezzConfig)
+  ingredient list, Jade's block tooltip, AppleSkin's hunger overlay, BetterF3, Chat Heads. Loaded through the
+  join without errors: Mouse Tweaks, Controlling (+ Searchables), Cloth Config, 3D Skin Layers, Freecam,
+  EntityCulling, FerriteCore. The singleplayer world screens open; creating a world was not tried.
 
 ## Change sequence
 
 `mod-jvm-host` → `mod-fabric-boot` → `mod-net-bridge` → `mod-render-backend` → `mod-frame-compose` →
-`mod-input-screens` → `mod-entity-render-hooks` → `mod-sound-bridge` → `mod-manager-ui`.
+`mod-input-screens` → `mod-entity-render-hooks` → `mod-sound-bridge` → `mod-manager-ui`, later `mod-neoforge-1`.
 Spikes first: SPIR-V combined samplers through naga, SDL3 offscreen video driver off the main thread, and the
 `EmbeddedChannel` behaviour of `Connection.setupInboundProtocol`.

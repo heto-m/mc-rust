@@ -2,7 +2,8 @@
 //! Jars are only read as zip manifests; no class is loaded and nothing is extracted.
 
 #[cfg(test)]
-mod fixture;
+pub(crate) mod fixture;
+pub mod neoforge;
 pub mod policy;
 pub mod resolve;
 pub mod scan;
@@ -59,12 +60,13 @@ pub fn default_enabled(policy: Option<&PolicyEntry>) -> bool {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Report {
     pub entries: Vec<ModEntry>,
+    /// The enabled mods need both loaders, so none of them is loaded.
+    pub mixed: Option<crate::MixedLoaders>,
 }
 
 fn loader_name(kind: &ModKind) -> Option<String> {
     Some(match kind {
-        ModKind::Fabric => return None,
-        ModKind::NeoForge => "NeoForge mods are not supported yet".into(),
+        ModKind::Fabric | ModKind::NeoForge => return None,
         ModKind::Forge => "Forge mods are not supported yet".into(),
         ModKind::Quilt => "Quilt mods are not supported yet".into(),
         ModKind::Invalid(why) => format!("unreadable: {why}"),
@@ -82,7 +84,7 @@ pub fn evaluate(
         .into_iter()
         .map(|info| {
             let policy = info
-                .is_fabric()
+                .is_loadable()
                 .then(|| policy.get(&info.id).cloned())
                 .flatten();
             let enabled = settings.is_enabled(&info.id, default_enabled(policy.as_ref()));
@@ -111,7 +113,7 @@ pub fn evaluate(
 
     let unavailable: HashMap<String, String> = entries
         .iter()
-        .filter(|e| e.info.is_fabric())
+        .filter(|e| e.info.is_loadable())
         .filter_map(|e| {
             let why = match e.status {
                 ModStatus::Blocked(_) => "blocked",
@@ -132,7 +134,19 @@ pub fn evaluate(
             entries[i].status = ModStatus::Excluded(reason);
         }
     }
-    Report { entries }
+    let mixed = crate::Loader::for_mods(
+        entries
+            .iter()
+            .filter(|e| e.status == ModStatus::Active)
+            .map(|e| &e.info),
+    )
+    .err();
+    if let Some(m) = &mixed {
+        for e in entries.iter_mut().filter(|e| e.status == ModStatus::Active) {
+            e.status = ModStatus::Excluded(m.to_string());
+        }
+    }
+    Report { entries, mixed }
 }
 
 impl Report {
@@ -149,7 +163,14 @@ impl Report {
         ids
     }
 
-    /// The jars for `fabric.addMods`; empty means no JVM starts.
+    /// The loader the active mods need: `None` when there are none, including a mixed set.
+    pub fn loader(&self) -> Option<crate::Loader> {
+        crate::Loader::for_mods(self.active().map(|e| &e.info))
+            .ok()
+            .flatten()
+    }
+
+    /// The jars handed to the loader; empty means no JVM starts.
     pub fn jars(&self) -> Vec<PathBuf> {
         self.active().map(|e| e.info.path.clone()).collect()
     }

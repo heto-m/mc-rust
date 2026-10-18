@@ -144,7 +144,7 @@ pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect ho
            [--screenshot out.png [--after-ticks N] [--bench N] [--bench-timeline secs]]
        singleplayer: --singleplayer <saves folder> starts that world's local server and joins it (game dir's saves/)
        soak: --connect host[:port] --soak secs runs offscreen, rejoins after kicks and prints soak-stats every 10 s
-       mods: [--mods <dir>] uses <dir> instead of <game-dir>/mods; enabled mods boot under Fabric (needs `cargo xtask fabric-fetch`)
+       mods: [--mods <dir>] uses <dir> instead of <game-dir>/mods; enabled mods boot under Fabric or NeoForge, never both (needs `cargo xtask fabric-fetch` or `neoforge-fetch`)
        launcher: shown first without --connect/--singleplayer/--mods; --launcher forces it, --profile <name> plays one directly,
            --data-dir <dir> holds launcher_profiles.json (default run); explicit --game-dir/--mods/--name/--jar/--size win
 camera angles are degrees; yaw 0 looks toward -Z, positive turns left";

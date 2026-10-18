@@ -8,6 +8,7 @@ mod golden;
 mod java;
 mod jdk;
 mod manifest;
+mod neoforge;
 mod net;
 mod paths;
 mod server;
@@ -76,6 +77,13 @@ enum Command {
     },
     /// Download Fabric Loader, its libraries, the vanilla libraries and natives, and the test mods
     FabricFetch {
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Download the pinned NeoForge installer and libraries, patch the client jar and write the launch manifest
+    NeoforgeFetch {
         #[arg(long)]
         version: Option<String>,
         #[arg(long)]
@@ -170,6 +178,10 @@ fn main() -> Result<()> {
         Command::FabricFetch { version, force } => {
             let ver = fetch::resolve_version(version.as_deref())?;
             fabric::run(&layout, &ver, force)?;
+        }
+        Command::NeoforgeFetch { version, force } => {
+            let ver = fetch::resolve_version(version.as_deref())?;
+            neoforge::run(&layout, &ver, force)?;
         }
         Command::JavaBuild { out } => {
             java::run(&layout, out.as_deref())?;

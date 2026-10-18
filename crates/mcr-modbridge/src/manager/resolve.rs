@@ -8,14 +8,20 @@ pub const LOADER_VERSION: &str = "0.19.5";
 /// Bundled with the pinned loader under its own mod id.
 pub const MIXINEXTRAS_VERSION: &str = "0.5.5";
 pub const JAVA_VERSION: &str = "25";
+/// The NeoForge build `cargo xtask neoforge-fetch` pins, and its FancyModLoader.
+pub const NEOFORGE_VERSION: &str = "26.3.0.90";
+pub const FML_VERSION: &str = "12.0.12";
 pub const BRIDGE_ID: &str = "mcr_bridge";
 pub const BRIDGE_VERSION: &str = "0.1.0";
 
-/// What the loader itself provides: the game, Fabric Loader, MixinExtras, Java and the bridge mod.
+/// What the loaders themselves provide: the game, Fabric Loader, NeoForge and FML, MixinExtras, Java
+/// and the bridge mod. A set never mixes loaders, so each loader's ids can be listed side by side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostEnv {
     pub minecraft: String,
     pub loader: String,
+    pub neoforge: String,
+    pub fml: String,
     pub mixinextras: String,
     pub java: String,
 }
@@ -25,6 +31,8 @@ impl Default for HostEnv {
         Self {
             minecraft: GAME_VERSION.into(),
             loader: LOADER_VERSION.into(),
+            neoforge: NEOFORGE_VERSION.into(),
+            fml: FML_VERSION.into(),
             mixinextras: MIXINEXTRAS_VERSION.into(),
             java: JAVA_VERSION.into(),
         }
@@ -32,10 +40,12 @@ impl Default for HostEnv {
 }
 
 impl HostEnv {
-    fn provided(&self) -> [(&'static str, &str); 5] {
+    fn provided(&self) -> [(&'static str, &str); 7] {
         [
             ("minecraft", &self.minecraft),
             ("fabricloader", &self.loader),
+            ("neoforge", &self.neoforge),
+            ("fml", &self.fml),
             ("mixinextras", &self.mixinextras),
             ("java", &self.java),
             (BRIDGE_ID, BRIDGE_VERSION),

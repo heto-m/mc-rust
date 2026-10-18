@@ -2,6 +2,7 @@ package dev.mcr.bridge.mixin;
 
 import dev.mcr.bridge.world.BlockEntitySections;
 import dev.mcr.bridge.world.BridgeSectionMesh;
+import java.util.List;
 import net.minecraft.client.renderer.chunk.RenderSectionRegion;
 import net.minecraft.client.renderer.chunk.SectionMesh;
 import net.minecraft.client.renderer.chunk.SectionRenderDispatcher;
@@ -26,18 +27,26 @@ abstract class RenderSectionMixin {
     @Shadow
     private void cancelTasks() {}
 
-    @Inject(method = "compileSync", at = @At("HEAD"), cancellable = true)
-    private void mcr$scanSync(RenderSectionRegion region, CallbackInfo ci) {
+    private static final String REGION = "Lnet/minecraft/client/renderer/chunk/RenderSectionRegion;";
+
+    @Inject(
+            method = {"compileSync(" + REGION + ")V", "compileAsync(" + REGION + ")V"},
+            at = @At("HEAD"),
+            cancellable = true)
+    private void mcr$scan(RenderSectionRegion region, CallbackInfo ci) {
         cancelTasks();
         setSectionMesh(BridgeSectionMesh.scan(getSectionNode()));
         ci.cancel();
     }
 
-    @Inject(method = "compileAsync", at = @At("HEAD"), cancellable = true)
-    private void mcr$scanAsync(RenderSectionRegion region, CallbackInfo ci) {
-        cancelTasks();
-        setSectionMesh(BridgeSectionMesh.scan(getSectionNode()));
-        ci.cancel();
+    // NeoForge's overloads with extra renderers, which its LevelRenderer calls instead.
+    @Inject(
+            method = {"compileSync(" + REGION + "Ljava/util/List;)V", "compileAsync(" + REGION + "Ljava/util/List;)V"},
+            at = @At("HEAD"),
+            cancellable = true,
+            require = 0)
+    private void mcr$scanWithRenderers(RenderSectionRegion region, List<?> renderers, CallbackInfo ci) {
+        mcr$scan(region, ci);
     }
 
     @Inject(method = "setSectionMesh", at = @At("HEAD"))

@@ -92,7 +92,7 @@ impl Host {
         }
     }
 
-    fn natives_dir_name(self) -> String {
+    pub fn natives_dir_name(self) -> String {
         format!("{}-{}", self.os, self.arch)
     }
 }
@@ -194,7 +194,7 @@ pub fn run(layout: &Layout, game: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn fetch_one(d: &Download, dest: &Path, force: bool) -> Result<()> {
+pub fn fetch_one(d: &Download, dest: &Path, force: bool) -> Result<()> {
     let checksum = match &d.checksum {
         Some(c) => c.clone(),
         None => sidecar_sha512(&d.url).with_context(|| format!("checksum for {}", d.name))?,
@@ -202,7 +202,7 @@ fn fetch_one(d: &Download, dest: &Path, force: bool) -> Result<()> {
     if !force && checksum.file_matches(dest)? {
         return Ok(());
     }
-    println!("[fabric] downloading {}", d.name);
+    println!("[download] {}", d.name);
     download_to(&d.url, dest)?;
     checksum
         .verify_or_remove(dest)
@@ -346,7 +346,7 @@ pub fn parse_vanilla_libraries(text: &str, host: Host) -> Result<VanillaLibs> {
     })
 }
 
-fn parse_asset_index(text: &str) -> Result<String> {
+pub fn parse_asset_index(text: &str) -> Result<String> {
     let root: Value = serde_json::from_str(text).context("version.json is not JSON")?;
     root["assetIndex"]["id"]
         .as_str()
@@ -373,7 +373,7 @@ pub fn native_target(entry: &str, host: Host) -> Option<&str> {
     Some(file)
 }
 
-fn extract_natives(jar: &Path, out: &Path, host: Host) -> Result<()> {
+pub fn extract_natives(jar: &Path, out: &Path, host: Host) -> Result<()> {
     let mut zip = zip::ZipArchive::new(File::open(jar)?)?;
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i)?;

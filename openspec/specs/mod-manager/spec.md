@@ -6,11 +6,23 @@ Scan the mods folder, apply the compatibility policy and dependency pre-check, k
 ## Requirements
 
 ### Requirement: Mods folder scanning
-mcr SHALL scan `<data>/mods/` for jars, read Fabric metadata (id, name, version, description, icon, dependencies, breaks, environment, provides, nested jars) without loading classes, and SHALL list NeoForge/Forge jars and unparsable jars with a reason instead of loading them.
+mcr SHALL scan `<data>/mods/` for jars and read Fabric metadata (id, name, version, description, icon, dependencies, breaks, environment, provides, nested jars) and NeoForge metadata from `META-INF/neoforge.mods.toml` (id, name, version, description, required dependencies and their sides) without loading classes. It SHALL list Forge, Quilt and unparsable jars with a reason instead of loading them.
 
 #### Scenario: NeoForge jar
 - **WHEN** a NeoForge mod jar is in the mods folder
-- **THEN** it is listed as not supported yet and is not passed to the loader
+- **THEN** it is listed with its mod id, name and version and is passed to the loader when enabled
+
+#### Scenario: NeoForge dependency
+- **WHEN** an enabled NeoForge mod requires a mod id that no enabled jar provides
+- **THEN** it is excluded and the Mods screen shows the missing id
+
+#### Scenario: NeoForge library jar
+- **WHEN** a jar has no `neoforge.mods.toml` but its manifest declares `FMLModType: GAMELIBRARY`
+- **THEN** it is listed as a NeoForge jar and passed to the loader when enabled
+
+#### Scenario: Forge jar
+- **WHEN** a Forge mod jar is in the mods folder
+- **THEN** it is listed as not supported and is not passed to the loader
 
 ### Requirement: Compatibility policy
 mcr SHALL apply a data-driven policy of `blocked`, `unsupported` and `partial` mod ids, each with a reason. Blocked mods SHALL never be passed to the loader. Unsupported mods SHALL require explicit enabling with a warning.

@@ -25,6 +25,8 @@ const MAX_ERROR: usize = 160;
 const MAX_TOML_BYTES: u64 = 256 << 10;
 
 const FABRIC: &str = "fabric.mod.json";
+const JARJAR: &str = "META-INF/jarjar/metadata.json";
+const JAR_MANIFEST: &str = "META-INF/MANIFEST.MF";
 const QUILT: &str = "quilt.mod.json";
 const NEOFORGE: &str = "META-INF/neoforge.mods.toml";
 const FORGE: &str = "META-INF/mods.toml";
@@ -109,6 +111,11 @@ impl ModInfo {
 
     pub fn is_fabric(&self) -> bool {
         self.kind == ModKind::Fabric
+    }
+
+    /// A jar of a loader mcr can boot.
+    pub fn is_loadable(&self) -> bool {
+        matches!(self.kind, ModKind::Fabric | ModKind::NeoForge)
     }
 }
 
@@ -239,16 +246,28 @@ fn other_loader<R: Read + Seek>(zip: &mut ZipArchive<R>, path: &Path, file_name:
         ModKind::NeoForge
     } else if zip.by_name(FORGE).is_ok() {
         ModKind::Forge
+    } else if let Some(info) = neoforge_library(zip, path, file_name) {
+        return info;
     } else {
         return invalid(path, file_name, &ScanError::NotAMod.to_string());
     };
+    if kind == ModKind::NeoForge {
+        return match read_text(zip, NEOFORGE, MAX_TOML_BYTES) {
+            Ok(Some(text)) => {
+                let mut info = ModInfo::bare(path, file_name, ModKind::NeoForge);
+                match fill_neoforge(zip, &text, &mut info) {
+                    Ok(()) => info,
+                    Err(why) => invalid(path, file_name, &format!("{NEOFORGE}: {why}")),
+                }
+            }
+            Ok(None) => invalid(path, file_name, &format!("{NEOFORGE} unreadable")),
+            Err(e) => invalid(path, file_name, &e.to_string()),
+        };
+    }
     let mut info = ModInfo::bare(path, file_name, kind.clone());
-    let toml = match kind {
-        ModKind::NeoForge => NEOFORGE,
-        ModKind::Forge => FORGE,
-        _ => return info,
-    };
-    if let Ok(Some(text)) = read_text(zip, toml, MAX_TOML_BYTES) {
+    if kind == ModKind::Forge
+        && let Ok(Some(text)) = read_text(zip, FORGE, MAX_TOML_BYTES)
+    {
         if let Some(v) = toml_value(&text, "displayName") {
             info.name = clean(&v, MAX_NAME);
         }
@@ -257,6 +276,181 @@ fn other_loader<R: Read + Seek>(zip: &mut ZipArchive<R>, path: &Path, file_name:
         }
     }
     info
+}
+
+fn manifest_attribute(manifest: &str, key: &str) -> Option<String> {
+    manifest.lines().find_map(|l| {
+        l.strip_prefix(key)?
+            .strip_prefix(':')
+            .map(|v| v.trim().to_owned())
+    })
+}
+
+/// A library NeoForge loads from the mods folder on its manifest's `FMLModType` alone (no mods.toml).
+fn neoforge_library<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    path: &Path,
+    file_name: &str,
+) -> Option<ModInfo> {
+    let manifest = read_text(zip, JAR_MANIFEST, MAX_TOML_BYTES).ok()??;
+    let kind = manifest_attribute(&manifest, "FMLModType")?;
+    if !matches!(kind.as_str(), "GAMELIBRARY" | "LIBRARY") {
+        return None;
+    }
+    let mut info = ModInfo::bare(path, file_name, ModKind::NeoForge);
+    if let Some(title) = manifest_attribute(&manifest, "Specification-Title") {
+        info.name = clean(&title, MAX_NAME);
+    }
+    if let Some(version) = manifest_attribute(&manifest, "Implementation-Version") {
+        info.version = clean(&version, MAX_VERSION);
+    }
+    info.description = "library".to_owned();
+    Some(info)
+}
+
+/// `${file.jarVersion}` stands for the jar manifest's `Implementation-Version`.
+fn neoforge_version<R: Read + Seek>(zip: &mut ZipArchive<R>, version: &str) -> String {
+    if !version.contains("${") {
+        return clean(version, MAX_VERSION);
+    }
+    let jar_version = read_text(zip, JAR_MANIFEST, MAX_TOML_BYTES)
+        .ok()
+        .flatten()
+        .and_then(|m| manifest_attribute(&m, "Implementation-Version"))
+        .unwrap_or_else(|| "0".to_owned());
+    clean(
+        &version.replace("${file.jarVersion}", &jar_version),
+        MAX_VERSION,
+    )
+}
+
+fn neoforge_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    (2..=MAX_ID).contains(&id.len())
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn bounded(deps: Vec<Dependency>) -> Vec<Dependency> {
+    deps.into_iter()
+        .filter(|d| d.id.len() <= MAX_ID)
+        .take(MAX_DEPS)
+        .map(|d| Dependency {
+            id: d.id,
+            range: d
+                .range
+                .into_iter()
+                .take(MAX_LIST)
+                .map(|r| clean(&r, 128))
+                .collect(),
+        })
+        .collect()
+}
+
+fn fill_neoforge<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    text: &str,
+    info: &mut ModInfo,
+) -> Result<(), String> {
+    let m = super::neoforge::parse_manifest(text)?;
+    if !neoforge_id(&m.id) {
+        return Err("invalid mod id".into());
+    }
+    info.version = neoforge_version(zip, &m.version);
+    info.name = m
+        .name
+        .map(|n| clean(&n, MAX_NAME))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| clean(&m.id, MAX_NAME));
+    info.id = m.id;
+    info.description = clean(&m.description.replace('\n', " "), MAX_DESCRIPTION);
+    info.depends = bounded(m.depends);
+    info.breaks = bounded(m.breaks);
+    if let Some(path) = m.icon.filter(|p| p.len() <= 256) {
+        info.icon = match read_named(zip, &path, MAX_ICON_BYTES) {
+            Ok(Some(bytes)) => decode_icon(&bytes).map(Arc::new),
+            _ => None,
+        };
+    }
+    let mut budget = NestedBudget {
+        bytes: MAX_NESTED_TOTAL_BYTES,
+        jars: MAX_NESTED_TOTAL,
+    };
+    read_jarjar(zip, info, &mut budget, MAX_NESTED_DEPTH);
+    Ok(())
+}
+
+/// Jar-in-jar mods NeoForge would load from `META-INF/jarjar`, so they satisfy dependencies.
+fn read_jarjar<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    info: &mut ModInfo,
+    budget: &mut NestedBudget,
+    depth: u32,
+) {
+    let Ok(Some(text)) = read_text(zip, JARJAR, MAX_JSON_BYTES) else {
+        return;
+    };
+    let Ok(root) = serde_json::from_str::<Value>(&text) else {
+        return;
+    };
+    let paths: Vec<String> = root["jars"]
+        .as_array()
+        .map(|jars| {
+            jars.iter()
+                .filter_map(|j| j["path"].as_str())
+                .filter(|p| p.len() <= 256)
+                .take(MAX_NESTED)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    for file in paths {
+        let Some(mut inner) = take_nested(zip, &file, info, budget) else {
+            continue;
+        };
+        let Ok(Some(toml)) = read_text(&mut inner, NEOFORGE, MAX_TOML_BYTES) else {
+            continue;
+        };
+        if let Ok(m) = super::neoforge::parse_manifest(&toml)
+            && neoforge_id(&m.id)
+        {
+            let version = neoforge_version(&mut inner, &m.version);
+            info.nested.push(Nested {
+                id: m.id,
+                version,
+                provides: Vec::new(),
+            });
+            if depth > 1 {
+                read_jarjar(&mut inner, info, budget, depth - 1);
+            }
+        }
+    }
+}
+
+/// Opens one nested jar within the budget, or warns why it was skipped.
+fn take_nested<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    file: &str,
+    info: &mut ModInfo,
+    budget: &mut NestedBudget,
+) -> Option<ZipArchive<Cursor<Vec<u8>>>> {
+    if budget.jars == 0 {
+        info.warnings
+            .push("too many nested jars; the rest were not read".to_owned());
+        return None;
+    }
+    let size = zip.by_name(file).ok()?.size();
+    if size > MAX_NESTED_JAR_BYTES || size > budget.bytes {
+        info.warnings.push(format!(
+            "nested jar {} was not read (too large)",
+            clean(file, 80)
+        ));
+        return None;
+    }
+    budget.bytes -= size;
+    budget.jars -= 1;
+    let bytes = read_named(zip, file, MAX_NESTED_JAR_BYTES).ok()??;
+    open_zip(Cursor::new(bytes)).ok()
 }
 
 /// The first `key = "value"` line; mods.toml is only read for display, never trusted.
@@ -454,24 +648,7 @@ fn read_nested_level<R: Read + Seek>(
                 .push("too many nested jars; the rest were not read".to_owned());
             return;
         }
-        let Ok(entry) = zip.by_name(file) else {
-            continue;
-        };
-        let size = entry.size();
-        drop(entry);
-        if size > MAX_NESTED_JAR_BYTES || size > budget.bytes {
-            info.warnings.push(format!(
-                "nested jar {} was not read (too large)",
-                clean(file, 80)
-            ));
-            continue;
-        }
-        budget.bytes -= size;
-        budget.jars -= 1;
-        let Ok(Some(bytes)) = read_named(zip, file, MAX_NESTED_JAR_BYTES) else {
-            continue;
-        };
-        let Ok(mut inner) = open_zip(Cursor::new(bytes)) else {
+        let Some(mut inner) = take_nested(zip, file, info, budget) else {
             continue;
         };
         let Ok(Some(text)) = read_text(&mut inner, FABRIC, MAX_JSON_BYTES) else {
