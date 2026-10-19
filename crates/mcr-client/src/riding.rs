@@ -320,6 +320,21 @@ impl Client {
         self.ride.as_ref()
     }
 
+    /// `LocalPlayer#jumpableVehicle`: the charge of the jump bar and whether the mount's dash is
+    /// cooling down, while steering a saddled horse, camel or nautilus.
+    pub fn jump_bar(&self) -> Option<(f32, bool)> {
+        let ride = self.ride.as_ref()?;
+        let Sim::Mount(mount) = &ride.sim else {
+            return None;
+        };
+        let jumpable = match mount.mode {
+            MountMode::Horse | MountMode::Nautilus => true,
+            MountMode::Camel => !mount.refuse_to_move,
+            _ => false,
+        };
+        jumpable.then(|| (ride.jump.scale.clamp(0.0, 1.0), mount.jump_cooldown() > 0))
+    }
+
     pub(crate) fn ride_tick(&mut self, input: &PlayerInput, vehicle: i32) -> Result<()> {
         self.combat.hands_busy = false;
         let impulse = std::mem::take(&mut self.state.vehicle_impulse);

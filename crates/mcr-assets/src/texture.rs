@@ -249,7 +249,8 @@ pub fn decode_sprite(name: &str, png: &[u8], mcmeta: Option<&[u8]>) -> Result<Sp
 /// The decoded texture; `None` when absent or when a (possibly hostile) pack's file does not decode.
 pub(crate) fn load_sprite(resources: &ResourceManager, path: &str) -> Option<Sprite> {
     let png = match resources.read(path) {
-        Ok(png) => png?,
+        Ok(Some(png)) => png,
+        Ok(None) => return load_permutation(resources, path),
         Err(e) => {
             tracing::warn!("{path}: {e}");
             return None;
@@ -263,6 +264,113 @@ pub(crate) fn load_sprite(resources: &ResourceManager, path: &str) -> Option<Spr
             decode_sprite(path, &png, None).ok()
         }
     }
+}
+
+/// `(namespace, path)` of an identifier, `minecraft` when it has none.
+fn split_id(id: &str) -> (&str, &str) {
+    id.split_once(':').unwrap_or(("minecraft", id))
+}
+
+/// A texture that only exists as an atlas `paletted_permutations` output, such as
+/// `trims/items/helmet_trim_gold`: the base texture recoloured from the key to the named palette.
+fn load_permutation(resources: &ResourceManager, path: &str) -> Option<Sprite> {
+    let (ns, rest) = path.strip_prefix("assets/")?.split_once('/')?;
+    let stem = rest.strip_prefix("textures/")?.strip_suffix(".png")?;
+    let base_exists = stem
+        .match_indices('_')
+        .any(|(i, _)| resources.exists(&format!("assets/{ns}/textures/{}.png", &stem[..i])));
+    if !base_exists {
+        return None;
+    }
+    let atlases: Vec<&str> = resources
+        .list_prefix("assets/")
+        .filter(|p| p.ends_with(".json") && p.split('/').nth(2) == Some("atlases"))
+        .collect();
+    for atlas in atlases {
+        for bytes in resources.read_all(atlas) {
+            let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            let sources = json.get("sources").and_then(|s| s.as_array());
+            for source in sources.into_iter().flatten() {
+                let kind = source.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if split_id(kind).1 != "paletted_permutations" {
+                    continue;
+                }
+                if let Some(sprite) = permutation_from(resources, source, ns, stem) {
+                    return Some(sprite);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn permutation_from(
+    resources: &ResourceManager,
+    source: &serde_json::Value,
+    ns: &str,
+    stem: &str,
+) -> Option<Sprite> {
+    let separator = source
+        .get("separator")
+        .and_then(|s| s.as_str())
+        .unwrap_or("_");
+    let permutations = source.get("permutations")?.as_object()?;
+    let (base, palette) = source
+        .get("textures")?
+        .as_array()?
+        .iter()
+        .filter_map(|t| t.as_str())
+        .map(split_id)
+        .filter(|(tns, _)| *tns == ns)
+        .find_map(|(_, tpath)| {
+            let suffix = stem.strip_prefix(tpath)?.strip_prefix(separator)?;
+            Some((tpath, permutations.get(suffix)?.as_str()?))
+        })?;
+    let key = source.get("palette_key")?.as_str()?;
+    let read_palette = |id: &str| {
+        let (pns, ppath) = split_id(id);
+        let path = format!("assets/{pns}/textures/palettes/{ppath}.png");
+        let bytes = resources.read(&path).ok()??;
+        decode_png(&path, &bytes).ok().map(|(_, _, rgba)| rgba)
+    };
+    let (keys, values) = (read_palette(key)?, read_palette(palette)?);
+    if keys.len() != values.len() {
+        tracing::warn!("palette {palette} does not match the size of {key}");
+        return None;
+    }
+    let mut mapping = HashMap::new();
+    for (k, v) in keys
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(values.as_chunks::<4>().0)
+    {
+        if k[3] != 0 {
+            mapping.insert([k[0], k[1], k[2]], *v);
+        }
+    }
+    let mut sprite = load_sprite(resources, &format!("assets/{ns}/textures/{base}.png"))?;
+    for frame in &mut sprite.frames {
+        for px in frame.as_chunks_mut::<4>().0 {
+            if px[3] == 0 {
+                continue;
+            }
+            let rgb = [px[0], px[1], px[2]];
+            let target = mapping
+                .get(&rgb)
+                .copied()
+                .unwrap_or([rgb[0], rgb[1], rgb[2], 255]);
+            *px = [
+                target[0],
+                target[1],
+                target[2],
+                (u32::from(px[3]) * u32::from(target[3]) / 255) as u8,
+            ];
+        }
+    }
+    Some(sprite)
 }
 
 pub fn missing_sprite() -> Sprite {

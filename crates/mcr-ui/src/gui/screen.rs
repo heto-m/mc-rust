@@ -278,6 +278,11 @@ pub trait Screen {
         false
     }
 
+    /// `Screen#showsActiveEffects`: the HUD leaves its effect icons out under this screen.
+    fn shows_active_effects(&self, _gui_width: i32) -> bool {
+        false
+    }
+
     /// Server dialogs and the screen shown while waiting for the server to answer one.
     fn is_dialog(&self) -> bool {
         false
@@ -365,6 +370,11 @@ impl ScreenStack {
 
     pub fn top_shows_music_toast(&self) -> bool {
         self.top().is_some_and(Screen::shows_music_toast)
+    }
+
+    pub fn top_shows_active_effects(&self) -> bool {
+        self.top()
+            .is_some_and(|s| s.shows_active_effects(self.size.0))
     }
 
     pub fn top_is_dialog(&self) -> bool {

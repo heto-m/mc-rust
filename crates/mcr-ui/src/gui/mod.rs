@@ -54,7 +54,9 @@ pub use credits::{
 pub use dialog::Dialog;
 pub use dialog_screen::{DialogScreen, WaitingForResponseScreen};
 pub use edit_box::{EditBox, is_allowed_char};
-pub use effects_list::{can_see_effects, draw_effects, effect_name, effect_order};
+pub use effects_list::{
+    EffectSortKey, can_see_effects, draw_effects, effect_key_order, effect_name, effect_order,
+};
 pub use env::{
     ActiveEffect, Clipboard, Env, GameView, MapView, MemoryClipboard, MerchantInfo, NoView,
     RenderCx, TradeOffer,

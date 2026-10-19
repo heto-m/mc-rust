@@ -3,7 +3,7 @@ use std::ops::Range;
 use wgpu::util::DeviceExt;
 
 use crate::atlas::Atlas;
-use crate::ui::{PageKind, Ui, Vertex};
+use crate::ui::{Blend, PageKind, Ui, Vertex};
 
 const INITIAL_QUADS: usize = 4096;
 
@@ -26,6 +26,7 @@ struct Draw {
     kind: PageKind,
     page: usize,
     scissor: [u32; 4],
+    blend: Blend,
     indices: Range<u32>,
 }
 
@@ -39,6 +40,7 @@ pub struct UiStats {
 #[derive(Debug)]
 pub struct UiRenderer {
     pipeline: wgpu::RenderPipeline,
+    invert_pipeline: wgpu::RenderPipeline,
     page_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     globals: wgpu::Buffer,
@@ -114,42 +116,53 @@ impl UiRenderer {
             dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
             operation: wgpu::BlendOperation::Add,
         };
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("ui"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2,
-                        1 => Float32x2,
-                        2 => Unorm8x4
-                    ],
-                })],
+        let make_pipeline = |label: &str, color: wgpu::BlendComponent| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x2,
+                            1 => Float32x2,
+                            2 => Unorm8x4
+                        ],
+                    })],
+                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: Some(wgpu::BlendState {
+                            color,
+                            alpha: premultiplied,
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = make_pipeline("ui", premultiplied);
+        let invert_pipeline = make_pipeline(
+            "ui invert",
+            wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::OneMinusDst,
+                dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                operation: wgpu::BlendOperation::Add,
             },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState {
-                        color: premultiplied,
-                        alpha: premultiplied,
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ui globals"),
             size: std::mem::size_of::<Globals>() as u64,
@@ -180,6 +193,7 @@ impl UiRenderer {
         });
         Self {
             pipeline,
+            invert_pipeline,
             page_layout,
             sampler,
             globals,
@@ -359,6 +373,7 @@ impl UiRenderer {
                     kind: c.page.kind,
                     page: c.page.index as usize,
                     scissor: c.scissor,
+                    blend: c.blend,
                     indices: quads.start * 6..split * 6,
                 });
                 quads.start = split;
@@ -370,6 +385,7 @@ impl UiRenderer {
                 kind: c.page.kind,
                 page: c.page.index as usize,
                 scissor: c.scissor,
+                blend: c.blend,
                 indices: quads.start * 6..quads.end * 6,
             });
         }
@@ -402,11 +418,18 @@ impl UiRenderer {
         let Some(draws) = self.draws.get(range).filter(|d| !d.is_empty()) else {
             return;
         };
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.globals_bg, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+        let mut bound = None;
         for d in draws {
+            if bound != Some(d.blend) {
+                pass.set_pipeline(match d.blend {
+                    Blend::Normal => &self.pipeline,
+                    Blend::Invert => &self.invert_pipeline,
+                });
+                bound = Some(d.blend);
+            }
             let pages = match d.kind {
                 PageKind::Sprite => &self.sprite_pages,
                 PageKind::Glyph => &self.glyph_pages,

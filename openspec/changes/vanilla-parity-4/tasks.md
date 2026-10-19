@@ -177,23 +177,23 @@ Scope: mcr-ui gui, items and tooltip, mcr-app view.
 
 Scope: mcr-app hud and play, mcr-ui screens/hud.
 
-- [ ] 12.1 H1 (V) Status effect icons missing
-- [ ] 12.2 H2 (V) Attack indicator missing
-- [ ] 12.3 H3 (V) Crosshair not inverted, drawn in third person and spectator
-- [ ] 12.4 H5 (V) Overlays drawn above the HUD
-- [ ] 12.5 H6 (V) Selected item name popup missing
-- [ ] 12.6 H7 (V) Mount health and jump bar missing
-- [ ] 12.7 H8 (V) Hunger icons never show and food does not jitter at zero saturation
-- [ ] 12.8 H9 (V) Air bubbles wrong
-- [ ] 12.9 H10 (V) Off-hand slot ignores the main-hand option
-- [ ] 12.10 H11 (V) Tab list hearts objectives render nothing
-- [ ] 12.11 H13 (V) Locator bar background covers the XP level
-- [ ] 12.12 H14 (V) Jukebox "Now Playing" action bar missing
-- [ ] 12.13 H17 (M) Sidebar and title backdrops
-- [ ] 12.14 H20 (M) Title and action bar cut-off
-- [ ] 12.15 C22 (M) Hotbar pop animation
-- [ ] 12.16 Offscreen HUD tests: effect icons rows, attack indicator modes, air bubbles, left-handed off-hand slot, vehicle hearts and jump bar
-- [ ] 12.17 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 12.1 H1 (V) Status effect icons missing
+- [x] 12.2 H2 (V) Attack indicator missing
+- [x] 12.3 H3 (V) Crosshair not inverted, drawn in third person and spectator
+- [x] 12.4 H5 (V) Overlays drawn above the HUD
+- [x] 12.5 H6 (V) Selected item name popup missing
+- [x] 12.6 H7 (V) Mount health and jump bar missing
+- [x] 12.7 H8 (V) Hunger icons never show and food does not jitter at zero saturation
+- [x] 12.8 H9 (V) Air bubbles wrong
+- [x] 12.9 H10 (V) Off-hand slot ignores the main-hand option
+- [x] 12.10 H11 (V) Tab list hearts objectives render nothing
+- [x] 12.11 H13 (V) Locator bar background covers the XP level
+- [x] 12.12 H14 (V) Jukebox "Now Playing" action bar missing
+- [x] 12.13 H17 (M) Sidebar and title backdrops
+- [x] 12.14 H20 (M) Title and action bar cut-off
+- [x] 12.15 C22 (M) Hotbar pop animation
+- [x] 12.16 Offscreen HUD tests: effect icons rows, attack indicator modes, air bubbles, left-handed off-hand slot, vehicle hearts and jump bar
+- [x] 12.17 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 13. Camera effects and screen overlays
 

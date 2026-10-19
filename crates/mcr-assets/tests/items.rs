@@ -187,6 +187,34 @@ fn trim_material_selects_trimmed_model() {
 }
 
 #[test]
+fn trim_overlay_textures_come_from_the_paletted_permutations() {
+    let Some(rm) = vanilla() else { return };
+    let mut baker = ItemBaker::new();
+    let missing = mcr_assets::missing_sprite();
+    let mut seen = Vec::new();
+    for name in [
+        "minecraft:trims/items/helmet_trim_gold",
+        "minecraft:trims/items/helmet_trim_netherite_darker",
+        "minecraft:trims/items/boots_trim_resin",
+        "minecraft:trims/items/helmet_trim_gold_darker",
+    ] {
+        let sprite = baker.intern(&id(name));
+        let image = baker.image(&rm, sprite).unwrap();
+        assert_ne!(
+            image.frames, missing.frames,
+            "{name} resolved to the missing texture"
+        );
+        seen.push(image.frames[0].clone());
+    }
+    assert_ne!(
+        seen[0], seen[3],
+        "the darker gold palette differs from gold"
+    );
+    let unknown = baker.intern(&id("minecraft:trims/items/helmet_trim_cardboard"));
+    assert_eq!(baker.image(&rm, unknown).unwrap().frames, missing.frames);
+}
+
+#[test]
 fn grass_block_tint_comes_from_the_colormap() {
     let Some(rm) = vanilla() else { return };
     let items = ItemModels::load(&rm).unwrap();

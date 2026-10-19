@@ -631,6 +631,7 @@ impl ClientState {
         let pos = self.player.physics.pos;
         self.world.tick();
         self.titles.tick();
+        self.inventory.tick_pop();
         let frozen = !self.world.runs_normally;
         let mut cx = SimContext {
             world: &self.chunks,

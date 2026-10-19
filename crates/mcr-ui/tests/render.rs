@@ -1,7 +1,10 @@
 mod common;
 
 use mcr_protocol::types::text::{Component, Content, Style as ProtoStyle};
-use mcr_ui::{ChatHud, ChatOptions, DebugOverlay, HeartKind, HudSprites, HudState, UiRenderer};
+use mcr_ui::{
+    AirState, ChatHud, ChatOptions, ContextualBar, CrosshairIndicator, DebugOverlay, HeartKind,
+    HudEffect, HudSprites, HudState, ScreenAssets, UiRenderer, vanilla_resources,
+};
 
 const SIZE: (u32, u32) = (854, 480);
 const WORLD: wgpu::Color = wgpu::Color {
@@ -222,4 +225,286 @@ fn text_effects_render() {
     let img = common::render(&gpu, &mut renderer, &mut ui, (640, 480), WORLD);
     common::save_png("text_effects.png", 640, 480, &img);
     assert!(differs_from_clear(&img) > 500);
+}
+
+/// 640x480 at GUI scale 2: a 320x240 GUI whose hotbar is centred on x = 160.
+const HUD_SIZE: (u32, u32) = (640, 480);
+
+fn hud_shot(
+    gpu: &common::Gpu,
+    renderer: &mut UiRenderer,
+    ui: &mut mcr_ui::Ui,
+    draw: impl FnOnce(&mut mcr_ui::UiFrame<'_>),
+) -> Vec<u8> {
+    {
+        let mut f = ui.frame(HUD_SIZE.0, HUD_SIZE.1);
+        assert_eq!(f.gui_size(), (320, 240));
+        draw(&mut f);
+    }
+    common::render(gpu, renderer, ui, HUD_SIZE, WORLD)
+}
+
+/// Pixels in the GUI rectangle that differ from the clear colour.
+fn changed_in(img: &[u8], (x0, y0, x1, y1): (i32, i32, i32, i32)) -> usize {
+    let clear = [107u8, 140, 92];
+    let mut n = 0;
+    for y in (y0 * 2)..(y1 * 2) {
+        for x in (x0 * 2)..(x1 * 2) {
+            let p = common::pixel(img, HUD_SIZE.0, x as u32, y as u32);
+            if (0..3).any(|c| p[c].abs_diff(clear[c]) > 3) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+#[test]
+fn effect_icons_fill_a_beneficial_and_a_harmful_row() {
+    let Some((gpu, mut renderer, mut ui)) = setup() else {
+        return;
+    };
+    let Some(jar) = common::jar_path() else {
+        return;
+    };
+    let resources = vanilla_resources(&jar, None).expect("resources");
+    let assets = ScreenAssets::load(&mut ui, &resources).expect("assets");
+    let sprites = HudSprites::new(&ui);
+    let speed = assets.texture("mob_effect/speed");
+    let poison = assets.texture("mob_effect/poison");
+    assert!(speed.is_some() && poison.is_some());
+    let effect = |sprite, beneficial, ambient| HudEffect {
+        sprite,
+        beneficial,
+        ambient,
+        duration: 600,
+    };
+    let effects = [
+        effect(speed, true, false),
+        effect(speed, true, true),
+        effect(poison, false, false),
+    ];
+    let img = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw_effects(f, &effects)
+    });
+    common::save_png("hud_effects.png", HUD_SIZE.0, HUD_SIZE.1, &img);
+    assert!(
+        changed_in(&img, (295, 1, 319, 25)) > 1000,
+        "first beneficial icon"
+    );
+    assert!(
+        changed_in(&img, (270, 1, 294, 25)) > 1000,
+        "second beneficial icon"
+    );
+    assert!(changed_in(&img, (295, 27, 319, 51)) > 1000, "harmful row");
+    assert_eq!(
+        changed_in(&img, (270, 27, 294, 51)),
+        0,
+        "one harmful icon only"
+    );
+    assert_eq!(changed_in(&img, (0, 60, 320, 240)), 0);
+}
+
+#[test]
+fn attack_indicator_modes() {
+    let Some((gpu, mut renderer, mut ui)) = setup() else {
+        return;
+    };
+    let sprites = HudSprites::new(&ui);
+    let img = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw_crosshair(f, CrosshairIndicator::Progress(0.5))
+    });
+    common::save_png("hud_crosshair_progress.png", HUD_SIZE.0, HUD_SIZE.1, &img);
+    let inverted = [255 - 107, 255 - 140, 255 - 92];
+    let inverted_pixels = (112 * 2..127 * 2)
+        .flat_map(|y| (152 * 2..167 * 2).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let p = common::pixel(&img, HUD_SIZE.0, x, y);
+            (0..3).all(|c| p[c].abs_diff(inverted[c]) <= 3)
+        })
+        .count();
+    assert!(
+        inverted_pixels > 20,
+        "the crosshair inverts what is under it"
+    );
+    let bar = (152, 129, 168, 133);
+    assert!(
+        changed_in(&img, bar) > 0,
+        "charging bar under the crosshair"
+    );
+    let full = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw_crosshair(f, CrosshairIndicator::Full)
+    });
+    assert!(changed_in(&full, (152, 129, 168, 145)) > changed_in(&img, (152, 129, 168, 145)));
+    let none = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw_crosshair(f, CrosshairIndicator::None)
+    });
+    assert_eq!(changed_in(&none, (152, 129, 168, 145)), 0);
+
+    let hotbar = |left_handed| HudState {
+        hotbar_attack: Some(0.5),
+        left_handed,
+        player_health: false,
+        contextual: ContextualBar::Empty,
+        ..HudState::default()
+    };
+    let right = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw(f, &hotbar(false))
+    });
+    common::save_png("hud_hotbar_attack.png", HUD_SIZE.0, HUD_SIZE.1, &right);
+    assert!(
+        changed_in(&right, (257, 220, 275, 238)) > 100,
+        "indicator right of the hotbar"
+    );
+    assert_eq!(changed_in(&right, (47, 220, 65, 238)), 0);
+    let left = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw(f, &hotbar(true))
+    });
+    assert!(
+        changed_in(&left, (47, 220, 65, 238)) > 100,
+        "left-handed: indicator on the left"
+    );
+    assert_eq!(changed_in(&left, (257, 220, 275, 238)), 0);
+}
+
+#[test]
+fn air_bubbles_show_under_water_and_while_recovering() {
+    let Some((gpu, mut renderer, mut ui)) = setup() else {
+        return;
+    };
+    let sprites = HudSprites::new(&ui);
+    let row = (170, 191, 251, 201);
+    let with_air = |air| HudState {
+        air,
+        ..HudState::default()
+    };
+    let dry = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw(f, &with_air(AirState::default()))
+    });
+    assert_eq!(
+        changed_in(&dry, row),
+        0,
+        "full air out of water hides the row"
+    );
+    let diving = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw(
+            f,
+            &with_air(AirState {
+                underwater: true,
+                ..AirState::default()
+            }),
+        )
+    });
+    common::save_png("hud_air_full.png", HUD_SIZE.0, HUD_SIZE.1, &diving);
+    let full = changed_in(&diving, row);
+    assert!(full > 500, "ten full bubbles under water");
+    let low = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw(
+            f,
+            &with_air(AirState {
+                supply: 31,
+                max: 300,
+                underwater: true,
+            }),
+        )
+    });
+    common::save_png("hud_air_low.png", HUD_SIZE.0, HUD_SIZE.1, &low);
+    assert!(changed_in(&low, row) > 200, "empty bubbles are drawn too");
+    assert!(
+        changed_in(&low, (243, 191, 251, 201)) > 20,
+        "rightmost bubble"
+    );
+    assert!(
+        changed_in(&low, (171, 191, 179, 201)) > 20,
+        "leftmost empty bubble"
+    );
+}
+
+#[test]
+fn left_handed_offhand_slot_sits_right_of_the_hotbar() {
+    let Some((gpu, mut renderer, mut ui)) = setup() else {
+        return;
+    };
+    let sprites = HudSprites::new(&ui);
+    let state = |left_handed| HudState {
+        offhand: true,
+        left_handed,
+        player_health: false,
+        contextual: ContextualBar::Empty,
+        ..HudState::default()
+    };
+    let (left_slot, right_slot) = ((40, 217, 67, 240), (253, 217, 280, 240));
+    let right = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw(f, &state(false))
+    });
+    assert!(changed_in(&right, left_slot) > 500);
+    assert_eq!(changed_in(&right, right_slot), 0);
+    let left = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw(f, &state(true))
+    });
+    common::save_png("hud_offhand_right.png", HUD_SIZE.0, HUD_SIZE.1, &left);
+    assert!(changed_in(&left, right_slot) > 500);
+    assert_eq!(changed_in(&left, left_slot), 0);
+}
+
+#[test]
+fn vehicle_hearts_replace_food_and_jump_bar_replaces_xp() {
+    let Some((gpu, mut renderer, mut ui)) = setup() else {
+        return;
+    };
+    let sprites = HudSprites::new(&ui);
+    let riding = |scale| HudState {
+        vehicle_hearts: 15,
+        vehicle_health: 21,
+        contextual: ContextualBar::Jump {
+            scale,
+            cooldown: false,
+        },
+        ..HudState::default()
+    };
+    let img = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw(f, &riding(0.0))
+    });
+    common::save_png("hud_vehicle.png", HUD_SIZE.0, HUD_SIZE.1, &img);
+    let first_row = (170, 201, 251, 210);
+    let second_row = (210, 191, 251, 200);
+    assert!(
+        changed_in(&img, first_row) > 500,
+        "ten mount hearts on the food row"
+    );
+    assert!(changed_in(&img, second_row) > 200, "five more above");
+    assert_eq!(
+        changed_in(&img, (170, 191, 209, 200)),
+        0,
+        "second row holds five"
+    );
+    let charged = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw(f, &riding(1.0))
+    });
+    let bar = |img: &[u8], x0| {
+        let mut v = Vec::new();
+        for x in (x0 * 2)..((x0 + 20) * 2) {
+            v.push(common::pixel(img, HUD_SIZE.0, x as u32, (240 - 27) * 2));
+        }
+        v
+    };
+    assert_ne!(
+        bar(&img, 120),
+        bar(&charged, 120),
+        "the jump charge fills the bar"
+    );
+    let none = hud_shot(&gpu, &mut renderer, &mut ui, |f| {
+        sprites.draw(
+            f,
+            &HudState {
+                contextual: ContextualBar::Empty,
+                ..HudState::default()
+            },
+        )
+    });
+    assert_eq!(
+        changed_in(&none, (69, 211, 251, 216)),
+        0,
+        "no bar in the empty state"
+    );
 }

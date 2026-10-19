@@ -20,19 +20,37 @@ fn color(effect: &ActiveEffect) -> i32 {
     effect_info(&effect.effect).map_or(0, |i| i.color)
 }
 
+/// What `MobEffectInstance#compareTo` looks at; `color` is the effect's particle colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectSortKey {
+    pub ambient: bool,
+    pub duration: i32,
+    pub color: i32,
+}
+
 /// `MobEffectInstance#compareTo`.
-pub fn effect_order(a: &ActiveEffect, b: &ActiveEffect) -> Ordering {
+pub fn effect_key_order(a: EffectSortKey, b: EffectSortKey) -> Ordering {
     const CUTOFF: i32 = 32147;
-    let infinite = |e: &ActiveEffect| e.duration == -1;
+    let infinite = |e: EffectSortKey| e.duration == -1;
     if (a.duration <= CUTOFF || b.duration <= CUTOFF) && !(a.ambient && b.ambient) {
         a.ambient
             .cmp(&b.ambient)
             .then(infinite(a).cmp(&infinite(b)))
             .then(a.duration.cmp(&b.duration))
-            .then(color(a).cmp(&color(b)))
+            .then(a.color.cmp(&b.color))
     } else {
-        a.ambient.cmp(&b.ambient).then(color(a).cmp(&color(b)))
+        a.ambient.cmp(&b.ambient).then(a.color.cmp(&b.color))
     }
+}
+
+/// `MobEffectInstance#compareTo`.
+pub fn effect_order(a: &ActiveEffect, b: &ActiveEffect) -> Ordering {
+    let key = |e: &ActiveEffect| EffectSortKey {
+        ambient: e.ambient,
+        duration: e.duration,
+        color: color(e),
+    };
+    effect_key_order(key(a), key(b))
 }
 
 /// `EffectsInInventory#getEffectName`.

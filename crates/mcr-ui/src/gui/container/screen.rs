@@ -344,6 +344,11 @@ pub(super) fn max_stack(stack: &ItemStack) -> i32 {
 }
 
 impl Screen for ContainerScreen {
+    fn shows_active_effects(&self, gui_width: i32) -> bool {
+        self.layout.kind == MenuKind::PlayerInventory
+            && crate::gui::effects_list::can_see_effects(gui_width, self.left + self.layout.width)
+    }
+
     fn init(&mut self, width: i32, height: i32) {
         self.gui = (width, height);
         if let Some(book) = &mut self.recipes {

@@ -10,6 +10,15 @@ does.
 - **WHEN** the player has Speed
 - **THEN** its icon shows in the beneficial row at the top right
 
+### Requirement: Paletted atlas textures
+Item textures that exist only as the output of an atlas `paletted_permutations` source, such as the
+armour trim overlays and their darker variants, SHALL be generated from the base texture and the key and
+permutation palettes, as vanilla's atlas loader does.
+
+#### Scenario: Gold-trimmed netherite helmet
+- **WHEN** a netherite helmet carries a gold trim
+- **THEN** its icon shows the gold trim overlay, not the missing texture
+
 ### Requirement: Crosshair and overlays
 The crosshair SHALL use an inverting blend and draw only in first person (and in spectator only over a
 menu provider). Camera overlays (pumpkin, powder snow, portal, nausea, fire, in-block, underwater,

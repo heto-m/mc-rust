@@ -29,8 +29,9 @@ pub use items::{
 pub use lang::{DEFAULT_LANGUAGE, LanguageInfo, available_languages};
 pub use renderer::{UiRenderer, UiStats};
 pub use screens::{
-    CHART_SAMPLES, ChatHud, ChatLineTag, ChatOptions, DebugChart, DebugOverlay, HeartKind,
-    HudItems, HudSprites, HudState, fade_alpha,
+    AirBubbles, AirState, CHART_SAMPLES, ChatHud, ChatLineTag, ChatOptions, ContextualBar,
+    CrosshairIndicator, DebugChart, DebugOverlay, HeartKind, HudEffect, HudItems, HudSprites,
+    HudState, MAX_VEHICLE_HEARTS, effect_alpha, fade_alpha,
 };
 pub use sprites::{
     OwnedSprites, Scaling, SpriteId, SpriteInfo, SpriteQuad, SpriteReleaser, Sprites,
@@ -40,6 +41,8 @@ pub use text::{
     ClickSpan, Lang, click_at, flatten, flatten_events, parse_legacy, push_legacy, wrap,
 };
 pub use toast::{SystemToastId, Toast, ToastFrame, ToastManager, note_color};
-pub use ui::{Batch, DrawCmd, LINE_HEIGHT, PageKind, PageRef, Ui, UiFrame, Vertex, gui_scale};
+pub use ui::{
+    Batch, Blend, DrawCmd, LINE_HEIGHT, PageKind, PageRef, Ui, UiFrame, Vertex, gui_scale,
+};
 
 pub use wgpu;

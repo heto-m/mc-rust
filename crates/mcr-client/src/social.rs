@@ -9,7 +9,7 @@ use mcr_protocol::play::clientbound::ui::{
 };
 use mcr_protocol::types::Component;
 use mcr_protocol::types::game::{GameType, MessageSignature};
-use mcr_protocol::types::text::{Color, NamedColor, Style};
+use mcr_protocol::types::text::{Arg, Color, NamedColor, Style};
 use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
@@ -233,6 +233,8 @@ pub struct Titles {
     /// Ticks left on screen; the title shows only while this is positive.
     pub title_time: i32,
     pub overlay_time: i32,
+    /// The jukebox's "Now Playing" cycles colours (`Hud#animateOverlayMessageColor`).
+    pub animate_overlay: bool,
 }
 
 impl Default for Titles {
@@ -247,6 +249,7 @@ impl Default for Titles {
             fade_out,
             title_time: 0,
             overlay_time: 0,
+            animate_overlay: false,
         }
     }
 }
@@ -267,9 +270,27 @@ impl Titles {
         self.subtitle = Some(subtitle);
     }
 
-    pub fn set_overlay(&mut self, text: Component) {
+    pub fn set_overlay(&mut self, text: Component, animate: bool) {
         self.action_bar = Some(text);
         self.overlay_time = OVERLAY_TICKS;
+        self.animate_overlay = animate;
+    }
+
+    /// `Hud#setNowPlaying`.
+    pub fn set_now_playing(&mut self, song: Component) {
+        self.set_overlay(
+            Component::translatable("record.nowPlaying", vec![Arg::Component(song)]),
+            true,
+        );
+    }
+
+    /// Action bar colour this frame: white, or vanilla's hue cycle for "Now Playing".
+    pub fn overlay_color(&self, partial: f32, alpha: u8) -> u32 {
+        if !self.animate_overlay {
+            return u32::from(alpha) << 24 | 0xFF_FFFF;
+        }
+        let t = self.overlay_time as f32 - partial;
+        hsv_to_argb(t / 50.0, 0.7, 0.6, alpha)
     }
 
     pub fn set_times(&mut self, fade_in: i32, stay: i32, fade_out: i32) {
@@ -334,6 +355,25 @@ impl Titles {
         let alpha = ((t * 255.0 / 20.0) as i32).min(255);
         (alpha > 0).then_some(alpha as u8)
     }
+}
+
+/// `Mth.hsvToArgb`.
+pub fn hsv_to_argb(hue: f32, saturation: f32, value: f32, alpha: u8) -> u32 {
+    let h = ((hue * 6.0) as i32).rem_euclid(6);
+    let f = hue * 6.0 - (hue * 6.0) as i32 as f32;
+    let p = value * (1.0 - saturation);
+    let q = value * (1.0 - f * saturation);
+    let t = value * (1.0 - (1.0 - f) * saturation);
+    let (r, g, b) = match h {
+        0 => (value, t, p),
+        1 => (q, value, p),
+        2 => (p, value, t),
+        3 => (p, q, value),
+        4 => (t, p, value),
+        _ => (value, p, q),
+    };
+    let ch = |c: f32| ((c * 255.0) as i32).clamp(0, 255) as u32;
+    u32::from(alpha) << 24 | ch(r) << 16 | ch(g) << 8 | ch(b)
 }
 
 const BOSS_LERP_MILLIS: f32 = 100.0;

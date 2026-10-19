@@ -1222,7 +1222,7 @@ impl ClientState {
     }
 
     fn set_overlay(&mut self, text: Component, out: &mut Outbox) {
-        self.titles.set_overlay(text.clone());
+        self.titles.set_overlay(text.clone(), false);
         out.event(ClientEvent::Chat {
             kind: ChatKind::ActionBar,
             sender: None,

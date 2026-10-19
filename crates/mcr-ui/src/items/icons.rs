@@ -217,6 +217,29 @@ impl ItemIcons {
         w: i32,
         h: i32,
     ) {
+        if let Some(id) = self.icon(frame, view) {
+            frame.sprite(id, x, y, w, h);
+        }
+    }
+
+    /// The slot at `(x, y)` scaled by `(sx, sy)` around `(x + 8, y + 12)`, like the hotbar pop.
+    pub fn draw_squeezed(
+        &mut self,
+        frame: &mut UiFrame<'_>,
+        view: &ItemView,
+        x: i32,
+        y: i32,
+        sx: f32,
+        sy: f32,
+    ) {
+        if let Some(id) = self.icon(frame, view) {
+            let (cx, cy) = (x as f32 + 8.0, y as f32 + 12.0);
+            let dst = [cx - 8.0 * sx, cy - 12.0 * sy, cx + 8.0 * sx, cy + 4.0 * sy];
+            frame.sprite_f(id, dst, 0xFFFF_FFFF);
+        }
+    }
+
+    fn icon(&mut self, frame: &mut UiFrame<'_>, view: &ItemView) -> Option<SpriteId> {
         let scale = frame.scale();
         if scale != self.icon_scale {
             for icon in std::mem::take(&mut self.icons).into_values() {
@@ -228,7 +251,7 @@ impl ItemIcons {
         }
         let layers = self.layers(view.item, view.props);
         if layers.is_empty() {
-            return;
+            return None;
         }
         let key = Self::key(&layers, view.glint, scale);
         let size = SLOT as usize * scale as usize;
@@ -267,9 +290,7 @@ impl ItemIcons {
                 self.stats.rasterized += 1;
             }
         }
-        if let Some(id) = self.icons[&key].sprite {
-            frame.sprite(id, x, y, w, h);
-        }
+        self.icons[&key].sprite
     }
 
     fn evict_icons(&mut self, frame: &mut UiFrame<'_>, now: u64) {

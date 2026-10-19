@@ -127,6 +127,11 @@ impl ViewCache {
         }
     }
 
+    /// Names of the server's `trim_material` registry, by id.
+    pub fn trim_materials(&self) -> &[String] {
+        &self.trim_materials
+    }
+
     fn refresh_trim_materials(&mut self, state: &ClientState) {
         let Some(registry) = state.registries.get("minecraft:trim_material") else {
             return;

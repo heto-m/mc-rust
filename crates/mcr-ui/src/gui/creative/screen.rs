@@ -728,6 +728,10 @@ fn placeholder() -> ItemStack {
 }
 
 impl Screen for CreativeScreen {
+    fn shows_active_effects(&self, gui_width: i32) -> bool {
+        crate::gui::effects_list::can_see_effects(gui_width, self.left + WIDTH)
+    }
+
     fn init(&mut self, width: i32, height: i32) {
         self.left = (width - WIDTH) / 2;
         self.top = (height - HEIGHT) / 2;

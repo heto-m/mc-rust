@@ -7,11 +7,13 @@ use mcr_data::Version;
 use mcr_protocol::play::clientbound::ui::{BossBarColor, BossBarOverlay, ObjectiveRenderType};
 use mcr_protocol::types::entity_data::EntityDataValue;
 use mcr_protocol::types::game::GameType;
+use mcr_protocol::types::text::Arg;
 use mcr_protocol::types::text::Component;
 use mcr_settings::{InputKey, Options};
 use mcr_ui::{
-    ChatOptions, DebugOverlay, HeartKind, HudItems, HudSprites, HudState, ItemIcons, SharedChat,
-    SpriteId, StackView, Ui, UiFrame,
+    AirState, ChatOptions, ContextualBar, CrosshairIndicator, DebugOverlay, EffectCategory,
+    EffectSortKey, HeartKind, HudEffect, HudItems, HudSprites, HudState, ItemIcons, ItemRef,
+    MAX_VEHICLE_HEARTS, ScreenAssets, SharedChat, SpriteId, StackView, Ui, UiFrame,
 };
 use rustc_hash::FxHashMap;
 
@@ -19,7 +21,12 @@ use crate::skins::{HEAD_SIZE, SkinStore};
 
 const MAX_HEAD_SPRITES: usize = 256;
 const MAX_AIR: i32 = 300;
+const MAX_HUD_EFFECTS: usize = 64;
+const MAX_TAB_HEALTH: usize = 1024;
 const AIR_DATA_INDEX: u8 = 1;
+pub(crate) const HEALTH_DATA_INDEX: u8 = 9;
+const EFFECT_FLAG_AMBIENT: u8 = 1;
+const EFFECT_FLAG_SHOW_ICON: u8 = 4;
 const ABSORPTION_DATA_INDEX: u8 = 17;
 const FROZEN_DATA_INDEX: u8 = 7;
 const FULLY_FROZEN_TICKS: i32 = 140;
@@ -76,17 +83,77 @@ impl WaypointStyle {
 
 #[derive(Debug)]
 struct Sprites {
-    crosshair: Option<SpriteId>,
-    air: Option<SpriteId>,
-    air_bursting: Option<SpriteId>,
     hotbar: Option<SpriteId>,
     selection: Option<SpriteId>,
-    offhand: Option<SpriteId>,
     ping: [Option<SpriteId>; 6],
-    locator_bg: Option<SpriteId>,
+    tab_hearts: TabHeartSprites,
     arrow_up: Option<SpriteId>,
     arrow_down: Option<SpriteId>,
     spectator: SpectatorSprites,
+}
+
+#[derive(Debug)]
+struct TabHeartSprites {
+    container: Option<SpriteId>,
+    container_blinking: Option<SpriteId>,
+    full: Option<SpriteId>,
+    full_blinking: Option<SpriteId>,
+    half: Option<SpriteId>,
+    half_blinking: Option<SpriteId>,
+    absorbing_full_blinking: Option<SpriteId>,
+    absorbing_half_blinking: Option<SpriteId>,
+}
+
+/// `PlayerTabOverlay.HealthState`: the hearts of a tab entry blink and lag behind a change.
+#[derive(Debug, Clone, Copy)]
+struct TabHealth {
+    last: i32,
+    displayed: i32,
+    updated: i64,
+    blink_until: i64,
+}
+
+impl TabHealth {
+    fn new(value: i32) -> Self {
+        Self {
+            last: value,
+            displayed: value,
+            updated: 0,
+            blink_until: 0,
+        }
+    }
+
+    fn update(&mut self, value: i32, tick: i64) {
+        if value != self.last {
+            self.blink_until = tick + if value < self.last { 20 } else { 10 };
+            self.last = value;
+            self.updated = tick;
+        }
+        if tick - self.updated > 20 {
+            self.displayed = value;
+        }
+    }
+
+    fn blinking(&self, tick: i64) -> bool {
+        self.blink_until > tick && (self.blink_until - tick) % 6 >= 3
+    }
+}
+
+/// The selected item's name, shown above the hotbar after a slot change (`toolHighlightTimer`).
+#[derive(Debug, Default)]
+struct ToolHighlight {
+    timer: i32,
+    item: i32,
+    hover: Option<Component>,
+    styled: Option<Component>,
+    cells: Option<(Vec<mcr_ui::Cell>, f32)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EffectEntry {
+    sprite: Option<SpriteId>,
+    beneficial: bool,
+    color: i32,
 }
 
 #[derive(Debug)]
@@ -122,6 +189,16 @@ pub struct HudInput<'a> {
     pub show_heads: bool,
     pub millis: u64,
     pub spectator: Option<SpectatorHud<'a>>,
+    /// `None` hides the crosshair: third person, or a spectator looking at nothing to open.
+    pub crosshair: Option<CrosshairIndicator>,
+    /// Attack charge for the hotbar attack indicator.
+    pub hotbar_attack: Option<f32>,
+    /// Charge and cooldown of a jumpable mount.
+    pub jump_bar: Option<(f32, bool)>,
+    /// The open screen lists the effects itself (`Screen#showsActiveEffects`).
+    pub screen_shows_effects: bool,
+    pub screen_assets: &'a ScreenAssets,
+    pub trim_materials: &'a [String],
 }
 
 pub struct Hud {
@@ -137,10 +214,19 @@ pub struct Hud {
     poison: Option<i32>,
     wither: Option<i32>,
     regeneration: Option<i32>,
+    hunger: Option<i32>,
     last_health: i32,
     display_health: i32,
     last_health_millis: u64,
     health_blink_tick: i64,
+    last_bubble_pop: i32,
+    /// Volume and pitch of `ui.hud.bubble_pop`, played by the caller after the frame.
+    pub bubble_pop: Option<(f32, f32)>,
+    tool: ToolHighlight,
+    effect_entries: FxHashMap<i32, EffectEntry>,
+    effect_sorted: Vec<(EffectSortKey, HudEffect)>,
+    effect_icons: Vec<HudEffect>,
+    tab_health: RefCell<FxHashMap<uuid::Uuid, TabHealth>>,
 }
 
 impl std::fmt::Debug for Hud {
@@ -157,6 +243,38 @@ fn wrapped(frame: &mut UiFrame<'_>, cells: &[mcr_ui::Cell], width: f32) -> Vec<V
         .into_iter()
         .map(|r| cells[r].iter().filter(|c| c.ch != '\n').cloned().collect())
         .collect()
+}
+
+/// Blocks a spectator's crosshair shows over (`BlockBehaviour#showAsInteractableInSpectatorMode`):
+/// those with a menu, and portals.
+pub fn spectator_block(name: &str, has_book: bool) -> bool {
+    let name = name.strip_prefix("minecraft:").unwrap_or(name);
+    match name {
+        "lectern" => has_book,
+        "anvil" | "chipped_anvil" | "damaged_anvil" | "cartography_table" | "enchanting_table"
+        | "crafting_table" | "chest" | "trapped_chest" | "smithing_table" | "grindstone"
+        | "loom" | "stonecutter" | "furnace" | "blast_furnace" | "smoker" | "barrel" | "beacon"
+        | "brewing_stand" | "crafter" | "hopper" | "dispenser" | "dropper" | "nether_portal"
+        | "end_portal" | "end_gateway" => true,
+        n => n.ends_with("shulker_box"),
+    }
+}
+
+/// Entities that are a `MenuProvider`: container minecarts and chest boats.
+pub fn spectator_entity(name: &str) -> bool {
+    let name = name.strip_prefix("minecraft:").unwrap_or(name);
+    matches!(name, "chest_minecart" | "hopper_minecart")
+        || name.ends_with("_chest_boat")
+        || name.ends_with("_chest_raft")
+}
+
+/// Java's `Float.toString` for the plain values a heart count takes.
+fn java_float(v: f32) -> String {
+    if v.fract() == 0.0 && v.abs() < 1.0e7 {
+        format!("{v:.1}")
+    } else {
+        format!("{v}")
+    }
 }
 
 /// Vanilla `Hud#extractSleepOverlay`: dark blue, rising over 100 ticks and fading over 10 after.
@@ -181,6 +299,22 @@ fn draw_sleep_overlay(frame: &mut UiFrame<'_>, timer: u32) {
     }
 }
 
+/// `Options#getBackgroundColor(defaultOpacity)`, as the alpha of a black fill.
+fn background_alpha(options: &Options, default: f32) -> u32 {
+    let opacity = if options.background_for_chat_only {
+        default
+    } else {
+        options.text_background_opacity as f32
+    };
+    (opacity.clamp(0.0, 1.0) * 255.0).floor() as u32
+}
+
+/// The backdrop of `GuiGraphicsExtractor#textWithBackdrop`, faded with the text.
+fn text_backdrop(frame: &mut UiFrame<'_>, options: &Options, x: i32, y: i32, w: i32, argb: u32) {
+    let alpha = background_alpha(options, 0.0) * (argb >> 24) / 255;
+    frame.fill_rect(x - 2, y - 2, x + w + 2, y + 9 + 2, alpha << 24);
+}
+
 pub fn chat_options(options: &Options, focused: bool) -> ChatOptions {
     let text_opacity = (options.chat_opacity * 0.9 + 0.1) as f32;
     let height = if focused {
@@ -203,6 +337,8 @@ impl Hud {
         let fresh = Self::new(ui, data);
         self.sprites = fresh.sprites;
         self.own = fresh.own;
+        self.effect_entries.clear();
+        self.tool.cells = None;
         self.heads.get_mut().clear();
         self.head_sprites.get_mut().forget();
     }
@@ -242,10 +378,7 @@ impl Hud {
 
     fn draw_locator(&self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
         let (gui_w, gui_h) = frame.gui_size();
-        let (left, top) = ((gui_w - 182) / 2, gui_h - 24 - 5);
-        if let Some(bg) = self.own.locator_bg {
-            frame.sprite(bg, left, top, 182, 5);
-        }
+        let top = gui_h - 24 - 5;
         let marks = mcr_client::locator::marks(
             input.state.gameplay.waypoints.tracked.values(),
             &input.camera,
@@ -298,13 +431,18 @@ impl Hud {
         Self {
             sprites: HudSprites::new(ui),
             own: Sprites {
-                crosshair: id("hud/crosshair"),
-                air: id("hud/air"),
-                air_bursting: id("hud/air_bursting"),
                 hotbar: id("hud/hotbar"),
                 selection: id("hud/hotbar_selection"),
-                offhand: id("hud/hotbar_offhand_left"),
-                locator_bg: id("hud/locator_bar_background"),
+                tab_hearts: TabHeartSprites {
+                    container: id("hud/heart/container"),
+                    container_blinking: id("hud/heart/container_blinking"),
+                    full: id("hud/heart/full"),
+                    full_blinking: id("hud/heart/full_blinking"),
+                    half: id("hud/heart/half"),
+                    half_blinking: id("hud/heart/half_blinking"),
+                    absorbing_full_blinking: id("hud/heart/absorbing_full_blinking"),
+                    absorbing_half_blinking: id("hud/heart/absorbing_half_blinking"),
+                },
                 arrow_up: id("hud/locator_bar_arrow_up"),
                 arrow_down: id("hud/locator_bar_arrow_down"),
                 spectator: SpectatorSprites {
@@ -333,10 +471,18 @@ impl Hud {
             poison: effect("minecraft:poison"),
             wither: effect("minecraft:wither"),
             regeneration: effect("minecraft:regeneration"),
+            hunger: effect("minecraft:hunger"),
             last_health: 0,
             display_health: 0,
             last_health_millis: 0,
             health_blink_tick: 0,
+            last_bubble_pop: 0,
+            bubble_pop: None,
+            tool: ToolHighlight::default(),
+            effect_entries: FxHashMap::default(),
+            effect_sorted: Vec::new(),
+            effect_icons: Vec::new(),
+            tab_health: RefCell::default(),
         }
     }
 
@@ -381,6 +527,32 @@ impl Hud {
         *self.chat.borrow_mut() = mcr_ui::ChatHud::default();
     }
 
+    /// Vanilla `Hud#tick`: the selected item name's timer.
+    pub fn tick(&mut self, state: &ClientState, options: &Options) {
+        let stack = state.inventory.hotbar(state.player.held_slot);
+        if stack.is_empty() {
+            self.tool.timer = 0;
+            self.tool.item = 0;
+            self.tool.hover = None;
+            return;
+        }
+        let item = ItemRef::new(stack.item, stack.count, &stack.components);
+        let cx = crate::view::TooltipCx(state);
+        let hover = mcr_ui::hover_name(&item, &cx);
+        if self.tool.hover.is_none()
+            || self.tool.item != stack.item
+            || self.tool.hover.as_ref() != Some(&hover)
+        {
+            self.tool.timer = (40.0 * options.notification_display_time) as i32;
+            self.tool.styled = Some(mcr_ui::styled_hover_name(&item, &cx));
+            self.tool.cells = None;
+        } else if self.tool.timer > 0 {
+            self.tool.timer -= 1;
+        }
+        self.tool.item = stack.item;
+        self.tool.hover = Some(hover);
+    }
+
     pub fn draw(&mut self, frame: &mut UiFrame<'_>, icons: &mut ItemIcons, input: &HudInput<'_>) {
         icons.set_time(input.millis);
         if !input.hidden {
@@ -404,25 +576,28 @@ impl Hud {
         input: &HudInput<'_>,
     ) {
         let state = input.state;
-        let (gui_w, gui_h) = frame.gui_size();
-        if let Some(c) = self.own.crosshair {
-            frame.sprite(c, (gui_w - 15) / 2, (gui_h - 15) / 2, 15, 15);
+        if let Some(indicator) = input.crosshair {
+            self.sprites.draw_crosshair(frame, indicator);
         }
         self.draw_bars(frame, icons, input);
+        if !input.screen_shows_effects {
+            self.draw_effects(frame, input);
+        }
         self.draw_bosses(frame, state);
     }
 
     /// The HUD parts vanilla draws over the sleep fade.
     fn draw_messages(&mut self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
-        let state = input.state;
-        self.draw_sidebar(frame, state);
+        self.draw_sidebar(frame, input);
         self.draw_titles(frame, input);
-        if input.tab_held {
-            self.draw_tab_list(frame, input);
-        }
         if !input.chat_open {
             let opts = chat_options(input.options, false);
             self.chat.borrow_mut().draw(frame, input.tick, &opts);
+        }
+        if input.tab_held {
+            self.draw_tab_list(frame, input);
+        } else {
+            self.tab_health.get_mut().clear();
         }
     }
 
@@ -430,120 +605,273 @@ impl Hud {
         state.player.attributes.get(&id?).map(|a| a.value(None))
     }
 
+    fn effect_entry(&mut self, id: i32, input: &HudInput<'_>) -> Option<EffectEntry> {
+        if let Some(e) = self.effect_entries.get(&id) {
+            return Some(*e);
+        }
+        let name = input
+            .state
+            .data
+            .registry("minecraft:mob_effect")?
+            .name_of(u32::try_from(id).ok()?)?;
+        let info = mcr_ui::effect_info(name);
+        let path = name.split_once(':').map_or(name, |p| p.1);
+        let entry = EffectEntry {
+            sprite: input.screen_assets.texture(&format!("mob_effect/{path}")),
+            beneficial: info.is_some_and(|i| i.category == EffectCategory::Beneficial),
+            color: info.map_or(0, |i| i.color),
+        };
+        if self.effect_entries.len() < 256 {
+            self.effect_entries.insert(id, entry);
+        }
+        Some(entry)
+    }
+
+    fn draw_effects(&mut self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
+        let mut sorted = std::mem::take(&mut self.effect_sorted);
+        sorted.clear();
+        for (&id, e) in &input.state.player.effects {
+            if sorted.len() >= MAX_HUD_EFFECTS {
+                break;
+            }
+            if e.flags & EFFECT_FLAG_SHOW_ICON == 0 {
+                continue;
+            }
+            let Some(entry) = self.effect_entry(id, input) else {
+                continue;
+            };
+            let ambient = e.flags & EFFECT_FLAG_AMBIENT != 0;
+            sorted.push((
+                EffectSortKey {
+                    ambient,
+                    duration: e.duration_ticks,
+                    color: entry.color,
+                },
+                HudEffect {
+                    sprite: entry.sprite,
+                    beneficial: entry.beneficial,
+                    ambient,
+                    duration: e.duration_ticks,
+                },
+            ));
+        }
+        sorted.sort_by(|a, b| mcr_ui::effect_key_order(b.0, a.0));
+        self.effect_icons.clear();
+        self.effect_icons.extend(sorted.iter().map(|e| e.1));
+        self.effect_sorted = sorted;
+        self.sprites.draw_effects(frame, &self.effect_icons);
+    }
+
+    /// Hearts and current health of a living mount, `Hud#getVehicleMaxHearts`.
+    fn vehicle_health(&self, state: &ClientState) -> (i32, i32) {
+        let Some(vehicle) = state.player.vehicle.and_then(|v| state.entities.get(v)) else {
+            return (0, 0);
+        };
+        let Some(EntityDataValue::Float(health)) = vehicle.data.get(&HEALTH_DATA_INDEX) else {
+            return (0, 0);
+        };
+        let max = self
+            .max_health_attr
+            .and_then(|id| vehicle.attributes.get(&id))
+            .map_or(20.0, |a| a.value(None));
+        let max = if max.is_finite() {
+            max.clamp(0.0, 2048.0)
+        } else {
+            20.0
+        };
+        let hearts = ((max as f32 + 0.5) as i32 / 2).min(MAX_VEHICLE_HEARTS);
+        let health = if health.is_finite() {
+            health.ceil().clamp(0.0, 2048.0) as i32
+        } else {
+            0
+        };
+        (hearts, health)
+    }
+
     fn draw_bars(&mut self, frame: &mut UiFrame<'_>, icons: &mut ItemIcons, input: &HudInput<'_>) {
         let state = input.state;
         let player = &state.player;
-        let cooldown = |stack: Option<&mcr_protocol::types::ItemStack>| {
-            stack.map_or(0.0, |s| state.cooldown_percent(s, input.partial))
-        };
-        let stacks: Vec<Option<StackView<'_>>> = (0..9u8)
-            .map(|slot| StackView::new(state.inventory.hotbar(slot)))
-            .collect();
-        let offhand_stack = state.inventory.player.slots.get(OFFHAND_SLOT);
-        let offhand = offhand_stack.and_then(StackView::new);
-        let items = HudItems {
-            hotbar: std::array::from_fn(|i| {
-                let c = cooldown(Some(state.inventory.hotbar(i as u8)));
-                stacks[i].as_ref().map(|s| s.view(c))
-            }),
-            offhand: offhand.as_ref().map(|s| s.view(cooldown(offhand_stack))),
-        };
+        let spectator = player.game_mode == GameType::Spectator;
         let survival = matches!(player.game_mode, GameType::Survival | GameType::Adventure);
-        let locator =
-            !state.gameplay.waypoints.tracked.is_empty() && !(survival && player.xp_show_ticks > 0);
+        let left_handed = input.options.main_hand == mcr_settings::value::HumanoidArm::Left;
+        let offhand_stack = state.inventory.player.slots.get(OFFHAND_SLOT);
+        let offhand = offhand_stack
+            .and_then(StackView::new)
+            .map(|v| v.with_trim_materials(input.trim_materials));
+        let (vehicle_hearts, vehicle_health) = self.vehicle_health(state);
+        let contextual = ContextualBar::choose(
+            !state.gameplay.waypoints.tracked.is_empty(),
+            input.jump_bar,
+            survival,
+            player.xp_show_ticks > 0,
+        );
+        let mut hud = HudState {
+            tick: input.tick,
+            selected_slot: player.held_slot,
+            offhand: offhand.is_some(),
+            left_handed,
+            hotbar_attack: input.hotbar_attack,
+            hotbar: !spectator,
+            player_health: survival,
+            hardcore: state.world.hardcore,
+            vehicle_hearts,
+            vehicle_health,
+            contextual,
+            xp_progress: player.xp_progress.clamp(0.0, 1.0),
+            xp_level: player.xp_level.max(0),
+            experience: survival,
+            ..HudState::default()
+        };
         if survival {
-            let max_health = self
-                .attribute(state, self.max_health_attr)
-                .map_or(20, |v| v.clamp(1.0, 1024.0) as i32);
-            let absorption = match player.data.get(&ABSORPTION_DATA_INDEX) {
-                Some(EntityDataValue::Float(v)) if v.is_finite() => {
-                    v.ceil().clamp(0.0, 1024.0) as i32
-                }
-                _ => 0,
-            };
-            let health = player.health.ceil().clamp(0.0, 2048.0) as i32;
-            let tick = i64::from(input.tick);
-            let blink =
-                self.health_blink_tick > tick && (self.health_blink_tick - tick) / 3 % 2 == 1;
-            if health < self.last_health && player.damage_cooldown > 0 {
-                self.last_health_millis = input.millis;
-                self.health_blink_tick = tick + 20;
-            } else if health > self.last_health && player.damage_cooldown > 0 {
-                self.last_health_millis = input.millis;
-                self.health_blink_tick = tick + 10;
-            }
-            if input.millis.saturating_sub(self.last_health_millis) > 1000 {
-                self.display_health = health;
-                self.last_health_millis = input.millis;
-            }
-            self.last_health = health;
-            let has = |id: Option<i32>| id.is_some_and(|id| player.effects.contains_key(&id));
-            let frozen = matches!(
-                player.data.get(&FROZEN_DATA_INDEX),
-                Some(EntityDataValue::Int(t)) if *t >= FULLY_FROZEN_TICKS
-            );
-            let heart_kind = if has(self.poison) {
-                HeartKind::Poisoned
-            } else if has(self.wither) {
-                HeartKind::Withered
-            } else if frozen {
-                HeartKind::Frozen
-            } else {
-                HeartKind::Normal
-            };
-            let regen_index = if has(self.regeneration) {
-                let span = (max_health.max(self.display_health).max(health) + 5).max(1);
-                (input.tick as i32).rem_euclid(span)
-            } else {
-                -1
-            };
-            let hud = HudState {
-                blink,
-                displayed_health: self.display_health,
-                heart_kind,
-                regen_index,
-                shake_tick: (health + absorption <= 4).then_some(input.tick),
-                selected_slot: player.held_slot,
-                offhand: offhand.is_some(),
-                health,
-                max_health,
-                absorption,
-                hardcore: state.world.hardcore,
-                armor: self
-                    .attribute(state, self.armor_attr)
-                    .map_or(0, |v| v.clamp(0.0, 40.0) as i32),
-                food: player.food.clamp(0, 20),
-                xp_progress: player.xp_progress.clamp(0.0, 1.0),
-                xp_level: player.xp_level.max(0),
-                xp_bar: !locator,
-                ..HudState::default()
-            };
-            self.sprites.draw(frame, &hud);
-            self.draw_air(frame, player.data.get(&AIR_DATA_INDEX));
-        } else if player.game_mode == GameType::Spectator {
+            self.fill_player_health(&mut hud, input);
+        }
+        if spectator {
             self.draw_spectator_menu(frame, input);
         } else {
-            self.draw_hotbar(frame, player.held_slot, offhand.is_some());
-        }
-        if player.game_mode != GameType::Spectator {
+            self.sprites.draw_hotbar(frame, &hud);
+            let cooldown = |stack: Option<&mcr_protocol::types::ItemStack>| {
+                stack.map_or(0.0, |s| state.cooldown_percent(s, input.partial))
+            };
+            let stacks: [Option<StackView<'_>>; 9] = std::array::from_fn(|i| {
+                StackView::new(state.inventory.hotbar(i as u8))
+                    .map(|v| v.with_trim_materials(input.trim_materials))
+            });
+            let pop = |slot: usize| {
+                let p = f32::from(state.inventory.pop[slot]);
+                if p > 0.0 { p - input.partial } else { 0.0 }
+            };
+            let items = HudItems {
+                hotbar: std::array::from_fn(|i| {
+                    let c = cooldown(Some(state.inventory.hotbar(i as u8)));
+                    stacks[i].as_ref().map(|s| s.view(c))
+                }),
+                offhand: offhand.as_ref().map(|s| s.view(cooldown(offhand_stack))),
+                pop: std::array::from_fn(pop),
+                offhand_pop: pop(9),
+                left_handed,
+            };
             self.sprites.draw_items(frame, icons, &items);
         }
-        if locator {
+        self.sprites.draw_status(frame, &hud);
+        if survival {
+            self.track_bubble_pop(hud.air);
+        }
+        if contextual == ContextualBar::Locator {
             self.draw_locator(frame, input);
+        }
+        if !spectator {
+            self.draw_tool_name(frame, input, survival);
         }
     }
 
-    fn draw_hotbar(&self, frame: &mut UiFrame<'_>, selected: u8, offhand: bool) {
+    fn fill_player_health(&mut self, hud: &mut HudState, input: &HudInput<'_>) {
+        let state = input.state;
+        let player = &state.player;
+        let max_health = self
+            .attribute(state, self.max_health_attr)
+            .map_or(20, |v| v.clamp(1.0, 1024.0) as i32);
+        let absorption = match player.data.get(&ABSORPTION_DATA_INDEX) {
+            Some(EntityDataValue::Float(v)) if v.is_finite() => v.ceil().clamp(0.0, 1024.0) as i32,
+            _ => 0,
+        };
+        let health = player.health.ceil().clamp(0.0, 2048.0) as i32;
+        let tick = i64::from(input.tick);
+        let blink = self.health_blink_tick > tick && (self.health_blink_tick - tick) / 3 % 2 == 1;
+        if health < self.last_health && player.damage_cooldown > 0 {
+            self.last_health_millis = input.millis;
+            self.health_blink_tick = tick + 20;
+        } else if health > self.last_health && player.damage_cooldown > 0 {
+            self.last_health_millis = input.millis;
+            self.health_blink_tick = tick + 10;
+        }
+        if input.millis.saturating_sub(self.last_health_millis) > 1000 {
+            self.display_health = health;
+            self.last_health_millis = input.millis;
+        }
+        self.last_health = health;
+        let has = |id: Option<i32>| id.is_some_and(|id| player.effects.contains_key(&id));
+        let frozen = matches!(
+            player.data.get(&FROZEN_DATA_INDEX),
+            Some(EntityDataValue::Int(t)) if *t >= FULLY_FROZEN_TICKS
+        );
+        hud.heart_kind = if has(self.poison) {
+            HeartKind::Poisoned
+        } else if has(self.wither) {
+            HeartKind::Withered
+        } else if frozen {
+            HeartKind::Frozen
+        } else {
+            HeartKind::Normal
+        };
+        hud.regen_index = if has(self.regeneration) {
+            let span = (max_health.max(self.display_health).max(health) + 5).max(1);
+            (input.tick as i32).rem_euclid(span)
+        } else {
+            -1
+        };
+        hud.blink = blink;
+        hud.displayed_health = self.display_health;
+        hud.shake = health + absorption <= 4;
+        hud.health = health;
+        hud.max_health = max_health;
+        hud.absorption = absorption;
+        hud.armor = self
+            .attribute(state, self.armor_attr)
+            .map_or(0, |v| v.clamp(0.0, 40.0) as i32);
+        hud.food = player.food.clamp(0, 20);
+        hud.hunger_effect = has(self.hunger);
+        hud.saturation_empty = player.saturation <= 0.0;
+        hud.air = AirState {
+            supply: match player.data.get(&AIR_DATA_INDEX) {
+                Some(EntityDataValue::Int(air)) => (*air).clamp(0, MAX_AIR),
+                _ => MAX_AIR,
+            },
+            max: MAX_AIR,
+            underwater: player.physics.eye_in_water(),
+        };
+    }
+
+    /// `Hud#playAirBubblePoppedSound`, once per bursting bubble.
+    fn track_bubble_pop(&mut self, air: AirState) {
+        if !air.visible() {
+            return;
+        }
+        if !air.underwater {
+            self.last_bubble_pop = 0;
+        }
+        if let Some(bubble) = air.popping_bubble()
+            && self.last_bubble_pop != bubble
+        {
+            self.bubble_pop = Some(air.pop_sound());
+            self.last_bubble_pop = bubble;
+        }
+    }
+
+    /// `Hud#extractSelectedItemName`.
+    fn draw_tool_name(&mut self, frame: &mut UiFrame<'_>, input: &HudInput<'_>, survival: bool) {
+        if self.tool.timer <= 0 {
+            return;
+        }
+        let Some(name) = &self.tool.styled else {
+            return;
+        };
+        if self.tool.cells.is_none() {
+            let cells = frame.ui().flatten(name);
+            let width = frame.ui().width(&cells);
+            self.tool.cells = Some((cells, width));
+        }
+        let Some((cells, width)) = &self.tool.cells else {
+            return;
+        };
         let (gui_w, gui_h) = frame.gui_size();
-        let left = gui_w / 2 - 91;
-        if let Some(s) = self.own.hotbar {
-            frame.sprite(s, left, gui_h - 22, 182, 22);
-        }
-        if let Some(s) = self.own.selection {
-            frame.sprite(s, left - 1 + i32::from(selected) * 20, gui_h - 23, 24, 23);
-        }
-        if let (true, Some(s)) = (offhand, self.own.offhand) {
-            frame.sprite(s, left - 29, gui_h - 23, 29, 24);
+        let w = width.ceil() as i32;
+        let x = (gui_w - w) / 2;
+        let y = gui_h - 59 + if survival { 0 } else { 14 };
+        let alpha = (self.tool.timer * 256 / 10).min(255) as u32;
+        if alpha > 0 {
+            let argb = alpha << 24 | 0xFF_FFFF;
+            text_backdrop(frame, input.options, x, y, w, argb);
+            frame.cells(cells, x as f32, y as f32, argb, true);
         }
     }
 
@@ -660,31 +988,6 @@ impl Hud {
         }
     }
 
-    fn draw_air(&self, frame: &mut UiFrame<'_>, air: Option<&EntityDataValue>) {
-        let Some(EntityDataValue::Int(air)) = air else {
-            return;
-        };
-        let air = (*air).clamp(-20, MAX_AIR);
-        if air >= MAX_AIR {
-            return;
-        }
-        let (gui_w, gui_h) = frame.gui_size();
-        let y = gui_h - 49;
-        let right = gui_w / 2 + 91;
-        let full = ((air.max(0) - 2) * 10 + MAX_AIR - 1) / MAX_AIR;
-        let total = (air.max(0) * 10 + MAX_AIR - 1) / MAX_AIR;
-        for i in 0..total.max(0) {
-            let sprite = if i < full {
-                self.own.air
-            } else {
-                self.own.air_bursting
-            };
-            if let Some(s) = sprite {
-                frame.sprite(s, right - i * 8 - 9, y, 9, 9);
-            }
-        }
-    }
-
     fn draw_bosses(&self, frame: &mut UiFrame<'_>, state: &ClientState) {
         let (gui_w, gui_h) = frame.gui_size();
         let now = Instant::now();
@@ -749,7 +1052,8 @@ impl Hud {
         }
     }
 
-    fn draw_sidebar(&self, frame: &mut UiFrame<'_>, state: &ClientState) {
+    fn draw_sidebar(&self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
+        let state = input.state;
         let board = &state.scoreboard;
         let Some(name) = board.sidebar_objective(&state.name) else {
             return;
@@ -789,14 +1093,16 @@ impl Hud {
         let left = gui_w - widest - 3;
         let right = gui_w - 3 + 2;
         let header_y = bottom - count * row_h;
+        let header_bg = background_alpha(input.options, 0.4) << 24;
+        let rows_bg = background_alpha(input.options, 0.3) << 24;
         frame.fill_rect(
             left - 2,
             header_y - row_h - 1,
             right,
             header_y - 1,
-            0x6600_0000,
+            header_bg,
         );
-        frame.fill_rect(left - 2, header_y - 1, right, bottom, 0x5000_0000);
+        frame.fill_rect(left - 2, header_y - 1, right, bottom, rows_bg);
         frame.cells(
             &title,
             (left + widest / 2) as f32 - title_w / 2.0,
@@ -814,39 +1120,41 @@ impl Hud {
     fn draw_titles(&self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
         let t = &input.state.titles;
         let (gui_w, gui_h) = frame.gui_size();
-        if let (Some(alpha), Some(bar)) = (t.overlay_alpha(input.partial), &t.action_bar)
-            && alpha > 8
-        {
+        // Text below alpha 4 counts as opaque, so a fading line stops at 4.
+        if let (Some(alpha), Some(bar)) = (t.overlay_alpha(input.partial), &t.action_bar) {
+            let argb = t.overlay_color(input.partial, alpha.max(4));
             let cells = frame.ui().flatten(bar);
-            let w = frame.ui().width(&cells);
-            frame.cells(
-                &cells,
-                (gui_w as f32 - w) / 2.0,
-                (gui_h - 68 - 4) as f32,
-                u32::from(alpha) << 24 | 0xFF_FFFF,
-                true,
-            );
+            let w = frame.ui().width(&cells).ceil() as i32;
+            let (x, y) = (gui_w / 2 - w / 2, gui_h - 68 - 4);
+            text_backdrop(frame, input.options, x, y, w, argb);
+            frame.cells(&cells, x as f32, y as f32, argb, true);
         }
-        if let (Some(alpha), Some(title)) = (t.title_alpha(input.partial), &t.title)
-            && alpha > 8
-        {
-            let argb = u32::from(alpha) << 24 | 0xFF_FFFF;
-            let (cx, cy) = (gui_w as f32 / 2.0, gui_h as f32 / 2.0);
-            for (component, scale, dy) in
-                [(Some(title), 4.0, -10.0), (t.subtitle.as_ref(), 2.0, 5.0)]
-            {
-                if let Some(c) = component {
-                    let cells = frame.ui().flatten(c);
-                    let w = frame.ui().width(&cells);
-                    frame.cells_scaled(
-                        &cells,
-                        cx - w * scale / 2.0,
-                        cy + dy * scale,
-                        argb,
-                        true,
-                        scale,
-                    );
-                }
+        if let (Some(alpha), Some(title)) = (t.title_alpha(input.partial), &t.title) {
+            let argb = u32::from(alpha.max(4)) << 24 | 0xFF_FFFF;
+            let backdrop = background_alpha(input.options, 0.0) * u32::from(alpha) / 255;
+            let (cx, cy) = (gui_w / 2, gui_h / 2);
+            for (component, scale, dy) in [(Some(title), 4, -10), (t.subtitle.as_ref(), 2, 5)] {
+                let Some(c) = component else {
+                    continue;
+                };
+                let cells = frame.ui().flatten(c);
+                let w = frame.ui().width(&cells).ceil() as i32;
+                let x = -(w / 2);
+                frame.fill_rect(
+                    cx + (x - 2) * scale,
+                    cy + (dy - 2) * scale,
+                    cx + (x + w + 2) * scale,
+                    cy + (dy + 9 + 2) * scale,
+                    backdrop << 24,
+                );
+                frame.cells_scaled(
+                    &cells,
+                    (cx + x * scale) as f32,
+                    (cy + dy * scale) as f32,
+                    argb,
+                    true,
+                    scale as f32,
+                );
             }
         }
     }
@@ -883,6 +1191,105 @@ impl Hud {
         id
     }
 
+    /// `PlayerTabOverlay#extractTablistHearts`.
+    fn draw_tab_hearts(
+        &self,
+        frame: &mut UiFrame<'_>,
+        (left, right, y): (i32, i32, i32),
+        player: uuid::Uuid,
+        score: i32,
+        tick: i64,
+    ) {
+        let health = {
+            let mut states = self.tab_health.borrow_mut();
+            if !states.contains_key(&player) && states.len() >= MAX_TAB_HEALTH {
+                return;
+            }
+            let h = states
+                .entry(player)
+                .or_insert_with(|| TabHealth::new(score));
+            h.update(score, tick);
+            *h
+        };
+        let (score64, displayed) = (i64::from(score), i64::from(health.displayed));
+        let full_hearts = (score64.max(displayed) + 1).div_euclid(2);
+        let to_render = score64.max(displayed).max(20) / 2;
+        let blink = health.blinking(tick);
+        if full_hearts <= 0 {
+            return;
+        }
+        let per_heart = ((right - left - 4) as f32 / to_render as f32)
+            .min(9.0)
+            .floor() as i32;
+        if per_heart <= 3 {
+            let pct = (score as f32 / 20.0).clamp(0.0, 1.0);
+            let color =
+                0xFF00_0000 | (((1.0 - pct) * 255.0) as u32) << 16 | ((pct * 255.0) as u32) << 8;
+            let hearts = java_float(score as f32 / 2.0);
+            let hp = Component::translatable(
+                "multiplayer.player.list.hp",
+                vec![Arg::Str(hearts.clone())],
+            );
+            let mut cells = frame.ui().flatten(&hp);
+            let mut w = frame.ui().width(&cells).ceil() as i32;
+            if right - w < left {
+                cells = frame.ui().flatten(&Component::text(hearts));
+                w = frame.ui().width(&cells).ceil() as i32;
+            }
+            frame.cells(
+                &cells,
+                ((right + left - w) / 2) as f32,
+                y as f32,
+                color,
+                true,
+            );
+            return;
+        }
+        let h = &self.own.tab_hearts;
+        let container = if blink {
+            h.container_blinking
+        } else {
+            h.container
+        };
+        let (full_hearts, to_render) = (full_hearts as i32, to_render as i32);
+        let sprite = |frame: &mut UiFrame<'_>, s: Option<SpriteId>, heart: i32| {
+            if let Some(s) = s {
+                frame.sprite(s, left + heart * per_heart, y, 9, 9);
+            }
+        };
+        for heart in full_hearts..to_render {
+            sprite(frame, container, heart);
+        }
+        for heart in 0..full_hearts {
+            sprite(frame, container, heart);
+            let n = heart * 2 + 1;
+            if blink {
+                if n < health.displayed {
+                    sprite(frame, h.full_blinking, heart);
+                }
+                if n == health.displayed {
+                    sprite(frame, h.half_blinking, heart);
+                }
+            }
+            if n < score {
+                let s = if heart >= 10 {
+                    h.absorbing_full_blinking
+                } else {
+                    h.full
+                };
+                sprite(frame, s, heart);
+            }
+            if n == score {
+                let s = if heart >= 10 {
+                    h.absorbing_half_blinking
+                } else {
+                    h.half
+                };
+                sprite(frame, s, heart);
+            }
+        }
+    }
+
     fn draw_tab_list(&self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
         let state = input.state;
         let head_w = if input.show_heads { 9 } else { 0 };
@@ -917,6 +1324,12 @@ impl Hud {
             .map(|(_, _, w)| if *w > 0.0 { spacer + w } else { 0.0 })
             .fold(0.0f32, f32::max)
             .ceil() as i32;
+        {
+            let mut health = self.tab_health.borrow_mut();
+            if !health.is_empty() {
+                health.retain(|id, _| players.iter().any(|p| p.uuid == *id));
+            }
+        }
         let (gui_w, _) = frame.gui_size();
         let slots = players.len();
         let mut rows = slots;
@@ -993,17 +1406,31 @@ impl Hud {
             frame.push_scissor(x, ry, x + slot_w - 11, ry + 9);
             frame.cells(name, name_x as f32, ry as f32, color, true);
             frame.pop_scissor();
-            if objective.is_some() && !spectator && !hearts {
+            if let (Some((o, _)), false) = (objective, spectator) {
                 let score_left = name_x + max_name_w + 1;
                 let score_right = score_left + width_for_score;
                 if score_right - score_left > 5 {
-                    frame.cells(
-                        score,
-                        score_right as f32 - score_w,
-                        ry as f32,
-                        0xFFFF_FFFF,
-                        true,
-                    );
+                    if hearts {
+                        let value = board
+                            .scores
+                            .get(&(players[i].name.clone(), o.to_owned()))
+                            .map_or(0, |s| s.value);
+                        self.draw_tab_hearts(
+                            frame,
+                            (score_left, score_right, ry),
+                            players[i].uuid,
+                            value,
+                            i64::from(input.tick),
+                        );
+                    } else {
+                        frame.cells(
+                            score,
+                            score_right as f32 - score_w,
+                            ry as f32,
+                            0xFFFF_FFFF,
+                            true,
+                        );
+                    }
                 }
             }
             let icon = match players[i].latency {
@@ -1038,7 +1465,31 @@ impl Hud {
 
 #[cfg(test)]
 mod tests {
-    use super::{WaypointStyle, sleep_overlay_color};
+    use super::{
+        WaypointStyle, java_float, sleep_overlay_color, spectator_block, spectator_entity,
+    };
+
+    #[test]
+    fn spectator_crosshair_targets() {
+        assert!(spectator_block("minecraft:chest", false));
+        assert!(spectator_block("minecraft:red_shulker_box", false));
+        assert!(spectator_block("minecraft:nether_portal", false));
+        assert!(!spectator_block("minecraft:lectern", false));
+        assert!(spectator_block("minecraft:lectern", true));
+        assert!(!spectator_block("minecraft:ender_chest", false));
+        assert!(!spectator_block("minecraft:stone", false));
+        assert!(spectator_entity("minecraft:hopper_minecart"));
+        assert!(spectator_entity("minecraft:bamboo_chest_raft"));
+        assert!(spectator_entity("minecraft:oak_chest_boat"));
+        assert!(!spectator_entity("minecraft:oak_boat"));
+        assert!(!spectator_entity("minecraft:villager"));
+    }
+
+    #[test]
+    fn heart_counts_print_like_java_floats() {
+        assert_eq!(java_float(10.0), "10.0");
+        assert_eq!(java_float(9.5), "9.5");
+    }
 
     #[test]
     fn sleep_fade_rises_then_fades_after_waking() {

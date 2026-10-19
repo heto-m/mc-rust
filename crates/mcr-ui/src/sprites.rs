@@ -167,6 +167,17 @@ impl SpriteInfo {
         self.quad(atlas_size as f32, nominal, src, dst)
     }
 
+    /// The whole sprite over a fractional destination rectangle, ignoring its GUI scaling.
+    pub fn stretched(&self, atlas_size: u32, dst: [f32; 4]) -> SpriteQuad {
+        let nominal = (self.width as f32, self.height as f32);
+        self.quad(
+            atlas_size as f32,
+            nominal,
+            [0.0, 0.0, nominal.0, nominal.1],
+            dst,
+        )
+    }
+
     /// Stretches the `sw`x`sh` window starting at pixel `(tx, ty)` over the destination rectangle.
     pub fn region_scaled(
         &self,

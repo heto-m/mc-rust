@@ -56,6 +56,8 @@ pub struct Inventory {
     pub resyncs: u64,
     /// Recent server slot updates, oldest first; tests clear it between clicks.
     pub update_log: Vec<ServerUpdate>,
+    /// `ItemStack#popTime` of the hotbar slots 36-44 and the offhand 45.
+    pub pop: [u8; 10],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +81,7 @@ impl Default for Inventory {
             server_updates: 0,
             resyncs: 0,
             update_log: Vec::new(),
+            pop: [0; 10],
         }
     }
 }
@@ -94,7 +97,16 @@ pub fn inventory_index_to_menu_slot(index: i32) -> Option<usize> {
     })
 }
 
+const POP_TICKS: u8 = 5;
+
 impl Inventory {
+    /// `ItemStack#inventoryTick` counting the pop animation down.
+    pub fn tick_pop(&mut self) {
+        for p in &mut self.pop {
+            *p = p.saturating_sub(1);
+        }
+    }
+
     pub fn container(&self, id: i32) -> Option<&Container> {
         if id == PLAYER_MENU_ID {
             Some(&self.player)
@@ -186,7 +198,14 @@ impl Inventory {
             return false;
         };
         let differs = *target != item;
+        let pops = id == PLAYER_MENU_ID
+            && (HOTBAR_START..=OFFHAND_MENU_SLOT).contains(&(slot as usize))
+            && !item.is_empty()
+            && (target.is_empty() || target.count < item.count);
         *target = item;
+        if pops {
+            self.pop[slot as usize - HOTBAR_START] = POP_TICKS;
+        }
         self.corrections += u64::from(differs);
         self.log_update(id, i32::from(slot), differs);
         if id != PLAYER_MENU_ID {

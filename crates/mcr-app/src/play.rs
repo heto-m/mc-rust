@@ -955,6 +955,7 @@ impl Play {
         }
         let scoping = self.scoping();
         self.overlays.tick(scoping);
+        self.hud.tick(state, &self.options);
         let [block, sky] = crate::entities::light_at(
             &state.chunks,
             state.player.pos(),
@@ -1116,6 +1117,110 @@ impl Play {
 
     fn scoping(&self) -> bool {
         self.perspective == Perspective::First && self.hand.as_ref().is_some_and(HeldHand::scoping)
+    }
+
+    /// `Hud#extractCrosshair`'s visibility and indicator, and the hotbar attack indicator.
+    fn crosshair_hud(&self) -> (Option<mcr_ui::CrosshairIndicator>, Option<f32>) {
+        use mcr_protocol::types::game::GameType;
+        use mcr_settings::value::AttackIndicator;
+        use mcr_ui::CrosshairIndicator;
+        let client = &self.world.client;
+        let state = &client.state;
+        let spectator = state.player.game_mode == GameType::Spectator;
+        let scale = client.attack_strength_scale(0.0);
+        let mode = self.options.attack_indicator;
+        let hotbar = (mode == AttackIndicator::Hotbar).then_some(scale);
+        if self.perspective != Perspective::First || (spectator && !self.spectator_crosshair()) {
+            return (None, hotbar);
+        }
+        if mode != AttackIndicator::Crosshair {
+            return (Some(CrosshairIndicator::None), hotbar);
+        }
+        let full = scale >= 1.0
+            && match self.target {
+                Some(Target::Entity { id, hit, .. }) => {
+                    let alive = state.entities.get(id).is_some_and(|e| {
+                        matches!(
+                            e.data.get(&crate::hud::HEALTH_DATA_INDEX),
+                            Some(mcr_protocol::types::entity_data::EntityDataValue::Float(h)) if *h > 0.0
+                        )
+                    });
+                    alive && state.attack_strength_delay() > 5.0 && self.attack_in_range(hit)
+                }
+                _ => false,
+            };
+        let indicator = if full {
+            CrosshairIndicator::Full
+        } else if scale < 1.0 {
+            CrosshairIndicator::Progress(scale)
+        } else {
+            CrosshairIndicator::None
+        };
+        (Some(indicator), hotbar)
+    }
+
+    /// `AttackRange#isInRange` of the held item, from the eye to where the ray met the target.
+    fn attack_in_range(&self, hit: [f64; 3]) -> bool {
+        use mcr_protocol::types::component::DataComponent;
+        let state = &self.world.client.state;
+        let stack = state.held_stack();
+        let patched = stack.components.added.iter().find_map(|c| match c {
+            DataComponent::AttackRange(r) => Some(r.clone()),
+            _ => None,
+        });
+        let default = || {
+            let component = self
+                .data
+                .registry("minecraft:data_component_type")?
+                .id_of("minecraft:attack_range")?;
+            let item = u32::try_from(stack.item).ok()?;
+            // Every vanilla item with a default attack_range is a spear, and they share it.
+            self.data
+                .item_has_default_component(item, component)
+                .then_some(mcr_protocol::types::component::AttackRange {
+                    min_reach: 2.0,
+                    max_reach: 4.5,
+                    min_creative_reach: 2.0,
+                    max_creative_reach: 6.5,
+                    hitbox_margin: 0.125,
+                    mob_factor: 0.5,
+                })
+        };
+        let Some(range) = patched.or_else(default) else {
+            return true;
+        };
+        let creative = state.player.game_mode == mcr_protocol::types::game::GameType::Creative;
+        let (min, max) = if creative {
+            (range.min_creative_reach, range.max_creative_reach)
+        } else {
+            (range.min_reach, range.max_reach)
+        };
+        let margin = f64::from(range.hitbox_margin);
+        let d = DVec3::from_array(self.cur_eye).distance(DVec3::from_array(hit));
+        d >= f64::from(min) - margin && d <= f64::from(max) + margin
+    }
+
+    /// `Hud#canRenderCrosshairForSpectator`.
+    fn spectator_crosshair(&self) -> bool {
+        let state = &self.world.client.state;
+        match self.target {
+            Some(Target::Entity { id, .. }) => state
+                .entities
+                .get(id)
+                .and_then(|e| u32::try_from(e.kind).ok())
+                .and_then(|k| self.data.entity_type_name(k))
+                .is_some_and(crate::hud::spectator_entity),
+            Some(Target::Block(hit)) => {
+                let has_book = self
+                    .data
+                    .state_properties(hit.state)
+                    .any(|(k, v)| k == "has_book" && v == "true");
+                self.data
+                    .state_block_name(hit.state)
+                    .is_some_and(|n| crate::hud::spectator_block(n, has_book))
+            }
+            None => false,
+        }
     }
 
     fn update_fov(&mut self) {
@@ -1448,6 +1553,11 @@ impl Play {
                 let sound = self.ambience.jukebox_sound(&self.world.client.state, data);
                 if let (Some(sound), Some(audio)) = (sound, &mut self.audio) {
                     audio.play_record(&sound, [pos.x, pos.y, pos.z]);
+                }
+                if let Some(song) =
+                    crate::ambience::jukebox_description(&self.world.client.state, data)
+                {
+                    self.world.client.state.titles.set_now_playing(song);
                 }
             }
             ClientEvent::LevelEvent {
@@ -2800,6 +2910,8 @@ impl Play {
         let spectator_alpha = self.spectator_menu_alpha();
         let hotbar_keys = self.keys.hotbar.map(|i| self.bindings.input(i));
         let chat_open = self.chat_open();
+        let (crosshair, hotbar_attack) = self.crosshair_hud();
+        self.view_cache.refresh(&self.world.client.state);
         let debug = self.debug_on.then(|| {
             let mut overlay = debug::build(&DebugInput {
                 state: &self.world.client.state,
@@ -2848,9 +2960,14 @@ impl Play {
                         keys: hotbar_keys,
                     }
                 }),
+                crosshair,
+                hotbar_attack,
+                jump_bar: self.world.client.jump_bar(),
+                screen_shows_effects: self.stack.top_shows_active_effects(),
+                screen_assets: &self.gui.assets,
+                trim_materials: self.view_cache.trim_materials(),
             };
         {
-            self.view_cache.refresh(&self.world.client.state);
             let view = StateView {
                 state: &self.world.client.state,
                 operator_items: self.options.operator_items_tab,
@@ -2883,19 +3000,6 @@ impl Play {
                     },
                 );
             }
-            self.hud.draw(&mut frame, &mut self.gui.icons, &input);
-            if !hidden && self.options.show_subtitles {
-                let dir = view_direction(self.yaw, self.pitch);
-                let yaw = f64::from(self.yaw).to_radians();
-                let lines = self.subtitles.lines(
-                    self.cur_eye,
-                    dir,
-                    [-yaw.cos(), 0.0, -yaw.sin()],
-                    input.millis,
-                    self.options.notification_display_time,
-                );
-                crate::subtitles::draw(&mut frame, &lines, &self.options);
-            }
             if !hidden {
                 let scoping = self.perspective == Perspective::First
                     && self.hand.as_ref().is_some_and(HeldHand::scoping);
@@ -2913,6 +3017,19 @@ impl Play {
                     partial,
                     warning,
                 );
+            }
+            self.hud.draw(&mut frame, &mut self.gui.icons, &input);
+            if !hidden && self.options.show_subtitles {
+                let dir = view_direction(self.yaw, self.pitch);
+                let yaw = f64::from(self.yaw).to_radians();
+                let lines = self.subtitles.lines(
+                    self.cur_eye,
+                    dir,
+                    [-yaw.cos(), 0.0, -yaw.sin()],
+                    input.millis,
+                    self.options.notification_display_time,
+                );
+                crate::subtitles::draw(&mut frame, &lines, &self.options);
             }
             if !self.stack.is_empty() {
                 let mut cx =
@@ -2943,6 +3060,17 @@ impl Play {
             }
         }
 
+        let feet = self.feet();
+        if let (Some((volume, pitch)), Some(audio)) = (self.hud.bubble_pop.take(), &mut self.audio)
+        {
+            audio.play(
+                "minecraft:ui.hud.bubble_pop",
+                Some(feet),
+                volume,
+                pitch,
+                SoundSource::Players,
+            );
+        }
         self.render.renderer.set_environment(&env);
         self.render.renderer.set_animation_tick(self.ticks);
         crate::post_effects::requested(

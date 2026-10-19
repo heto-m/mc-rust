@@ -46,10 +46,21 @@ pub struct PageRef {
     pub index: u32,
 }
 
+/// How a draw command meets the framebuffer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Blend {
+    /// Premultiplied alpha.
+    #[default]
+    Normal,
+    /// Vanilla's `CROSSHAIR` pipeline: white inverts what is underneath.
+    Invert,
+}
+
 #[derive(Clone, Debug)]
 pub struct DrawCmd {
     pub page: PageRef,
     pub scissor: [u32; 4],
+    pub blend: Blend,
     pub quads: Range<u32>,
 }
 
@@ -61,6 +72,7 @@ pub struct Batch {
     pub framebuffer: (u32, u32),
     /// First quad drawn above the app's 3D screen preview, when a screen marked one.
     pub preview_split: Option<u32>,
+    blend: Blend,
 }
 
 impl Batch {
@@ -80,11 +92,15 @@ impl Batch {
         for (pos, uv) in corners.into_iter().zip(uv) {
             self.vertices.push(Vertex { pos, uv, color });
         }
+        let blend = self.blend;
         match self.cmds.last_mut() {
-            Some(cmd) if cmd.page == page && cmd.scissor == scissor => cmd.quads.end = quad + 1,
+            Some(cmd) if cmd.page == page && cmd.scissor == scissor && cmd.blend == blend => {
+                cmd.quads.end = quad + 1
+            }
             _ => self.cmds.push(DrawCmd {
                 page,
                 scissor,
+                blend,
                 quads: quad..quad + 1,
             }),
         }
@@ -204,6 +220,7 @@ impl Ui {
         self.batch.vertices.clear();
         self.batch.cmds.clear();
         self.batch.preview_split = None;
+        self.batch.blend = Blend::Normal;
         self.batch.scale = scale;
         self.batch.framebuffer = (width, height);
         UiFrame {
@@ -263,6 +280,11 @@ impl UiFrame<'_> {
         self.scale
     }
 
+    /// Blend mode of everything drawn until the next call.
+    pub fn set_blend(&mut self, blend: Blend) {
+        self.ui.batch.blend = blend;
+    }
+
     /// Number of UI frames started so far.
     pub fn number(&self) -> u64 {
         self.ui.frames
@@ -311,7 +333,7 @@ impl UiFrame<'_> {
     fn fill_f(&mut self, rect: [f32; 4], argb: u32) {
         let scissor = self.scissor_px();
         let page = match self.ui.batch.cmds.last() {
-            Some(cmd) if cmd.scissor == scissor => cmd.page,
+            Some(cmd) if cmd.scissor == scissor && cmd.blend == self.ui.batch.blend => cmd.page,
             _ => PageRef {
                 kind: PageKind::Sprite,
                 index: 0,
@@ -351,6 +373,24 @@ impl UiFrame<'_> {
                 color_bytes(argb),
             );
         });
+    }
+
+    /// Stretches the whole sprite over a fractional GUI rectangle `[x0, y0, x1, y1]`.
+    pub fn sprite_f(&mut self, id: SpriteId, dst: [f32; 4], argb: u32) {
+        let info = *self.ui.sprites.info(id);
+        let q = info.stretched(self.ui.sprites.atlas().size(), dst);
+        let page = PageRef {
+            kind: PageKind::Sprite,
+            index: info.page,
+        };
+        let scissor = self.scissor_px();
+        self.ui.batch.push(
+            page,
+            scissor,
+            rect_corners(q.dst),
+            uv_corners(q.uv),
+            color_bytes(argb),
+        );
     }
 
     /// Draws the `w`x`h` window of a sprite starting at pixel `(tx, ty)`, unscaled.

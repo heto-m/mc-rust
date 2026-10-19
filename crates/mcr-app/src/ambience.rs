@@ -551,6 +551,18 @@ impl Ambience {
     }
 }
 
+/// The `description` of a jukebox song registry entry, for "Now Playing".
+pub fn jukebox_description(
+    state: &ClientState,
+    song: i32,
+) -> Option<mcr_protocol::types::Component> {
+    let entry = state.registries.get("minecraft:jukebox_song")?.get(song)?;
+    let description = entry.data.as_ref()?.get("description")?;
+    Some(mcr_protocol::types::Component::from_nbt_lenient(
+        description,
+    ))
+}
+
 pub fn biome_at(state: &ClientState, pos: [i32; 3]) -> Option<usize> {
     let chunks = &state.chunks;
     let column = chunks.column(mcr_world::ChunkPos::new(pos[0] >> 4, pos[2] >> 4))?;
