@@ -240,14 +240,7 @@ impl ClientState {
                 global: p.global,
                 predicted: false,
             }),
-            P::LevelParticles(p) => out.event(ClientEvent::Particle {
-                particle: p.particle,
-                pos: [p.x, p.y, p.z],
-                count: p.count,
-                delta: [p.x_dist, p.y_dist, p.z_dist],
-                speed: [p.x_max_speed, p.y_max_speed, p.z_max_speed],
-                always_show: p.always_show,
-            }),
+            P::LevelParticles(p) => out.event(ClientEvent::Particle(Box::new(p))),
             P::Sound(p) => out.event(ClientEvent::Sound {
                 sound: p.sound,
                 source: p.source,
@@ -452,6 +445,13 @@ impl ClientState {
             P::RotateHead(p) => {
                 if let Some(e) = self.entities.get_mut(p.entity_id) {
                     e.lerp_head_to(p.y_head_rot.degrees());
+                }
+            }
+            P::ProjectilePower(p) => {
+                if let Some(e) = self.entities.get_mut(p.entity_id)
+                    && p.acceleration_power.is_finite()
+                {
+                    e.acceleration_power = Some(p.acceleration_power);
                 }
             }
             P::SetEntityMotion(p) => {
@@ -1106,6 +1106,7 @@ impl ClientState {
         }
         self.player
             .reset_for_spawn(info.game_type, info.previous_game_type, keep);
+        self.player.last_death.clone_from(&info.last_death_location);
         crate::glide::apply_player_flags(&mut self.player);
         self.refresh_physics_inputs();
         Ok(())

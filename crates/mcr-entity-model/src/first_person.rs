@@ -138,6 +138,18 @@ impl EntityScene {
         light: [u8; 2],
         origin: [f64; 3],
     ) {
+        self.emit_quad_with(texture, size, matrix, light, origin, Pipeline::Cutout);
+    }
+
+    pub(crate) fn emit_quad_with(
+        &mut self,
+        texture: &str,
+        size: [f32; 2],
+        matrix: Mat4,
+        light: [u8; 2],
+        origin: [f64; 3],
+        pipeline: Pipeline,
+    ) {
         let tex = self.textures.resolve(texture, &mut self.gpu, &self.assets);
         let model_id = self.quad_model();
         let Some((base, out)) = self.gpu.alloc_bones(1) else {
@@ -147,7 +159,7 @@ impl EntityScene {
         self.gpu.push(&PartInstance {
             model: model_id,
             texture: tex,
-            pipeline: Pipeline::Cutout,
+            pipeline,
             bone_base: base,
             tint: [255; 4],
             hurt: false,

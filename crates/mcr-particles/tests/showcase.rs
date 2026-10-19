@@ -265,3 +265,98 @@ fn ten_thousand_particles_update_and_render() {
     assert!(tick_ms < 25.0, "update too slow: {tick_ms}");
     save("particles_10k.png", &r.read_offscreen().unwrap());
 }
+
+const NEW_GRID: &[&str] = &[
+    "cherry_leaves",
+    "pale_oak_leaves",
+    "tinted_leaves",
+    "red_poplar_leaves",
+    "snowflake",
+    "white_ash",
+    "crimson_spore",
+    "warped_spore",
+    "soul",
+    "sculk_soul",
+    "sculk_charge_pop",
+    "wax_on",
+    "wax_off",
+    "scrape",
+    "dragon_breath",
+    "sonic_boom",
+    "gust",
+    "falling_dust",
+    "dust_plume",
+    "trial_spawner_detection",
+    "trial_spawner_detection_ominous",
+    "firefly",
+    "ominous_spawning",
+    "squid_ink",
+    "glow_squid_ink",
+    "shriek",
+    "reverse_portal",
+    "dolphin",
+    "spit",
+    "white_smoke",
+    "noxious_gas",
+    "infested",
+    "raid_omen",
+    "mycelium",
+    "pause_mob_growth",
+    "dust_pillar",
+    "sneeze",
+    "underwater",
+    "spore_blossom_air",
+    "sulfur_cube_goo",
+];
+
+fn new_particle(name: &str) -> Particle {
+    use mcr_protocol::types::particle::ColorParticleKind;
+    match name {
+        "tinted_leaves" => Particle::Color {
+            kind: ColorParticleKind::TintedLeaves,
+            argb: 0xFF30_A030u32 as i32,
+        },
+        "falling_dust" | "dust_pillar" => Particle::BlockState {
+            kind: if name == "dust_pillar" {
+                BlockParticleKind::DustPillar
+            } else {
+                BlockParticleKind::FallingDust
+            },
+            state: 2,
+        },
+        "dragon_breath" => Particle::DragonBreath { power: 1.0 },
+        "shriek" => Particle::Shriek { delay: 0 },
+        _ => particle(name),
+    }
+}
+
+#[test]
+fn new_particle_showcase() {
+    let (Some(mut r), Some(resources)) = (renderer(), jar()) else {
+        return;
+    };
+    let mut e = engine(resources);
+    let env = Environment::overworld(6000, 0.0, 0.0);
+    let cam = Camera {
+        position: DVec3::new(0.0, 8.0, 14.0),
+        pitch: 0.0,
+        ..Camera::default()
+    };
+    let cols = 8;
+    for (i, name) in NEW_GRID.iter().enumerate() {
+        let (cx, cy) = ((i % cols) as f64 - 3.5, (i / cols) as f64);
+        let at = [cx * 2.6, 12.0 + 3.0 * (2.0 - cy) + 0.5 * 8.0 - 8.0, 0.0];
+        let p = new_particle(name);
+        match *name {
+            "sonic_boom" | "gust" | "shriek" => e.emit(&p, at, [0.0; 3], 0.0, 0),
+            "firefly" | "dust_pillar" => e.emit(&p, at, [0.3; 3], 0.0, 8),
+            _ => e.emit(&p, at, [0.25; 3], 0.02, 8),
+        }
+    }
+    for _ in 0..6 {
+        e.tick(&World);
+    }
+    frame(&mut r, &mut e, &env, &cam);
+    save("particles_grid_new.png", &r.read_offscreen().unwrap());
+    assert!(e.count() > 100);
+}

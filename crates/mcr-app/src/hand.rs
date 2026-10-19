@@ -1074,13 +1074,24 @@ impl Hand {
         self.scene.emit_map(id, pose.0, f.light, true, [0.0; 3]);
     }
 
+    /// Compass and clock inputs for held items, owned by the local player.
+    pub fn set_item_world(
+        &mut self,
+        world: mcr_entity_model::ItemWorld,
+        owner: mcr_entity_model::ItemOwner,
+    ) {
+        self.scene.set_item_world(world);
+        self.scene.set_item_owner(Some(owner));
+    }
+
     pub fn set_map(
         &mut self,
         id: i32,
         image: mcr_entity_model::ImageRgba,
         deco: Vec<mcr_entity_model::MapDecoration>,
+        labels: mcr_entity_model::MapLabels,
     ) {
-        self.scene.set_map(id, image, deco);
+        self.scene.set_map(id, image, deco, labels);
     }
 
     /// Uploads the instances; call after [`Self::prepare`].

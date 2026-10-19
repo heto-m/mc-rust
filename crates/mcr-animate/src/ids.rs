@@ -99,39 +99,5 @@ pub fn tinted_leaves(argb: i32) -> Particle {
 
 /// Vanilla particle types registered with `overrideLimiter`.
 pub fn overrides_limiter(particle: &Particle) -> bool {
-    let Particle::Simple(id) = particle else {
-        return false;
-    };
-    usize::try_from(*id)
-        .ok()
-        .and_then(|i| PARTICLE_NAMES.get(i))
-        .is_some_and(|n| LIMITER_OVERRIDES.contains(n))
+    mcr_particles::overrides_limiter(particle.type_id())
 }
-
-const LIMITER_OVERRIDES: [&str; 25] = [
-    "trial_spawner_detection",
-    "trial_spawner_detection_ominous",
-    "vault_connection",
-    "damage_indicator",
-    "elder_guardian",
-    "explosion_emitter",
-    "explosion",
-    "gust",
-    "gust_emitter_large",
-    "gust_emitter_small",
-    "sonic_boom",
-    "sculk_charge_pop",
-    "poof",
-    "spit",
-    "squid_ink",
-    "sweep_attack",
-    "campfire_cosy_smoke",
-    "campfire_signal_smoke",
-    "glow_squid_ink",
-    "glow",
-    "wax_on",
-    "wax_off",
-    "electric_spark",
-    "scrape",
-    "ominous_spawning",
-];

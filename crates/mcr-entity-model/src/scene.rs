@@ -113,6 +113,8 @@ fn eval_job(
             attach_pose,
             ..
         } = job;
+        let anchored = plan.parts.iter().any(|p| p.anchor.is_some());
+        let base = parts.first().filter(|p| p.part == 0).map(|p| p.mi);
         let mut cursor = 0;
         let mut cached = None;
         for pj in parts.iter() {
@@ -127,6 +129,7 @@ fn eval_job(
                 match part.pose {
                     crate::plan::Pose::Rig => animate(plan.rig, &plan.anim, &entry.binding, pose),
                     crate::plan::Pose::Rest => {}
+                    crate::plan::Pose::Own(rig) => animate(rig, &plan.anim, &entry.binding, pose),
                     crate::plan::Pose::Keyframes => {
                         for &(name, seconds, weight) in &plan.keyframes {
                             if let Some(Some(anim)) = bound.get(&(pj.mi, name)) {
@@ -155,7 +158,7 @@ fn eval_job(
                 evaluate(&entry.model, pose, world);
             }
             cached = Some((pj.mi, part.pose));
-            if pj.part == 0 && !plan.attachments.is_empty() {
+            if pj.part == 0 && (!plan.attachments.is_empty() || anchored) {
                 let mut zero_scale = false;
                 attach_pose.clear();
                 attach_pose.extend(pose.iter().map(|p| {
@@ -175,7 +178,15 @@ fn eval_job(
                     *m = *xf * *m;
                 }
             }
-            let part_xf = *xf
+            let frame = match (part.anchor, base) {
+                (Some((bone, local)), Some(bm)) => models[bm]
+                    .model
+                    .bone(bone)
+                    .and_then(|b| attach_world.get(b as usize))
+                    .map_or(*xf, |m| *m * local),
+                _ => *xf,
+            };
+            let part_xf = frame
                 * Mat4::from_translation(part.offset)
                 * Mat4::from_scale(Vec3::splat(part.scale));
             for (o, w) in out[cursor..cursor + n].iter_mut().zip(world.iter()) {
@@ -491,6 +502,11 @@ impl EntityScene {
         let plan = &job.plan;
         let hurt = v.hurt || v.death_time > 0.0;
         self.outline = v.outline;
+        self.items.owner = Some(crate::items::ItemOwner {
+            id: v.id,
+            pos: v.pos,
+            yaw: crate::misc::owner_yaw(v),
+        });
         for pj in &job.parts {
             let part = &plan.parts[pj.part];
             let (mut pipeline, mut tint, mut hidden) = (part.pipeline, part.tint, false);
@@ -1212,6 +1228,16 @@ impl EntityScene {
 
     pub fn draw_blended(&self, pass: &mut wgpu::RenderPass<'_>) {
         self.gpu.draw_blended(pass);
+    }
+
+    /// Compass and clock inputs for item models drawn from now on.
+    pub fn set_item_world(&mut self, world: crate::items::ItemWorld) {
+        self.items.world = world;
+    }
+
+    /// The owner of items drawn outside entity plans (first-person hands).
+    pub fn set_item_owner(&mut self, owner: Option<crate::items::ItemOwner>) {
+        self.items.owner = owner;
     }
 
     pub fn has_outlines(&self) -> bool {

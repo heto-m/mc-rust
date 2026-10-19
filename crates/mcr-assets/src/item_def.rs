@@ -176,6 +176,38 @@ pub struct ItemNode {
     pub kind: NodeKind,
 }
 
+impl ItemNode {
+    /// Whether the node reads compass needles or the clock, which change with the world, not the stack.
+    pub fn reads_world(&self) -> bool {
+        match &self.kind {
+            NodeKind::Composite(nodes) => nodes.iter().any(ItemNode::reads_world),
+            NodeKind::Condition {
+                on_true, on_false, ..
+            } => on_true.reads_world() || on_false.reads_world(),
+            NodeKind::Select {
+                prop,
+                cases,
+                fallback,
+            } => {
+                matches!(prop, SelectProp::ContextDimension)
+                    || cases.iter().any(|(_, n)| n.reads_world())
+                    || fallback.as_ref().is_some_and(|n| n.reads_world())
+            }
+            NodeKind::Range {
+                prop,
+                entries,
+                fallback,
+                ..
+            } => {
+                matches!(prop, RangeProp::Compass(_) | RangeProp::Time(_))
+                    || entries.iter().any(|(_, n)| n.reads_world())
+                    || fallback.as_ref().is_some_and(|n| n.reads_world())
+            }
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ItemModelDef {
     pub root: ItemNode,

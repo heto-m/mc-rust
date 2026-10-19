@@ -778,8 +778,13 @@ pub(crate) fn allay(r: &mut R, a: &AnimIn) {
     r.ry(Slot::LeftArm, -0.27925268 * holding);
 }
 
-pub(crate) fn parrot(r: &mut R, a: &AnimIn) {
-    let flying = !a.on_ground && !a.sitting;
+pub(crate) fn parrot(r: &mut R, a: &AnimIn, shoulder: bool) {
+    let (sitting, flap) = if shoulder {
+        (false, 0.0)
+    } else {
+        (a.sitting, a.flap)
+    };
+    let flying = !shoulder && !a.on_ground && !sitting;
     let head = [
         Slot::Head,
         Slot::Tail,
@@ -793,7 +798,7 @@ pub(crate) fn parrot(r: &mut R, a: &AnimIn) {
         r.add_rot(Slot::LeftLeg, Vec3::new(PI * 2.0 / 9.0, 0.0, 0.0));
         r.add_rot(Slot::RightLeg, Vec3::new(PI * 2.0 / 9.0, 0.0, 0.0));
     }
-    if a.sitting {
+    if sitting {
         for s in head {
             r.add_pos(s, Vec3::new(0.0, 1.9, 0.0));
         }
@@ -809,8 +814,8 @@ pub(crate) fn parrot(r: &mut R, a: &AnimIn) {
         Some(a.head_yaw * DEG),
         None,
     );
-    if !a.sitting {
-        if !flying {
+    if !sitting {
+        if !flying && !shoulder {
             r.add_rot(
                 Slot::LeftLeg,
                 Vec3::new(cos(a.walk_pos * 0.6662) * 1.4 * a.walk_speed, 0.0, 0.0),
@@ -820,7 +825,7 @@ pub(crate) fn parrot(r: &mut R, a: &AnimIn) {
                 Vec3::new(cos(a.walk_pos * 0.6662 + PI) * 1.4 * a.walk_speed, 0.0, 0.0),
             );
         }
-        let bob = a.flap * 0.3;
+        let bob = flap * 0.3;
         for s in head {
             r.add_pos(s, Vec3::new(0.0, bob, 0.0));
         }
@@ -828,8 +833,8 @@ pub(crate) fn parrot(r: &mut R, a: &AnimIn) {
             Slot::Tail,
             Vec3::new(cos(a.walk_pos * 0.6662) * 0.3 * a.walk_speed, 0.0, 0.0),
         );
-        r.rz(Slot::LeftWing, -0.0873 - a.flap);
-        r.rz(Slot::RightWing, 0.0873 + a.flap);
+        r.rz(Slot::LeftWing, -0.0873 - flap);
+        r.rz(Slot::RightWing, 0.0873 + flap);
     }
 }
 

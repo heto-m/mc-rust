@@ -425,6 +425,8 @@ pub struct Entity {
     pub flight: Option<Box<FlightHistory>>,
     /// Chosen at the first position update, once the entity's data says whether it is living.
     pub lerp: Option<Lerp>,
+    /// `projectile_power` for fireballs and wither skulls; vanilla's 0.1 until the server sends one.
+    pub acceleration_power: Option<f64>,
     sim_ticks: u32,
     sim_collided: bool,
     interpolation_left: u8,
@@ -461,6 +463,7 @@ impl Entity {
             swell: (0, 0),
             flight: None,
             lerp: None,
+            acceleration_power: None,
             sim_ticks: 0,
             sim_collided: false,
             interpolation_left: 0,
@@ -791,6 +794,7 @@ impl Entity {
                 0
             },
             anchor,
+            acceleration: self.acceleration_power,
         }
     }
 

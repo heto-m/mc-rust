@@ -1925,6 +1925,7 @@ dependencies = [
  "criterion 0.5.1",
  "glam",
  "mcr-assets",
+ "mcr-buf",
  "mcr-protocol",
  "mcr-render",
  "png",

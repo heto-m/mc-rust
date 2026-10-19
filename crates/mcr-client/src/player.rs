@@ -38,6 +38,8 @@ pub struct LocalPlayer {
     /// Vanilla `sleepCounter`: up to 100 while asleep, then 101..110 fading out after waking.
     pub sleep_timer: u32,
     pub vehicle: Option<i32>,
+    /// `Player#getLastDeathLocation`, from the last login or respawn.
+    pub last_death: Option<mcr_protocol::types::component::GlobalPos>,
     /// A teleport has been received since login/respawn.
     pub placed: bool,
     /// Vanilla `clientLoaded`: movement runs and is sent only after this.
@@ -83,6 +85,7 @@ impl Default for LocalPlayer {
             show_death_screen: true,
             sleep_timer: 0,
             vehicle: None,
+            last_death: None,
             placed: false,
             loaded: false,
             loaded_waited_ticks: 0,

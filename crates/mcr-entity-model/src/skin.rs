@@ -26,6 +26,18 @@ pub fn prepare(width: u32, height: u32, rgba: &[u8]) -> ImageRgba {
     img
 }
 
+/// A downloaded cape as-is; mismatched pixel data becomes a transparent 64x32 image.
+pub fn prepare_cape(width: u32, height: u32, rgba: &[u8]) -> ImageRgba {
+    if width == 0 || height == 0 || rgba.len() as u64 != u64::from(width) * u64::from(height) * 4 {
+        return ImageRgba::solid(64, 32, [0, 0, 0, 0]);
+    }
+    ImageRgba {
+        width,
+        height,
+        rgba: rgba.to_vec(),
+    }
+}
+
 fn opaque(img: &mut ImageRgba, x0: u32, y0: u32, x1: u32, y1: u32) {
     for y in y0..y1.min(img.height) {
         for x in x0..x1.min(img.width) {

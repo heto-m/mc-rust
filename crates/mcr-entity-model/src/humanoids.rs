@@ -3,7 +3,7 @@ use mcr_protocol::types::entity_data::{EntityDataValue, Pose};
 use uuid::Uuid;
 
 use crate::catalog::{BuildFn, PlanCx, hitbox};
-use crate::equipment::{add_layers, humanoid_armor};
+use crate::equipment::{add_layers, has_layer, humanoid_armor};
 use crate::hands::{
     HandFamily, arm_items, hand_attach, is_item, is_spear, item_name, player_poses, set_pose,
 };
@@ -729,8 +729,171 @@ fn player(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     let prefix = if slim { "player_slim" } else { "player" };
     humanoid_armor(cx, v, plan, prefix, false);
     wings(cx, v, plan, false);
+    avatar_layers(cx, v, plan, &texture, slim, mask & 1 != 0);
     plan.post_rot = avatar_rotation(v);
     let _ = hitbox;
+}
+
+const MAX_STUCK: i32 = 64;
+
+/// The cubes `PlayerModel.getRandomBodyPart` picks from: bone, min and max corner in sixteenths.
+fn body_cubes(slim: bool) -> [(&'static str, Vec3, Vec3); 6] {
+    let arm = if slim { 3.0 } else { 4.0 };
+    [
+        (
+            "head",
+            Vec3::new(-4.0, -8.0, -4.0),
+            Vec3::new(4.0, 0.0, 4.0),
+        ),
+        (
+            "body",
+            Vec3::new(-4.0, 0.0, -2.0),
+            Vec3::new(4.0, 12.0, 2.0),
+        ),
+        (
+            "left_arm",
+            Vec3::new(-1.0, -2.0, -2.0),
+            Vec3::new(-1.0 + arm, 10.0, 2.0),
+        ),
+        (
+            "right_arm",
+            Vec3::new(1.0 - arm, -2.0, -2.0),
+            Vec3::new(1.0, 10.0, 2.0),
+        ),
+        (
+            "left_leg",
+            Vec3::new(-2.0, 0.0, -2.0),
+            Vec3::new(2.0, 12.0, 2.0),
+        ),
+        (
+            "right_leg",
+            Vec3::new(-2.0, 0.0, -2.0),
+            Vec3::new(2.0, 12.0, 2.0),
+        ),
+    ]
+}
+
+/// `StuckInBodyLayer`: where each stuck arrow or stinger sits, seeded by the entity id.
+pub(crate) fn stuck_frames(
+    id: i32,
+    count: i32,
+    slim: bool,
+    surface: bool,
+) -> Vec<(&'static str, Mat4)> {
+    let mut rng = crate::effects::JavaRandom::new(i64::from(id) as u64);
+    let cubes = body_cubes(slim);
+    (0..count.clamp(0, MAX_STUCK))
+        .map(|_| {
+            let (bone, min, max) = cubes[rng.next_int(6) as usize];
+            rng.next_int(1);
+            let mut mid = [rng.next_float(), rng.next_float(), rng.next_float()];
+            if surface {
+                let plane = rng.next_int(3) as usize;
+                mid[plane] = if mid[plane] > 0.5 { 1.0 } else { 0.5 };
+            }
+            let mid = Vec3::from(mid);
+            let pos = min + (max - min) * mid;
+            let dir = -(mid * 2.0 - Vec3::ONE);
+            let y_rot = dir.x.atan2(dir.z);
+            let x_rot = dir.y.atan2(dir.x.hypot(dir.z));
+            let local = Mat4::from_translation(pos)
+                * Mat4::from_rotation_y(y_rot - std::f32::consts::FRAC_PI_2)
+                * Mat4::from_rotation_z(x_rot);
+            (bone, local)
+        })
+        .collect()
+}
+
+/// `PlayerCapeModel.setupAnim`: the cape's final rotation as ZYX euler degrees.
+pub(crate) fn cape_rotation([flap, lean, lean2]: [f32; 3]) -> [f32; 3] {
+    let q = glam::Quat::from_rotation_x((6.0 + lean / 2.0 + flap).to_radians())
+        * glam::Quat::from_rotation_z((lean2 / 2.0).to_radians())
+        * glam::Quat::from_rotation_y((180.0 - lean2 / 2.0).to_radians());
+    let (z, y, x) = q.to_euler(glam::EulerRot::ZYX);
+    [x.to_degrees(), y.to_degrees(), z.to_degrees()]
+}
+
+/// The extra layers of `AvatarRenderer`: cape, deadmau5 ears, stuck arrows and stingers, shoulder
+/// parrots and the riptide swirl.
+fn avatar_layers(
+    cx: &mut PlanCx<'_>,
+    v: &EntityView<'_>,
+    plan: &mut Plan,
+    skin_texture: &str,
+    slim: bool,
+    show_cape: bool,
+) {
+    let pv = &v.player;
+    let chest = v.item(slot::CHEST);
+    if !v.invisible
+        && show_cape
+        && let Some(cape) = pv.skin.and_then(|s| s.cape.as_ref())
+        && !chest.is_some_and(|c| has_layer(cx, c, "wings"))
+    {
+        let key = format!("dyn:cape:{}", cape.key);
+        let (w, h, rgba) = (cape.width, cape.height, &cape.rgba);
+        cx.tex
+            .register(&key, || crate::skin::prepare_cape(w, h, rgba));
+        let armored = chest.is_some_and(|c| has_layer(cx, c, "humanoid"));
+        let part = plan.push(Part::new("minecraft:player#cape", key).no_hurt());
+        if armored {
+            part.offset = Vec3::new(0.0, -0.85, 1.1);
+        }
+        plan.rot_overrides
+            .push((Slot::Cape, cape_rotation(pv.cloak)));
+    }
+    if pv.extra_ears && !v.invisible {
+        plan.push(Part::new("minecraft:player#ears", skin_texture.to_owned()));
+    }
+    for (index, layer, texture, surface) in [
+        (
+            idx::LIVING_ARROWS,
+            "minecraft:arrow#main",
+            "entity/projectiles/arrow",
+            false,
+        ),
+        (
+            idx::LIVING_STINGERS,
+            "minecraft:bee_stinger#main",
+            "entity/bee/bee_stinger",
+            true,
+        ),
+    ] {
+        let count = v.int(index).unwrap_or(0);
+        for (bone, local) in stuck_frames(v.id, count, slim, surface) {
+            let part = plan.push(Part::new(layer, texture).no_hurt().not_body());
+            part.pose = crate::plan::Pose::Rest;
+            part.anchor = Some((bone, local));
+        }
+    }
+    let crouching = v.pose() == Pose::Crouching;
+    for (index, x) in [
+        (idx::PLAYER_SHOULDER_LEFT, 6.4),
+        (idx::PLAYER_SHOULDER_RIGHT, -6.4),
+    ] {
+        let Some(EntityDataValue::OptionalUnsignedInt(Some(variant))) = v.raw(index) else {
+            continue;
+        };
+        let texture = crate::mobs::parrot_texture(i32::try_from(*variant).unwrap_or(0));
+        let part = plan.push(
+            Part::new("minecraft:parrot#main", texture)
+                .no_hurt()
+                .not_body(),
+        );
+        part.pose = crate::plan::Pose::Own(Rig::ShoulderParrot);
+        part.offset = Vec3::new(x, if crouching { -20.8 } else { -24.0 }, 0.0);
+    }
+    if v.living_flag(2) {
+        let part = plan.push(
+            Part::new(
+                "minecraft:spin_attack#main",
+                "entity/trident/trident_riptide",
+            )
+            .no_hurt()
+            .not_body(),
+        );
+        part.pose = crate::plan::Pose::Own(Rig::SpinAttack);
+    }
 }
 
 /// `AvatarRenderer.setupRotations` on top of the living turn: riptide spin, glide pitch and roll, swim.
@@ -785,4 +948,48 @@ fn wings(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan, baby: bool) {
     let [x, ry, z] = v.glide.wings.map(f32::to_degrees);
     plan.rot_overrides.push((Slot::LeftWing, [x, ry, z]));
     plan.rot_overrides.push((Slot::RightWing, [x, -ry, -z]));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stuck_arrows_are_seeded_and_bounded() {
+        let a = stuck_frames(42, 5, false, false);
+        assert_eq!(a.len(), 5);
+        let b = stuck_frames(42, 5, false, false);
+        assert_eq!(a, b);
+        assert_ne!(a, stuck_frames(43, 5, false, false));
+        assert_eq!(
+            stuck_frames(1, i32::MAX, true, true).len(),
+            MAX_STUCK as usize
+        );
+        assert!(stuck_frames(1, -3, false, false).is_empty());
+        for (bone, m) in stuck_frames(9, 20, true, true) {
+            let (_, min, max) = body_cubes(true)
+                .into_iter()
+                .find(|(b, _, _)| *b == bone)
+                .unwrap();
+            let p = m.w_axis.truncate();
+            assert!(
+                p.cmpge(min - 1e-4).all() && p.cmple(max + 1e-4).all(),
+                "{bone} {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn still_cape_hangs_six_degrees_out() {
+        let [x, y, z] = cape_rotation([0.0; 3]);
+        let q = glam::Quat::from_euler(
+            glam::EulerRot::ZYX,
+            z.to_radians(),
+            y.to_radians(),
+            x.to_radians(),
+        );
+        let want = glam::Quat::from_rotation_x(6f32.to_radians())
+            * glam::Quat::from_rotation_y(std::f32::consts::PI);
+        assert!(q.dot(want).abs() > 0.9999, "{x} {y} {z}");
+    }
 }

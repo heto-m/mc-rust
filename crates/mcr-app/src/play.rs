@@ -453,6 +453,9 @@ pub struct Play {
     /// Set when the server sent us elsewhere; the shell reconnects there.
     pub transfer: Option<mcr_client::TransferTarget>,
     sky_factor: f32,
+    needles: crate::needles::Needles,
+    sun_turn: f32,
+    moon_phase: u8,
     pack_answers: Vec<bool>,
     conduct_answers: Vec<(bool, bool, i32)>,
     dialog_replies: Vec<mcr_client::DialogReply>,
@@ -688,6 +691,9 @@ impl Play {
             closed: None,
             transfer: None,
             sky_factor: 1.0,
+            needles: crate::needles::Needles::default(),
+            sun_turn: 0.0,
+            moon_phase: 0,
             attack_click: false,
             use_click: false,
             target: None,
@@ -953,10 +959,18 @@ impl Play {
             gliding: state.player.physics.fall_flying,
             crouching: state.player.physics.crouching,
             vel: state.player.physics.vel,
+            on_ground: state.player.physics.on_ground,
+            swimming: state.player.physics.swimming,
         };
         if let Some(entities) = &mut self.entities {
             entities.tick(state, sample);
         }
+        let body_yaw = self
+            .entities
+            .as_ref()
+            .map_or(self.yaw, |l| l.local_body_yaw(1.0));
+        self.needles
+            .tick(self.sun_turn, body_yaw, state.world.runs_normally);
         let running = state.world.runs_normally;
         if let Some(block_entities) = &mut self.block_entities
             && running
@@ -1377,11 +1391,14 @@ impl Play {
             return;
         };
         let (image, deco) = (crate::map::image(&map.colors), crate::map::decorations(map));
+        let labels = crate::map::labels(&mut self.gui.ui, map);
         if let Some(entities) = &mut self.entities {
-            entities.scene.set_map(id, image.clone(), deco.clone());
+            entities
+                .scene
+                .set_map(id, image.clone(), deco.clone(), labels.clone());
         }
         if let Some(hand) = &mut self.hand {
-            hand.set_map(id, image, deco);
+            hand.set_map(id, image, deco, labels);
         }
     }
 
@@ -1478,16 +1495,12 @@ impl Play {
                     crate::effects::lightning_sounds(audio, e);
                 }
             }
-            ClientEvent::Particle {
-                particle,
-                pos,
-                count,
-                delta,
-                speed,
-                always_show,
-            } => self
-                .effects
-                .emit(&particle, pos, delta, speed, count, always_show),
+            ClientEvent::Particle(packet) => {
+                self.effects.emit(&packet);
+                if self.effects.particles.take_elder_guardian() {
+                    self.ghost_age = Some(0);
+                }
+            }
             ClientEvent::BlockDestruction {
                 entity_id,
                 pos,
@@ -3055,6 +3068,8 @@ impl Play {
             boss_fog,
         });
         self.sky_factor = env.sky_factor;
+        self.sun_turn = (env.sun_angle / std::f32::consts::TAU).rem_euclid(1.0);
+        self.moon_phase = env.moon_phase;
         self.prepare_visuals(&camera, partial, aspect, &env);
         let screen_fx = self.screen_effects(&camera, partial, aspect);
 
@@ -3144,6 +3159,7 @@ impl Play {
                     camera.position.to_array(),
                     partial,
                     crosshair,
+                    self.hud_hidden,
                 );
                 nametags::draw(
                     &mut frame,
@@ -3151,7 +3167,10 @@ impl Play {
                     &TagParams {
                         camera: &camera,
                         framebuffer: size,
-                        opacity: self.options.text_background_opacity,
+                        opacity: nametags::background_opacity(
+                            self.options.background_for_chat_only,
+                            self.options.text_background_opacity,
+                        ),
                         state: &self.world.client.state,
                     },
                 );
@@ -3329,6 +3348,19 @@ impl Play {
     fn prepare_visuals(&mut self, camera: &Camera, partial: f32, aspect: f32, env: &Environment) {
         let state = &self.world.client.state;
         let size = self.render.renderer.size();
+        let item_world = self.needles.world(state, self.moon_phase);
+        let body_yaw = self
+            .entities
+            .as_ref()
+            .map_or(self.yaw, |l| l.local_body_yaw(partial));
+        let owner = crate::needles::local_owner(state, body_yaw);
+        crate::needles::apply_to_icons(self.gui.icons.context_mut(), &item_world, owner);
+        if let Some(hand) = &mut self.hand {
+            hand.set_item_world(item_world.clone(), owner);
+        }
+        if let Some(layer) = &mut self.entities {
+            layer.scene.set_item_world(item_world);
+        }
         if let Some(layer) = &mut self.entities {
             let cull = Cull {
                 camera_pos: camera.position.to_array(),

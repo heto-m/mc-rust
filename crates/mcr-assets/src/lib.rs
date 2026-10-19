@@ -29,7 +29,8 @@ pub use item_def::{
     SelectProp, SpecialKind, TimeSource, TintSource, mat4_apply, mat4_mul,
 };
 pub use item_eval::{
-    ChargeType, ItemContext, ItemLayer, ItemModels, ItemProps, LayerKind, LocalDateTime, PlainItem,
+    ChargeType, CompassInputs, ItemContext, ItemLayer, ItemModels, ItemProps, LayerKind,
+    LocalDateTime, PlainItem,
 };
 pub use model::{
     Builtin, DisplayContext, Element, FaceDef, GuiLight, ItemTransform, Material, ModelLoader,

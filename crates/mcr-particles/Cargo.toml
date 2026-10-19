@@ -14,6 +14,7 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+mcr-buf = { path = "../mcr-buf" }
 mcr-assets = { path = "../mcr-assets" }
 png.workspace = true
 criterion.workspace = true

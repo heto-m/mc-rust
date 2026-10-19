@@ -1,5 +1,5 @@
 use mcr_buf::{BlockPos, Identifier};
-use mcr_protocol::play::clientbound::world::{ExplosionParticle, SoundSource};
+use mcr_protocol::play::clientbound::world::{ExplosionParticle, LevelParticles, SoundSource};
 use mcr_protocol::types::Component;
 use mcr_protocol::types::{Particle, SoundEvent};
 use mcr_world::ChunkPos;
@@ -232,14 +232,7 @@ pub enum ClientEvent {
         source: Option<SoundSource>,
         name: Option<Identifier>,
     },
-    Particle {
-        particle: Particle,
-        pos: [f64; 3],
-        count: i32,
-        delta: [f32; 3],
-        speed: [f32; 3],
-        always_show: bool,
-    },
+    Particle(Box<LevelParticles>),
     LevelEvent {
         event: i32,
         pos: BlockPos,

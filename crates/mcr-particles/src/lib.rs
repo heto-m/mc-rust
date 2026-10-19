@@ -20,8 +20,8 @@ pub mod weather;
 
 use std::collections::HashMap;
 
-use mcr_protocol::play::clientbound::world::LevelParticles;
-use mcr_protocol::types::particle::{BlockParticleKind, Particle};
+use mcr_protocol::play::clientbound::world::{LevelParticles, ParticleRandomization};
+use mcr_protocol::types::particle::{BlockParticleKind, Particle, PositionSource};
 use mcr_render::glam::DVec3;
 use mcr_render::{EffectImage, Environment, OverlayCtx};
 
@@ -32,7 +32,7 @@ pub use sim::{POOL_CAP, Spark};
 use atlas::{DynamicSlots, to_slot};
 use render::Gpu;
 use rng::Rng;
-use sim::{Data, Kind, P, Pool, Scratch, Spawn, Tick};
+use sim::{Data, Kind, P, Pool, Scratch, Spawn, Target, Tick};
 
 const MAX_EMIT: i32 = 1024;
 const MAX_VELOCITY: f64 = 64.0;
@@ -57,6 +57,17 @@ pub trait ParticleWorld {
     fn fluid(&self, _x: i32, _y: i32, _z: i32) -> Option<(Fluid, f32)> {
         None
     }
+    fn is_air(&self, _x: i32, _y: i32, _z: i32) -> bool {
+        true
+    }
+    /// A still water source, where sulfur bubbles rise.
+    fn is_water_source(&self, x: i32, y: i32, z: i32) -> bool {
+        matches!(self.fluid(x, y, z), Some((Fluid::Water, _)))
+    }
+    /// An entity's position, for vibrations that travel to it.
+    fn entity_position(&self, _id: i32) -> Option<[f64; 3]> {
+        None
+    }
 }
 
 /// An empty world: no collision, full sky light, no fluids.
@@ -71,6 +82,19 @@ pub trait ParticleAssets {
     fn item_texture(&self, item: i32) -> Option<EffectImage>;
     /// A texture by path under `textures/`, like `item/slime_ball`.
     fn named_texture(&self, path: &str) -> Option<EffectImage>;
+    /// The `0xRRGGBB` colour of `falling_dust` for a block state.
+    fn block_dust_color(&self, _state: i32) -> Option<u32> {
+        None
+    }
+}
+
+/// The particles video setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Density {
+    #[default]
+    All,
+    Decreased,
+    Minimal,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -95,17 +119,30 @@ pub struct ParticleEngine {
     slots: DynamicSlots,
     uploads: Vec<(u32, Vec<u8>)>,
     tints: HashMap<u64, [f32; 3]>,
+    dust_colors: HashMap<i32, u32>,
     pools: [Vec<P>; 3],
     kinds: Vec<(Kind, Pool)>,
+    limit_overrides: Vec<bool>,
     rng: Rng,
     spawns: Vec<Spawn>,
     scratch: Scratch,
     camera: Option<DVec3>,
+    density: Density,
+    spores: usize,
+    elder_guardian: bool,
     gpu: Option<Gpu>,
 }
 
 fn finite3(v: [f64; 3]) -> bool {
     v.iter().all(|c| c.is_finite())
+}
+
+/// Vanilla `ParticleType#getOverrideLimiter` by registry id.
+pub fn overrides_limiter(type_id: i32) -> bool {
+    usize::try_from(type_id)
+        .ok()
+        .and_then(|i| PARTICLE_NAMES.get(i))
+        .is_some_and(|n| sim::overrides_limiter(n))
 }
 
 impl ParticleEngine {
@@ -116,12 +153,20 @@ impl ParticleEngine {
             slots: DynamicSlots::default(),
             uploads: Vec::new(),
             tints: HashMap::new(),
+            dust_colors: HashMap::new(),
             pools: [Vec::new(), Vec::new(), Vec::new()],
             kinds: PARTICLE_NAMES.iter().map(|n| sim::kind_of(n)).collect(),
+            limit_overrides: PARTICLE_NAMES
+                .iter()
+                .map(|n| sim::overrides_limiter(n))
+                .collect(),
             rng: Rng::new(0x9e37_79b9_7f4a_7c15),
             spawns: Vec::new(),
             scratch: Scratch::new(),
             camera: None,
+            density: Density::All,
+            spores: 0,
+            elder_guardian: false,
             gpu: None,
         }
     }
@@ -130,16 +175,26 @@ impl ParticleEngine {
         self.camera = position.is_finite().then_some(position);
     }
 
+    pub fn set_density(&mut self, density: Density) {
+        self.density = density;
+    }
+
     pub fn count(&self) -> usize {
         self.pools.iter().map(Vec::len).sum()
     }
 
     pub fn clear(&mut self) {
         self.pools.iter_mut().for_each(Vec::clear);
+        self.spores = 0;
     }
 
     pub fn atlas(&self) -> &ParticleAtlas {
         &self.atlas
+    }
+
+    /// Whether an `elder_guardian` particle arrived since the last call; the caller shows the ghost.
+    pub fn take_elder_guardian(&mut self) -> bool {
+        std::mem::take(&mut self.elder_guardian)
     }
 
     fn rect(
@@ -157,6 +212,17 @@ impl ParticleEngine {
         Some((uv, tint))
     }
 
+    fn dust_color(&mut self, state: i32) -> u32 {
+        if let Some(&c) = self.dust_colors.get(&state) {
+            return c;
+        }
+        let c = self.assets.block_dust_color(state).unwrap_or(0xFFFFFF);
+        if self.dust_colors.len() < 4096 {
+            self.dust_colors.insert(state, c);
+        }
+        c
+    }
+
     fn data_for(&mut self, particle: &Particle) -> (u16, Data) {
         let id = particle.type_id();
         let id16 = u16::try_from(id).unwrap_or(0);
@@ -165,7 +231,9 @@ impl ParticleEngine {
                 let key = *state as u32 as u64;
                 let marker_key = (3u64 << 40) | key;
                 match kind {
-                    BlockParticleKind::Block | BlockParticleKind::BlockCrumble => self
+                    BlockParticleKind::Block
+                    | BlockParticleKind::BlockCrumble
+                    | BlockParticleKind::DustPillar => self
                         .rect(key, |a| a.block_texture(*state))
                         .map_or(Data::None, |(rect, tint)| Data::Rect { rect, tint }),
                     BlockParticleKind::BlockMarker => self
@@ -173,7 +241,7 @@ impl ParticleEngine {
                             a.block_texture(*state).map(|(img, _)| (img, [1.0; 3]))
                         })
                         .map_or(Data::None, |(rect, tint)| Data::Rect { rect, tint }),
-                    _ => Data::None,
+                    BlockParticleKind::FallingDust => Data::Argb(self.dust_color(*state)),
                 }
             }
             Particle::Item(item) => {
@@ -182,7 +250,57 @@ impl ParticleEngine {
                     .map_or(Data::None, |(rect, tint)| Data::Rect { rect, tint })
             }
             Particle::Color { argb, .. } => Data::Argb(*argb as u32),
-            Particle::Spell { color, .. } => Data::Argb(*color as u32),
+            Particle::Spell { color, power, .. } => Data::Spell {
+                argb: *color as u32,
+                power: *power,
+            },
+            Particle::DragonBreath { power } => Data::Power(*power),
+            Particle::SculkCharge { roll } => Data::Roll(*roll),
+            Particle::Shriek { delay } => Data::Delay(*delay),
+            Particle::Geyser { water_blocks, .. } => Data::Geyser {
+                water_blocks: *water_blocks,
+                impulse: 0.0,
+            },
+            Particle::GeyserBase {
+                water_blocks,
+                burst_impulse_base,
+                ..
+            } => Data::Geyser {
+                water_blocks: *water_blocks,
+                impulse: *burst_impulse_base,
+            },
+            Particle::Vibration {
+                source,
+                arrival_ticks,
+            } => Data::Vibration {
+                target: match source {
+                    PositionSource::Block(p) => Target::Block([p.x, p.y, p.z]),
+                    PositionSource::Entity {
+                        entity_id,
+                        y_offset,
+                    } => Target::Entity {
+                        id: *entity_id,
+                        y_offset: *y_offset,
+                    },
+                },
+                ticks: *arrival_ticks,
+            },
+            Particle::Trail {
+                target,
+                color,
+                duration,
+            } => {
+                let t = DVec3::new(target.x, target.y, target.z);
+                if t.is_finite() {
+                    Data::Trail {
+                        target: t,
+                        color: *color as u32,
+                        ticks: *duration,
+                    }
+                } else {
+                    Data::None
+                }
+            }
             Particle::Dust { color, scale } => Data::Dust {
                 color: *color as u32,
                 scale: *scale,
@@ -208,7 +326,7 @@ impl ParticleEngine {
                     None => Data::None,
                 }
             }
-            _ => Data::None,
+            Particle::Modded { .. } => Data::None,
         };
         (id16, data)
     }
@@ -217,6 +335,14 @@ impl ParticleEngine {
         let Some(&(kind, pool)) = self.kinds.get(usize::from(spawn.type_id)) else {
             return;
         };
+        if kind == Kind::ElderGuardian {
+            self.elder_guardian = true;
+            return;
+        }
+        let spore = kind == Kind::Suspended(sim::Suspended::SporeAir);
+        if spore && self.spores >= sim::SPORE_LIMIT {
+            return;
+        }
         let list = &mut self.pools[pool as usize];
         if list.len() >= POOL_CAP {
             return;
@@ -227,12 +353,61 @@ impl ParticleEngine {
             .clamp(DVec3::splat(-MAX_VELOCITY), DVec3::splat(MAX_VELOCITY));
         if let Some(p) = sim::construct(&spawn, kind, &self.atlas, &mut self.rng) {
             list.push(p);
+            self.spores += usize::from(spore);
         }
     }
 
-    /// Mirrors `level_particles` with one speed for all axes: a positive `count` scatters particles
-    /// around `pos` by gaussian `delta` with gaussian velocity of magnitude `speed`; zero spawns a single
-    /// particle whose velocity is `delta * speed`.
+    /// Vanilla `ClientLevel#calculateParticleLevel`, rolled once per particle.
+    fn roll_density(&mut self, always_show: bool) -> Density {
+        let mut level = self.density;
+        if always_show && level == Density::Minimal && self.rng.below(10) == 0 {
+            level = Density::Decreased;
+        }
+        if level == Density::Decreased && self.rng.below(3) == 0 {
+            level = Density::Minimal;
+        }
+        level
+    }
+
+    /// Vanilla `ClientLevel#doAddParticle`: limiter-overriding particles always spawn, others only
+    /// within 32 blocks of the camera and unless the particle setting drops them.
+    fn add_checked(
+        &mut self,
+        (type_id, data): (u16, Data),
+        override_limiter: bool,
+        always_show: bool,
+        pos: DVec3,
+        vel: DVec3,
+    ) {
+        let level = self.roll_density(always_show);
+        let forced = override_limiter
+            || self
+                .limit_overrides
+                .get(usize::from(type_id))
+                .copied()
+                .unwrap_or(false);
+        if !forced {
+            if let Some(cam) = self.camera
+                && cam.distance_squared(pos) > MAX_DISTANCE_SQ
+            {
+                return;
+            }
+            if level == Density::Minimal {
+                return;
+            }
+        }
+        self.add(Spawn {
+            type_id,
+            pos,
+            aux: vel,
+            data,
+        });
+    }
+
+    /// Mirrors `level_particles` with one speed for all axes, ignoring the particle setting and the
+    /// distance limit: a positive `count` scatters particles around `pos` by gaussian `delta` with
+    /// gaussian velocity of magnitude `speed`; zero spawns a single particle whose velocity is
+    /// `delta * speed`.
     pub fn emit(
         &mut self,
         particle: &Particle,
@@ -241,24 +416,52 @@ impl ParticleEngine {
         speed: f32,
         count: i32,
     ) {
-        self.emit_inner(
-            particle,
-            pos,
-            delta.map(f64::from),
-            [f64::from(speed); 3],
+        let density = std::mem::replace(&mut self.density, Density::All);
+        self.emit_packet(&LevelParticles {
+            particle: particle.clone(),
+            override_limiter: true,
+            always_show: false,
+            x: pos[0],
+            y: pos[1],
+            z: pos[2],
+            x_dist: delta[0],
+            y_dist: delta[1],
+            z_dist: delta[2],
+            x_max_speed: speed,
+            y_max_speed: speed,
+            z_max_speed: speed,
             count,
-            true,
-        );
+            randomization: ParticleRandomization::Default,
+        });
+        self.density = density;
     }
 
-    /// Vanilla `level.addParticle`: one particle with exact velocity, skipped beyond the view range.
+    /// Vanilla `level.addParticle`: one particle with exact velocity, subject to the particle setting
+    /// and the 32-block limit unless its type overrides the limiter.
     pub fn add_particle(&mut self, particle: &Particle, pos: [f64; 3], vel: [f64; 3]) {
-        self.emit_inner(particle, pos, vel, [1.0; 3], 0, false);
+        self.add_particle_with(particle, false, false, pos, vel);
     }
 
-    /// Vanilla `level.addParticle` for particle types that override the limiter: shown at any distance.
-    pub fn add_particle_unlimited(&mut self, particle: &Particle, pos: [f64; 3], vel: [f64; 3]) {
-        self.emit_inner(particle, pos, vel, [1.0; 3], 0, true);
+    /// Vanilla `level.addParticle` with explicit `overrideLimiter` and `alwaysShow` flags.
+    pub fn add_particle_with(
+        &mut self,
+        particle: &Particle,
+        override_limiter: bool,
+        always_show: bool,
+        pos: [f64; 3],
+        vel: [f64; 3],
+    ) {
+        if !finite3(pos) || !finite3(vel) {
+            return;
+        }
+        let data = self.data_for(particle);
+        self.add_checked(
+            data,
+            override_limiter,
+            always_show,
+            DVec3::from_array(pos),
+            DVec3::from_array(vel),
+        );
     }
 
     /// A firework explosion spark; colours are `0xRRGGBB`.
@@ -289,62 +492,48 @@ impl ParticleEngine {
         });
     }
 
+    /// Vanilla `handleParticleEvent`, honouring both packet flags and the randomization type.
     pub fn emit_packet(&mut self, packet: &LevelParticles) {
-        self.emit_inner(
-            &packet.particle,
-            [packet.x, packet.y, packet.z],
-            [packet.x_dist, packet.y_dist, packet.z_dist].map(f64::from),
-            [packet.x_max_speed, packet.y_max_speed, packet.z_max_speed].map(f64::from),
-            packet.count,
-            packet.always_show,
-        );
-    }
-
-    fn emit_inner(
-        &mut self,
-        particle: &Particle,
-        pos: [f64; 3],
-        delta: [f64; 3],
-        speed: [f64; 3],
-        count: i32,
-        force: bool,
-    ) {
+        let pos = [packet.x, packet.y, packet.z];
+        let delta = [packet.x_dist, packet.y_dist, packet.z_dist].map(f64::from);
+        let speed = [packet.x_max_speed, packet.y_max_speed, packet.z_max_speed].map(f64::from);
+        let (override_limiter, always_show) = (packet.override_limiter, packet.always_show);
+        let (count, randomization) = (packet.count, packet.randomization);
         if !finite3(pos) || !finite3(delta) || !finite3(speed) {
             return;
         }
         let at = DVec3::from_array(pos);
-        if !force
-            && let Some(cam) = self.camera
-            && cam.distance_squared(at) > MAX_DISTANCE_SQ
-        {
-            return;
-        }
-        let (type_id, data) = self.data_for(particle);
+        let data = self.data_for(&packet.particle);
         let delta = DVec3::from_array(delta);
         let speed = DVec3::from_array(speed);
         if count <= 0 {
-            self.add(Spawn {
-                type_id,
-                pos: at,
-                aux: delta * speed,
-                data,
-            });
+            self.add_checked(data, override_limiter, always_show, at, delta * speed);
             return;
         }
         for _ in 0..count.min(MAX_EMIT) {
-            let g = |r: &mut Rng| r.gaussian();
-            let offset = DVec3::new(g(&mut self.rng), g(&mut self.rng), g(&mut self.rng)) * delta;
-            let vel = DVec3::new(g(&mut self.rng), g(&mut self.rng), g(&mut self.rng)) * speed;
-            self.add(Spawn {
-                type_id,
-                pos: at + offset,
-                aux: vel,
-                data,
-            });
+            let (offset, vel) = match randomization {
+                ParticleRandomization::Default => {
+                    let mut g = || self.rng.gaussian();
+                    let offset = DVec3::new(g(), g(), g()) * delta;
+                    (offset, DVec3::new(g(), g(), g()) * speed)
+                }
+                ParticleRandomization::Alternative
+                | ParticleRandomization::AlternativeWithSpeed => {
+                    let mut u = || self.rng.f64();
+                    let offset = DVec3::new(u(), u(), u()) * delta;
+                    let vel = if randomization == ParticleRandomization::AlternativeWithSpeed {
+                        DVec3::new(u(), u(), u()) * speed
+                    } else {
+                        speed
+                    };
+                    (offset, vel)
+                }
+            };
+            self.add_checked(data, override_limiter, always_show, at + offset, vel);
         }
     }
 
-    /// A single particle of a registry type by id; returns whether it was accepted.
+    /// A single particle of a registry type by name, ignoring the limiter.
     pub fn add_simple(&mut self, name: &str, pos: DVec3, vel: DVec3) {
         if !pos.is_finite() || !vel.is_finite() {
             return;
@@ -480,7 +669,10 @@ impl ParticleEngine {
                 if alive {
                     i += 1;
                 } else {
-                    list.swap_remove(i);
+                    let gone = list.swap_remove(i);
+                    if gone.kind == Kind::Suspended(sim::Suspended::SporeAir) {
+                        self.spores = self.spores.saturating_sub(1);
+                    }
                 }
             }
         }

@@ -16,6 +16,8 @@ pub enum Pose {
     Rest,
     /// Run a named keyframe animation set: `(name, time seconds, weight)`.
     Keyframes,
+    /// Run another rig on the entity's animation inputs, untouched by `hide` and `rot_overrides`.
+    Own(Rig),
 }
 
 /// A model plus texture drawn for an entity; layers are extra parts sharing the entity's rig.
@@ -33,6 +35,8 @@ pub struct Part {
     pub scale: f32,
     /// Part of the body an invisible entity hides; equipment layers and eyes are not.
     pub body: bool,
+    /// Drawn in the frame of this bone of the first part, then `Mat4` (model sixteenths).
+    pub anchor: Option<(&'static str, Mat4)>,
 }
 
 impl Part {
@@ -49,6 +53,7 @@ impl Part {
             offset: Vec3::ZERO,
             scale: 1.0,
             body: true,
+            anchor: None,
         }
     }
 

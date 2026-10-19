@@ -3,9 +3,9 @@
 use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use mcr_auth::textures::{SkinSource, fetch_skin, parse_textures};
+use mcr_auth::textures::{SkinSource, fetch_skin, fetch_texture, parse_textures};
 use mcr_client::PlayerList;
-use mcr_entity_model::{Skin, default_skin};
+use mcr_entity_model::{Cape, Skin, default_skin};
 use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
@@ -149,13 +149,29 @@ fn valid_skin_size(w: u32, h: u32) -> bool {
 fn download(source: &SkinSource) -> Option<Skin> {
     let bytes = fetch_skin(source).ok()?;
     let (width, height, rgba) = decode_png_rgba(&bytes, valid_skin_size)?;
+    let cape = source.cape.as_ref().and_then(|url| {
+        let bytes = fetch_texture(url).ok()?;
+        let (width, height, rgba) = decode_png_rgba(&bytes, valid_cape_size)?;
+        Some(Cape {
+            key: url.clone(),
+            width,
+            height,
+            rgba,
+        })
+    });
     Some(Skin {
         key: source.url.clone(),
         width,
         height,
         rgba,
         slim: source.slim,
+        cape,
     })
+}
+
+/// Capes are 64x32, or a whole multiple of it for high-resolution ones.
+fn valid_cape_size(w: u32, h: u32) -> bool {
+    (64..=1024).contains(&w) && w.is_multiple_of(64) && h.checked_mul(2) == Some(w)
 }
 
 /// The face, with the hat layer blended over it when worn, from a 64-wide skin.

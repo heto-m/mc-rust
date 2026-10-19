@@ -31,6 +31,8 @@ fn closeup() {
                 V::Boolean(b == "1")
             } else if let Some(b) = val.strip_prefix('y') {
                 V::Byte(b.parse().unwrap())
+            } else if let Some(o) = val.strip_prefix('o') {
+                V::OptionalUnsignedInt(o.parse().ok())
             } else if let Some(f) = val.strip_prefix('f') {
                 V::Float(f.parse().unwrap())
             } else {
@@ -50,8 +52,45 @@ fn closeup() {
         eq[3] = item(&c);
     }
     if let Ok(d) = std::env::var("CU_ITEMDATA") {
-        data = data.with(8, V::ItemStack(item(&d)));
+        let index = std::env::var("CU_ITEMIDX")
+            .ok()
+            .and_then(|i| i.parse().ok())
+            .unwrap_or(8);
+        data = data.with(index, V::ItemStack(item(&d)));
     }
+    let skin = std::env::var("CU_CAPE").is_ok().then(|| {
+        let px = |w: u32, h: u32, f: &dyn Fn(u32, u32) -> [u8; 4]| {
+            (0..w * h)
+                .flat_map(|i| f(i % w, i / w))
+                .collect::<Vec<u8>>()
+        };
+        mcr_entity_model::Skin {
+            key: "closeup".into(),
+            width: 64,
+            height: 64,
+            rgba: px(64, 64, &|x, y| {
+                [100 + (x * 2) as u8, 120, 90 + (y * 2) as u8, 255]
+            }),
+            slim: false,
+            cape: Some(mcr_entity_model::Cape {
+                key: "closeup".into(),
+                width: 64,
+                height: 32,
+                rgba: px(64, 32, &|x, _| {
+                    if x < 12 {
+                        [200, 30, 30, 255]
+                    } else {
+                        [30, 30, 200, 255]
+                    }
+                }),
+            }),
+        }
+    });
+    let cloak: Vec<f32> = std::env::var("CU_CLOAK")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|x| x.parse().ok())
+        .collect();
     let reg = TestRegistries::vanilla();
     let (w, hh) = (600u32, 600u32);
     let dist = env_f("CU_DIST", 3.5);
@@ -60,6 +99,26 @@ fn closeup() {
     for az in [0.0f32, 90.0, 180.0] {
         let mut v = EntityView::named(&ty, &data.0);
         v.equipment = Some(&eq);
+        v.id = 7;
+        v.player.skin = skin.as_ref();
+        if let [f, l, l2] = cloak[..] {
+            v.player.cloak = [f, l, l2];
+        }
+        v.player.extra_ears = std::env::var("CU_EARS").is_ok();
+        let floats = |name: &str| -> Vec<f32> {
+            std::env::var(name)
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|x| x.parse().ok())
+                .collect()
+        };
+        if let [l, r] = floats("CU_ROW")[..] {
+            v.vehicle.rowing = [l, r];
+        }
+        if let [hurt, dir, damage] = floats("CU_HURT")[..] {
+            (v.vehicle.hurt, v.vehicle.hurt_dir, v.vehicle.damage) = (hurt, dir, damage);
+        }
+        v.vehicle.bubble = env_f("CU_BUBBLE", 0.0);
         v.limb_amount = env_f("CU_WALK", 0.0);
         v.limb_swing = env_f("CU_SWING", 2.0);
         v.attack_time = env_f("CU_ATTACK", 0.0);

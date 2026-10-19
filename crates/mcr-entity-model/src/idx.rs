@@ -5,6 +5,8 @@ pub const SILENT: u8 = 4;
 pub const POSE: u8 = 6;
 
 pub const LIVING_FLAGS: u8 = 8;
+pub const LIVING_ARROWS: u8 = 12;
+pub const LIVING_STINGERS: u8 = 13;
 pub const MOB_FLAGS: u8 = 15;
 /// `AgeableMob` and most animals; piglins and zombies define their own.
 pub const BABY: u8 = 16;
@@ -94,6 +96,8 @@ pub const DOLPHIN_BABY: u8 = 16;
 
 pub const PLAYER_MAIN_HAND: u8 = 15;
 pub const PLAYER_MODEL_PARTS: u8 = 16;
+pub const PLAYER_SHOULDER_LEFT: u8 = 19;
+pub const PLAYER_SHOULDER_RIGHT: u8 = 20;
 
 pub const ARMOR_STAND_FLAGS: u8 = 15;
 pub const ARMOR_STAND_HEAD_POSE: u8 = 16;

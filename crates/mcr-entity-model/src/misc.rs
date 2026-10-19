@@ -355,10 +355,35 @@ fn lightning(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     });
 }
 
+/// `getVisualRotationYInDegrees` of the entity an item is drawn for: body yaw for living entities,
+/// the facing and turn of item frames, the plain yaw otherwise.
+pub(crate) fn owner_yaw(v: &EntityView<'_>) -> f32 {
+    if matches!(v.raw(9), Some(EntityDataValue::Float(_))) {
+        return v.body_yaw;
+    }
+    let frame = mcr_data::v26_3()
+        .entity_type_name(v.type_id as u32)
+        .is_some_and(|n| n.ends_with("item_frame"));
+    if !frame {
+        return v.yaw;
+    }
+    let (two_d, vertical) = match direction_of(v, idx::FRAME_DIRECTION) {
+        0 => (-1, -90),
+        1 => (-1, 90),
+        2 => (2, 0),
+        3 => (0, 0),
+        4 => (1, 0),
+        _ => (3, 0),
+    };
+    let rotation = v.int(idx::FRAME_ROTATION).unwrap_or(0).rem_euclid(8);
+    (180 + two_d * 90 + rotation * 45 + vertical) as f32
+}
+
+/// `HangingEntity.DATA_DIRECTION`; the server leaves out its default, south.
 fn direction_of(v: &EntityView<'_>, index: u8) -> u8 {
     match v.raw(index) {
         Some(EntityDataValue::Direction(d)) => d.id() as u8,
-        _ => 2,
+        _ => 3,
     }
 }
 
@@ -673,30 +698,77 @@ fn boat(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     let dir = if chest { "chest_boat" } else { "boat" };
     plan.rig = Rig::Static;
     plan.model_y = 0.0;
-    plan.extra_offset = Vec3::new(0.0, 0.375, 0.0);
-    plan.spin = std::f32::consts::FRAC_PI_2;
-    plan.body_yaw_offset = 0.0;
+    plan.pre_offset = Vec3::new(0.0, 0.375, 0.0);
+    let anim = &v.vehicle;
+    let mut post = Mat4::from_rotation_x(anim.wobble().to_radians());
+    if anim.bubble != 0.0 {
+        post *= Mat4::from_axis_angle(
+            Vec3::new(1.0, 0.0, 1.0).normalize(),
+            anim.bubble.to_radians(),
+        );
+    }
+    // Vanilla turns the model 90 degrees after the flip, which mirrors the turn.
+    plan.post_rot = post * Mat4::from_rotation_y(-std::f32::consts::FRAC_PI_2);
     plan.push(Part::new(
         format!("minecraft:{dir}/{wood}#main"),
         format!("entity/{dir}/{wood}"),
-    ));
+    ))
+    .hurt = false;
+    for (slot, time, right) in [
+        (Slot::LeftPaddle, anim.rowing[0], false),
+        (Slot::RightPaddle, anim.rowing[1], true),
+    ] {
+        plan.rot_overrides
+            .push((slot, paddle_rotation(time, right)));
+    }
+}
+
+/// `AbstractBoatModel.animatePaddle` in degrees, keeping the paddle's resting roll.
+pub(crate) fn paddle_rotation(time: f32, right: bool) -> [f32; 3] {
+    use std::f32::consts::PI;
+    let lerp = |t: f32, a: f32, b: f32| a + t.clamp(0.0, 1.0) * (b - a);
+    let x = lerp(((-time).sin() + 1.0) / 2.0, -PI / 3.0, -PI / 12.0);
+    let mut y = lerp(((-time + 1.0).sin() + 1.0) / 2.0, -PI / 4.0, PI / 4.0);
+    if right {
+        y = PI - y;
+    }
+    [x.to_degrees(), y.to_degrees(), 11.25]
+}
+
+/// `AbstractMinecartRenderer`'s per-entity jitter that keeps stacked carts from z-fighting.
+fn minecart_jitter(id: i32) -> Vec3 {
+    let seed = i64::from(id).wrapping_mul(493_286_711);
+    let seed = seed
+        .wrapping_mul(seed)
+        .wrapping_mul(4_392_167_121)
+        .wrapping_add(seed.wrapping_mul(98_761));
+    let axis = |shift: u32| (((seed >> shift) & 7) as f32 + 0.5) / 8.0 - 0.5;
+    Vec3::new(axis(16), axis(20), axis(24)) * 0.004
 }
 
 fn minecart(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     let name = short(cx.type_name(v).unwrap_or("minecraft:minecart")).to_owned();
     plan.rig = Rig::Static;
     plan.model_y = 0.0;
-    plan.extra_offset = Vec3::new(0.0, 0.375, 0.0);
-    plan.spin = std::f32::consts::FRAC_PI_2;
+    plan.skip_rotation = true;
+    let (offset, (yaw, pitch)) = match v.rail {
+        Some(r) => (Vec3::from(r.offset), r.angles.unwrap_or((v.yaw, v.pitch))),
+        None => (Vec3::ZERO, (v.yaw, v.pitch)),
+    };
+    let cart = Mat4::from_translation(minecart_jitter(v.id) + offset + Vec3::new(0.0, 0.375, 0.0))
+        * Mat4::from_rotation_y((180.0 - yaw).to_radians())
+        * Mat4::from_rotation_z((-pitch).to_radians())
+        * Mat4::from_rotation_x(v.vehicle.wobble().to_radians());
+    plan.post_rot = cart;
     plan.push(Part::new(
         format!("minecraft:{name}#main"),
         "entity/minecart/minecart",
-    ));
+    ))
+    .hurt = false;
     let Some((state, offset)) = minecart_contents(&name, v) else {
         return;
     };
-    let mut local = Mat4::from_rotation_y((180.0 - v.body_yaw).to_radians() + plan.spin)
-        * Mat4::from_translation(Vec3::new(0.0, 0.375, 0.0))
+    let mut local = cart
         * Mat4::from_scale(Vec3::splat(0.75))
         * Mat4::from_translation(Vec3::new(-0.5, (offset - 8) as f32 / 16.0, 0.5))
         * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
@@ -923,5 +995,37 @@ mod tests {
         assert!(hidden_while_fresh("minecraft:small_fireball"));
         assert!(!hidden_while_fresh("minecraft:item"));
         assert!(!hidden_while_fresh("minecraft:dragon_fireball"));
+    }
+
+    #[test]
+    fn paddles_rest_at_their_vanilla_pose_and_mirror() {
+        let left = paddle_rotation(0.0, false);
+        let right = paddle_rotation(0.0, true);
+        assert!((left[0] - (-37.5)).abs() < 1e-3, "{left:?}");
+        assert!((left[1] + right[1] - 180.0).abs() < 1e-3);
+        assert_eq!(left[2], 11.25);
+        let swung = paddle_rotation(std::f32::consts::FRAC_PI_2, false);
+        assert!((swung[0] - (-60.0)).abs() < 1e-3, "{swung:?}");
+    }
+
+    #[test]
+    fn vehicle_wobble_needs_hurt_time() {
+        let mut anim = crate::view::VehicleAnim {
+            hurt: 5.0,
+            hurt_dir: 1.0,
+            damage: 10.0,
+            ..Default::default()
+        };
+        assert!((anim.wobble() - 5f32.sin() * 5.0).abs() < 1e-5);
+        anim.hurt = -0.5;
+        assert_eq!(anim.wobble(), 0.0);
+    }
+
+    #[test]
+    fn minecart_jitter_is_tiny_and_per_entity() {
+        for id in [-5, 0, 1, 7, i32::MAX] {
+            assert!(minecart_jitter(id).abs().max_element() <= 0.002);
+        }
+        assert_ne!(minecart_jitter(1), minecart_jitter(2));
     }
 }

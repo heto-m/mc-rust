@@ -128,7 +128,17 @@ fn compass_and_clock_dispatch_with_defaults() {
         models_of(&items, "clock", &PlainItem, &ctx),
         ["item/clock_00"]
     );
-    ctx.compass_angle = 5.0 / 32.0;
+    ctx.compass = mcr_assets::CompassInputs {
+        owner: Some(([0.5, 64.0, 0.5], 0.0)),
+        spawn: Some([0, 64, 100]),
+        ..Default::default()
+    };
+    assert_eq!(
+        models_of(&items, "compass", &PlainItem, &ctx),
+        ["item/compass_16"]
+    );
+    ctx.compass.spawn = None;
+    ctx.compass.spin = 5.0 / 32.0;
     assert_eq!(
         models_of(&items, "compass", &PlainItem, &ctx),
         ["item/compass_21"]

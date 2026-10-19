@@ -3,7 +3,8 @@ use mcr_render::wgpu;
 use mcr_render::{Environment, OverlayCtx};
 
 use crate::atlas::{DYNAMIC_SIZE, ParticleAtlas, SLOT, Uv};
-use crate::sim::{self, Kind, Light, P, POOL_CAP, Pool};
+use crate::sim::{self, Kind, Light, P, POOL_CAP, Pool, fade};
+use glam::Quat;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -277,6 +278,36 @@ impl Gpu {
     }
 }
 
+/// `roll.y` above 1 marks a quad that turns about the vertical axis only (vanilla `LOOKAT_Y`).
+const LOOKAT_Y: [f32; 3] = [2.0, 0.0, 0.0];
+
+/// A fixed orientation as the quaternion's vector part with `w >= 0`, which the shader rebuilds.
+fn fixed(q: Quat) -> [f32; 3] {
+    let q = if q.w < 0.0 { -q } else { q };
+    let v = [q.x, q.y, q.z];
+    if v == [0.0; 3] { [1.0e-6, 0.0, 0.0] } else { v }
+}
+
+/// The extra orientation of quads that do not face the camera.
+fn orientation(p: &P, partial: f32) -> Option<[f32; 3]> {
+    match p.kind {
+        Kind::TrialDetect => Some(LOOKAT_Y),
+        Kind::Shriek => Some(fixed(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_3))),
+        Kind::Vibration => {
+            let lerp = |a: f32, b: f32| b + (a - b) * partial;
+            let rot = lerp(p.aux[0], p.aux[1]);
+            let pitch = lerp(p.aux[2], p.aux[3]) + std::f32::consts::FRAC_PI_2;
+            let sway = ((p.age as f32 + partial - std::f32::consts::TAU) * 0.05).sin() * 2.0;
+            Some(fixed(
+                Quat::from_rotation_y(rot)
+                    * Quat::from_rotation_x(-pitch)
+                    * Quat::from_rotation_y(sway),
+            ))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn build_instances(
     pools: &[Vec<P>; 3],
     atlas: &ParticleAtlas,
@@ -290,7 +321,7 @@ pub(crate) fn build_instances(
         out.clear();
         for p in list.iter().take(POOL_CAP) {
             let size = sim::quad_size(p, partial);
-            if size <= 0.0 || p.kind == Kind::Seed {
+            if size <= 0.0 || p.kind.invisible() || (p.kind == Kind::Shriek && p.aux[0] > 0.0) {
                 continue;
             }
             let pos = p.prev + (p.pos - p.prev) * f64::from(partial) - camera;
@@ -300,23 +331,26 @@ pub(crate) fn build_instances(
                 Light::Full => (block, sky) = (15.0, 15.0),
                 Light::BlockMax => block = 15.0,
                 Light::Emission => block += (15.0 - block) * sim::emission(p, partial),
+                Light::Firefly => {
+                    let t = ((p.age as f32 + partial) / p.life.max(1) as f32).clamp(0.0, 1.0);
+                    (block, sky) = ((255.0 * fade(t, 0.1, 0.3)).floor() / 16.0, 0.0);
+                }
             }
             let lm = lightmap
                 .get((sky as usize).min(15) * 16 + (block as usize).min(15))
                 .copied()
                 .unwrap_or([1.0; 4]);
-            let uv = if p.kind == sim::Kind::Marker {
-                p.rect
-            } else if pool == Pool::Terrain as usize {
-                Uv {
+            let uv = match p.kind {
+                Kind::Marker => p.rect,
+                Kind::Terrain | Kind::Goo => Uv {
                     u0: p.rect.u0 + (p.rect.u1 - p.rect.u0) * p.sub[0] / 4.0,
                     v0: p.rect.v0 + (p.rect.v1 - p.rect.v0) * p.sub[1] / 4.0,
                     u1: p.rect.u0 + (p.rect.u1 - p.rect.u0) * (p.sub[0] + 1.0) / 4.0,
                     v1: p.rect.v0 + (p.rect.v1 - p.rect.v0) * (p.sub[1] + 1.0) / 4.0,
-                }
-            } else {
-                atlas.uv(p.sprite)
+                },
+                _ => atlas.uv(p.sprite),
             };
+            let [qx, qy, qz] = orientation(p, partial).unwrap_or([0.0; 3]);
             out.push(Instance {
                 pos_size: [pos.x as f32, pos.y as f32, pos.z as f32, size],
                 uv: [uv.u0, uv.v0, uv.u1, uv.v1],
@@ -326,12 +360,7 @@ pub(crate) fn build_instances(
                     p.color[2] * lm[2],
                     sim::alpha(p, partial),
                 ],
-                roll: [
-                    p.prev_roll + (p.roll - p.prev_roll) * partial,
-                    0.0,
-                    0.0,
-                    0.0,
-                ],
+                roll: [p.prev_roll + (p.roll - p.prev_roll) * partial, qx, qy, qz],
             });
         }
     }

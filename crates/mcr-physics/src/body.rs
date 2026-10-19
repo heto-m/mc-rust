@@ -78,6 +78,8 @@ pub struct BodyFlags {
     pub loyalty: u8,
     /// The owner's eye a loyal trident returns to, or the entity an attached rocket rides with.
     pub anchor: Option<[f64; 3]>,
+    /// A hurting projectile's `accelerationPower` from `projectile_power`.
+    pub acceleration: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -388,11 +390,16 @@ impl Body {
         data: &PhysicsData,
         scratch: &mut BodyScratch,
     ) {
-        let (accel, inertia, liquid) = match self.kind {
+        let (default_accel, inertia, liquid) = match self.kind {
             BodyKind::WindCharge => (0.0, 1.0, 1.0),
             BodyKind::WitherSkull if self.flags.dangerous => (0.1, 0.73f32, 0.8f32),
             _ => (0.1, 0.95, 0.8),
         };
+        let accel = self
+            .flags
+            .acceleration
+            .filter(|a| a.is_finite())
+            .map_or(default_accel, |a| a.clamp(-MAX_SPEED, MAX_SPEED));
         let k = if self.in_water(world, data) {
             liquid
         } else {

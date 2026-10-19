@@ -27,6 +27,7 @@ mod scene;
 mod skin;
 mod special;
 mod texcache;
+mod vehicles;
 mod view;
 
 pub use anim::{BoundAnimation, catmull_rom, sample};
@@ -46,8 +47,8 @@ pub use gpu::{
     OUTLINE_COLOR_FORMAT, OUTLINE_DEPTH_FORMAT, PartInstance, Pipeline, TargetFormats, TexId,
 };
 pub use humanoids::default_skin;
-pub use items::clone_count;
-pub use maps::{MapDecoration, stack_map_id};
+pub use items::{ItemOwner, ItemWorld, clone_count};
+pub use maps::{LABEL_SCALE, MapDecoration, MapLabels, stack_map_id};
 pub use misc::{cluster_offset, display_local, hidden_while_fresh};
 pub use model::{Bone, BoneId, Model};
 pub use plan::{Attach, AttachKind, FreeGeo, ItemContext, ItemSource, Part, Plan};
@@ -57,9 +58,10 @@ pub use rig::{
 };
 pub use scene::{EntityScene, FrameParams, NameTag, SceneStats, ShadowGround};
 pub use texcache::TextureCache;
+pub use vehicles::{RailPose, RailShape, rail_pose};
 pub use view::{
-    BedFacing, BodyVisibility, EntityData, EntityView, EventAnim, Glide, NoData, PlayerView,
-    Registries, Skin, slot,
+    BedFacing, BodyVisibility, Cape, EntityData, EntityView, EventAnim, Glide, NoData, PlayerView,
+    Registries, Skin, VehicleAnim, slot,
 };
 
 pub use glam;

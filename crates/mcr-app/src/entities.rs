@@ -10,8 +10,8 @@ use mcr_entity_model::mcr_protocol::types::entity_data::{EntityDataValue, Pose a
 use mcr_entity_model::wgpu;
 use mcr_entity_model::{
     BodyVisibility, DisplayTrack, EntityData, EntityScene, EntityView, FrameParams, Glide,
-    LightInfo, NoData, PlayerView, PoseLerp, Registries, SceneAssets, TargetFormats, display_local,
-    hidden_while_fresh, idx, slot, teleport_duration,
+    LightInfo, NoData, PlayerView, PoseLerp, RailShape, Registries, SceneAssets, TargetFormats,
+    VehicleAnim, display_local, hidden_while_fresh, idx, rail_pose, slot, teleport_duration,
 };
 use mcr_physics::Pose as PhysPose;
 use mcr_protocol::play::serverbound::Facing;
@@ -120,9 +120,160 @@ pub struct Track {
     use_ticks: u32,
     use_off: bool,
     glide: GlideTrack,
+    cloak: CloakTrack,
+    boat: BoatTrack,
     display: DisplayTrack,
     display_kind: DisplayKind,
     pose_lerp: PoseLerp,
+}
+
+/// `ClientAvatarState`: the cape's lagging anchor, walk bob and walked distance.
+#[derive(Debug, Clone, Copy, Default)]
+struct CloakTrack {
+    cloak: [f64; 3],
+    prev: [f64; 3],
+    bob: f32,
+    prev_bob: f32,
+    walk: f32,
+    prev_walk: f32,
+}
+
+impl CloakTrack {
+    /// `pos` is where the player stood when the tick began; `bob` is `updateBob`'s target.
+    fn tick(&mut self, pos: [f64; 3], bob: f32, walked: f32) {
+        self.prev_walk = self.walk;
+        self.walk += walked;
+        self.prev = self.cloak;
+        for ((cloak, prev), p) in self.cloak.iter_mut().zip(&mut self.prev).zip(pos) {
+            let d = p - *cloak;
+            if d.abs() > 10.0 || !d.is_finite() {
+                *cloak = p;
+                *prev = p;
+            } else {
+                *cloak += d * 0.25;
+            }
+        }
+        self.prev_bob = self.bob;
+        self.bob += (bob - self.bob) * 0.4;
+    }
+
+    /// `extractCapeState`: flap, lean and sideways lean in degrees.
+    fn view(&self, partial: f32, pos: [f64; 3], body_yaw: f32, fall_flying: f32) -> [f32; 3] {
+        let cloak = lerp3(self.prev, self.cloak, f64::from(partial));
+        let d = [cloak[0] - pos[0], cloak[1] - pos[1], cloak[2] - pos[2]].map(|x| x as f32);
+        let (fx, fz) = (body_yaw.to_radians().sin(), -body_yaw.to_radians().cos());
+        let lean = ((d[0] * fx + d[2] * fz) * 100.0 * (1.0 - fall_flying)).clamp(0.0, 150.0);
+        let lean2 = ((d[0] * fz - d[2] * fx) * 100.0).clamp(-20.0, 20.0);
+        let bob = lerp(self.prev_bob, self.bob, partial);
+        let walk = lerp(self.prev_walk, self.walk, partial);
+        let flap = (d[1] * 10.0).clamp(-6.0, 32.0) + (walk * 6.0).sin() * 32.0 * bob;
+        [flap, lean, lean2]
+    }
+}
+
+/// `AbstractBoat`'s client-side paddle phases and bubble-column wobble.
+#[derive(Debug, Clone, Copy, Default)]
+struct BoatTrack {
+    paddles: [f32; 2],
+    rowing: [bool; 2],
+    bubble_multiplier: f32,
+    bubble: f32,
+    prev_bubble: f32,
+}
+
+impl BoatTrack {
+    fn tick(&mut self, data: &FxHashMap<u8, EntityDataValue>, age: u32) {
+        let flag = |i: u8| matches!(data.get(&i), Some(EntityDataValue::Boolean(true)));
+        self.rowing = [flag(BOAT_PADDLE_LEFT), flag(BOAT_PADDLE_RIGHT)];
+        for (p, on) in self.paddles.iter_mut().zip(self.rowing) {
+            *p = if on {
+                (*p + PI / 8.0) % (PI * 16.0)
+            } else {
+                0.0
+            };
+        }
+        let bubbling =
+            matches!(data.get(&BOAT_BUBBLE_TIME), Some(EntityDataValue::Int(t)) if *t > 0);
+        self.bubble_multiplier =
+            (self.bubble_multiplier + if bubbling { 0.05 } else { -0.1 }).clamp(0.0, 1.0);
+        self.prev_bubble = self.bubble;
+        self.bubble = 10.0 * (0.5 * f64::from(age)).sin() as f32 * self.bubble_multiplier;
+    }
+
+    fn rowing_time(&self, side: usize, partial: f32) -> f32 {
+        if self.rowing[side] {
+            let p = self.paddles[side];
+            lerp(p - PI / 8.0, p, partial.clamp(0.0, 1.0))
+        } else {
+            0.0
+        }
+    }
+}
+
+const BOAT_PADDLE_LEFT: u8 = 11;
+const BOAT_PADDLE_RIGHT: u8 = 12;
+const BOAT_BUBBLE_TIME: u8 = 13;
+
+fn is_boat(name: &str) -> bool {
+    name.ends_with("boat") || name.ends_with("raft")
+}
+
+/// `VehicleEntity` hurt state for boats and minecarts, plus the boat's own animation.
+fn vehicle_anim(
+    name: &str,
+    data: &FxHashMap<u8, EntityDataValue>,
+    t: &Track,
+    partial: f32,
+) -> VehicleAnim {
+    let int = |i: u8| match data.get(&i) {
+        Some(EntityDataValue::Int(v)) => *v,
+        _ => 0,
+    };
+    let damage = match data.get(&10) {
+        Some(EntityDataValue::Float(d)) if d.is_finite() => d.clamp(0.0, 1.0e4),
+        _ => 0.0,
+    };
+    let mut anim = VehicleAnim {
+        hurt: int(8).clamp(0, 1000) as f32 - partial,
+        hurt_dir: int(9).clamp(-1, 1) as f32,
+        damage: (damage - partial).max(0.0),
+        ..VehicleAnim::default()
+    };
+    if is_boat(name) {
+        anim.rowing = [
+            t.boat.rowing_time(0, partial),
+            t.boat.rowing_time(1, partial),
+        ];
+        anim.bubble = lerp(t.boat.prev_bubble, t.boat.bubble, partial);
+    }
+    anim
+}
+
+fn rail_shape(chunks: &ChunkStore, b: [i32; 3]) -> Option<RailShape> {
+    let state = chunks.block(b[0], b[1], b[2])?.0;
+    let data = mcr_data::v26_3();
+    let name = data.state_block_name(state)?;
+    if !matches!(
+        name,
+        "minecraft:rail"
+            | "minecraft:powered_rail"
+            | "minecraft:detector_rail"
+            | "minecraft:activator_rail"
+    ) {
+        return None;
+    }
+    data.state_properties(state)
+        .find_map(|(k, v)| (k == "shape").then_some(v))
+        .and_then(RailShape::parse)
+}
+
+/// `AbstractClientPlayer.updateBob`'s target.
+fn bob_target(on_ground: bool, dead: bool, swimming: bool, vel: [f64; 3]) -> f32 {
+    if on_ground && !dead && !swimming {
+        (vel[0].hypot(vel[2]) as f32).min(0.1)
+    } else {
+        0.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,6 +394,8 @@ impl Track {
             use_ticks: 0,
             use_off: false,
             glide: GlideTrack::default(),
+            cloak: CloakTrack::default(),
+            boat: BoatTrack::default(),
             display: DisplayTrack::default(),
             display_kind: DisplayKind::None,
             pose_lerp: PoseLerp::default(),
@@ -263,6 +416,9 @@ impl Track {
             1.0,
         );
         self.glide.tick(local.gliding, local.crouching, local.vel);
+        let walked = (self.pos[0] - self.prev_pos[0]).hypot(self.pos[2] - self.prev_pos[2]) as f32;
+        let bob = bob_target(local.on_ground, local.dead, local.swimming, local.vel);
+        self.cloak.tick(self.prev_pos, bob, walked * 0.6);
         if !local.dead {
             self.death = 0;
         }
@@ -356,6 +512,8 @@ pub struct LocalSample {
     pub gliding: bool,
     pub crouching: bool,
     pub vel: [f64; 3],
+    pub on_ground: bool,
+    pub swimming: bool,
 }
 
 pub struct EntityLayer {
@@ -367,7 +525,7 @@ pub struct EntityLayer {
     player_type: i32,
     scale_attribute: Option<i32>,
     tick: u64,
-    drawn_list: Vec<(i32, [f64; 3], f32, bool)>,
+    drawn_list: Vec<(i32, [f64; 3], bool)>,
     texts: TextDisplays,
     pub last_drawn: usize,
     pub last_culled: usize,
@@ -560,6 +718,17 @@ impl EntityLayer {
                 );
                 t.glide.tick(gliding, crouching, e.velocity);
             }
+            if name.is_some_and(is_boat) {
+                t.boat.tick(&e.data, t.age);
+            }
+            if e.kind == self.player_type {
+                let swimming = matches!(
+                    e.data.get(&6),
+                    Some(EntityDataValue::Pose(DataPose::Swimming))
+                );
+                let bob = bob_target(e.on_ground, dead, swimming, e.velocity);
+                t.cloak.tick(t.prev_pos, bob, 0.0);
+            }
         }
         let tick = self.tick;
         self.tracks.retain(|_, t| t.seen == tick);
@@ -697,6 +866,8 @@ impl EntityLayer {
                 swimming: cx.state.player.physics.swimming,
                 using_item: cx.local_using,
                 skin: cx.skins.get(cx.state.uuid),
+                cloak: cloak_of(local, &v, cx.partial),
+                extra_ears: cx.state.name == "deadmau5",
                 ..PlayerView::default()
             };
             v.light = light_at(&cx.state.chunks, v.pos, eye_height(data, *player_type));
@@ -746,7 +917,6 @@ impl EntityLayer {
                 drawn_list.push((
                     e.id,
                     pos,
-                    h * scale,
                     matches!(
                         e.data.get(&6),
                         Some(EntityDataValue::Pose(DataPose::Crouching))
@@ -763,6 +933,12 @@ impl EntityLayer {
                 view.leash = leash_line(cx, tracks, data, e, &view, scale);
                 view.fuse = e.fuse_remaining(cx.partial);
                 view.swelling = e.swelling(cx.partial);
+                if is_boat(name) || name.ends_with("minecart") {
+                    view.vehicle = vehicle_anim(name, &e.data, t, cx.partial);
+                }
+                if name.ends_with("minecart") {
+                    view.rail = rail_pose(pos, |b| rail_shape(&cx.state.chunks, b));
+                }
                 apply_events(&mut view, cx.events.view(e.id, cx.partial));
                 if e.kind == *player_type {
                     view.player = PlayerView {
@@ -770,6 +946,8 @@ impl EntityLayer {
                         swimming: view.pose() == DataPose::Swimming,
                         using_item: view.living_flag(0),
                         skin: cx.skins.get(e.uuid),
+                        cloak: cloak_of(t, &view, cx.partial),
+                        extra_ears: cx.state.players.name_of(e.uuid) == Some("deadmau5"),
                         ..PlayerView::default()
                     };
                 }
@@ -907,11 +1085,16 @@ impl EntityLayer {
         v
     }
 
+    /// The local player's body yaw in degrees, as the entity renderer turns it.
+    pub fn local_body_yaw(&self, partial: f32) -> f32 {
+        lerp_degrees(self.local.prev_body, self.local.body, partial)
+    }
+
     pub fn drawn_entities(
         &self,
         _state: &ClientState,
         _partial: f32,
-    ) -> impl Iterator<Item = (i32, [f64; 3], f32, bool)> + '_ {
+    ) -> impl Iterator<Item = (i32, [f64; 3], bool)> + '_ {
         self.drawn_list.iter().copied()
     }
 
@@ -1331,6 +1514,11 @@ fn make_view<'a>(
     v
 }
 
+fn cloak_of(t: &Track, v: &EntityView<'_>, partial: f32) -> [f32; 3] {
+    let pos = lerp3(t.prev_pos, t.pos, f64::from(partial));
+    t.cloak.view(partial, pos, v.body_yaw, v.glide.scale())
+}
+
 /// The bed a living entity in the sleeping pose lies in (its synced sleeping position, index 14).
 fn bed_of(state: &ClientState, v: &EntityView<'_>) -> Option<mcr_entity_model::BedFacing> {
     use mcr_entity_model::BedFacing as B;
@@ -1417,6 +1605,8 @@ mod tests {
             gliding: false,
             crouching: false,
             vel: [0.0; 3],
+            on_ground: true,
+            swimming: false,
         };
         let mut t = Track::new([0.0; 3], 0.0, 0.0, 0.0, true);
         t.death = 1;

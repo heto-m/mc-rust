@@ -33,6 +33,7 @@ mod mods;
 mod mods_ui;
 mod movement_sounds;
 mod nametags;
+mod needles;
 mod net_world;
 mod outline;
 mod overlays;

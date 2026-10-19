@@ -652,17 +652,21 @@ fn rabbit(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
 
 fn parrot(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     plan.rig = Rig::Parrot;
-    let name = match v.int(idx::PARROT_VARIANT).unwrap_or(0) {
-        1 => "blue",
-        2 => "green",
-        3 => "yellow_blue",
-        4 => "grey",
-        _ => "red_blue",
-    };
     plan.push(Part::new(
         "minecraft:parrot#main",
-        format!("entity/parrot/parrot_{name}"),
+        parrot_texture(v.int(idx::PARROT_VARIANT).unwrap_or(0)),
     ));
+}
+
+/// `ParrotRenderer.getVariantTexture`; unknown ids fall back to red-blue like `Variant.byId`.
+pub(crate) fn parrot_texture(variant: i32) -> &'static str {
+    match variant {
+        1 => "entity/parrot/parrot_blue",
+        2 => "entity/parrot/parrot_green",
+        3 => "entity/parrot/parrot_yellow_blue",
+        4 => "entity/parrot/parrot_grey",
+        _ => "entity/parrot/parrot_red_blue",
+    }
 }
 
 fn axolotl(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {

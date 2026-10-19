@@ -3,8 +3,8 @@ use std::sync::{Arc, OnceLock};
 
 use glam::{Mat4, Quat, Vec3};
 use mcr_assets::{
-    BakedItemModel, ChargeType, DisplayContext, Identifier, ItemBaker, ItemContext as AssetCtx,
-    ItemLayer, ItemProps, LayerKind, ModelBaker,
+    BakedItemModel, ChargeType, CompassInputs, DisplayContext, Identifier, ItemBaker,
+    ItemContext as AssetCtx, ItemLayer, ItemProps, LayerKind, ModelBaker,
 };
 use mcr_protocol::types::ItemStack;
 use mcr_protocol::types::component::{DataComponent, component_type_id};
@@ -47,6 +47,30 @@ struct Key {
     context: ItemContext,
     using: u8,
     variant: u64,
+    /// The models a compass or clock picked from the world inputs.
+    world: u64,
+}
+
+/// World inputs of item models that read compass needles or the clock.
+#[derive(Clone, Debug, Default)]
+pub struct ItemWorld {
+    pub day_fraction: f32,
+    pub random: f32,
+    pub moon_phase_fraction: f32,
+    pub dimension: String,
+    /// Spawn, recovery target and spin; the owner comes from [`ItemOwner`].
+    pub compass: CompassInputs,
+    /// The local player's smoothed needle, used when it owns the item.
+    pub local_wobble: Option<f32>,
+    pub local_id: Option<i32>,
+}
+
+/// The entity an item is drawn for: id, position and `getVisualRotationYInDegrees`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ItemOwner {
+    pub id: i32,
+    pub pos: [f64; 3],
+    pub yaw: f32,
 }
 
 #[derive(Debug)]
@@ -59,6 +83,9 @@ pub struct ItemGeometry {
     blocks: HashMap<i32, Option<Arc<ItemGeo>>>,
     bakes: u32,
     evicted: Vec<ModelId>,
+    pub(crate) world: ItemWorld,
+    pub(crate) owner: Option<ItemOwner>,
+    reads_world: FxHashMap<i32, bool>,
 }
 
 struct StackProps<'a> {
@@ -73,9 +100,30 @@ impl StackProps<'_> {
     }
 }
 
+fn layers_hash(layers: &[ItemLayer]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    for layer in layers {
+        if let LayerKind::Model(id) = &layer.kind {
+            id.hash(&mut h);
+        }
+    }
+    h.finish() | 1
+}
+
 impl ItemProps for StackProps<'_> {
     fn count(&self) -> i32 {
         self.stack.count
+    }
+
+    fn lodestone_target(&self) -> Option<(&str, [i32; 3])> {
+        match self.component("lodestone_tracker") {
+            Some(DataComponent::LodestoneTracker(t)) => t
+                .target
+                .as_ref()
+                .map(|g| (g.dimension.as_str(), [g.pos.x, g.pos.y, g.pos.z])),
+            _ => None,
+        }
     }
 
     fn max_stack_size(&self) -> i32 {
@@ -349,7 +397,40 @@ impl ItemGeometry {
             blocks: HashMap::new(),
             bakes: 0,
             evicted: Vec::new(),
+            world: ItemWorld::default(),
+            owner: None,
+            reads_world: FxHashMap::default(),
         }
+    }
+
+    fn reads_world(&mut self, item: i32) -> bool {
+        if let Some(&r) = self.reads_world.get(&item) {
+            return r;
+        }
+        let r = u32::try_from(item)
+            .ok()
+            .and_then(|i| mcr_data::v26_3().item_name(i))
+            .and_then(|name| self.assets.items.get(&Identifier::parse(name)))
+            .is_some_and(|def| def.root.reads_world());
+        if self.reads_world.len() < 4096 {
+            self.reads_world.insert(item, r);
+        }
+        r
+    }
+
+    fn world_context(&self, ctx: &mut AssetCtx) {
+        let w = &self.world;
+        ctx.day_fraction = w.day_fraction;
+        ctx.random = w.random;
+        ctx.moon_phase_fraction = w.moon_phase_fraction;
+        ctx.dimension.clone_from(&w.dimension);
+        ctx.compass = w.compass;
+        ctx.compass.owner = self.owner.map(|o| (o.pos, o.yaw));
+        ctx.compass.seed = self.owner.map_or(0, |o| o.id);
+        ctx.compass.wobble = self
+            .owner
+            .filter(|o| Some(o.id) == w.local_id)
+            .and(w.local_wobble);
     }
 
     pub fn item(&mut self, stack: &ItemStack, context: ItemContext) -> Option<Arc<ItemGeo>> {
@@ -363,7 +444,8 @@ impl ItemGeometry {
         context: ItemContext,
         using: Option<(f32, f32)>,
     ) -> Option<Arc<ItemGeo>> {
-        if stack.components.is_empty() && using.is_none() {
+        let dynamic = self.reads_world(stack.item);
+        if stack.components.is_empty() && using.is_none() && !dynamic {
             let key = Key {
                 item: stack.item,
                 dyed: 0,
@@ -371,6 +453,7 @@ impl ItemGeometry {
                 context,
                 using: 0,
                 variant: 0,
+                world: 0,
             };
             if let Some(hit) = self.cache.get(&key) {
                 return hit.clone();
@@ -394,21 +477,7 @@ impl ItemGeometry {
         let model_hash = known_model
             .map_or(0, |m| m.bytes().fold(7u64, |h, b| h * 31 + u64::from(b)))
             ^ u64::from(broken) << 63;
-        let key = Key {
-            item: stack.item,
-            dyed: props.dyed_color().map_or(0, |c| c & 0x00FF_FFFF),
-            model_hash,
-            context,
-            using: using.map_or(0, |(ticks, _)| 1 + ticks.clamp(0.0, 120.0) as u8),
-            variant: crate::special::variant_hash(stack),
-        };
-        if let Some(hit) = self.cache.get(&key) {
-            return hit.clone();
-        }
-        if !self.admit() {
-            return None;
-        }
-        let ctx = AssetCtx {
+        let mut ctx = AssetCtx {
             display: display_context(context),
             using_item: using.is_some(),
             ticks_using_item: using.map_or(0.0, |u| u.0),
@@ -416,10 +485,37 @@ impl ItemGeometry {
             crossbow_pull: using.map_or(0.0, |(ticks, remaining)| crossbow_pull(ticks, remaining)),
             ..AssetCtx::default()
         };
-        let layers = self
-            .assets
-            .items
-            .evaluate(&Identifier::parse(name), &props, &ctx);
+        let mut layers = None;
+        let mut world = 0;
+        if dynamic {
+            self.world_context(&mut ctx);
+            let evaluated = self
+                .assets
+                .items
+                .evaluate(&Identifier::parse(name), &props, &ctx);
+            world = layers_hash(&evaluated);
+            layers = Some(evaluated);
+        }
+        let key = Key {
+            item: stack.item,
+            dyed: props.dyed_color().map_or(0, |c| c & 0x00FF_FFFF),
+            model_hash,
+            context,
+            using: using.map_or(0, |(ticks, _)| 1 + ticks.clamp(0.0, 120.0) as u8),
+            variant: crate::special::variant_hash(stack),
+            world,
+        };
+        if let Some(hit) = self.cache.get(&key) {
+            return hit.clone();
+        }
+        if !self.admit() {
+            return None;
+        }
+        let layers = layers.unwrap_or_else(|| {
+            self.assets
+                .items
+                .evaluate(&Identifier::parse(name), &props, &ctx)
+        });
         let geo = self.build(&layers, context, Some(stack)).map(Arc::new);
         self.cache.insert(key, geo.clone());
         geo
@@ -680,6 +776,7 @@ mod cache_tests {
             model_hash: 0,
             context: ItemContext::Ground,
             variant: 0,
+            world: 0,
         };
         assert_eq!(key(0x0100_0000), key(0));
         assert_eq!(key(i32::MIN), key(0));

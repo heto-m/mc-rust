@@ -253,22 +253,22 @@ Scope: mcr-client entity and handler, mcr-client client.
 
 Scope: mcr-particles, mcr-app effects.
 
-- [ ] 17.1 E12 (V) Many particle types use a generic fallback or are skipped
-- [ ] 17.2 N11 (M) Particle flags dropped or misused
-- [ ] 17.3 Unit tests: each particle type maps to a non-generic kind, falling leaves lifetime and gravity, override limiter beyond 32 blocks
-- [ ] 17.4 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 17.1 E12 (V) Many particle types use a generic fallback or are skipped
+- [x] 17.2 N11 (M) Particle flags dropped or misused
+- [x] 17.3 Unit tests: each particle type maps to a non-generic kind, falling leaves lifetime and gravity, override limiter beyond 32 blocks
+- [x] 17.4 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 18. Entity layers, name tags, maps and compasses
 
 Scope: mcr-entity-model humanoids, misc and maps, mcr-app nametags, skins and map, mcr-assets item_eval.
 
-- [ ] 18.1 E9 (V) Missing player layers: cape, shoulder parrots, stuck arrows and stingers, riptide swirl
-- [ ] 18.2 E11 (V) Minecart pitch, boat paddles and hit wobble missing
-- [ ] 18.3 H12 (V) Name tags
-- [ ] 18.4 C23 (V) Map decorations: wrong sprites, no names, no frame filter
-- [ ] 18.5 N4 (V) Compass and clock items frozen
-- [ ] 18.6 Unit tests: map decoration sprite names for every type, frame filter, name tag alpha; compass angle toward spawn
-- [ ] 18.7 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 18.1 E9 (V) Missing player layers: cape, shoulder parrots, stuck arrows and stingers, riptide swirl
+- [x] 18.2 E11 (V) Minecart pitch, boat paddles and hit wobble missing
+- [x] 18.3 H12 (V) Name tags
+- [x] 18.4 C23 (V) Map decorations: wrong sprites, no names, no frame filter
+- [x] 18.5 N4 (V) Compass and clock items frozen
+- [x] 18.6 Unit tests: map decoration sprite names for every type, frame filter, name tag alpha; compass angle toward spawn
+- [x] 18.7 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 19. Chat and commands
 

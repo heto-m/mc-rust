@@ -5,8 +5,8 @@ use serde_json::Value;
 use crate::error::{AssetError, Result};
 use crate::identifier::Identifier;
 use crate::item_def::{
-    ConditionProp, IDENTITY4, ItemModelDef, ItemNode, Mat4, NodeKind, RangeProp, SelectProp,
-    SpecialKind, TimeSource, TintSource, mat4_mul,
+    CompassTarget, ConditionProp, IDENTITY4, ItemModelDef, ItemNode, Mat4, NodeKind, RangeProp,
+    SelectProp, SpecialKind, TimeSource, TintSource, mat4_mul,
 };
 use crate::model::DisplayContext;
 use crate::resources::ResourceManager;
@@ -88,6 +88,50 @@ pub trait ItemProps {
     fn bundle_fullness(&self) -> f32 {
         0.0
     }
+    /// The `lodestone_tracker` target: dimension and block position.
+    fn lodestone_target(&self) -> Option<(&str, [i32; 3])> {
+        None
+    }
+}
+
+/// What `minecraft:compass` needles point at. Targets are block positions already known to be in
+/// the owner's dimension.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CompassInputs {
+    /// Owner position and `getVisualRotationYInDegrees`; without an owner every needle reads 0.
+    pub owner: Option<([f64; 3], f32)>,
+    /// The local player's smoothed `0.5 - (yaw - 0.25)`, when it owns the item and ticks run normally.
+    pub wobble: Option<f32>,
+    pub spawn: Option<[i32; 3]>,
+    pub recovery: Option<[i32; 3]>,
+    /// `noTargetWobbler.rotation()`: the shared spin of needles without a target.
+    pub spin: f32,
+    pub seed: i32,
+}
+
+impl CompassInputs {
+    /// `CompassAngleState.calculate` toward `target`, in turns.
+    pub fn angle(&self, target: Option<[i32; 3]>) -> f32 {
+        let Some((pos, yaw)) = self.owner else {
+            return 0.0;
+        };
+        let centre = |t: [i32; 3]| t.map(|v| f64::from(v) + 0.5);
+        let target = target.map(centre).filter(|c| {
+            let d: f64 = (0..3).map(|i| (c[i] - pos[i]).powi(2)).sum();
+            d >= 1.0e-5
+        });
+        let Some(c) = target else {
+            let offset = self.seed.wrapping_mul(1_327_217_883) as f32 / 2.147_483_6e9;
+            return (self.spin + offset).rem_euclid(1.0);
+        };
+        let to_target = ((c[2] - pos[2]).atan2(c[0] - pos[0]) / std::f64::consts::TAU) as f32;
+        let yaw = (yaw / 360.0).rem_euclid(1.0);
+        let turn = match self.wobble {
+            Some(w) => to_target + w,
+            None => 0.5 - (yaw - 0.25 - to_target),
+        };
+        turn.rem_euclid(1.0)
+    }
 }
 
 /// An item with no components.
@@ -155,7 +199,7 @@ pub struct ItemContext {
     pub day_fraction: f32,
     pub moon_phase_fraction: f32,
     pub random: f32,
-    pub compass_angle: f32,
+    pub compass: CompassInputs,
     pub crossbow_pull: f32,
     pub fishing_rod_cast: bool,
     pub selected: bool,
@@ -181,7 +225,7 @@ impl Default for ItemContext {
             day_fraction: 0.0,
             moon_phase_fraction: 0.0,
             random: 0.0,
-            compass_angle: 0.0,
+            compass: CompassInputs::default(),
             crossbow_pull: 0.0,
             fishing_rod_cast: false,
             selected: false,
@@ -538,7 +582,18 @@ impl Evaluator<'_> {
                 TimeSource::Daytime => c.day_fraction,
                 TimeSource::MoonPhase => c.moon_phase_fraction,
             },
-            RangeProp::Compass(_) => c.compass_angle,
+            RangeProp::Compass(target) => {
+                let pos = match target {
+                    CompassTarget::None => None,
+                    CompassTarget::Spawn => c.compass.spawn,
+                    CompassTarget::Recovery => c.compass.recovery,
+                    CompassTarget::Lodestone => p
+                        .lodestone_target()
+                        .filter(|(dim, _)| *dim == c.dimension)
+                        .map(|(_, pos)| pos),
+                };
+                c.compass.angle(pos)
+            }
             RangeProp::CrossbowPull => c.crossbow_pull,
             RangeProp::UseCycle { period } => {
                 if c.using_item && *period > 0.0 {

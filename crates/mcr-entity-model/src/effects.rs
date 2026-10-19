@@ -2,12 +2,12 @@ use crate::cube::Vertex;
 use crate::model::Model;
 
 /// `java.util.Random`, which vanilla's thread-local random source reproduces.
-struct JavaRandom(u64);
+pub(crate) struct JavaRandom(u64);
 
 const MASK: u64 = (1 << 48) - 1;
 
 impl JavaRandom {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         JavaRandom((seed ^ 0x5DEECE66D) & MASK)
     }
 
@@ -16,7 +16,11 @@ impl JavaRandom {
         (self.0 >> (48 - bits)) as i32
     }
 
-    fn next_int(&mut self, bound: i32) -> i32 {
+    pub(crate) fn next_float(&mut self) -> f32 {
+        self.next(24) as f32 / (1 << 24) as f32
+    }
+
+    pub(crate) fn next_int(&mut self, bound: i32) -> i32 {
         if bound & (bound - 1) == 0 {
             return ((i64::from(bound) * i64::from(self.next(31))) >> 31) as i32;
         }

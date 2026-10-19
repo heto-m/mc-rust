@@ -6,12 +6,10 @@ use mcr_buf::BlockPos;
 use mcr_client::ClientState;
 use mcr_data::Version;
 use mcr_particles::{
-    Fluid, ParticleAssets, ParticleAtlas, ParticleEngine, ParticleWorld,
+    Density, Fluid, ParticleAssets, ParticleAtlas, ParticleEngine, ParticleWorld,
     weather::{RainSound, RainTicker},
 };
-use mcr_protocol::play::clientbound::world::{
-    ExplosionParticle, LevelParticles, ParticleRandomization,
-};
+use mcr_protocol::play::clientbound::world::{ExplosionParticle, LevelParticles};
 use mcr_protocol::types::Particle;
 use mcr_protocol::types::component::{FireworkExplosion, FireworkShape};
 use mcr_render::glam::DVec3;
@@ -194,6 +192,27 @@ impl ParticleAssets for AppParticleAssets {
     fn named_texture(&self, path: &str) -> Option<EffectImage> {
         self.texture(path)
     }
+
+    fn block_dust_color(&self, state: i32) -> Option<u32> {
+        let state = u32::try_from(state).ok()?;
+        let data = mcr_data::v26_3();
+        let name = data.state_block_name(state)?;
+        let fixed = match name {
+            "minecraft:sand" => Some(0xDBD3A0),
+            "minecraft:red_sand" => Some(0xA95821),
+            "minecraft:gravel" => Some(0x808080),
+            "minecraft:dragon_egg" => Some(0x000000),
+            _ => None,
+        };
+        if fixed.is_some() {
+            return fixed;
+        }
+        if block_particle(&self.assets, state).is_some_and(|p| p.tinted) {
+            return Some(0x78C058);
+        }
+        let [r, g, b, _] = mcr_ui::map_color(data.block_state(state)?.map_color << 2 | 1);
+        Some(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
+    }
 }
 
 /// Collision, light and fluid queries on the client's chunks.
@@ -240,6 +259,35 @@ impl ParticleWorld for ClientParticleWorld<'_> {
             f32::from(fluid.amount) / 9.0
         };
         Some((kind, height))
+    }
+
+    fn is_air(&self, x: i32, y: i32, z: i32) -> bool {
+        self.0
+            .chunks
+            .block(x, y, z)
+            .and_then(|s| mcr_data::v26_3().block_state(s.0))
+            .is_none_or(|info| info.is_air())
+    }
+
+    fn is_water_source(&self, x: i32, y: i32, z: i32) -> bool {
+        let data: &Version = mcr_data::v26_3();
+        self.0
+            .chunks
+            .block(x, y, z)
+            .and_then(|s| data.block_state(s.0)?.fluid)
+            .is_some_and(|f| {
+                f.source
+                    && data
+                        .fluid_name(f.fluid)
+                        .is_some_and(|n| n.contains("water"))
+            })
+    }
+
+    fn entity_position(&self, id: i32) -> Option<[f64; 3]> {
+        if id == self.0.player.entity_id {
+            return Some(self.0.player.physics.pos);
+        }
+        self.0.entities.get(id).map(|e| e.pos)
     }
 }
 
@@ -487,61 +535,25 @@ impl WorldEffects {
 
     pub fn set_options(&mut self, options: &Options) {
         self.status = options.particles;
-    }
-
-    pub fn emit(
-        &mut self,
-        particle: &Particle,
-        pos: [f64; 3],
-        delta: [f32; 3],
-        speed: [f32; 3],
-        count: i32,
-        always: bool,
-    ) {
-        self.counter = self.counter.wrapping_add(1);
-        let (count, skip) = match self.status {
-            ParticleStatus::All => (count, false),
-            ParticleStatus::Decreased => (
-                (count + 1) / 2,
-                count <= 0 && self.counter.is_multiple_of(2),
-            ),
-            ParticleStatus::Minimal => (count / 4, count <= 0 || count < 4),
-        };
-        if skip && !always {
-            return;
-        }
-        self.particles.emit_packet(&LevelParticles {
-            particle: particle.clone(),
-            override_limiter: false,
-            always_show: always,
-            x: pos[0],
-            y: pos[1],
-            z: pos[2],
-            x_dist: delta[0],
-            y_dist: delta[1],
-            z_dist: delta[2],
-            x_max_speed: speed[0],
-            y_max_speed: speed[1],
-            z_max_speed: speed[2],
-            randomization: ParticleRandomization::Default,
-            count,
+        self.particles.set_density(match options.particles {
+            ParticleStatus::All => Density::All,
+            ParticleStatus::Decreased => Density::Decreased,
+            ParticleStatus::Minimal => Density::Minimal,
         });
     }
 
-    /// Vanilla `ClientLevel.addParticle`: thinned out by the particle setting, nothing beyond 32 blocks.
-    pub fn add_particle(&mut self, particle: &Particle, pos: [f64; 3], vel: [f64; 3]) {
-        let shown = match self.status {
-            ParticleStatus::All => true,
-            ParticleStatus::Decreased => self.random_unit() >= 1.0 / 3.0,
-            ParticleStatus::Minimal => false,
-        };
-        if shown {
-            self.particles.add_particle(particle, pos, vel);
-        }
+    /// Vanilla `handleParticleEvent`: both packet flags and the randomization type apply.
+    pub fn emit(&mut self, packet: &LevelParticles) {
+        self.particles.emit_packet(packet);
     }
 
-    /// Vanilla `ClientLevel.addParticle` with `alwaysShow`: the particle level is re-rolled per particle, and
-    /// limiter-overriding types skip both the level and the distance check.
+    /// Vanilla `ClientLevel.addParticle`: thinned out by the particle setting, nothing beyond 32 blocks
+    /// unless the type overrides the limiter.
+    pub fn add_particle(&mut self, particle: &Particle, pos: [f64; 3], vel: [f64; 3]) {
+        self.particles.add_particle(particle, pos, vel);
+    }
+
+    /// Vanilla `ClientLevel.addParticle` with `alwaysShow`, which only re-rolls the particle setting.
     pub fn add_particle_vanilla(
         &mut self,
         particle: &Particle,
@@ -549,18 +561,8 @@ impl WorldEffects {
         vel: [f64; 3],
         always: bool,
     ) {
-        let mut level = self.status;
-        if always && level == ParticleStatus::Minimal && self.random_unit() < 0.1 {
-            level = ParticleStatus::Decreased;
-        }
-        if level == ParticleStatus::Decreased && self.random_unit() < 1.0 / 3.0 {
-            level = ParticleStatus::Minimal;
-        }
-        if mcr_animate::overrides_limiter(particle) {
-            self.particles.add_particle_unlimited(particle, pos, vel);
-        } else if level != ParticleStatus::Minimal {
-            self.particles.add_particle(particle, pos, vel);
-        }
+        self.particles
+            .add_particle_with(particle, false, always, pos, vel);
     }
 
     /// Vanilla `ClientLevel.createFireworks`: a few poofs without explosions, else a starter.
@@ -840,14 +842,7 @@ impl WorldEffects {
                     pos[1] + height * (0.5 + y / 4.0),
                     pos[2] + width * z / 4.0,
                 ];
-                self.emit(
-                    &particle,
-                    at,
-                    [x as f32, y as f32 + 0.2, z as f32],
-                    [1.0; 3],
-                    0,
-                    true,
-                );
+                self.add_particle_vanilla(&particle, at, [x, y + 0.2, z], true);
             }
             t.age += 1;
         }
@@ -867,7 +862,7 @@ impl WorldEffects {
         if !center.iter().all(|c| c.is_finite()) {
             return;
         }
-        self.emit(particle, center, [1.0, 0.0, 0.0], [1.0; 3], 0, true);
+        self.add_particle(particle, center, [1.0, 0.0, 0.0]);
         if particles.iter().any(|p| p.weight > 0)
             && radius.is_finite()
             && block_count > 0
@@ -925,9 +920,9 @@ impl WorldEffects {
             let base = 0.5 / (r / f64::from(e.radius.max(1.0e-3)) + 0.1) * a * b + 0.3;
             let speed = base * f64::from(info.speed);
             let pos = [0, 1, 2].map(|i| e.center[i] + local[i] * f64::from(info.scaling));
-            let vel = dir.map(|d| (d * speed) as f32);
+            let vel = dir.map(|d| d * speed);
             let particle = info.particle.clone();
-            self.emit(&particle, pos, vel, [1.0; 3], 0, false);
+            self.add_particle(&particle, pos, vel);
         }
     }
 

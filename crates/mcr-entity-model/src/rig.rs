@@ -41,7 +41,8 @@ slots! {
     LeftSleeve = "left_sleeve", RightSleeve = "right_sleeve", LeftPants = "left_pants",
     RightPants = "right_pants", BasePlate = "base_plate", LeftChest = "left_chest",
     RightChest = "right_chest", LeftBodyStick = "left_body_stick", RightBodyStick = "right_body_stick",
-    ShoulderStick = "shoulder_stick", Cape = "cape", Wool = "wool",
+    ShoulderStick = "shoulder_stick", Cape = "cape", Wool = "wool", Box0 = "box0", Box1 = "box1",
+    LeftPaddle = "left_paddle", RightPaddle = "right_paddle",
     Tentacle0 = "tentacle0", Tentacle1 = "tentacle1", Tentacle2 = "tentacle2", Tentacle3 = "tentacle3",
     Tentacle4 = "tentacle4", Tentacle5 = "tentacle5", Tentacle6 = "tentacle6", Tentacle7 = "tentacle7",
     Tentacle8 = "tentacle8",
@@ -313,6 +314,10 @@ pub enum Rig {
     Silverfish,
     Crystal,
     Fangs,
+    /// `ParrotModel.Pose.ON_SHOULDER` on the carrying player's inputs.
+    ShoulderParrot,
+    /// `SpinAttackEffectModel`: two boxes turning at different speeds.
+    SpinAttack,
 }
 
 pub(crate) struct R<'a> {
@@ -410,6 +415,17 @@ pub(crate) fn cos(x: f32) -> f32 {
     x.cos()
 }
 
+fn wrap_degrees(d: f32) -> f32 {
+    let w = d % 360.0;
+    if w >= 180.0 {
+        w - 360.0
+    } else if w < -180.0 {
+        w + 360.0
+    } else {
+        w
+    }
+}
+
 pub(crate) fn lerp(t: f32, a: f32, b: f32) -> f32 {
     a + t * (b - a)
 }
@@ -486,7 +502,13 @@ pub fn animate(rig: Rig, a: &AnimIn, b: &Binding, pose: &mut [Pose]) {
         Rig::Shulker => crate::rig_mobs::shulker(&mut r, a),
         Rig::Vex => crate::rig_mobs::vex(&mut r, a),
         Rig::Allay => crate::rig_mobs::allay(&mut r, a),
-        Rig::Parrot => crate::rig_mobs::parrot(&mut r, a),
+        Rig::Parrot => crate::rig_mobs::parrot(&mut r, a, false),
+        Rig::ShoulderParrot => crate::rig_mobs::parrot(&mut r, a, true),
+        Rig::SpinAttack => {
+            for (slot, speed) in [(Slot::Box0, 50.0), (Slot::Box1, 55.0)] {
+                r.ry(slot, wrap_degrees(a.age * -speed) * DEG);
+            }
+        }
         Rig::Endermite => crate::rig_mobs::endermite(&mut r, a, false),
         Rig::Silverfish => crate::rig_mobs::endermite(&mut r, a, true),
         Rig::Dolphin => crate::rig_mobs::dolphin(&mut r, a),

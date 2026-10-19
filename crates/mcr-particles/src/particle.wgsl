@@ -29,7 +29,17 @@ fn vs(@builtin(vertex_index) vi: u32, inst: Instance) -> Out {
     let cs = cos(inst.roll.x);
     let sn = sin(inst.roll.x);
     let rotated = vec2<f32>(c.x * cs - c.y * sn, c.x * sn + c.y * cs);
-    let world = inst.pos_size.xyz + (u.right.xyz * rotated.x + u.up.xyz * rotated.y) * inst.pos_size.w;
+    let q = inst.roll.yzw;
+    var offset = u.right.xyz * rotated.x + u.up.xyz * rotated.y;
+    if q.x > 1.5 {
+        // Turns about the vertical axis only; the camera's right vector is always horizontal.
+        offset = u.right.xyz * rotated.x + vec3<f32>(0.0, 1.0, 0.0) * rotated.y;
+    } else if dot(q, q) > 0.0 {
+        let w = sqrt(max(0.0, 1.0 - dot(q, q)));
+        let v = vec3<f32>(c.x, c.y, 0.0);
+        offset = v + 2.0 * cross(q, cross(q, v) + w * v);
+    }
+    let world = inst.pos_size.xyz + offset * inst.pos_size.w;
     var o: Out;
     o.clip = u.view_proj * vec4<f32>(world, 1.0);
     let t = vec2<f32>((c.x + 1.0) * 0.5, 1.0 - (c.y + 1.0) * 0.5);

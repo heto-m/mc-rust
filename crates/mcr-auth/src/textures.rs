@@ -14,22 +14,35 @@ const TEXTURE_HOST: &str = "textures.minecraft.net";
 pub struct SkinSource {
     pub url: String,
     pub slim: bool,
+    pub cape: Option<String>,
 }
 
-/// The skin of a `textures` property value. Only `textures.minecraft.net` is trusted, over https.
+/// The skin and cape of a `textures` property value. Only `textures.minecraft.net` is trusted, over https.
 pub fn parse_textures(value: &str) -> Option<SkinSource> {
     if value.len() > MAX_PROPERTY_BYTES {
         return None;
     }
     let json = STANDARD.decode(value.trim()).ok()?;
     let root: serde_json::Value = serde_json::from_slice(&json).ok()?;
-    let skin = root.get("textures")?.get("SKIN")?;
-    let url = skin.get("url")?.as_str()?;
+    let textures = root.get("textures")?;
+    let skin = textures.get("SKIN")?;
     let slim = skin
         .get("metadata")
         .and_then(|m| m.get("model"))
         .and_then(|m| m.as_str())
         == Some("slim");
+    let cape = textures
+        .get("CAPE")
+        .and_then(|c| c.get("url")?.as_str())
+        .and_then(trusted_url);
+    Some(SkinSource {
+        url: trusted_url(skin.get("url")?.as_str()?)?,
+        slim,
+        cape,
+    })
+}
+
+fn trusted_url(url: &str) -> Option<String> {
     let rest = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))?;
@@ -37,20 +50,23 @@ pub fn parse_textures(value: &str) -> Option<SkinSource> {
     let plain_path = path
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.'));
-    (host == TEXTURE_HOST && !path.is_empty() && plain_path).then(|| SkinSource {
-        url: format!("https://{host}/{path}"),
-        slim,
-    })
+    (host == TEXTURE_HOST && !path.is_empty() && plain_path)
+        .then(|| format!("https://{host}/{path}"))
 }
 
 /// The PNG bytes behind a skin URL, at most 256 KiB.
 pub fn fetch_skin(source: &SkinSource) -> Result<Vec<u8>, String> {
+    fetch_texture(&source.url)
+}
+
+/// The PNG bytes behind a trusted texture URL, at most 256 KiB.
+pub fn fetch_texture(url: &str) -> Result<Vec<u8>, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(15)))
         .max_redirects(0)
         .build()
         .into();
-    let mut response = agent.get(&source.url).call().map_err(|e| e.to_string())?;
+    let mut response = agent.get(url).call().map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     response
         .body_mut()
@@ -108,6 +124,22 @@ mod tests {
         ] {
             assert_eq!(parse_textures(&property(url, None)), None, "{url}");
         }
+    }
+
+    #[test]
+    fn cape_is_read_from_the_trusted_host_only() {
+        let value = |cape: &str| {
+            STANDARD.encode(format!(
+                r#"{{"textures":{{"SKIN":{{"url":"http://textures.minecraft.net/texture/s"}},"CAPE":{{"url":"{cape}"}}}}}}"#
+            ))
+        };
+        let s = parse_textures(&value("http://textures.minecraft.net/texture/c")).unwrap();
+        assert_eq!(
+            s.cape.as_deref(),
+            Some("https://textures.minecraft.net/texture/c")
+        );
+        let s = parse_textures(&value("http://evil.example/c")).unwrap();
+        assert_eq!(s.cape, None);
     }
 
     #[test]

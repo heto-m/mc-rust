@@ -3,10 +3,17 @@ use glam::DVec3;
 use crate::atlas::{ParticleAtlas, Uv};
 use crate::names::PARTICLE_NAMES;
 use crate::rng::Rng;
-use crate::{Fluid, ParticleWorld};
+
+mod step;
+
+pub(crate) use step::{Scratch, Tick, alpha, emission, fade, quad_size, tick};
 
 pub const POOL_CAP: usize = 16_384;
 pub(crate) const MAX_SPAWNS_PER_TICK: usize = 4096;
+/// Vanilla's `ParticleLimit.SPORE_BLOSSOM`.
+pub(crate) const SPORE_LIMIT: usize = 1000;
+const MAX_DATA_TICKS: i32 = 1200;
+const MAX_WATER_BLOCKS: i32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pool {
@@ -22,29 +29,92 @@ pub(crate) enum Liquid {
     Honey,
     Obsidian,
     Nectar,
+    Spore,
     DripWater,
     DripLava,
+}
+
+/// `BaseAshSmokeParticle` subclasses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Haze {
+    Smoke,
+    Large,
+    White,
+    Ash,
+    WhiteAsh,
+    Plume,
+    Noxious,
+    Geyser,
+}
+
+/// Invisible particles that spawn others over their life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Emitter {
+    GustLarge,
+    GustSmall,
+    Geyser,
+    Noxious,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Town {
+    Plain,
+    Happy,
+    Composter,
+    Egg,
+    Dolphin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Suspended {
+    Underwater,
+    Crimson,
+    Warped,
+    SporeAir,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shine {
+    Glow,
+    WaxOn,
+    WaxOff,
+    Spark,
+    Scrape,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Leaves {
+    Cherry,
+    Pale,
+    Tinted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Generic,
-    Smoke,
+    Ash(Haze),
     Flame,
     LavaPop,
     Explosion,
+    SonicBoom,
+    Gust,
     Seed,
+    Emitter(Emitter),
     Poof,
     Crit,
     Heart,
     Note,
     Portal,
+    ReversePortal,
     Dust,
     Transition,
     WaterDrop,
     Splash,
     Bubble,
+    BubbleColumn,
+    CurrentDown,
     BubblePop,
+    SulfurBubble,
     Hang(Liquid),
     Fall(Liquid),
     Land(Liquid),
@@ -52,14 +122,44 @@ pub(crate) enum Kind {
     Campfire,
     Sweep,
     Animated,
+    SquidInk,
     Flash,
     Spell,
-    Town,
+    Town(Town),
+    Suspended(Suspended),
     Terrain,
+    Goo,
     Marker,
     FlyTowards,
     VaultConnection,
-    Skip,
+    FlyStraight,
+    Rising,
+    Glow(Shine),
+    Leaves(Leaves),
+    FallingDust,
+    DragonBreath,
+    Sculk,
+    Wake,
+    Vertical,
+    Snowflake,
+    TrialDetect,
+    Firefly,
+    Shriek,
+    Vibration,
+    Trail,
+    GeyserPlume,
+    ElderGuardian,
+}
+
+impl Kind {
+    /// Kinds that never draw a quad.
+    pub(crate) fn invisible(self) -> bool {
+        matches!(self, Kind::Seed | Kind::Emitter(_) | Kind::ElderGuardian)
+    }
+
+    fn needs_sprites(self) -> bool {
+        !matches!(self, Kind::Terrain | Kind::Marker) && !self.invisible()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,15 +168,52 @@ pub(crate) enum Light {
     Full,
     BlockMax,
     Emission,
+    Firefly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Target {
+    Block([i32; 3]),
+    Entity { id: i32, y_offset: f32 },
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Data {
     None,
-    Dust { color: u32, scale: f32 },
-    Transition { from: u32, to: u32, scale: f32 },
+    Dust {
+        color: u32,
+        scale: f32,
+    },
+    Transition {
+        from: u32,
+        to: u32,
+        scale: f32,
+    },
     Argb(u32),
-    Rect { rect: Uv, tint: [f32; 3] },
+    Spell {
+        argb: u32,
+        power: f32,
+    },
+    Power(f32),
+    Roll(f32),
+    Delay(i32),
+    Geyser {
+        water_blocks: i32,
+        impulse: f32,
+    },
+    Vibration {
+        target: Target,
+        ticks: i32,
+    },
+    Trail {
+        target: DVec3,
+        color: u32,
+        ticks: i32,
+    },
+    Rect {
+        rect: Uv,
+        tint: [f32; 3],
+    },
     Firework(Spark),
 }
 
@@ -104,6 +241,8 @@ pub(crate) struct P {
     pub prev: DVec3,
     pub start: DVec3,
     pub vel: DVec3,
+    /// Per-kind state: a target position, emitter velocity or plume heights.
+    pub extra: DVec3,
     pub age: i32,
     pub life: i32,
     pub size: f32,
@@ -123,6 +262,7 @@ pub(crate) struct P {
     pub speed_up: bool,
     pub on_ground: bool,
     pub stopped: bool,
+    pub flag: bool,
     pub rect: Uv,
     pub sub: [f32; 2],
     pub aux: [f32; 6],
@@ -135,31 +275,122 @@ pub(crate) fn type_id(name: &str) -> u16 {
         .map_or(0, |i| i as u16)
 }
 
+/// Vanilla `ParticleType#getOverrideLimiter`: shown at any distance and particle setting.
+pub(crate) fn overrides_limiter(name: &str) -> bool {
+    matches!(
+        name,
+        "block_marker"
+            | "geyser"
+            | "geyser_base"
+            | "geyser_poof"
+            | "geyser_plume"
+            | "damage_indicator"
+            | "elder_guardian"
+            | "explosion_emitter"
+            | "explosion"
+            | "gust"
+            | "gust_emitter_large"
+            | "gust_emitter_small"
+            | "sonic_boom"
+            | "sculk_charge"
+            | "sculk_charge_pop"
+            | "vibration"
+            | "poof"
+            | "spit"
+            | "squid_ink"
+            | "sweep_attack"
+            | "campfire_cosy_smoke"
+            | "campfire_signal_smoke"
+            | "glow_squid_ink"
+            | "glow"
+            | "wax_on"
+            | "wax_off"
+            | "electric_spark"
+            | "scrape"
+            | "trial_spawner_detection"
+            | "trial_spawner_detection_ominous"
+            | "vault_connection"
+            | "ominous_spawning"
+    )
+}
+
 pub(crate) fn kind_of(name: &str) -> (Kind, Pool) {
     use Kind::*;
     use Liquid::*;
     let opaque = |k| (k, Pool::Opaque);
     let trans = |k| (k, Pool::Translucent);
     match name {
-        "smoke" | "large_smoke" | "white_smoke" => opaque(Smoke),
+        "smoke" => opaque(Ash(self::Haze::Smoke)),
+        "large_smoke" => opaque(Ash(self::Haze::Large)),
+        "white_smoke" => opaque(Ash(self::Haze::White)),
+        "ash" => opaque(Ash(self::Haze::Ash)),
+        "white_ash" => opaque(Ash(self::Haze::WhiteAsh)),
+        "dust_plume" => opaque(Ash(self::Haze::Plume)),
+        "noxious_gas" => trans(Ash(self::Haze::Noxious)),
+        "geyser_base" | "geyser_poof" => opaque(Ash(self::Haze::Geyser)),
+        "geyser_plume" => opaque(GeyserPlume),
+        "geyser" => opaque(Emitter(self::Emitter::Geyser)),
+        "noxious_gas_cloud" => opaque(Emitter(self::Emitter::Noxious)),
+        "gust_emitter_large" => opaque(Emitter(self::Emitter::GustLarge)),
+        "gust_emitter_small" => opaque(Emitter(self::Emitter::GustSmall)),
+        "gust" | "small_gust" => opaque(Gust),
+        "sonic_boom" => opaque(SonicBoom),
         "flame" | "small_flame" | "soul_fire_flame" | "copper_fire_flame" => opaque(Flame),
+        "soul" | "sculk_soul" => trans(Rising),
         "lava" => opaque(LavaPop),
         "explosion" => opaque(Explosion),
         "explosion_emitter" => opaque(Seed),
-        "poof" => opaque(Poof),
+        "elder_guardian" => opaque(ElderGuardian),
+        "poof" | "spit" => opaque(Poof),
         "crit" | "damage_indicator" | "enchanted_hit" => opaque(Crit),
         "heart" | "angry_villager" => opaque(Heart),
-        "happy_villager" | "composter" | "egg_crack" => opaque(Town),
+        "happy_villager" => opaque(Town(self::Town::Happy)),
+        "composter" => opaque(Town(self::Town::Composter)),
+        "egg_crack" => opaque(Town(self::Town::Egg)),
+        "mycelium" => opaque(Town(self::Town::Plain)),
+        "dolphin" => opaque(Town(self::Town::Dolphin)),
+        "underwater" => opaque(Suspended(self::Suspended::Underwater)),
+        "crimson_spore" => opaque(Suspended(self::Suspended::Crimson)),
+        "warped_spore" => opaque(Suspended(self::Suspended::Warped)),
+        "spore_blossom_air" => opaque(Suspended(self::Suspended::SporeAir)),
+        "glow" => opaque(Glow(Shine::Glow)),
+        "wax_on" => opaque(Glow(Shine::WaxOn)),
+        "wax_off" => opaque(Glow(Shine::WaxOff)),
+        "electric_spark" => opaque(Glow(Shine::Spark)),
+        "scrape" => opaque(Glow(Shine::Scrape)),
+        "cherry_leaves" => opaque(Leaves(self::Leaves::Cherry)),
+        "pale_oak_leaves"
+        | "red_poplar_leaves"
+        | "orange_poplar_leaves"
+        | "yellow_poplar_leaves" => opaque(Leaves(self::Leaves::Pale)),
+        "tinted_leaves" => opaque(Leaves(self::Leaves::Tinted)),
+        "falling_dust" => opaque(FallingDust),
+        "dragon_breath" => opaque(DragonBreath),
+        "sculk_charge" | "sculk_charge_pop" => trans(Sculk),
+        "fishing" => opaque(Wake),
+        "pause_mob_growth" | "reset_mob_growth" => opaque(Vertical),
+        "snowflake" => opaque(Snowflake),
+        "trial_spawner_detection" | "trial_spawner_detection_ominous" => opaque(TrialDetect),
+        "ominous_spawning" => opaque(FlyStraight),
+        "firefly" => trans(Firefly),
+        "shriek" => trans(Shriek),
+        "vibration" => trans(Vibration),
+        "trail" => opaque(Trail),
+        "squid_ink" | "glow_squid_ink" => trans(SquidInk),
         "note" => opaque(Note),
         "portal" => opaque(Portal),
+        "reverse_portal" => opaque(ReversePortal),
         "dust" => opaque(Dust),
         "dust_color_transition" => opaque(Transition),
-        "block" | "block_crumble" | "item" | "item_slime" | "item_cobweb" | "item_snowball" => {
-            (Terrain, Pool::Terrain)
-        }
+        "block" | "block_crumble" | "dust_pillar" | "item" | "item_slime" | "item_cobweb"
+        | "item_snowball" => (Terrain, Pool::Terrain),
+        "sulfur_cube_goo" => opaque(Goo),
         "rain" => opaque(WaterDrop),
         "splash" => opaque(Splash),
-        "bubble" | "bubble_column_up" | "current_down" | "underwater" => opaque(Bubble),
+        "bubble" => opaque(Bubble),
+        "bubble_column_up" => opaque(BubbleColumn),
+        "current_down" => opaque(CurrentDown),
+        "sulfur_bubbles" => opaque(SulfurBubble),
         "bubble_pop" => opaque(BubblePop),
         "dripping_water" => opaque(Hang(Water)),
         "falling_water" => opaque(Fall(Water)),
@@ -173,6 +404,7 @@ pub(crate) fn kind_of(name: &str) -> (Kind, Pool) {
         "falling_obsidian_tear" => opaque(Fall(Obsidian)),
         "landing_obsidian_tear" => opaque(Land(Obsidian)),
         "falling_nectar" => opaque(Fall(Nectar)),
+        "falling_spore_blossom" => opaque(Fall(Spore)),
         "dripping_dripstone_water" => opaque(Hang(DripWater)),
         "falling_dripstone_water" => opaque(Fall(DripWater)),
         "dripping_dripstone_lava" => opaque(Hang(DripLava)),
@@ -183,10 +415,10 @@ pub(crate) fn kind_of(name: &str) -> (Kind, Pool) {
         "campfire_cosy_smoke" | "campfire_signal_smoke" => trans(Campfire),
         "sweep_attack" => opaque(Sweep),
         "totem_of_undying" | "end_rod" | "firework" => trans(Animated),
-        "witch" | "effect" | "instant_effect" | "entity_effect" => trans(Spell),
+        "witch" | "effect" | "instant_effect" | "entity_effect" | "infested" | "raid_omen"
+        | "trial_omen" => trans(Spell),
         "flash" => trans(Flash),
         "block_marker" => (Marker, Pool::Terrain),
-        "elder_guardian" | "vibration" | "trail" | "shriek" => opaque(Skip),
         _ => opaque(Generic),
     }
 }
@@ -197,6 +429,7 @@ fn base(pos: DVec3, rng: &mut Rng) -> P {
         prev: pos,
         start: pos,
         vel: DVec3::ZERO,
+        extra: DVec3::ZERO,
         age: 0,
         life: (4.0 / (rng.f32() * 0.9 + 0.1)) as i32,
         size: 0.1 * (rng.f32() * 0.5 + 0.5) * 2.0,
@@ -216,6 +449,7 @@ fn base(pos: DVec3, rng: &mut Rng) -> P {
         speed_up: false,
         on_ground: false,
         stopped: false,
+        flag: false,
         rect: Uv::ZERO,
         sub: [0.0; 2],
         aux: [0.0; 6],
@@ -250,7 +484,18 @@ fn scale(p: &mut P, s: f32) {
     set_size(p, 0.2 * s, 0.2 * s);
 }
 
-fn rgb(c: u32) -> [f32; 3] {
+/// Vanilla `Particle#setPower`.
+fn power(p: &mut P, power: f32) {
+    if !power.is_finite() {
+        return;
+    }
+    let k = f64::from(power.clamp(0.0, 16.0));
+    p.vel.x *= k;
+    p.vel.y = (p.vel.y - 0.1) * k + 0.1;
+    p.vel.z *= k;
+}
+
+pub(crate) fn rgb(c: u32) -> [f32; 3] {
     [
         ((c >> 16) & 255) as f32 / 255.0,
         ((c >> 8) & 255) as f32 / 255.0,
@@ -258,7 +503,13 @@ fn rgb(c: u32) -> [f32; 3] {
     ]
 }
 
-fn set_from_age(p: &mut P, atlas: &ParticleAtlas) {
+fn color(p: &mut P, [r, g, b]: [f32; 3]) {
+    p.color[0] = r;
+    p.color[1] = g;
+    p.color[2] = b;
+}
+
+pub(crate) fn set_from_age(p: &mut P, atlas: &ParticleAtlas) {
     let set = atlas.set(usize::from(p.type_id));
     if let Some(last) = set.len().checked_sub(1) {
         let idx = if p.life > 0 {
@@ -270,40 +521,62 @@ fn set_from_age(p: &mut P, atlas: &ParticleAtlas) {
     }
 }
 
+/// Kinds whose provider picks a random sprite instead of animating by age.
+fn random_sprite(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::FlyTowards
+            | Kind::VaultConnection
+            | Kind::FlyStraight
+            | Kind::Bubble
+            | Kind::BubbleColumn
+            | Kind::CurrentDown
+            | Kind::SulfurBubble
+            | Kind::Town(_)
+            | Kind::Suspended(_)
+            | Kind::Leaves(_)
+            | Kind::Vertical
+            | Kind::Firefly
+            | Kind::Shriek
+            | Kind::Vibration
+            | Kind::Trail
+            | Kind::ReversePortal
+            | Kind::Hang(_)
+            | Kind::Fall(_)
+            | Kind::Land(_)
+    )
+}
+
+fn data_ticks(t: i32) -> i32 {
+    t.clamp(0, MAX_DATA_TICKS)
+}
+
 pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut Rng) -> Option<P> {
     let (pos, aux) = (s.pos, s.aux);
     let set = atlas.set(usize::from(s.type_id));
-    if set.is_empty() && !matches!(kind, Kind::Terrain | Kind::Marker | Kind::Seed) {
+    if set.is_empty() && kind.needs_sprites() {
         return None;
     }
+    let name = PARTICLE_NAMES
+        .get(usize::from(s.type_id))
+        .copied()
+        .unwrap_or("");
     let mut p = match kind {
-        Kind::Skip => return None,
-        Kind::Smoke => {
-            let big = PARTICLE_NAMES[usize::from(s.type_id)] == "large_smoke";
-            let sc = if big { 2.5 } else { 1.0 };
-            let mut p = base_v(pos, DVec3::ZERO, rng);
-            p.friction = 0.96;
-            p.gravity = -0.1;
-            p.speed_up = true;
-            p.vel = p.vel * 0.1 + aux;
-            let c = rng.f32() * 0.3;
-            p.color = [c, c, c, 1.0];
-            p.size *= 0.75 * sc;
-            p.life = ((8.0 / (rng.f32() * 0.8 + 0.2) * sc) as i32).max(1);
-            p
-        }
+        Kind::Ash(style) => ash(s, style, rng),
         Kind::Flame => {
-            let mut p = base_v(pos, aux, rng);
-            p.friction = 0.96;
-            p.vel = p.vel * 0.01 + aux;
-            let jitter = |rng: &mut Rng| f64::from(rng.f32() - rng.f32()) * 0.05;
-            p.pos += DVec3::new(jitter(rng), jitter(rng), jitter(rng));
-            p.prev = p.pos;
-            p.life = (8.0 / (rng.f32() as f64 * 0.8 + 0.2)) as i32 + 4;
+            let mut p = rising(pos, aux, rng);
             p.physics = false;
             p.light_mode = Light::Emission;
-            if PARTICLE_NAMES[usize::from(s.type_id)] == "small_flame" {
+            if name == "small_flame" {
                 scale(&mut p, 0.5);
+            }
+            p
+        }
+        Kind::Rising => {
+            let mut p = rising(pos, aux, rng);
+            scale(&mut p, 1.5);
+            if name == "sculk_soul" {
+                p.light_mode = Light::BlockMax;
             }
             p
         }
@@ -318,12 +591,28 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             p.light_mode = Light::BlockMax;
             p
         }
-        Kind::Explosion => {
+        Kind::Explosion | Kind::SonicBoom => {
             let mut p = base(pos, rng);
             p.life = 6 + rng.below(4) as i32;
             let c = rng.f32() * 0.6 + 0.4;
             p.color = [c, c, c, 1.0];
             p.size = 2.0 * (1.0 - aux.x as f32 * 0.5);
+            if kind == Kind::SonicBoom {
+                p.life = 16;
+                p.size = 1.5;
+            }
+            p.light_mode = Light::Full;
+            p.physics = false;
+            p
+        }
+        Kind::Gust => {
+            let mut p = base(pos, rng);
+            p.life = 12 + rng.below(4) as i32;
+            p.size = 1.0;
+            set_size(&mut p, 1.0, 1.0);
+            if name == "small_gust" {
+                scale(&mut p, 0.15);
+            }
             p.light_mode = Light::Full;
             p.physics = false;
             p
@@ -334,9 +623,24 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             p.physics = false;
             p
         }
+        Kind::Emitter(e) => {
+            let mut p = base(pos, rng);
+            p.physics = false;
+            p.extra = aux;
+            p.life = match e {
+                Emitter::GustLarge => 7,
+                Emitter::GustSmall => 3,
+                Emitter::Geyser | Emitter::Noxious => 20,
+            };
+            if let Data::Geyser { water_blocks, .. } = s.data {
+                p.aux[0] = water_blocks.clamp(0, MAX_WATER_BLOCKS) as f32;
+            }
+            p
+        }
+        Kind::ElderGuardian => return None,
         Kind::Poof => {
             let mut p = base(pos, rng);
-            p.gravity = -0.1;
+            p.gravity = if name == "spit" { 0.5 } else { -0.1 };
             p.friction = 0.9;
             let j = |rng: &mut Rng| f64::from(rng.f32() * 2.0 - 1.0) * 0.05;
             p.vel = DVec3::new(aux.x + j(rng), aux.y + j(rng), aux.z + j(rng));
@@ -347,7 +651,6 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             p
         }
         Kind::Crit => {
-            let name = PARTICLE_NAMES[usize::from(s.type_id)];
             let aux = if name == "damage_indicator" {
                 DVec3::new(aux.x, aux.y + 1.0, aux.z)
             } else {
@@ -369,7 +672,7 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             p
         }
         Kind::Heart => {
-            let angry = PARTICLE_NAMES[usize::from(s.type_id)] == "angry_villager";
+            let angry = name == "angry_villager";
             let mut p = base_v(
                 if angry { pos + DVec3::Y * 0.5 } else { pos },
                 DVec3::ZERO,
@@ -402,7 +705,7 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             p.life = 6;
             p
         }
-        Kind::Portal => {
+        Kind::Portal | Kind::ReversePortal => {
             let mut p = base(pos, rng);
             p.vel = aux;
             p.size = 0.1 * (rng.f32() * 0.2 + 0.5);
@@ -411,6 +714,10 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             p.life = (rng.f32() * 10.0) as i32 + 40;
             p.physics = false;
             p.light_mode = Light::Emission;
+            if kind == Kind::ReversePortal {
+                p.size *= 1.5;
+                p.life = (rng.f32() * 2.0) as i32 + 60;
+            }
             p
         }
         Kind::FlyTowards | Kind::VaultConnection => {
@@ -430,7 +737,20 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             } else {
                 p.light_mode = Light::Emission;
             }
-            p.sprite = set[rng.below(set.len() as u32) as usize];
+            p
+        }
+        Kind::FlyStraight => {
+            let mut p = base(pos, rng);
+            p.vel = aux;
+            p.pos = pos + aux;
+            p.prev = p.pos;
+            p.size = 0.1 * (rng.f32() * 0.5 + 0.2);
+            p.physics = false;
+            p.life = (rng.f32() * 5.0) as i32 + 25;
+            p.light_mode = Light::BlockMax;
+            let [r, g, b] = rgb(OMINOUS_START);
+            p.color = [r, g, b, 1.0];
+            scale(&mut p, 3.0 + rng.f32() * 2.0);
             p
         }
         Kind::Dust | Kind::Transition => {
@@ -482,13 +802,36 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             }
             p
         }
-        Kind::Bubble => {
+        Kind::Bubble | Kind::BubbleColumn | Kind::SulfurBubble => {
             let mut p = base(pos, rng);
             set_size(&mut p, 0.02, 0.02);
             p.size *= rng.f32() * 0.6 + 0.2;
             let j = |rng: &mut Rng| f64::from(rng.f32() * 2.0 - 1.0) * 0.02;
             p.vel = aux * 0.2 + DVec3::new(j(rng), j(rng), j(rng));
             p.life = (8.0 / (rng.f32() * 0.8 + 0.2)) as i32;
+            if kind == Kind::BubbleColumn {
+                p.gravity = -0.125;
+                p.friction = 0.85;
+                p.life = (40.0 / (rng.f32() * 0.8 + 0.2)) as i32;
+            } else if kind == Kind::SulfurBubble {
+                p.gravity = -0.04;
+                p.friction = 0.85;
+                p.vel.y = 0.0;
+                let start = 0.02 + 0.02 * rng.f32();
+                p.size = start;
+                p.aux[0] = start;
+                p.life = i32::MAX;
+                p.extra = DVec3::new(pos.y, pos.y + 3.0, pos.y);
+            }
+            p
+        }
+        Kind::CurrentDown => {
+            let mut p = base(pos, rng);
+            p.life = (rng.f32() * 60.0) as i32 + 30;
+            p.physics = false;
+            p.vel = DVec3::new(0.0, -0.05, 0.0);
+            set_size(&mut p, 0.02, 0.02);
+            p.size *= rng.f32() * 0.6 + 0.2;
             p
         }
         Kind::BubblePop => {
@@ -498,36 +841,16 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             p.vel = aux;
             p
         }
-        Kind::Hang(l) | Kind::Fall(l) | Kind::Land(l) => {
-            let mut p = base(pos, rng);
-            set_size(&mut p, 0.01, 0.01);
-            p.gravity = 0.06;
-            let [r, g, b] = match l {
-                Liquid::Water | Liquid::DripWater => [0.2, 0.3, 1.0],
-                Liquid::Lava | Liquid::DripLava => [1.0, 0.285_714_3, 0.083_333_33],
-                Liquid::Honey => [0.622_5, 0.507_5, 0.082_5],
-                Liquid::Nectar => [0.92, 0.782, 0.72],
-                Liquid::Obsidian => [0.51, 0.03, 0.67],
-            };
-            p.color = [r, g, b, 1.0];
-            if matches!(kind, Kind::Hang(_)) {
-                p.gravity *= 0.02;
-                p.life = 40;
-            }
-            if matches!(kind, Kind::Land(_)) {
-                p.life = (16.0 / (rng.f32() * 0.8 + 0.2)) as i32;
-            }
-            if matches!(l, Liquid::Lava | Liquid::DripLava) {
-                p.light_mode = Light::BlockMax;
-            }
-            p
-        }
+        Kind::Hang(l) | Kind::Fall(l) | Kind::Land(l) => drip(pos, kind, l, rng),
         Kind::Cloud => {
             let mut p = base(pos, rng);
             p.friction = 0.96;
             p.vel = p.vel * 0.1 + aux;
             let c = 1.0 - rng.f32() * 0.3;
             p.color = [c, c, c, 1.0];
+            if name == "sneeze" {
+                p.color = [0.22, 1.0, 0.53, 0.4];
+            }
             p.size *= 1.875;
             let base_life = (8.0 / (rng.f32() as f64 * 0.8 + 0.3)) as i32;
             p.life = ((base_life as f32 * 2.5) as i32).max(1);
@@ -535,7 +858,7 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             p
         }
         Kind::Campfire => {
-            let signal = PARTICLE_NAMES[usize::from(s.type_id)] == "campfire_signal_smoke";
+            let signal = name == "campfire_signal_smoke";
             let mut p = base(pos, rng);
             scale(&mut p, 3.0);
             set_size(&mut p, 0.25, 0.25);
@@ -554,69 +877,23 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             p.physics = false;
             p
         }
-        Kind::Animated => {
-            let name = PARTICLE_NAMES[usize::from(s.type_id)];
+        Kind::Animated => animated(s, name, rng),
+        Kind::SquidInk => {
             let mut p = base(pos, rng);
-            p.friction = 0.91;
-            p.light_mode = Light::Full;
+            p.friction = 0.92;
+            p.size = 0.5;
+            p.color = if name == "glow_squid_ink" {
+                [0.2, 0.8, 0.6, 1.0]
+            } else {
+                [0.0, 0.0, 0.0, 1.0]
+            };
+            p.life = (0.5 * 12.0 / (rng.f32() * 0.8 + 0.2)) as i32;
+            p.physics = false;
             p.vel = aux;
-            p.size *= 0.75;
-            p.life = 60 + rng.below(12) as i32;
-            p.aux = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0];
-            match name {
-                "totem_of_undying" => {
-                    p.gravity = 1.25;
-                    p.friction = 0.6;
-                    p.color = if rng.below(4) == 0 {
-                        [
-                            0.6 + rng.f32() * 0.2,
-                            0.6 + rng.f32() * 0.3,
-                            rng.f32() * 0.2,
-                            1.0,
-                        ]
-                    } else {
-                        [
-                            0.1 + rng.f32() * 0.2,
-                            0.4 + rng.f32() * 0.3,
-                            rng.f32() * 0.2,
-                            1.0,
-                        ]
-                    };
-                }
-                "end_rod" => {
-                    p.gravity = 0.0125;
-                    p.physics = false;
-                    p.aux = [0.949, 0.871, 0.788, 1.0, 0.0, 0.0];
-                }
-                _ => {
-                    p.gravity = 0.1;
-                    p.life = 48 + rng.below(12) as i32;
-                    p.color = [1.0, 1.0, 1.0, 0.99];
-                    if let Data::Firework(spark) = s.data {
-                        let [r, g, b] = rgb(spark.color);
-                        p.color = [r, g, b, 0.99];
-                        let [fr, fg, fb] = rgb(spark.fade.unwrap_or(0));
-                        let flag = |b: bool| if b { 1.0 } else { 0.0 };
-                        p.aux = [
-                            fr,
-                            fg,
-                            fb,
-                            flag(spark.fade.is_some()),
-                            flag(spark.twinkle),
-                            flag(spark.trail),
-                        ];
-                        if spark.trailed {
-                            p.age = p.life / 2;
-                        }
-                    } else {
-                        p.aux = [0.0; 6];
-                    }
-                }
-            }
+            p.light_mode = Light::Full;
             p
         }
         Kind::Spell => {
-            let name = PARTICLE_NAMES[usize::from(s.type_id)];
             let mut p = base_v(
                 pos,
                 DVec3::new(0.5 - rng.f64(), aux.y, 0.5 - rng.f64()),
@@ -642,12 +919,19 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
                     let [r, g, b] = rgb(c);
                     [r, g, b, ((c >> 24) & 255) as f32 / 255.0]
                 }
+                (_, Data::Spell { argb, .. }) => {
+                    let [r, g, b] = rgb(argb);
+                    [r, g, b, 1.0]
+                }
                 _ => [1.0; 4],
             };
+            if let Data::Spell { power: k, .. } = s.data {
+                power(&mut p, k);
+            }
             p.aux[3] = p.color[3];
             p
         }
-        Kind::Town => {
+        Kind::Town(t) => {
             let mut p = base_v(pos, aux, rng);
             let br = rng.f32() * 0.1 + 0.2;
             p.color = [br, br, br, 1.0];
@@ -656,29 +940,319 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             p.vel *= 0.02;
             p.life = (20.0 / (rng.f32() * 0.8 + 0.2)) as i32;
             p.physics = false;
-            if PARTICLE_NAMES[usize::from(s.type_id)] != "happy_villager" {
-                p.color = [br, br, br, 1.0];
-            } else {
-                p.color = [1.0; 4];
+            match t {
+                Town::Plain => {}
+                Town::Happy | Town::Egg => p.color = [1.0; 4],
+                Town::Composter => {
+                    p.color = [1.0; 4];
+                    p.life = 3 + rng.below(5) as i32;
+                }
+                Town::Dolphin => {
+                    p.color = [0.3, 0.5, 1.0, 1.0 - rng.f32() * 0.7];
+                    p.life /= 2;
+                }
             }
             p
         }
+        Kind::Suspended(sus) => {
+            let at = pos - DVec3::Y * 0.125;
+            let mut p = match sus {
+                Suspended::Underwater => {
+                    let mut p = base(at, rng);
+                    p.size *= rng.f32() * 0.6 + 0.2;
+                    p
+                }
+                _ => {
+                    let v = match sus {
+                        Suspended::Crimson => DVec3::new(
+                            rng.gaussian() * 1.0e-6,
+                            rng.gaussian() * 1.0e-4,
+                            rng.gaussian() * 1.0e-6,
+                        ),
+                        Suspended::Warped => {
+                            DVec3::new(0.0, rng.f64() * -1.9 * rng.f64() * 0.1, 0.0)
+                        }
+                        _ => DVec3::new(0.0, -0.8, 0.0),
+                    };
+                    let mut p = base_v(at, v, rng);
+                    p.size *= rng.f32() * 0.6 + 0.6;
+                    p
+                }
+            };
+            set_size(&mut p, 0.01, 0.01);
+            p.life = (16.0 / (rng.f32() * 0.8 + 0.2)) as i32;
+            p.physics = false;
+            p.friction = 1.0;
+            match sus {
+                Suspended::Underwater => color(&mut p, [0.4, 0.4, 0.7]),
+                Suspended::Crimson => color(&mut p, [0.9, 0.4, 0.5]),
+                Suspended::Warped => {
+                    color(&mut p, [0.1, 0.1, 0.3]);
+                    set_size(&mut p, 0.001, 0.001);
+                }
+                Suspended::SporeAir => {
+                    p.life = 500 + rng.below(501) as i32;
+                    p.gravity = 0.01;
+                    color(&mut p, [0.32, 0.5, 0.22]);
+                }
+            }
+            p
+        }
+        Kind::Glow(g) => {
+            let v0 = if g == Shine::Glow {
+                DVec3::new(0.5 - rng.f64(), aux.y, 0.5 - rng.f64())
+            } else {
+                DVec3::ZERO
+            };
+            let mut p = base_v(pos, v0, rng);
+            p.friction = 0.96;
+            p.speed_up = true;
+            p.size *= 0.75;
+            p.physics = false;
+            p.light_mode = Light::Emission;
+            let wax = DVec3::new(aux.x * 0.005, aux.y * 0.01, aux.z * 0.005);
+            match g {
+                Shine::Spark => {
+                    color(&mut p, [1.0, 0.9, 1.0]);
+                    p.vel = aux * 0.25;
+                    p.life = rng.below(2) as i32 + 2;
+                }
+                Shine::Glow => {
+                    let c = if rng.bool() {
+                        [0.6, 1.0, 0.8]
+                    } else {
+                        [0.08, 0.4, 0.4]
+                    };
+                    color(&mut p, c);
+                    p.vel.y *= 0.2;
+                    if aux.x == 0.0 && aux.z == 0.0 {
+                        p.vel.x *= 0.1;
+                        p.vel.z *= 0.1;
+                    }
+                    p.life = (8.0 / (rng.f64() * 0.8 + 0.2)) as i32;
+                }
+                Shine::Scrape => {
+                    let c = if rng.bool() {
+                        [0.29, 0.58, 0.51]
+                    } else {
+                        [0.43, 0.77, 0.62]
+                    };
+                    color(&mut p, c);
+                    p.vel = aux * 0.01;
+                    p.life = rng.below(30) as i32 + 10;
+                }
+                Shine::WaxOff => {
+                    color(&mut p, [1.0, 0.9, 1.0]);
+                    p.vel = wax;
+                    p.life = rng.below(30) as i32 + 10;
+                }
+                Shine::WaxOn => {
+                    color(&mut p, [0.91, 0.55, 0.08]);
+                    p.vel = wax;
+                    p.life = rng.below(30) as i32 + 10;
+                }
+            }
+            p
+        }
+        Kind::Leaves(l) => leaves(s, l, rng),
+        Kind::FallingDust => {
+            let mut p = base(pos, rng);
+            if let Data::Argb(c) = s.data {
+                color(&mut p, rgb(c));
+            }
+            p.size *= 0.675;
+            let base_life = (32.0 / (rng.f32() * 0.8 + 0.2)) as i32;
+            p.life = ((base_life as f32 * 0.9) as i32).max(1);
+            p.aux[0] = (rng.f32() - 0.5) * 0.1;
+            p.roll = rng.f32() * std::f32::consts::TAU;
+            p.prev_roll = p.roll;
+            p
+        }
+        Kind::DragonBreath => {
+            let mut p = base(pos, rng);
+            p.friction = 0.96;
+            p.vel = aux;
+            p.color = [
+                0.717_647_1 + rng.f32() * (0.874_509_8 - 0.717_647_1),
+                0.0,
+                0.823_529_4 + rng.f32() * (0.976_470_6 - 0.823_529_4),
+                1.0,
+            ];
+            p.size *= 0.75;
+            p.life = (20.0 / (rng.f32() * 0.8 + 0.2)) as i32;
+            p.physics = false;
+            if let Data::Power(k) = s.data {
+                power(&mut p, k);
+            }
+            p
+        }
+        Kind::Sculk => {
+            let mut p = base_v(pos, aux, rng);
+            p.friction = 0.96;
+            p.physics = false;
+            p.vel = aux;
+            p.light_mode = Light::BlockMax;
+            if name == "sculk_charge_pop" {
+                p.life = rng.below(4) as i32 + 6;
+            } else {
+                scale(&mut p, 1.5);
+                p.life = rng.below(12) as i32 + 8;
+                if let Data::Roll(r) = s.data
+                    && r.is_finite()
+                {
+                    p.roll = r;
+                    p.prev_roll = r;
+                }
+            }
+            p
+        }
+        Kind::Wake => {
+            let mut p = base_v(pos, DVec3::ZERO, rng);
+            set_size(&mut p, 0.01, 0.01);
+            p.life = (8.0 / (rng.f32() * 0.8 + 0.2)) as i32;
+            p.vel = aux;
+            p
+        }
+        Kind::Vertical => {
+            let mut p = base_v(pos, aux, rng);
+            p.vel = aux;
+            p.vel.y += if name == "reset_mob_growth" {
+                0.03
+            } else {
+                -0.03
+            };
+            p.size *= rng.f32() * 0.6 + 0.5;
+            p.life = 8;
+            p
+        }
+        Kind::Snowflake => {
+            let mut p = base(pos, rng);
+            p.gravity = 0.225;
+            p.friction = 1.0;
+            let j = |rng: &mut Rng| f64::from(rng.f32() * 2.0 - 1.0) * 0.05;
+            p.vel = DVec3::new(aux.x + j(rng), aux.y + j(rng), aux.z + j(rng));
+            p.size = 0.1 * (rng.f32() * rng.f32() + 1.0);
+            p.life = (16.0 / (rng.f32() * 0.8 + 0.2)) as i32 + 2;
+            p.color = [0.923, 0.964, 0.999, 1.0];
+            p
+        }
+        Kind::TrialDetect => {
+            let mut p = base_v(pos, DVec3::ZERO, rng);
+            p.friction = 0.96;
+            p.gravity = -0.1;
+            p.speed_up = true;
+            p.vel = DVec3::new(aux.x, p.vel.y * 0.9 + aux.y, aux.z);
+            p.size *= 0.75 * 1.5;
+            p.life = ((8.0 / (0.5 + rng.f32() * 0.5) * 1.5) as i32).max(1);
+            p.light_mode = Light::BlockMax;
+            p
+        }
+        Kind::Firefly => {
+            let y = if rng.bool() { aux.y } else { -aux.y };
+            let mut p = base_v(pos, DVec3::new(0.5 - rng.f64(), y, 0.5 - rng.f64()), rng);
+            p.speed_up = true;
+            p.friction = 0.96;
+            p.size *= 0.75;
+            p.vel *= 0.8;
+            p.life = 200 + rng.below(101) as i32;
+            scale(&mut p, 1.5);
+            p.color[3] = 0.0;
+            p.light_mode = Light::Firefly;
+            p
+        }
+        Kind::Shriek => {
+            let mut p = base_v(pos, DVec3::ZERO, rng);
+            p.size = 0.85;
+            p.life = 30;
+            p.vel = DVec3::new(0.0, 0.1, 0.0);
+            p.light_mode = Light::BlockMax;
+            if let Data::Delay(d) = s.data {
+                p.aux[0] = data_ticks(d) as f32;
+            }
+            p
+        }
+        Kind::Vibration => {
+            let Data::Vibration { target, ticks } = s.data else {
+                return None;
+            };
+            let mut p = base_v(pos, DVec3::ZERO, rng);
+            p.size = 0.3;
+            p.life = data_ticks(ticks);
+            p.light_mode = Light::BlockMax;
+            p.physics = false;
+            match target {
+                Target::Block([x, y, z]) => {
+                    p.extra = DVec3::new(f64::from(x), f64::from(y), f64::from(z)) + 0.5;
+                }
+                Target::Entity { id, y_offset } => {
+                    p.flag = true;
+                    let dy = if y_offset.is_finite() {
+                        y_offset.clamp(-64.0, 64.0)
+                    } else {
+                        0.0
+                    };
+                    p.extra = DVec3::new(f64::from(id), f64::from(dy), 0.0);
+                }
+            }
+            p
+        }
+        Kind::Trail => {
+            let Data::Trail {
+                target,
+                color: c,
+                ticks,
+            } = s.data
+            else {
+                return None;
+            };
+            let mut p = base_v(pos, aux, rng);
+            let [r, g, b] = rgb(c);
+            let k = |rng: &mut Rng| 0.875 + rng.f32() * 0.25;
+            let ch = |v: f32, k: f32| ((v * 255.0 * k) as i32).clamp(0, 255) as f32 / 255.0;
+            p.color = [ch(r, k(rng)), ch(g, k(rng)), ch(b, k(rng)), 1.0];
+            p.size = 0.26;
+            p.extra = target;
+            p.life = data_ticks(ticks);
+            p.light_mode = Light::Full;
+            p.physics = false;
+            p
+        }
+        Kind::GeyserPlume => plume(s, rng),
         Kind::Terrain => {
             let Data::Rect { rect, tint } = s.data else {
                 return None;
             };
-            let mut p = base_v(pos, aux, rng);
+            let block = matches!(name, "block" | "block_crumble" | "dust_pillar");
+            let mut p = base_v(pos, if block { aux } else { DVec3::ZERO }, rng);
+            match name {
+                "item" => p.vel = p.vel * 0.1 + aux,
+                "block_crumble" => {
+                    p.vel = DVec3::ZERO;
+                    p.life = rng.below(10) as i32 + 1;
+                }
+                "dust_pillar" => {
+                    p.vel = DVec3::new(
+                        rng.gaussian() / 30.0,
+                        aux.y + rng.gaussian() / 2.0,
+                        rng.gaussian() / 30.0,
+                    );
+                    p.life = rng.below(20) as i32 + 20;
+                }
+                _ => {}
+            }
             p.gravity = 1.0;
-            let shade = if PARTICLE_NAMES[usize::from(s.type_id)] == "block"
-                || PARTICLE_NAMES[usize::from(s.type_id)] == "block_crumble"
-            {
-                0.6
-            } else {
-                1.0
-            };
+            let shade = if block { 0.6 } else { 1.0 };
             p.color = [shade * tint[0], shade * tint[1], shade * tint[2], 1.0];
             p.size /= 2.0;
             p.rect = rect;
+            p.sub = [rng.f32() * 3.0, rng.f32() * 3.0];
+            p
+        }
+        Kind::Goo => {
+            let mut p = base_v(pos, DVec3::ZERO, rng);
+            p.gravity = 1.0;
+            p.size /= 2.0;
+            p.rect = atlas.uv(set[0]);
             p.sub = [rng.f32() * 3.0, rng.f32() * 3.0];
             p
         }
@@ -714,514 +1288,288 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
     p.kind = kind;
     p.type_id = s.type_id;
     p.life = p.life.max(1);
-    if !matches!(
-        kind,
-        Kind::Terrain | Kind::Marker | Kind::Seed | Kind::FlyTowards | Kind::VaultConnection
-    ) {
-        p.sprite = set[0];
-        set_from_age(&mut p, atlas);
+    if !set.is_empty() && !matches!(kind, Kind::Terrain | Kind::Marker | Kind::Goo) {
+        if random_sprite(kind) {
+            p.sprite = set[rng.below(set.len() as u32) as usize];
+        } else {
+            p.sprite = set[0];
+            set_from_age(&mut p, atlas);
+        }
     }
     Some(p)
 }
 
-fn aabb(p: &P) -> [f64; 6] {
-    let w = f64::from(p.half_w);
-    [
-        p.pos.x - w,
-        p.pos.y,
-        p.pos.z - w,
-        p.pos.x + w,
-        p.pos.y + f64::from(p.height),
-        p.pos.z + w,
-    ]
-}
+const OMINOUS_START: u32 = (-12_210_434i32) as u32;
 
-pub(crate) struct Scratch {
-    boxes: Vec<[f64; 6]>,
-    local: Vec<[f32; 6]>,
-}
-
-impl Scratch {
-    pub(crate) fn new() -> Self {
-        Self {
-            boxes: Vec::with_capacity(64),
-            local: Vec::with_capacity(8),
-        }
-    }
-}
-
-fn collide(world: &dyn ParticleWorld, bb: [f64; 6], d: DVec3, s: &mut Scratch) -> DVec3 {
-    let lo = [
-        bb[0].min(bb[0] + d.x),
-        bb[1].min(bb[1] + d.y),
-        bb[2].min(bb[2] + d.z),
-    ];
-    let hi = [
-        bb[3].max(bb[3] + d.x),
-        bb[4].max(bb[4] + d.y),
-        bb[5].max(bb[5] + d.z),
-    ];
-    s.boxes.clear();
-    let cell = |v: f64| v.floor().clamp(-3.0e7, 3.0e7) as i32;
-    let (x0, y0, z0) = (cell(lo[0]), cell(lo[1]), cell(lo[2]));
-    let (x1, y1, z1) = (cell(hi[0]), cell(hi[1]), cell(hi[2]));
-    if (x1 - x0) > 12 || (y1 - y0) > 12 || (z1 - z0) > 12 {
-        return d;
-    }
-    for x in x0..=x1 {
-        for y in y0..=y1 {
-            for z in z0..=z1 {
-                s.local.clear();
-                world.collision_boxes(x, y, z, &mut s.local);
-                for b in &s.local {
-                    s.boxes.push([
-                        f64::from(x) + f64::from(b[0]),
-                        f64::from(y) + f64::from(b[1]),
-                        f64::from(z) + f64::from(b[2]),
-                        f64::from(x) + f64::from(b[3]),
-                        f64::from(y) + f64::from(b[4]),
-                        f64::from(z) + f64::from(b[5]),
-                    ]);
-                }
-            }
-        }
-    }
-    if s.boxes.is_empty() {
-        return d;
-    }
-    let mut bb = bb;
-    let mut out = d;
-    let clip = |axis: usize, bb: &[f64; 6], boxes: &[[f64; 6]], mut dv: f64| -> f64 {
-        let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
-        for o in boxes {
-            if bb[a + 3] <= o[a] || bb[a] >= o[a + 3] || bb[b + 3] <= o[b] || bb[b] >= o[b + 3] {
-                continue;
-            }
-            if dv > 0.0 && bb[axis + 3] <= o[axis] {
-                dv = dv.min(o[axis] - bb[axis + 3]);
-            } else if dv < 0.0 && bb[axis] >= o[axis + 3] {
-                dv = dv.max(o[axis + 3] - bb[axis]);
-            }
-        }
-        dv
-    };
-    let shift = |bb: &mut [f64; 6], axis: usize, dv: f64| {
-        bb[axis] += dv;
-        bb[axis + 3] += dv;
-    };
-    out.y = clip(1, &bb, &s.boxes, out.y);
-    shift(&mut bb, 1, out.y);
-    let x_first = out.x.abs() >= out.z.abs();
-    let order = if x_first { [0, 2] } else { [2, 0] };
-    for axis in order {
-        let v = clip(axis, &bb, &s.boxes, if axis == 0 { out.x } else { out.z });
-        shift(&mut bb, axis, v);
-        if axis == 0 {
-            out.x = v;
-        } else {
-            out.z = v;
-        }
-    }
-    out
-}
-
-fn mv(p: &mut P, world: &dyn ParticleWorld, s: &mut Scratch, d: DVec3) {
-    if p.stopped {
-        return;
-    }
-    let orig = d;
-    let mut d = d;
-    if p.physics && d != DVec3::ZERO && d.length_squared() < 10_000.0 {
-        d = collide(world, aabb(p), d, s);
-    }
-    p.pos += d;
-    if orig.y.abs() >= 1.0e-5 && d.y.abs() < 1.0e-5 {
-        p.stopped = true;
-    }
-    p.on_ground = orig.y != d.y && orig.y < 0.0;
-    if orig.x != d.x {
-        p.vel.x = 0.0;
-    }
-    if orig.z != d.z {
-        p.vel.z = 0.0;
-    }
-}
-
-pub(crate) struct Tick<'a> {
-    pub world: &'a dyn ParticleWorld,
-    pub atlas: &'a ParticleAtlas,
-    pub rng: &'a mut Rng,
-    pub spawns: &'a mut Vec<Spawn>,
-    pub scratch: &'a mut Scratch,
-}
-
-fn queue(t: &mut Tick, spawn: Spawn) {
-    if t.spawns.len() < MAX_SPAWNS_PER_TICK {
-        t.spawns.push(spawn);
-    }
-}
-
-fn drag(p: &mut P, f: f64) {
-    p.vel *= f;
-}
-
-/// Advances a particle one tick; returns false when it should be removed.
-pub(crate) fn tick(p: &mut P, t: &mut Tick) -> bool {
+/// Vanilla `RisingParticle`.
+fn rising(pos: DVec3, aux: DVec3, rng: &mut Rng) -> P {
+    let mut p = base_v(pos, aux, rng);
+    p.friction = 0.96;
+    p.vel = p.vel * 0.01 + aux;
+    let jitter = |rng: &mut Rng| f64::from(rng.f32() - rng.f32()) * 0.05;
+    p.pos += DVec3::new(jitter(rng), jitter(rng), jitter(rng));
     p.prev = p.pos;
-    p.prev_roll = p.roll;
-    let cell = |v: f64| v.floor().clamp(-3.0e7, 3.0e7) as i32;
-    let at = (cell(p.pos.x), cell(p.pos.y), cell(p.pos.z));
-    p.light = t.world.light(at.0, at.1, at.2);
-    match p.kind {
-        Kind::Seed => {
-            for _ in 0..6 {
-                let j = |r: &mut Rng| (r.f64() - r.f64()) * 4.0;
-                let off = DVec3::new(j(t.rng), j(t.rng), j(t.rng));
-                queue(
-                    t,
-                    Spawn {
-                        type_id: type_id("explosion"),
-                        pos: p.pos + off,
-                        aux: DVec3::new(f64::from(p.age) / f64::from(p.life), 0.0, 0.0),
-                        data: Data::None,
-                    },
-                );
-            }
-            p.age += 1;
-            return p.age < p.life;
+    p.start = p.pos;
+    p.life = (8.0 / (rng.f32() as f64 * 0.8 + 0.2)) as i32 + 4;
+    p
+}
+
+/// Vanilla `BaseAshSmokeParticle` and its subclasses.
+fn ash(s: &Spawn, style: Haze, rng: &mut Rng) -> P {
+    let mut pos = s.pos;
+    let mut aux = s.aux;
+    let (mut dir, col_rand, max_life, gravity, physics, mut sc) = match style {
+        Haze::Smoke | Haze::White => ([0.1; 3], 0.3, 8.0, -0.1, true, 1.0),
+        Haze::Large => ([0.1; 3], 0.3, 8.0, -0.1, true, 2.5),
+        Haze::Ash => ([0.1, -0.1, 0.1], 0.5, 20.0, 0.1, false, 1.0),
+        Haze::WhiteAsh => ([0.1, -0.1, 0.1], 0.0, 20.0, 0.0125, false, 1.0),
+        Haze::Plume => ([0.7, 0.6, 0.7], 0.5, 7.0, 0.5, false, 1.0),
+        Haze::Noxious => ([0.1; 3], 0.3, 5.0, -0.02, true, 3.0),
+        Haze::Geyser => ([1.0; 3], 0.0, 0.0, 0.0, true, 1.0),
+    };
+    match style {
+        Haze::Ash => aux = DVec3::ZERO,
+        Haze::WhiteAsh => {
+            let mut f = |k: f64| rng.f64() * k * rng.f64() * 0.1;
+            aux = DVec3::new(f(-1.9), f(-0.5) * 5.0, f(-1.9));
         }
-        Kind::Portal => {
-            p.age += 1;
-            if p.age >= p.life {
-                return false;
-            }
-            let a = p.age as f32 / p.life as f32;
-            let mut s = a;
-            s = -s + s * s * 2.0;
-            s = 1.0 - s;
-            let start = p.start;
-            p.pos = DVec3::new(
-                start.x + p.vel.x * f64::from(s),
-                start.y + p.vel.y * f64::from(s) + f64::from(1.0 - a),
-                start.z + p.vel.z * f64::from(s),
-            );
-            return true;
+        Haze::Plume => aux.y += 0.15,
+        Haze::Geyser => {
+            let (water, impulse) = match s.data {
+                Data::Geyser {
+                    water_blocks,
+                    impulse,
+                } if impulse.is_finite() => (
+                    water_blocks.clamp(0, MAX_WATER_BLOCKS) as f32,
+                    impulse.clamp(0.0, 8.0),
+                ),
+                _ => (0.0, 1.5),
+            };
+            let burst = impulse + 0.25 * water;
+            dir = [burst; 3];
+            sc = 3.0 + 0.125 * water;
+            let mut j = |k: f64| f64::from(rng.f32() - 0.5) * k;
+            pos += DVec3::new(j(0.5), j(0.5) + 0.2, j(0.5));
         }
-        Kind::FlyTowards | Kind::VaultConnection => {
-            let expired = p.age >= p.life;
-            p.age += 1;
-            if expired {
-                return false;
-            }
-            let pos = 1.0 - p.age as f32 / p.life as f32;
-            let mut pp = 1.0 - pos;
-            pp *= pp;
-            pp *= pp;
-            let start = p.start;
-            p.pos = DVec3::new(
-                start.x + p.vel.x * f64::from(pos),
-                start.y + p.vel.y * f64::from(pos) - f64::from(pp * 1.2),
-                start.z + p.vel.z * f64::from(pos),
-            );
-            return true;
+        _ => {}
+    }
+    let mut p = base_v(pos, DVec3::ZERO, rng);
+    p.friction = 0.96;
+    p.gravity = gravity;
+    p.speed_up = true;
+    p.vel = p.vel * DVec3::from_array(dir.map(f64::from)) + aux;
+    let c = rng.f32() * col_rand;
+    p.color = [c, c, c, 1.0];
+    p.size *= 0.75 * sc;
+    p.life = ((max_life / (rng.f32() * 0.8 + 0.2) * sc) as i32).max(1);
+    p.physics = physics;
+    match style {
+        Haze::White => color(&mut p, [0.729_411_8, 0.694_117_67, 0.760_784_3]),
+        Haze::WhiteAsh => color(&mut p, rgb(0xBAB1C2)),
+        Haze::Plume => {
+            let shift = rng.f32() * 0.2;
+            color(&mut p, rgb(0xBAB1C2).map(|c| c - shift));
         }
-        Kind::Bubble => {
-            p.life -= 1;
-            if p.life <= 0 {
-                return false;
-            }
-            let name = crate::names::PARTICLE_NAMES[usize::from(p.type_id)];
-            p.vel.y += if name == "current_down" {
-                -0.002
+        Haze::Noxious => {
+            color(&mut p, [1.0; 3]);
+            p.life = ((6.0 / (rng.f64() * 0.5 + 0.5) * 3.0) as i32).max(1);
+            p.aux[0] = p.life as f32 / 2.0;
+        }
+        Haze::Geyser => {
+            p.friction = 0.725;
+            color(&mut p, [1.0; 3]);
+            p.vel.y = p.vel.y.abs();
+            p.life = (25.0 * (0.8 + 0.2 * rng.f32())) as i32;
+        }
+        _ => {}
+    }
+    p
+}
+
+fn drip(pos: DVec3, kind: Kind, l: Liquid, rng: &mut Rng) -> P {
+    let mut p = base(pos, rng);
+    set_size(&mut p, 0.01, 0.01);
+    p.gravity = 0.06;
+    let [r, g, b] = match (kind, l) {
+        (_, Liquid::Water | Liquid::DripWater) => [0.2, 0.3, 1.0],
+        (_, Liquid::Lava | Liquid::DripLava) => [1.0, 0.285_714_3, 0.083_333_33],
+        (Kind::Fall(_), Liquid::Honey) => [0.582, 0.448, 0.082],
+        (Kind::Land(_), Liquid::Honey) => [0.522, 0.408, 0.082],
+        (_, Liquid::Honey) => [0.622, 0.508, 0.082],
+        (_, Liquid::Nectar) => [0.92, 0.782, 0.72],
+        (_, Liquid::Spore) => [0.32, 0.5, 0.22],
+        (_, Liquid::Obsidian) => [0.511_718_75, 0.031_25, 0.890_625],
+    };
+    p.color = [r, g, b, 1.0];
+    let f = |rng: &mut Rng| rng.f32() * 0.8 + 0.2;
+    match kind {
+        Kind::Hang(_) => {
+            p.gravity *= 0.02;
+            p.life = if matches!(l, Liquid::Honey | Liquid::Obsidian) {
+                100
             } else {
-                0.002
+                40
             };
-            let d = p.vel;
-            mv(p, t.world, t.scratch, d);
-            drag(p, 0.85);
-            let (x, y, z) = (cell(p.pos.x), cell(p.pos.y), cell(p.pos.z));
-            return matches!(t.world.fluid(x, y, z), Some((Fluid::Water, _)));
         }
-        Kind::BubblePop => {
-            p.age += 1;
-            if p.age >= p.life {
-                return false;
-            }
-            p.vel.y -= f64::from(p.gravity);
-            let d = p.vel;
-            mv(p, t.world, t.scratch, d);
-            set_from_age(p, t.atlas);
-            return true;
-        }
-        Kind::WaterDrop | Kind::Splash => {
-            p.life -= 1;
-            if p.life <= 0 {
-                return false;
-            }
-            p.vel.y -= f64::from(p.gravity);
-            let d = p.vel;
-            mv(p, t.world, t.scratch, d);
-            drag(p, 0.98);
-            if p.on_ground {
-                if t.rng.f32() < 0.5 {
-                    return false;
+        Kind::Fall(_) => {
+            p.life = (64.0 / f(rng)) as i32;
+            match l {
+                Liquid::Nectar => {
+                    p.life = (16.0 / f(rng)) as i32;
+                    p.gravity = 0.007;
                 }
-                p.vel.x *= 0.7;
-                p.vel.z *= 0.7;
-            }
-            let (x, y, z) = (cell(p.pos.x), cell(p.pos.y), cell(p.pos.z));
-            let mut top = 0.0f32;
-            t.scratch.local.clear();
-            t.world.collision_boxes(x, y, z, &mut t.scratch.local);
-            let (fx, fz) = (
-                (p.pos.x - f64::from(x)) as f32,
-                (p.pos.z - f64::from(z)) as f32,
-            );
-            for b in &t.scratch.local {
-                if fx >= b[0] && fx <= b[3] && fz >= b[2] && fz <= b[5] {
-                    top = top.max(b[4]);
+                Liquid::Spore => {
+                    p.life = (64.0 / (0.1 + rng.f32() * 0.8)) as i32;
+                    p.gravity = 0.005;
                 }
-            }
-            if let Some((_, h)) = t.world.fluid(x, y, z) {
-                top = top.max(h);
-            }
-            return !(top > 0.0 && p.pos.y < f64::from(y) + f64::from(top));
-        }
-        Kind::Hang(l) | Kind::Fall(l) | Kind::Land(l) => return tick_drip(p, t, l),
-        Kind::Campfire => {
-            p.age += 1;
-            if p.age >= p.life || p.color[3] <= 0.0 {
-                return false;
-            }
-            let j = |r: &mut Rng| f64::from(r.f32() / 5000.0) * if r.bool() { 1.0 } else { -1.0 };
-            p.vel.x += j(t.rng);
-            p.vel.z += j(t.rng);
-            p.vel.y -= f64::from(p.gravity);
-            let d = p.vel;
-            mv(p, t.world, t.scratch, d);
-            if p.age >= p.life - 60 && p.color[3] > 0.01 {
-                p.color[3] -= 0.015;
-            }
-            return true;
-        }
-        Kind::Town => {
-            p.life -= 1;
-            if p.life <= 0 {
-                return false;
-            }
-            p.pos += p.vel;
-            drag(p, 0.99);
-            return true;
-        }
-        Kind::Sweep | Kind::Explosion => {
-            p.age += 1;
-            if p.age >= p.life {
-                return false;
-            }
-            set_from_age(p, t.atlas);
-            return true;
-        }
-        _ => {}
-    }
-
-    p.age += 1;
-    if p.age > p.life {
-        return false;
-    }
-    p.vel.y -= 0.04 * f64::from(p.gravity);
-    let d = p.vel;
-    mv(p, t.world, t.scratch, d);
-    if p.speed_up && p.pos.y == p.prev.y {
-        p.vel.x *= 1.1;
-        p.vel.z *= 1.1;
-    }
-    drag(p, f64::from(p.friction));
-    if p.on_ground {
-        p.vel.x *= f64::from(0.7f32);
-        p.vel.z *= f64::from(0.7f32);
-    }
-    match p.kind {
-        Kind::Smoke | Kind::Dust | Kind::Transition | Kind::Cloud | Kind::Generic | Kind::Poof => {
-            set_from_age(p, t.atlas);
-        }
-        Kind::Crit => {
-            p.color[1] *= 0.96;
-            p.color[2] *= 0.9;
-            set_from_age(p, t.atlas);
-        }
-        Kind::LavaPop => {
-            let odds = p.age as f32 / p.life as f32;
-            if t.rng.f32() > odds {
-                queue(
-                    t,
-                    Spawn {
-                        type_id: type_id("smoke"),
-                        pos: p.pos,
-                        aux: p.vel,
-                        data: Data::None,
-                    },
-                );
+                Liquid::Honey | Liquid::Obsidian => p.gravity = 0.01,
+                _ => {}
             }
         }
-        Kind::Animated | Kind::Spell => {
-            set_from_age(p, t.atlas);
-            if p.kind == Kind::Spell {
-                p.color[3] += (p.aux[3] - p.color[3]) * 0.05;
-            } else if p.age > p.life / 2 {
-                p.color[3] = 1.0 - (p.age as f32 - p.life as f32 / 2.0) / p.life as f32;
-                if p.aux[3] > 0.5 {
-                    for i in 0..3 {
-                        p.color[i] += (p.aux[i] - p.color[i]) * 0.2;
-                    }
-                }
-            }
-            if p.kind == Kind::Animated
-                && p.aux[5] > 0.5
-                && p.age < p.life / 2
-                && (p.age + p.life) % 2 == 0
-            {
-                let color = p.color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u32);
-                let fade = p.aux.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u32);
-                queue(
-                    t,
-                    Spawn {
-                        type_id: p.type_id,
-                        pos: p.pos,
-                        aux: DVec3::ZERO,
-                        data: Data::Firework(Spark {
-                            color: color[0] << 16 | color[1] << 8 | color[2],
-                            fade: (p.aux[3] > 0.5)
-                                .then_some(fade[0] << 16 | fade[1] << 8 | fade[2]),
-                            trail: false,
-                            twinkle: p.aux[4] > 0.5,
-                            trailed: true,
-                        }),
-                    },
-                );
-            }
-        }
-        _ => {}
-    }
-    if p.kind == Kind::Transition {
-        let f = p.age as f32 / p.life as f32;
-        for i in 0..3 {
-            p.color[i] = p.aux[3 + i] + (p.aux[i] - p.aux[3 + i]) * f;
-        }
-    }
-    true
-}
-
-fn tick_drip(p: &mut P, t: &mut Tick, l: Liquid) -> bool {
-    let hanging = matches!(p.kind, Kind::Hang(_));
-    if hanging {
-        if matches!(l, Liquid::Lava | Liquid::DripLava) {
-            p.color[0] = 1.0;
-            p.color[1] = 16.0 / (40 - p.life + 16) as f32;
-            p.color[2] = 4.0 / (40 - p.life + 8) as f32;
-        }
-        p.life -= 1;
-        if p.life <= 0 {
-            let name = match l {
-                Liquid::Water => "falling_water",
-                Liquid::Lava => "falling_lava",
-                Liquid::Honey => "falling_honey",
-                Liquid::Obsidian => "falling_obsidian_tear",
-                Liquid::DripWater => "falling_dripstone_water",
-                Liquid::DripLava => "falling_dripstone_lava",
-                Liquid::Nectar => "falling_nectar",
+        _ => {
+            p.life = match l {
+                Liquid::Honey => (128.0 / f(rng)) as i32,
+                Liquid::Obsidian => (28.0 / f(rng)) as i32,
+                _ => (16.0 / f(rng)) as i32,
             };
-            queue(
-                t,
-                Spawn {
-                    type_id: type_id(name),
-                    pos: p.pos,
-                    aux: p.vel,
-                    data: Data::None,
-                },
-            );
-            return false;
-        }
-    } else {
-        p.life -= 1;
-        if p.life <= 0 {
-            return false;
         }
     }
-    p.vel.y -= f64::from(p.gravity);
-    let d = p.vel;
-    mv(p, t.world, t.scratch, d);
-    if hanging {
-        p.vel *= 0.02;
-    } else if matches!(p.kind, Kind::Fall(_)) && p.on_ground {
-        let land = match l {
-            Liquid::Water | Liquid::DripWater => Some("splash"),
-            Liquid::Lava | Liquid::DripLava => Some("landing_lava"),
-            Liquid::Honey => Some("landing_honey"),
-            Liquid::Obsidian => Some("landing_obsidian_tear"),
-            Liquid::Nectar => None,
-        };
-        if let Some(name) = land {
-            queue(
-                t,
-                Spawn {
-                    type_id: type_id(name),
-                    pos: p.pos,
-                    aux: DVec3::ZERO,
-                    data: Data::None,
-                },
-            );
+    if matches!(l, Liquid::Lava | Liquid::DripLava | Liquid::Obsidian) {
+        p.light_mode = Light::BlockMax;
+    }
+    p
+}
+
+fn animated(s: &Spawn, name: &str, rng: &mut Rng) -> P {
+    let mut p = base(s.pos, rng);
+    p.friction = 0.91;
+    p.light_mode = Light::Full;
+    p.vel = s.aux;
+    p.size *= 0.75;
+    p.life = 60 + rng.below(12) as i32;
+    p.aux = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0];
+    match name {
+        "totem_of_undying" => {
+            p.gravity = 1.25;
+            p.friction = 0.6;
+            p.color = if rng.below(4) == 0 {
+                [
+                    0.6 + rng.f32() * 0.2,
+                    0.6 + rng.f32() * 0.3,
+                    rng.f32() * 0.2,
+                    1.0,
+                ]
+            } else {
+                [
+                    0.1 + rng.f32() * 0.2,
+                    0.4 + rng.f32() * 0.3,
+                    rng.f32() * 0.2,
+                    1.0,
+                ]
+            };
         }
-        return false;
-    }
-    drag(p, 0.98);
-    true
-}
-
-/// Size multiplier over the particle's life (vanilla `getQuadSize`).
-pub(crate) fn quad_size(p: &P, partial: f32) -> f32 {
-    let a = (p.age as f32 + partial) / p.life.max(1) as f32;
-    match p.kind {
-        Kind::Smoke
-        | Kind::Crit
-        | Kind::Heart
-        | Kind::Note
-        | Kind::Dust
-        | Kind::Transition
-        | Kind::Cloud => p.size * (a * 32.0).clamp(0.0, 1.0),
-        Kind::Flame => p.size * (1.0 - a * a * 0.5),
-        Kind::LavaPop => p.size * (1.0 - a * a),
-        Kind::Portal => {
-            let s = 1.0 - a;
-            p.size * (1.0 - s * s)
+        "end_rod" => {
+            p.gravity = 0.0125;
+            p.physics = false;
+            p.aux = [0.949, 0.871, 0.788, 1.0, 0.0, 0.0];
         }
-        Kind::Seed => 0.0,
-        Kind::Flash => 7.1 * ((p.age as f32 + partial - 1.0) * 0.25 * std::f32::consts::PI).sin(),
-        Kind::Animated if p.aux[4] > 0.5 && !twinkle_visible(p) => 0.0,
-        _ => p.size,
+        _ => {
+            p.gravity = 0.1;
+            p.life = 48 + rng.below(12) as i32;
+            p.color = [1.0, 1.0, 1.0, 0.99];
+            if let Data::Firework(spark) = s.data {
+                let [r, g, b] = rgb(spark.color);
+                p.color = [r, g, b, 0.99];
+                let [fr, fg, fb] = rgb(spark.fade.unwrap_or(0));
+                let flag = |b: bool| if b { 1.0 } else { 0.0 };
+                p.aux = [
+                    fr,
+                    fg,
+                    fb,
+                    flag(spark.fade.is_some()),
+                    flag(spark.twinkle),
+                    flag(spark.trail),
+                ];
+                if spark.trailed {
+                    p.age = p.life / 2;
+                }
+            } else {
+                p.aux = [0.0; 6];
+            }
+        }
     }
+    p
 }
 
-/// Vanilla's twinkling sparks skip every other three-tick window after the first third of life.
-fn twinkle_visible(p: &P) -> bool {
-    p.age < p.life / 3 || (p.age + p.life) / 3 % 2 == 0
+/// Vanilla `FallingParticle` behind every falling-leaves type.
+fn leaves(s: &Spawn, l: Leaves, rng: &mut Rng) -> P {
+    let (fall, side, swirl, flow, sc, start) = match l {
+        Leaves::Cherry => (0.25f32, 2.0f32, false, true, 1.0f32, 0.0f32),
+        Leaves::Pale | Leaves::Tinted => (0.07, 10.0, true, false, 2.0, 0.021),
+    };
+    let mut p = base(s.pos, rng);
+    let deg = |d: f32| d.to_radians();
+    let rot_speed = deg(if rng.bool() { -30.0 } else { 30.0 });
+    let spin = deg(if rng.bool() { -5.0 } else { 5.0 });
+    p.life = LEAVES_LIFE;
+    p.gravity = fall * 1.2 * 0.0025;
+    let size = sc * if rng.bool() { 0.05 } else { 0.075 };
+    p.size = size;
+    set_size(&mut p, size, size);
+    p.friction = 1.0;
+    p.vel = DVec3::new(0.0, -f64::from(start), 0.0);
+    let r = rng.f32();
+    let a = f64::from(r * 60.0).to_radians();
+    p.aux = [
+        rot_speed,
+        spin,
+        side,
+        (a.cos() * f64::from(side)) as f32,
+        (a.sin() * f64::from(side)) as f32,
+        (1000.0 + f64::from(r) * 3000.0).to_radians() as f32,
+    ];
+    p.flag = swirl;
+    p.extra.x = if flow { 1.0 } else { 0.0 };
+    if let (Leaves::Tinted, Data::Argb(c)) = (l, s.data) {
+        color(&mut p, rgb(c));
+    }
+    p
 }
 
-pub(crate) fn alpha(p: &P, partial: f32) -> f32 {
-    if p.kind == Kind::Flash {
-        0.6 - (p.age as f32 + partial - 1.0) * 0.25 * 0.5
-    } else if p.kind == Kind::VaultConnection {
-        let t = (p.age as f32 + partial) / p.life.max(1) as f32;
-        0.6 * ((t - 0.25) / 0.75).clamp(0.0, 1.0)
-    } else {
-        p.color[3]
-    }
-}
+pub(crate) const LEAVES_LIFE: i32 = 300;
 
-pub(crate) fn emission(p: &P, partial: f32) -> f32 {
-    let a = ((p.age as f32 + partial) / p.life.max(1) as f32).clamp(0.0, 1.0);
-    if matches!(p.kind, Kind::Portal | Kind::FlyTowards) {
-        a * a * a * a
-    } else {
-        a
-    }
+/// Vanilla `GeyserPlumeParticle`: a column of water that rises to its height, then fades.
+fn plume(s: &Spawn, rng: &mut Rng) -> P {
+    let water = match s.data {
+        Data::Geyser { water_blocks, .. } => water_blocks.clamp(0, MAX_WATER_BLOCKS),
+        _ => 0,
+    };
+    let mut j = |k: f32| f64::from((rng.f32() - 0.5) * k);
+    let pos = s.pos + DVec3::new(j(0.2), 0.0, j(0.2)) + DVec3::Y * f64::from(rng.f32());
+    let mut p = base_v(pos, s.aux, rng);
+    let height = 5 * water.max(1);
+    p.speed_up = true;
+    p.life = height * 5;
+    p.vel.y = 0.0;
+    p.friction = 1.0;
+    let propulsion = if water == 1 { 1.5 } else { 1.0 } * height as f32 * 1.45;
+    p.gravity = -propulsion;
+    let base_size = p.size * 0.75;
+    let min = base_size * (2.0 + height as f32 / 8.0);
+    let max = base_size * (3.0 + height as f32 / 8.0);
+    p.size = min;
+    p.extra = DVec3::new(
+        pos.y,
+        pos.y + f64::from(height) - 1.0,
+        f64::from(propulsion),
+    );
+    p.aux = [
+        (rng.f32() - 0.5) * 0.2,
+        (rng.f32() - 0.5) * 0.2,
+        min,
+        max,
+        0.0,
+        0.0,
+    ];
+    p
 }

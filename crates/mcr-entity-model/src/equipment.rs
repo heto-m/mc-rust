@@ -77,6 +77,13 @@ fn argb_rgb(c: i32) -> u32 {
 }
 
 /// Adds the equipment layers of `stack` for `layer_type` drawn on `model`; false if nothing was added.
+/// `EquipmentLayerRenderer`'s `hasLayer`: the stack's equipment asset defines `layer_type`.
+pub fn has_layer(cx: &PlanCx<'_>, stack: &ItemStack, layer_type: &str) -> bool {
+    equippable(cx, stack)
+        .and_then(|(asset, _)| cx.assets.equipment(&asset))
+        .is_some_and(|info| info.layers.get(layer_type).is_some_and(|l| !l.is_empty()))
+}
+
 pub fn add_layers(
     cx: &mut PlanCx<'_>,
     plan: &mut Plan,

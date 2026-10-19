@@ -62,6 +62,16 @@ pub struct Skin {
     pub height: u32,
     pub rgba: Vec<u8>,
     pub slim: bool,
+    pub cape: Option<Cape>,
+}
+
+/// Cape pixels for a player, 64x32 RGBA.
+#[derive(Debug, Clone)]
+pub struct Cape {
+    pub key: String,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -74,6 +84,10 @@ pub struct PlayerView<'a> {
     pub swimming: bool,
     pub using_item: bool,
     pub left_handed: bool,
+    /// `capeFlap`, `capeLean` and `capeLean2` of `extractCapeState`, in degrees.
+    pub cloak: [f32; 3],
+    /// `showExtraEars`: the player is named deadmau5.
+    pub extra_ears: bool,
 }
 
 /// Elytra flight state (`extractFlightData`, `ElytraAnimationState`), with the partial tick applied.
@@ -138,6 +152,31 @@ pub struct EventAnim {
     pub bite: f32,
     /// Ticks since the squid's tentacle phase was resynced.
     pub tentacle_sync: Option<f32>,
+}
+
+/// `VehicleEntity` hurt wobble plus boat paddles and bubble-column tilt, with the partial tick applied.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct VehicleAnim {
+    /// `hurtTime - partial`; the wobble only runs while it is positive.
+    pub hurt: f32,
+    pub hurt_dir: f32,
+    /// `max(damage - partial, 0)`.
+    pub damage: f32,
+    /// `AbstractBoat.getRowingTime` of the left and right paddle.
+    pub rowing: [f32; 2],
+    /// `AbstractBoat.getBubbleAngle` in degrees.
+    pub bubble: f32,
+}
+
+impl VehicleAnim {
+    /// The X rotation in degrees of the hurt wobble.
+    pub fn wobble(&self) -> f32 {
+        if self.hurt > 0.0 {
+            self.hurt.sin() * self.hurt * self.damage / 10.0 * self.hurt_dir
+        } else {
+            0.0
+        }
+    }
 }
 
 /// The facing of the bed a sleeper lies in: vanilla `LivingEntity#getBedOrientation`.
@@ -239,6 +278,9 @@ pub struct EntityView<'a> {
     pub display: Option<crate::display::DisplaySample>,
     /// The bed of an entity in the sleeping pose.
     pub bed: Option<BedFacing>,
+    pub vehicle: VehicleAnim,
+    /// The rail a minecart stands on.
+    pub rail: Option<crate::vehicles::RailPose>,
 }
 
 impl std::fmt::Debug for EntityView<'_> {
@@ -298,6 +340,8 @@ impl<'a> EntityView<'a> {
             custom_name: None,
             player: PlayerView::default(),
             bed: None,
+            vehicle: VehicleAnim::default(),
+            rail: None,
         }
     }
 
