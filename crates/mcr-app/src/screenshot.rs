@@ -243,18 +243,39 @@ fn shell_timeline(shell: &mut crate::shell::Shell, secs: u32, origin: Instant) {
     shell.set_mod_uncapped(true);
     let mut per_second = vec![0u32; secs as usize];
     let mut last = Instant::now();
+    let tail_from = u64::from(secs.saturating_sub(31));
+    let mut tail: Vec<f32> = Vec::new();
     loop {
         let now = Instant::now();
-        let Some(slot) = per_second.get_mut(now.duration_since(origin).as_secs() as usize) else {
+        let second = now.duration_since(origin).as_secs();
+        let Some(slot) = per_second.get_mut(second as usize) else {
             break;
         };
         *slot += 1;
+        if second >= tail_from {
+            tail.push((now - last).as_secs_f32() * 1000.0);
+        }
         shell.advance((now - last).as_secs_f32());
         last = now;
         shell.frame();
     }
     let list: Vec<String> = per_second.iter().map(u32::to_string).collect();
     println!("timeline fps per second: {}", list.join(" "));
+    if tail.len() > 1 {
+        tail.remove(0);
+        tail.sort_by(f32::total_cmp);
+        let n = tail.len();
+        let at = |q: usize| tail[(n * q / 1000).min(n - 1)];
+        println!(
+            "timeline frame ms over the last {} frames: mean {:.3} p50 {:.3} p99 {:.3} p99.9 {:.3} max {:.2}",
+            n,
+            tail.iter().sum::<f32>() / n as f32,
+            at(500),
+            at(990),
+            at(999),
+            tail[n - 1]
+        );
+    }
     let marks: Vec<String> = [5usize, 15, 30, 60]
         .into_iter()
         .filter(|&t| t < per_second.len())

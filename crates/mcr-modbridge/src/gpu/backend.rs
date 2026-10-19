@@ -7,6 +7,7 @@ use std::time::Duration;
 use rustc_hash::FxHashMap;
 
 use super::context::{self, Gpu, GpuError};
+use super::finisher;
 use super::info::PipelineInfo;
 use super::pass::BindCache;
 use super::pipeline::{Pipeline, PipelineError};
@@ -1787,7 +1788,7 @@ impl State {
     /// and, when submitting directly, keeps at most two submits in flight.
     pub fn submit(
         &mut self,
-        gpu: &Gpu,
+        gpu: &'static Gpu,
         stats: &Stats,
         slots: &Slots,
         encoder: Handle,
@@ -1795,7 +1796,12 @@ impl State {
         let defer = slots.is_active();
         let (writes, uploaded) = self.stage(gpu, encoder, defer, true)?;
         let enc = self.encoder(encoder)?;
-        let (cmd, failed) = finish_valid(gpu, enc.cmd.take());
+        let (cmd, failed) = if defer {
+            (enc.cmd.take().map(|c| finisher::finish(gpu, c)), None)
+        } else {
+            let (cmd, failed) = finish_valid(gpu, enc.cmd.take());
+            (cmd.map(finisher::Encoded::ready), failed)
+        };
         enc.submits += 1;
         let n = enc.submits;
         let mut maps = Vec::new();
@@ -1839,7 +1845,7 @@ impl State {
     /// can cut the frame; readbacks, fences and Java's transient memory still follow the next submit.
     pub fn split(
         &mut self,
-        gpu: &Gpu,
+        gpu: &'static Gpu,
         stats: &Stats,
         slots: &Slots,
         encoder: Handle,
@@ -1850,9 +1856,9 @@ impl State {
         }
         let (writes, uploaded) = self.stage(gpu, encoder, true, false)?;
         let enc = self.encoder(encoder)?;
-        let (cmd, failed) = finish_valid(gpu, enc.cmd.take());
+        let cmd = enc.cmd.take().map(|c| finisher::finish(gpu, c));
         if cmd.is_none() && writes.is_empty() {
-            return failed.map_or(Ok(()), Err);
+            return Ok(());
         }
         let (slot, frame) = slots.current();
         slots.defer(
@@ -1869,7 +1875,7 @@ impl State {
             },
         );
         stats.uploaded.fetch_add(uploaded, Ordering::Relaxed);
-        failed.map_or(Ok(()), Err)
+        Ok(())
     }
 
     /// Collects the dirty host ranges and staged ring bytes for the next queue write; with `defer`

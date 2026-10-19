@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use super::backend::{add_cost, cost, cost_start};
 use super::context::Gpu;
+use super::finisher::Encoded;
 use super::slab::Handle;
 use crate::abi::{
     SLOT_GUI, SLOT_IMMEDIATE, SLOT_POST_WORLD, SLOT_WORLD_AFTER, SLOT_WORLD_SOLID,
@@ -123,7 +124,7 @@ pub struct Submission {
     pub slot: u32,
     pub frame: u64,
     pub writes: Vec<(wgpu::Buffer, u64, Vec<u8>)>,
-    pub cmd: Option<wgpu::CommandBuffer>,
+    pub cmd: Option<Encoded>,
     /// Readback staging buffers to map once the copy into them is on the queue.
     pub maps: Vec<(wgpu::Buffer, Arc<AtomicU8>)>,
     pub track: Arc<SubmitTrack>,
@@ -157,7 +158,7 @@ impl Submission {
             add_cost(cost::QUEUE_SUBMIT, start);
             return;
         }
-        let index = gpu.queue.submit(self.cmd);
+        let index = gpu.queue.submit(self.cmd.and_then(Encoded::take));
         let (done, n) = (self.track.done.clone(), self.n);
         gpu.queue.on_submitted_work_done(move || {
             done.fetch_max(n, Ordering::AcqRel);
@@ -496,7 +497,7 @@ impl Slots {
         }
         add_cost(cost::QUEUE_WRITE, start);
         let mut state = self.batch.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(cmd) = sub.cmd {
+        if let Some(cmd) = sub.cmd.and_then(Encoded::take) {
             batch.push(cmd);
             state.keys.push(key);
         }

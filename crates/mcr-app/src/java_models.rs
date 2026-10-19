@@ -51,6 +51,11 @@ impl JavaRender {
         self.models.clone()
     }
 
+    /// Java sent a render report, so [`Self::user_packs`] is Java's selection.
+    pub fn reported(&self) -> bool {
+        self.models_gen > 0
+    }
+
     /// Java's selected packs that exist inside `game_dir`; others are left out.
     pub fn user_packs(&mut self, game_dir: &std::path::Path) -> &[std::path::PathBuf] {
         if self.user_packs.0 != self.models_gen {

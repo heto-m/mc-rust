@@ -197,6 +197,8 @@ pub struct FrameProfiler {
     window: ProfileWindow,
     window_start: Instant,
     total: ProfileWindow,
+    /// Java frames over twice the running mean, which make the frame time's tail.
+    slow: ProfileWindow,
     frame_start: Option<Instant>,
     wait: Duration,
     submit: Duration,
@@ -214,6 +216,7 @@ impl FrameProfiler {
             window: ProfileWindow::default(),
             window_start: Instant::now(),
             total: ProfileWindow::default(),
+            slow: ProfileWindow::default(),
             frame_start: None,
             wait: Duration::ZERO,
             submit: Duration::ZERO,
@@ -264,8 +267,17 @@ impl FrameProfiler {
             gpu: delta(&gpu, &self.gpu_seen),
         };
         self.gpu_seen = gpu;
+        let t = &self.total;
+        if t.java_frames >= 100 && u64::from(total_us) * t.java_frames > 2 * t.java_us {
+            self.slow.java(&sample);
+        }
         self.window.java(&sample);
         self.total.java(&sample);
+    }
+
+    /// The Java frames over twice the mean so far.
+    pub fn slow(&self) -> &ProfileWindow {
+        &self.slow
     }
 
     pub fn take_line(&mut self) -> Option<String> {
@@ -278,6 +290,7 @@ impl FrameProfiler {
 
     pub fn reset(&mut self) {
         self.total = ProfileWindow::default();
+        self.slow = ProfileWindow::default();
     }
 }
 

@@ -163,8 +163,35 @@ impl Shell {
             .as_ref()
             .map(|n| n.jars.clone())
             .unwrap_or_default();
-        let assets = Arc::new(Assets::load_with_mods(&cfg.jar, &mod_jars)?);
         let index = asset_index_id(&cfg.jar);
+        let mut resource_stack = ResourceStack {
+            jar: cfg.jar.clone(),
+            assets_dir: cfg.assets_dir.clone(),
+            index: index.clone(),
+            mods: mod_jars.clone(),
+            user: Vec::new(),
+        };
+        if cfg.mod_net.is_some() {
+            resource_stack.user = crate::respacks::predicted_java_packs(&cfg.game_dir);
+        }
+        let predicted = (!resource_stack.user.is_empty())
+            .then(|| {
+                resource_stack
+                    .build(&[])
+                    .and_then(|r| Assets::from_resources(&cfg.jar, r, &Default::default()))
+                    .inspect_err(|e| {
+                        eprintln!("resource packs: Java's packs failed to load: {e:#}")
+                    })
+                    .ok()
+            })
+            .flatten();
+        let assets = match predicted {
+            Some(assets) => Arc::new(assets),
+            None => {
+                resource_stack.user.clear();
+                Arc::new(Assets::load_with_mods(&cfg.jar, &mod_jars)?)
+            }
+        };
         let resources = Arc::new(
             vanilla_resources(
                 &cfg.jar,
@@ -198,13 +225,6 @@ impl Shell {
             &cfg.name,
             mcr_auth::offline::offline_uuid(&cfg.name).unwrap_or_default(),
         );
-        let resource_stack = ResourceStack {
-            jar: cfg.jar.clone(),
-            assets_dir: cfg.assets_dir.clone(),
-            index: index.clone(),
-            mods: mod_jars,
-            user: Vec::new(),
-        };
         let now = Instant::now();
         let builtin = assets.builtin.clone();
         let text_renderer = gui.text_renderer();
@@ -1347,8 +1367,9 @@ impl Shell {
         };
         let at_title = self.play.is_none();
         self.java_render.poll(&resources, Some(frames), at_title);
+        let reported = self.java_render.reported();
         let user = self.java_render.user_packs(&self.cfg.game_dir);
-        if user != self.resource_stack.user.as_slice() {
+        if reported && user != self.resource_stack.user.as_slice() {
             let user = user.to_vec();
             println!("resource packs: Java selected {} pack(s)", user.len());
             self.resource_stack.user = user;

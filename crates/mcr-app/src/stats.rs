@@ -9,6 +9,8 @@ pub struct StatWindow {
     frames: u32,
     frame_ms: f32,
     cpu_ms: f32,
+    acquire_ms: f32,
+    present_ms: f32,
     gpu_draw_ms: f32,
     gpu_cull_ms: f32,
     gpu_samples: u32,
@@ -22,6 +24,8 @@ impl Default for StatWindow {
             frames: 0,
             frame_ms: 0.0,
             cpu_ms: 0.0,
+            acquire_ms: 0.0,
+            present_ms: 0.0,
             gpu_draw_ms: 0.0,
             gpu_cull_ms: 0.0,
             gpu_samples: 0,
@@ -36,6 +40,8 @@ impl StatWindow {
         self.frames += 1;
         self.frame_ms += dt * 1000.0;
         self.cpu_ms += s.cpu_ms;
+        self.acquire_ms += s.acquire_ms;
+        self.present_ms += s.present_ms;
         if let Some(g) = s.gpu {
             self.gpu_cull_ms += g.cull_ms;
             self.gpu_draw_ms += g.draw_ms;
@@ -52,10 +58,12 @@ impl StatWindow {
         let n = self.frames as f32;
         let g = self.gpu_samples.max(1) as f32;
         let mut line = format!(
-            "{:.0} fps | frame {:.2} ms | cpu {:.2} ms | gpu cull {:.3} ms draw {:.2} ms | draws {}",
+            "{:.0} fps | frame {:.2} ms | cpu {:.2} ms (acquire {:.3} present {:.3}) | gpu cull {:.3} ms draw {:.2} ms | draws {}",
             1000.0 / (self.frame_ms / n),
             self.frame_ms / n,
             self.cpu_ms / n,
+            self.acquire_ms / n,
+            self.present_ms / n,
             self.gpu_cull_ms / g,
             self.gpu_draw_ms / g,
             self.draws,

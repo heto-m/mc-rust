@@ -129,6 +129,8 @@ pub fn run(layout: &Layout, game: &str, opts: &Options) -> Result<()> {
         .clone()
         .unwrap_or_else(|| layout.fabric_server_dir(&name));
     fs::create_dir_all(&dir)?;
+    // The server runs inside `dir`, so a relative path would miss its own mod list.
+    let dir = std::path::absolute(&dir)?;
     let eula_path = dir.join("eula.txt");
     match eula_action(
         std::env::var("MCR_ACCEPT_EULA").ok().as_deref(),

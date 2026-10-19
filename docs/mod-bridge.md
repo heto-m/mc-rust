@@ -37,7 +37,9 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
   `McrBoot.main(long table, String[] args)`. Flags: `-Djava.class.path=<boot jar + loader + libs>` (Knot loads `client.jar` from `fabric.gameJarPath`),
   `--enable-native-access=ALL-UNNAMED`, `-Xrs`, `-XX:+UseZGC`, `-XX:+UseCompactObjectHeaders`, `-Xmx` from
   settings (default 2G), `-Dfabric.gameJarPath`, `-Dfabric.addMods`, `-Dorg.lwjgl.librarypath`, plus `exit`/`abort`
-  hooks so `System.exit` from a mod becomes an orderly mcr shutdown. `Bridge::start` makes every path absolute,
+  hooks so `System.exit` from a mod becomes an orderly mcr shutdown. `MCR_JVM_EXTRA` appends whitespace-separated
+  options; one that picks a collector (`-XX:+Use…GC`) replaces ZGC. `SIGTERM` quits mcr the normal way, so the
+  AOT recording and preload record of a terminated session survive. `Bridge::start` makes every path absolute,
   passes `-Duser.dir=<game dir>` and moves the process into the game dir: mods open `config/…` through
   `java.io`, which resolves relative paths against the process directory and ignores `user.dir`.
 - **Java→Rust** calls are FFM downcalls to function pointers Rust passes in a versioned `#[repr(C)]` table
@@ -144,6 +146,13 @@ command buffer whose recording failed is dropped at `finish`; if a batch is stil
 to its own submits for the session. Readback maps, fence progress and `on_submitted_work_done` are armed in
 `Slots::submitted`, after the batch reached the queue.
 
+**Finishing off Java's thread.** wgpu 30 encodes commands only in `CommandEncoder::finish`, which was the largest
+Rust cost in Java's frame. Encoders Java queues for a later submit go to a worker thread (`gpu::finisher`,
+`mcr-gpu-finish`, 256 queued at most, else finished inline), and the render thread takes each buffer when it
+drains the submission. The worker finishes inside its own validation error scope (scopes are per thread), so a
+failed recording is still dropped before the batch. Medieval Immersed: Java's frame 1.54 to 1.30 ms; numbers in the
+`mod-perf-3` design.
+
 **Clears.** A full clear of a single-layer texture is not recorded at once. The next pass that renders to it
 clears as it loads, a later clear of the same texture replaces it, and ops that read or write the texture
 otherwise (copies, readbacks, region clears, a pass sampling it) record it first. A clear that nothing reads
@@ -181,7 +190,11 @@ gets the motion too), and the bench prints the turn latency and the frames in wh
 The turn latency runs from a mouse look to the end of the first frame whose camera shows it (`latency.rs`);
 windowed runs add it to the once-a-second stats line. `--bench-timeline S` instead runs unpaced frames until S seconds
 after joining (or after Java's title screen appears) and prints the frame rate of every second; with `--mods`
-the shell flow also prints when Java's title screen appeared.
+the shell flow also prints when Java's title screen appeared, and the mean, p50, p99, p99.9 and maximum frame
+time over the last 31 seconds. With `MCR_MOD_PROFILE` set, Java frames over twice the running mean (after the first
+100) are profiled apart, and the summary prints their count and phase means (`slow java frames N of M`). The
+windowed stats line shows the swapchain acquire and present inside mcr's CPU time; under gamescope's Xwayland the
+present blocks about 0.15 ms per frame, and MangoHud adds about 0.07 ms more.
 
 Java's camera FOV over vanilla's (zoom mods, FOV effects mods add) reaches Rust as `FSTATE_FOV_SCALE`, clamped to
 0.02–4, and scales mcr's projection and mouse sensitivity while Java draws the world. The other way, `FrameBegin`
@@ -436,7 +449,10 @@ A modded server renumbers block states (mods add properties to vanilla blocks), 
 end of configuration. Rust rebuilds its tables from the report (`mcr_data::rebuild`, block state ids are 32-bit),
 holds `FinishConfiguration` until then (10 s cap), and its configuration pongs follow Java's so Fabric's channel
 registration reaches the server first. Mod jars join Rust's resource stack, so modded blocks bake with mcr's own
-baker, and so do the resource packs Java selected inside the game dir.
+baker, and so do the resource packs Java selected inside the game dir. mcr reads that selection from Java's
+`options.txt` at startup (`respacks::predicted_java_packs`: `file/` entries inside the game dir, 256 at most) and
+compares it with Java's report only after Java's first render report, so a pack set that did not change no longer
+costs a second resource load (about 2 s with 16 packs) between Java's title and the connect.
 
 What Rust cannot read comes from Java (ABI 22):
 

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "xtask"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -52,3 +53,7 @@ debug = "line-tables-only"
 [profile.profiling]
 inherits = "release"
 debug = true
+
+[patch.crates-io]
+# Tracker clears and drops scale with live resources, not the largest resource index ever used.
+wgpu-core = { path = "vendor/wgpu-core" }

@@ -144,6 +144,9 @@ pub struct GpuTimes {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrameStats {
     pub cpu_ms: f32,
+    /// Waiting for the swapchain image and handing it back, within `cpu_ms`.
+    pub acquire_ms: f32,
+    pub present_ms: f32,
     pub uploaded_bytes: usize,
     pub uploaded_writes: usize,
     pub pending_upload_bytes: usize,
@@ -2007,6 +2010,7 @@ impl Renderer {
 
         let mut surface_tex = None;
         let mut surface_view = None;
+        let acquire_start = Instant::now();
         let color_view = match (&self.surface, &self.offscreen) {
             (Some(s), _) if self.scene.is_some() => {
                 let tex = match s.surface.get_current_texture() {
@@ -2071,6 +2075,7 @@ impl Renderer {
             (None, Some(t)) => t.create_view(&wgpu::TextureViewDescriptor::default()),
             (None, None) => unreachable!("renderer always has a target"),
         };
+        let acquire_ms = acquire_start.elapsed().as_secs_f32() * 1000.0;
 
         let aspect = w as f32 / h as f32;
         let mut external = self.external.take();
@@ -2408,12 +2413,16 @@ impl Renderer {
         if let Some(pending) = self.capture_pending.take() {
             self.captured = self.finish_capture(&pending);
         }
+        let present_start = Instant::now();
         if let Some(t) = surface_tex {
             self.queue.present(t);
         }
+        let present_ms = present_start.elapsed().as_secs_f32() * 1000.0;
 
         Ok(FrameStats {
             cpu_ms: start.elapsed().as_secs_f32() * 1000.0,
+            acquire_ms,
+            present_ms,
             uploaded_bytes,
             uploaded_writes,
             pending_upload_bytes: self.uploader.pending_bytes(),

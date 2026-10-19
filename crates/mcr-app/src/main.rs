@@ -432,6 +432,9 @@ impl App {
         }
         if let Scene::Shell(shell) = scene {
             shell.advance(dt);
+            if TERMINATE.load(std::sync::atomic::Ordering::Relaxed) {
+                shell.quit = true;
+            }
             if shell.quit {
                 self.exit = true;
                 return;
@@ -700,6 +703,20 @@ pub(crate) fn load_autopilot(path: &std::path::Path) -> Result<autopilot::Autopi
     Ok(autopilot::Autopilot::new(steps))
 }
 
+/// SIGTERM arrived: the window quits as if the user closed it, so Java and its caches shut down cleanly.
+static TERMINATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn quit_on_sigterm() {
+    extern "C" fn on_term(_: libc::c_int) {
+        TERMINATE.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
+    }
+}
+
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn pin_mmap_threshold() {
     // glibc raises it after each large free, so evicted sound buffers would pile up in the heap.
@@ -737,7 +754,10 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    pin_mmap_threshold();
+    {
+        pin_mmap_threshold();
+        quit_on_sigterm();
+    }
     launcher::remember_start_dir();
     let launched = Instant::now();
     let mut opts = match cli::parse(std::env::args().skip(1)) {

@@ -45,6 +45,7 @@ pub struct ComposeStats {
     pub java_size: (u32, u32),
     pub state: Option<LinkState>,
     pub profile: ProfileWindow,
+    pub slow: ProfileWindow,
 }
 
 impl ComposeStats {
@@ -67,7 +68,7 @@ impl ComposeStats {
             let (p50, p99, _) = Self::percentiles(v);
             format!("{p50}/{p99}")
         };
-        format!(
+        let mut out = format!(
             "composed {} late {} | wait {} us | java {} us | gui submit {} us | ticks java {} rust {} | {}",
             self.composed,
             self.late,
@@ -77,7 +78,16 @@ impl ComposeStats {
             self.java_ticks,
             self.rust_ticks,
             self.profile.line(),
-        )
+        );
+        if self.slow.java_frames > 0 {
+            let slow = self.slow.line();
+            let java = slow.find("java ").map_or("", |i| &slow[i..]);
+            out += &format!(
+                "\nslow java frames {} of {}: {java}",
+                self.slow.java_frames, self.profile.java_frames
+            );
+        }
+        out
     }
 }
 
@@ -375,6 +385,7 @@ impl FrameLink {
             java_size: java.size,
             state: Some(self.lockstep.state()),
             profile: self.profiler.total().clone(),
+            slow: self.profiler.slow().clone(),
             ..self.stats.clone()
         }
     }

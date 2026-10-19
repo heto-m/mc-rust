@@ -4,6 +4,7 @@ pub mod backend;
 pub mod context;
 pub mod enums;
 pub mod ffi;
+pub mod finisher;
 pub mod flip;
 pub mod info;
 pub mod pass;

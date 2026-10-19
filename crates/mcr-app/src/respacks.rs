@@ -88,6 +88,30 @@ impl ResourceStack {
     }
 }
 
+/// The file packs Java's `options.txt` selects, lowest priority first, as Java will report them
+/// (inside `game_dir` only), so the first resource stack already has them.
+pub fn predicted_java_packs(game_dir: &Path) -> Vec<PathBuf> {
+    let java = game_dir.join("java");
+    let Ok(text) = std::fs::read_to_string(java.join("options.txt")) else {
+        return Vec::new();
+    };
+    let Some(list) = text.lines().find_map(|l| l.strip_prefix("resourcePacks:")) else {
+        return Vec::new();
+    };
+    let Ok(names) = serde_json::from_str::<Vec<String>>(list) else {
+        return Vec::new();
+    };
+    let root = game_dir.canonicalize().ok();
+    names
+        .iter()
+        .take(256)
+        .filter_map(|n| n.strip_prefix("file/"))
+        .filter(|n| !n.contains(['/', '\\']) && *n != ".." && *n != ".")
+        .filter_map(|n| java.join("resourcepacks").join(n).canonicalize().ok())
+        .filter(|p| root.as_ref().is_some_and(|r| p.starts_with(r)))
+        .collect()
+}
+
 #[derive(Debug)]
 pub enum PackAction {
     Prompt {
@@ -459,5 +483,33 @@ mod download_tests {
             .unwrap();
         assert!(packs.poll().is_empty());
         assert!(packs.done_rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod predict_tests {
+    use super::*;
+
+    #[test]
+    fn predicted_packs_stay_inside_the_game_dir() {
+        let base = std::env::temp_dir().join(format!("mcr-predict-{}", std::process::id()));
+        let game = base.join("game");
+        let packs = game.join("java/resourcepacks");
+        std::fs::create_dir_all(packs.join("a")).unwrap();
+        std::fs::write(packs.join("b.zip"), b"").unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(base.join("outside"), packs.join("escape")).unwrap();
+        std::fs::write(
+            game.join("java/options.txt"),
+            "version:4000\nresourcePacks:[\"vanilla\",\"file/a\",\"fabric\",\"file/../../outside\",\"file/..\",\"file/escape\",\"file/missing\",\"file/b.zip\"]\nlang:en_us\n",
+        )
+        .unwrap();
+        let got = predicted_java_packs(&game);
+        let packs = packs.canonicalize().unwrap();
+        assert_eq!(got, [packs.join("a"), packs.join("b.zip")]);
+        std::fs::write(game.join("java/options.txt"), "resourcePacks:[\"file/a\"").unwrap();
+        assert!(predicted_java_packs(&game).is_empty());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

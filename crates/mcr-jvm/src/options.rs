@@ -21,6 +21,11 @@ impl Default for JvmOptions {
 
 impl JvmOptions {
     pub fn to_strings(&self) -> Result<Vec<String>, JvmError> {
+        self.with_dev_options(std::env::var("MCR_JVM_EXTRA").as_deref().unwrap_or(""))
+    }
+
+    /// The options with `dev` (whitespace-separated) appended; a collector in `dev` replaces ZGC.
+    fn with_dev_options(&self, dev: &str) -> Result<Vec<String>, JvmError> {
         if !valid_heap_size(&self.max_heap) {
             return Err(JvmError::InvalidOption(self.max_heap.clone()));
         }
@@ -29,16 +34,24 @@ impl JvmOptions {
         let class_path = class_path
             .into_string()
             .map_err(|p| JvmError::InvalidOption(p.to_string_lossy().into_owned()))?;
+        let gc_chosen = dev
+            .split_whitespace()
+            .any(|o| o.starts_with("-XX:+Use") && o.ends_with("GC"));
         let mut out = vec![
             format!("-Djava.class.path={class_path}"),
             "--enable-native-access=ALL-UNNAMED".into(),
             "-Xrs".into(),
-            "-XX:+UseZGC".into(),
+        ];
+        if !gc_chosen {
+            out.push("-XX:+UseZGC".into());
+        }
+        out.extend([
             "-XX:+UseCompactObjectHeaders".into(),
             "-XX:-UsePerfData".into(),
             format!("-Xmx{}", self.max_heap),
-        ];
+        ]);
         out.extend(self.extra.iter().cloned());
+        out.extend(dev.split_whitespace().map(str::to_owned));
         if let Some(bad) = out.iter().find(|o| o.contains('\0')) {
             return Err(JvmError::InvalidOption(bad.clone()));
         }
@@ -77,6 +90,18 @@ mod tests {
                 "-Dmcr.test=1".into(),
             ]
         );
+    }
+
+    #[test]
+    fn dev_options_append_and_a_collector_replaces_zgc() {
+        let opts = JvmOptions::default();
+        let plain = opts.with_dev_options("  -Xlog:gc  -Dx=1 ").unwrap();
+        assert!(plain.contains(&"-XX:+UseZGC".to_owned()));
+        assert!(plain.ends_with(&["-Xlog:gc".to_owned(), "-Dx=1".to_owned()]));
+        let g1 = opts.with_dev_options("-XX:+UseG1GC").unwrap();
+        assert!(!g1.iter().any(|o| o == "-XX:+UseZGC"));
+        assert_eq!(g1.last().map(String::as_str), Some("-XX:+UseG1GC"));
+        assert!(opts.with_dev_options("-Dx=\0").is_err());
     }
 
     #[test]
