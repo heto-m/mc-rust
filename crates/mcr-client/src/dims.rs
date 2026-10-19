@@ -3,7 +3,7 @@
 use mcr_physics::Aabb;
 use mcr_protocol::types::entity_data::{Direction, EntityDataValue, Pose};
 
-use crate::entity::Entity;
+use crate::entity::{Entity, Lerp};
 use crate::state::ClientState;
 
 const POSE: u8 = 6;
@@ -79,6 +79,48 @@ impl ClientState {
     /// Living entities sync their health as a float at index 9; interactions are handled first.
     pub(crate) fn is_living(&self, e: &Entity) -> bool {
         matches!(e.data.get(&HEALTH), Some(EntityDataValue::Float(_)))
+    }
+
+    /// The interpolation handler vanilla gives `e`'s type.
+    pub(crate) fn lerp_for(&self, e: &Entity) -> Lerp {
+        let name = self.short_type_name(e);
+        if self.is_living(e) {
+            return match name {
+                "shulker" => Lerp::Snap,
+                "player" | "allay" | "mannequin" => Lerp::Stepped(2),
+                _ => Lerp::Stepped(3),
+            };
+        }
+        let linear = name.ends_with("_boat")
+            || name.ends_with("_raft")
+            || name.ends_with("minecart")
+            || matches!(name, "experience_orb" | "fishing_bobber");
+        if linear { Lerp::Linear(3) } else { Lerp::Snap }
+    }
+
+    /// The eye position `PlayerLookAt` aims at: vanilla `getEyePosition` for the entity's pose.
+    pub(crate) fn entity_eye(&self, e: &Entity) -> [f64; 3] {
+        let base = u32::try_from(e.kind)
+            .ok()
+            .and_then(|k| self.data.entity_type_info(k));
+        let (_, h) = self.entity_dims(e);
+        let eye = match self.short_type_name(e) {
+            "player" | "mannequin" if self.is_living(e) => {
+                let standing = match pose(e) {
+                    Pose::Crouching => 1.27,
+                    Pose::Swimming | Pose::FallFlying | Pose::SpinAttack => 0.4,
+                    Pose::Sleeping | Pose::Dying => 0.2,
+                    _ => 1.62,
+                };
+                standing * self.entity_scale(e)
+            }
+            _ => base.map_or(0.0, |i| {
+                let full = f64::from(i.height);
+                let eye = f64::from(i.eye_height);
+                if full > 0.0 { eye * h / full } else { eye }
+            }),
+        };
+        [e.pos[0], e.pos[1] + eye, e.pos[2]]
     }
 
     /// Vanilla `isAlive` for a living entity: health above zero.

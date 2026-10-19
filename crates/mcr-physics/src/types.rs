@@ -94,6 +94,10 @@ pub struct Effects {
     pub jump_boost: Option<u8>,
     pub levitation: Option<u8>,
     pub slow_falling: bool,
+    /// `Player#isMobilityRestricted`: no sprinting.
+    pub blindness: bool,
+    pub dolphins_grace: bool,
+    pub weaving: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -3,6 +3,7 @@
 #![allow(clippy::needless_range_loop)]
 
 mod aabb;
+mod autojump;
 mod body;
 mod collide;
 mod data;
@@ -18,7 +19,7 @@ mod vehicle;
 mod world;
 
 pub use aabb::Aabb;
-pub use body::{Body, BodyKind, BodyScratch, aim, fluid_height};
+pub use body::{Body, BodyFlags, BodyKind, BodyScratch, aim, fluid_height};
 pub use collide::BorderBounds;
 pub use data::{PhysicsData, StateInfo, flag};
 pub use fluid::{camera_in_lava, camera_in_water};
@@ -34,6 +35,8 @@ pub use world::CollisionWorld;
 mod collision_tests;
 #[cfg(test)]
 mod fly_tests;
+#[cfg(test)]
+mod movement_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

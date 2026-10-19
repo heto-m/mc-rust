@@ -245,3 +245,88 @@ fn respawn_with_kept_attributes_keeps_their_modifiers() {
     handle(&mut s, packet);
     assert!((s.player.physics.attributes.movement_speed - 0.1).abs() < 1e-9);
 }
+
+#[test]
+fn movement_effects_attributes_and_fast_lava_reach_physics() {
+    use mcr_protocol::play::clientbound::entity::{
+        AttributeSnapshot, UpdateAttributes, UpdateMobEffect,
+    };
+    let mut s = state();
+    let effect = |s: &ClientState, name: &str| {
+        s.data
+            .registry("minecraft:mob_effect")
+            .and_then(|r| r.id_of(name))
+            .unwrap() as i32
+    };
+    for name in [
+        "minecraft:blindness",
+        "minecraft:dolphins_grace",
+        "minecraft:weaving",
+    ] {
+        let id = effect(&s, name);
+        handle(
+            &mut s,
+            P::UpdateMobEffect(UpdateMobEffect {
+                entity_id: PLAYER,
+                effect: id,
+                amplifier: 0,
+                duration_ticks: 100,
+                flags: 0,
+            }),
+        );
+    }
+    let e = s.player.physics.effects;
+    assert!(e.blindness && e.dolphins_grace && e.weaving);
+
+    let attr = |name: &str| {
+        s.data
+            .registry("minecraft:attribute")
+            .and_then(|r| r.id_of(name))
+            .unwrap() as i32
+    };
+    let snapshots = [
+        (attr("minecraft:friction_modifier"), 0.5),
+        (attr("minecraft:air_drag_modifier"), f64::NAN),
+    ]
+    .map(|(attribute, base)| AttributeSnapshot {
+        attribute,
+        base,
+        modifiers: Vec::new(),
+    });
+    handle(
+        &mut s,
+        P::UpdateAttributes(UpdateAttributes {
+            entity_id: PLAYER,
+            attributes: mcr_buf::LengthPrefixed(snapshots.to_vec()),
+        }),
+    );
+    let a = s.player.physics.attributes;
+    assert_eq!(a.friction_modifier, 0.5);
+    assert!(a.air_drag_modifier.is_finite(), "NaN is sanitised");
+
+    let mut nether = Compound::new();
+    let mut attributes = Compound::new();
+    attributes.insert("minecraft:gameplay/fast_lava", 1i8);
+    nether.insert("attributes", attributes);
+    s.registries.apply_registry_data(&RegistryData {
+        registry: Identifier::parse("minecraft:dimension_type").unwrap(),
+        entries: vec![
+            RegistryEntry {
+                id: Identifier::parse("minecraft:overworld").unwrap(),
+                data: Some(NetworkNbt(Value::Compound(Compound::new()))),
+            },
+            RegistryEntry {
+                id: Identifier::parse("minecraft:custom").unwrap(),
+                data: Some(NetworkNbt(Value::Compound(nether))),
+            },
+            RegistryEntry {
+                id: Identifier::parse("minecraft:the_nether").unwrap(),
+                data: None,
+            },
+        ],
+    });
+    for (type_id, fast) in [(0, false), (1, true), (2, true)] {
+        s.dimension.type_id = type_id;
+        assert_eq!(s.fast_lava(), fast, "dimension type {type_id}");
+    }
+}

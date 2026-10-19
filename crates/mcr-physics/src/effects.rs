@@ -111,7 +111,12 @@ impl PlayerPhysics {
                         continue;
                     }
                     if st.has(flag::WEB) {
-                        self.make_stuck([0.25, f64::from(0.05f32), 0.25]);
+                        let mult = if self.effects.weaving && self.kind != SimKind::Boat {
+                            [0.5, 0.25, 0.5]
+                        } else {
+                            [0.25, f64::from(0.05f32), 0.25]
+                        };
+                        self.make_stuck(mult);
                     } else if st.has(flag::SWEET_BERRY) {
                         if self.kind != SimKind::Boat {
                             let k = f64::from(0.8f32);
@@ -122,8 +127,8 @@ impl PlayerPhysics {
                         if boat || self.state_at(w, self.block_pos()).has(flag::POWDER_SNOW) {
                             let k = f64::from(0.9f32);
                             self.make_stuck([k, 1.5, k]);
-                            self.in_powder_snow = true;
                         }
+                        self.in_powder_snow = true;
                     } else if st.has(flag::HONEY) {
                         if self.honey_sliding(p) {
                             self.honey_slide();

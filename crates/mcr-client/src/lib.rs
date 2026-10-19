@@ -23,6 +23,8 @@ mod dims;
 mod edits;
 mod entity;
 mod entity_events;
+#[cfg(test)]
+mod entity_motion_tests;
 mod error;
 mod events;
 mod fluid_clip;

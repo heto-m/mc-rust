@@ -1,5 +1,5 @@
 //! Client-side simulation of simple non-living entities: dropped items, XP orbs, TNT, falling
-//! blocks, thrown items and arrows.
+//! blocks and every projectile the vanilla client keeps moving between server updates.
 
 use crate::aabb::Aabb;
 use crate::collide::{Colliders, CollisionCtx, any_collision};
@@ -26,6 +26,16 @@ pub enum BodyKind {
     Potion,
     ExperienceBottle,
     Arrow,
+    Trident,
+    /// Fireballs: accelerate along their motion, no gravity.
+    Fireball,
+    WitherSkull,
+    /// Wind charges keep their speed: no acceleration and no drag.
+    WindCharge,
+    LlamaSpit,
+    FireworkRocket,
+    /// Eyes of ender and shulker bullets: straight lines the server steers.
+    Drift,
 }
 
 impl BodyKind {
@@ -33,8 +43,14 @@ impl BodyKind {
         match self {
             Self::Item | Self::Tnt | Self::FallingBlock => 0.04,
             Self::ExperienceOrb | Self::Thrown => 0.03,
-            Self::Arrow | Self::Potion => 0.05,
+            Self::Arrow | Self::Trident | Self::Potion => 0.05,
             Self::ExperienceBottle => 0.07,
+            Self::LlamaSpit => 0.06,
+            Self::Fireball
+            | Self::WitherSkull
+            | Self::WindCharge
+            | Self::FireworkRocket
+            | Self::Drift => 0.0,
         }
     }
 
@@ -49,6 +65,21 @@ impl BodyKind {
 #[derive(Debug, Default)]
 pub struct BodyScratch(Colliders);
 
+/// Synced state that steers a projectile: entity data flags and the entity it follows.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BodyFlags {
+    pub no_gravity: bool,
+    /// `AbstractArrow#isNoPhysics`: passes through blocks, as a returning trident does.
+    pub no_physics: bool,
+    /// A blue wither skull, which slows more.
+    pub dangerous: bool,
+    /// A crossbow rocket flies straight instead of accelerating upwards.
+    pub shot_at_angle: bool,
+    pub loyalty: u8,
+    /// The owner's eye a loyal trident returns to, or the entity an attached rocket rides with.
+    pub anchor: Option<[f64; 3]>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Body {
     pub kind: BodyKind,
@@ -59,6 +90,8 @@ pub struct Body {
     pub pos: [f64; 3],
     pub vel: [f64; 3],
     pub on_ground: bool,
+    pub horizontal_collision: bool,
+    pub flags: BodyFlags,
 }
 
 #[derive(Clone, Copy)]
@@ -77,6 +110,8 @@ impl Body {
             pos,
             vel,
             on_ground: false,
+            horizontal_collision: false,
+            flags: BodyFlags::default(),
         }
     }
 
@@ -104,7 +139,28 @@ impl Body {
             BodyKind::Item => self.tick_item(world, data, scratch),
             BodyKind::ExperienceOrb => self.tick_orb(world, data, scratch, follow),
             BodyKind::Tnt | BodyKind::FallingBlock => self.tick_block(world, data, scratch),
-            _ => self.tick_projectile(world, data, scratch),
+            BodyKind::Thrown | BodyKind::Potion | BodyKind::ExperienceBottle => {
+                self.tick_thrown(world, data, scratch)
+            }
+            BodyKind::Arrow | BodyKind::Trident => self.tick_arrow(world, data, scratch),
+            BodyKind::Fireball | BodyKind::WitherSkull | BodyKind::WindCharge => {
+                self.tick_hurting(world, data, scratch)
+            }
+            BodyKind::LlamaSpit => self.tick_spit(world, data),
+            BodyKind::FireworkRocket => self.tick_firework(world, data, scratch),
+            BodyKind::Drift => {
+                for i in 0..3 {
+                    self.pos[i] += self.vel[i];
+                }
+            }
+        }
+    }
+
+    fn gravity(&self) -> f64 {
+        if self.flags.no_gravity {
+            0.0
+        } else {
+            self.kind.gravity()
         }
     }
 
@@ -219,36 +275,187 @@ impl Body {
         }
     }
 
-    /// Stops dead on contact; the server removes the projectile when it actually hits something.
-    fn tick_projectile<W: CollisionWorld + ?Sized>(
+    fn in_water<W: CollisionWorld + ?Sized>(&self, world: &W, data: &PhysicsData) -> bool {
+        fluid_height(world, data, &self.bounding_box(), FLUID_WATER) > 0.0
+    }
+
+    fn scale_vel(&mut self, k: f64) {
+        for v in &mut self.vel {
+            *v *= k;
+        }
+    }
+
+    /// Moves by the velocity and stops dead on contact; the server removes the projectile when it
+    /// actually hits something. Returns false once stopped.
+    fn fly<W: CollisionWorld + ?Sized>(
         &mut self,
         world: &W,
         data: &PhysicsData,
         scratch: &mut BodyScratch,
-    ) {
+    ) -> bool {
         let movement = self.vel;
         if movement == [0.0; 3] {
-            return;
+            return false;
         }
-        let bb = self.bounding_box();
-        let in_water = fluid_height(world, data, &bb, FLUID_WATER) > 0.0;
-        let resolved = collide(world, data, scratch, &bb, movement);
+        let resolved = collide(world, data, scratch, &self.bounding_box(), movement);
         for i in 0..3 {
             self.pos[i] += resolved[i];
         }
         if resolved != movement {
             self.vel = [0.0; 3];
+            return false;
+        }
+        true
+    }
+
+    /// `ThrowableProjectile#tick`: gravity and drag come before the move.
+    fn tick_thrown<W: CollisionWorld + ?Sized>(
+        &mut self,
+        world: &W,
+        data: &PhysicsData,
+        scratch: &mut BodyScratch,
+    ) {
+        if self.vel == [0.0; 3] {
             return;
         }
-        let drag = match (self.kind, in_water) {
-            (BodyKind::Arrow, true) => 0.6,
-            (_, true) => 0.8,
-            _ => 0.99,
+        self.vel[1] -= self.gravity();
+        let drag = if self.in_water(world, data) {
+            0.8
+        } else {
+            0.99
         };
-        for v in &mut self.vel {
-            *v *= drag;
+        self.scale_vel(f64::from(drag as f32));
+        self.fly(world, data, scratch);
+    }
+
+    /// `AbstractArrow#tick`; a loyal trident with no physics homes in on its owner's eye.
+    fn tick_arrow<W: CollisionWorld + ?Sized>(
+        &mut self,
+        world: &W,
+        data: &PhysicsData,
+        scratch: &mut BodyScratch,
+    ) {
+        let physics = !self.flags.no_physics;
+        if self.kind == BodyKind::Trident
+            && self.flags.loyalty > 0
+            && let Some(eye) = self.flags.anchor
+        {
+            let to = [
+                eye[0] - self.pos[0],
+                eye[1] - self.pos[1],
+                eye[2] - self.pos[2],
+            ];
+            let loyalty = f64::from(self.flags.loyalty);
+            self.pos[1] += to[1] * 0.015 * loyalty;
+            let dir = normalize(to);
+            for i in 0..3 {
+                self.vel[i] = self.vel[i] * 0.95 + dir[i] * 0.05 * loyalty;
+            }
         }
-        self.vel[1] -= self.kind.gravity();
+        if physics && self.vel == [0.0; 3] {
+            return;
+        }
+        let in_water = self.in_water(world, data);
+        if in_water {
+            let inertia = if self.kind == BodyKind::Trident {
+                0.99f32
+            } else {
+                0.6
+            };
+            self.scale_vel(f64::from(inertia));
+        }
+        if physics {
+            if !self.fly(world, data, scratch) {
+                return;
+            }
+        } else {
+            for i in 0..3 {
+                self.pos[i] += self.vel[i];
+            }
+        }
+        if !in_water {
+            self.scale_vel(f64::from(0.99f32));
+        }
+        if physics {
+            self.vel[1] -= self.gravity();
+        }
+    }
+
+    /// `AbstractHurtingProjectile#tick`: speeds up along its motion, then moves.
+    fn tick_hurting<W: CollisionWorld + ?Sized>(
+        &mut self,
+        world: &W,
+        data: &PhysicsData,
+        scratch: &mut BodyScratch,
+    ) {
+        let (accel, inertia, liquid) = match self.kind {
+            BodyKind::WindCharge => (0.0, 1.0, 1.0),
+            BodyKind::WitherSkull if self.flags.dangerous => (0.1, 0.73f32, 0.8f32),
+            _ => (0.1, 0.95, 0.8),
+        };
+        let k = if self.in_water(world, data) {
+            liquid
+        } else {
+            inertia
+        };
+        let dir = normalize(self.vel);
+        for i in 0..3 {
+            self.vel[i] = (self.vel[i] + dir[i] * accel) * f64::from(k);
+        }
+        self.fly(world, data, scratch);
+    }
+
+    /// `LlamaSpit#tick`: moves by the old motion, which then slows and falls.
+    fn tick_spit<W: CollisionWorld + ?Sized>(&mut self, world: &W, data: &PhysicsData) {
+        if self.vel == [0.0; 3] {
+            return;
+        }
+        let bb = self.bounding_box();
+        let lo = bb.min.map(|v| v.floor() as i32);
+        let hi = bb.max.map(|v| v.floor() as i32);
+        let mut any_air = false;
+        for x in lo[0]..=hi[0] {
+            for y in lo[1]..=hi[1] {
+                for z in lo[2]..=hi[2] {
+                    any_air |= state_at(world, data, [x, y, z]).is_air();
+                }
+            }
+        }
+        if !any_air || self.in_water(world, data) {
+            self.vel = [0.0; 3];
+            return;
+        }
+        let movement = self.vel;
+        self.scale_vel(f64::from(0.99f32));
+        self.vel[1] -= self.gravity();
+        for i in 0..3 {
+            self.pos[i] += movement[i];
+        }
+    }
+
+    /// `FireworkRocketEntity#tick`: a free rocket climbs and speeds up sideways; an attached one
+    /// rides with its entity.
+    fn tick_firework<W: CollisionWorld + ?Sized>(
+        &mut self,
+        world: &W,
+        data: &PhysicsData,
+        scratch: &mut BodyScratch,
+    ) {
+        if let Some(at) = self.flags.anchor {
+            self.pos = at;
+            return;
+        }
+        if !self.flags.shot_at_angle {
+            let k = if self.horizontal_collision { 1.0 } else { 1.15 };
+            self.vel = [self.vel[0] * k, self.vel[1] + 0.04, self.vel[2] * k];
+        }
+        let movement = self.vel;
+        let moved = collide(world, data, scratch, &self.bounding_box(), movement);
+        for i in 0..3 {
+            self.pos[i] += moved[i];
+        }
+        self.horizontal_collision = (movement[0] - moved[0]).abs() >= SAME_AXIS_EPS
+            || (movement[2] - moved[2]).abs() >= SAME_AXIS_EPS;
     }
 
     fn float_in_fluid(&mut self, multiplier: f64) {
@@ -421,6 +628,16 @@ pub fn fluid_height<W: CollisionWorld + ?Sized>(
         }
     }
     deepest
+}
+
+/// `Vec3#normalize`: zero below a length of 1e-5.
+fn normalize(v: [f64; 3]) -> [f64; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len < 1.0e-5 {
+        [0.0; 3]
+    } else {
+        [v[0] / len, v[1] / len, v[2] / len]
+    }
 }
 
 /// Yaw and pitch in degrees that point along `vel`, as projectiles orient themselves.

@@ -903,6 +903,7 @@ impl Play {
     fn tick_inner(&mut self) {
         self.ticks += 1;
         self.sync_settings();
+        self.world.client.state.player.physics.auto_jump = self.options.auto_jump;
         let input = self.player_input();
         self.prev_eye = self.cur_eye;
         self.prev_fov_mod = self.fov_mod;

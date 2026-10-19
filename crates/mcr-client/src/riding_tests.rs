@@ -296,6 +296,37 @@ fn camel_jump_bar_waits_for_the_dash_cooldown_and_sprint_sticks() {
 }
 
 #[test]
+fn blindness_refuses_and_stops_camel_sprint() {
+    let mut c = client("minecraft:stone", None);
+    mount(&mut c, "minecraft:camel", [8.5, 60.0, 8.5], 0.0);
+    let idle = keys(0.0, 0.0);
+    let sprint = PlayerInput {
+        forward: true,
+        sprint: true,
+        ..idle
+    };
+    for _ in 0..5 {
+        c.ride_tick(&idle, VEHICLE).unwrap();
+    }
+    c.state.player.physics.effects.blindness = true;
+    c.ride_tick(&sprint, VEHICLE).unwrap();
+    assert!(
+        !c.ride.as_ref().unwrap().sprinting,
+        "blind riders cannot sprint"
+    );
+    c.state.player.physics.effects.blindness = false;
+    c.ride_tick(&idle, VEHICLE).unwrap();
+    c.ride_tick(&sprint, VEHICLE).unwrap();
+    assert!(c.ride.as_ref().unwrap().sprinting);
+    c.state.player.physics.effects.blindness = true;
+    c.ride_tick(&sprint, VEHICLE).unwrap();
+    assert!(
+        !c.ride.as_ref().unwrap().sprinting,
+        "blindness stops the sprint"
+    );
+}
+
+#[test]
 fn an_untamed_nautilus_with_a_saddle_is_not_steered() {
     let mut c = client("minecraft:stone", Some("minecraft:water"));
     mount(&mut c, "minecraft:nautilus", [8.5, 61.0, 8.5], 0.0);

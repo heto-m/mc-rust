@@ -212,18 +212,18 @@ Scope: mcr-app overlays, play camera and FOV.
 
 Scope: mcr-physics tick, effects and fly; mcr-client state.
 
-- [ ] 14.1 P5 (V) Auto-jump option does nothing
-- [ ] 14.2 P6 (V) Blindness does not block or stop sprinting
-- [ ] 14.3 P7 (V) Dolphin's Grace has no effect
-- [ ] 14.4 P8 (V) Leather boots are never detected, so powder snow is never walkable
-- [ ] 14.5 P10 (V) Gliding through vines cancels the elytra
-- [ ] 14.6 P16 (M) Cobweb ignores Weaving
-- [ ] 14.7 P17 (M) Nether lava current too weak
-- [ ] 14.8 P18 (M) friction_modifier and air_drag_modifier not wired
-- [ ] 14.9 P20 (M) Block speed factor applies while gliding
-- [ ] 14.10 P21 (M) Riptide does not bounce off entities
-- [ ] 14.11 Unit tests: auto-jump step, blind sprint refused, dolphin's grace drag, leather boots on powder snow, glide through vines
-- [ ] 14.12 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 14.1 P5 (V) Auto-jump option does nothing
+- [x] 14.2 P6 (V) Blindness does not block or stop sprinting
+- [x] 14.3 P7 (V) Dolphin's Grace has no effect
+- [x] 14.4 P8 (V) Leather boots are never detected, so powder snow is never walkable
+- [x] 14.5 P10 (V) Gliding through vines cancels the elytra
+- [x] 14.6 P16 (M) Cobweb ignores Weaving
+- [x] 14.7 P17 (M) Nether lava current too weak
+- [x] 14.8 P18 (M) friction_modifier and air_drag_modifier not wired
+- [x] 14.9 P20 (M) Block speed factor applies while gliding
+- [x] 14.10 P21 (M) Riptide does not bounce off entities
+- [x] 14.11 Unit tests: auto-jump step, blind sprint refused, dolphin's grace drag, leather boots on powder snow, glide through vines
+- [x] 14.12 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 15. First-person hand
 
@@ -240,14 +240,14 @@ Scope: mcr-app hand.
 
 Scope: mcr-client entity and handler, mcr-client client.
 
-- [ ] 16.1 N9 (V) Many projectiles stutter between updates
-- [ ] 16.2 N10 (M) Living entity interpolation differs
-- [ ] 16.3 N12 (M) Entity velocity clamped to ±3.9
-- [ ] 16.4 N13 (M) Bundles not applied atomically
-- [ ] 16.5 N14 (M) player_look_at uses a fixed eye height
-- [ ] 16.6 N15 (M) Entity teleports ignore velocity-relative flags
-- [ ] 16.7 Unit tests: simulated projectile between syncs, stepped interpolation with queued steps, bundle applied in one tick, teleport delta flags
-- [ ] 16.8 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 16.1 N9 (V) Many projectiles stutter between updates
+- [x] 16.2 N10 (M) Living entity interpolation differs
+- [x] 16.3 N12 (M) Entity velocity clamped to ±3.9
+- [x] 16.4 N13 (M) Bundles not applied atomically
+- [x] 16.5 N14 (M) player_look_at uses a fixed eye height
+- [x] 16.6 N15 (M) Entity teleports ignore velocity-relative flags
+- [x] 16.7 Unit tests: simulated projectile between syncs, stepped interpolation with queued steps, bundle applied in one tick, teleport delta flags
+- [x] 16.8 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 17. Particles
 

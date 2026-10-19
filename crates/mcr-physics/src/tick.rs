@@ -65,7 +65,8 @@ impl PlayerPhysics {
         self.pos[0] = self.pos[0].clamp(-2.9999999e7, 2.9999999e7);
         self.pos[2] = self.pos[2].clamp(-2.9999999e7, 2.9999999e7);
         self.update_pose(world);
-        self.build_output(input)
+        let keys = self.keys;
+        self.build_output(&keys)
     }
 
     fn can_fit<W: CollisionWorld + ?Sized>(&self, w: &W, pose: Pose) -> bool {
@@ -101,7 +102,9 @@ impl PlayerPhysics {
 
     fn is_sprinting_possible(&self, allow_shallow: bool) -> bool {
         let has_food = self.food_level > 6 || self.abilities.may_fly;
-        has_food && (allow_shallow || !(self.is_in_water() && !self.is_under_water()))
+        !self.effects.blindness
+            && has_food
+            && (allow_shallow || !(self.is_in_water() && !self.is_under_water()))
     }
 
     fn ai_step<W: CollisionWorld + ?Sized>(&mut self, input: &PlayerInput, w: &W) {
@@ -116,6 +119,13 @@ impl PlayerPhysics {
             && self.can_fit(w, Pose::Crouching)
             && (self.keys.sneak || !self.can_fit(w, Pose::Standing));
         self.keys = *input;
+        let was_auto_jump = self.auto_jump_time > 0;
+        if was_auto_jump {
+            self.auto_jump_time -= 1;
+            self.keys.jump = true;
+        }
+        let keys = self.keys;
+        let input = &keys;
         if !self.spectator && !self.passenger {
             let bb = self.bounding_box();
             let reach = (bb.max[0] - bb.min[0]) * 0.35;
@@ -174,7 +184,7 @@ impl PlayerPhysics {
                     just_toggled = true;
                     self.abilities_changed = true;
                 }
-            } else if !was_jumping && input.jump {
+            } else if !was_jumping && input.jump && !was_auto_jump {
                 if self.jump_trigger_time == 0 {
                     self.jump_trigger_time = 7;
                 } else if !self.swimming {
@@ -381,9 +391,10 @@ impl PlayerPhysics {
         if self.effects.slow_falling || self.effects.levitation.is_some() {
             self.fall_distance = 0.0;
         }
+        let before = self.bounding_box();
         self.travel(w, [f64::from(mi[0]), 0.0, f64::from(mi[1])]);
         self.apply_effects_from_blocks(w);
-        self.tick_spin_attack();
+        self.tick_spin_attack(&before);
     }
 
     pub(crate) fn jump_from_ground<W: CollisionWorld + ?Sized>(&mut self, w: &W) {
@@ -433,6 +444,9 @@ impl PlayerPhysics {
         }
         let p = self.block_pos();
         let st = self.state_at(w, p);
+        if self.fall_flying && st.has(flag::GLIDE_THROUGH) {
+            return false;
+        }
         if st.has(flag::CLIMBABLE) {
             return true;
         }
@@ -595,6 +609,9 @@ impl PlayerPhysics {
         if ww > 0.0 {
             slow_down += (0.54600006 - slow_down) * ww;
             speed += (self.speed() - speed) * ww;
+        }
+        if self.effects.dolphins_grace {
+            slow_down = 0.96;
         }
         self.move_relative(speed, input);
         let v = self.vel;

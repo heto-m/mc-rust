@@ -31,7 +31,7 @@ impl PlayerPhysics {
     }
 
     pub(crate) fn block_speed_factor<W: CollisionWorld + ?Sized>(&self, w: &W) -> f32 {
-        if self.abilities.flying {
+        if self.abilities.flying || self.fall_flying {
             return 1.0;
         }
         let here = self.state_at(w, self.block_pos());
@@ -251,6 +251,7 @@ impl PlayerPhysics {
         if self.move_from.is_none() {
             self.move_from = Some(self.pos);
         }
+        let prev = self.pos;
         if len_sqr(self.stuck) > 1.0e-7 {
             delta = [
                 delta[0] * self.stuck[0],
@@ -287,6 +288,13 @@ impl PlayerPhysics {
         let f = f64::from(self.block_speed_factor(w));
         self.vel[0] *= f;
         self.vel[2] *= f;
+        if self.auto_jump {
+            let (xa, za) = (
+                (self.pos[0] - prev[0]) as f32,
+                (self.pos[2] - prev[2]) as f32,
+            );
+            self.update_auto_jump(w, xa, za);
+        }
     }
 
     fn check_fall_damage<W: CollisionWorld + ?Sized>(&mut self, w: &W, ya: f64) {

@@ -62,14 +62,16 @@ impl ClientState {
         if matches!(name, "bat" | "armor_stand" | "parrot") || !self.entity_alive(e) {
             return false;
         }
-        if self
-            .players
-            .get(e.uuid)
-            .is_some_and(|p| p.game_mode == GameType::Spectator)
-        {
+        if self.is_spectator_player(e) {
             return false;
         }
         self.teams_allow(e)
+    }
+
+    fn is_spectator_player(&self, e: &Entity) -> bool {
+        self.players
+            .get(e.uuid)
+            .is_some_and(|p| p.game_mode == GameType::Spectator)
     }
 
     fn teams_allow(&self, e: &Entity) -> bool {
@@ -96,12 +98,24 @@ impl ClientState {
         let mut colliders = std::mem::take(&mut self.player.physics.entity_colliders);
         colliders.clear();
         pushers.clear();
+        let mut spin = std::mem::take(&mut self.player.physics.spin_targets);
+        spin.clear();
+        let spinning = self.player.physics.spin_attack_ticks > 0;
         let own = self.player.entity_id;
         let pushable = !self.player.dead
             && self.player.game_mode != GameType::Spectator
             && self.player.vehicle.is_none();
         for e in self.entities.iter() {
-            if e.id == own || e.vehicle == Some(own) {
+            if e.id == own {
+                continue;
+            }
+            if spinning && spin.len() < MAX_COLLIDERS && !self.is_spectator_player(e) {
+                let ebox = self.entity_box(e);
+                if ebox.intersects(&scan) {
+                    spin.push((ebox, self.is_living(e)));
+                }
+            }
+            if e.vehicle == Some(own) {
                 continue;
             }
             let p = e.pos;
@@ -148,6 +162,7 @@ impl ClientState {
             }
         }
         self.player.physics.entity_colliders = colliders;
+        self.player.physics.spin_targets = spin;
         let b = &self.world.border;
         self.player.physics.border = BorderBounds::new(
             b.center_x,

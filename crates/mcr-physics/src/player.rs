@@ -71,6 +71,11 @@ pub struct PlayerPhysics {
     pub free_swimmer: bool,
     /// The camera follows another entity: vanilla sends no movement packets then.
     pub detached_camera: bool,
+    /// The auto-jump option of the local player.
+    pub auto_jump: bool,
+    /// Entities a riptide spin can hit this tick, with whether each is living; filled by the caller.
+    pub spin_targets: Vec<(Aabb, bool)>,
+    pub(crate) auto_jump_time: i32,
     pub(crate) fall_flying_started: bool,
     pub(crate) abilities_changed: bool,
     pub(crate) fluid: FluidState,
@@ -150,6 +155,9 @@ impl PlayerPhysics {
             pushed_by_fluid: true,
             free_swimmer: false,
             detached_camera: false,
+            auto_jump: false,
+            spin_targets: Vec::new(),
+            auto_jump_time: 0,
             fall_flying_started: false,
             abilities_changed: false,
             fluid: FluidState::default(),

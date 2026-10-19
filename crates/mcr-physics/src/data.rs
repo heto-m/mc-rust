@@ -31,6 +31,8 @@ pub mod flag {
     pub const SUFFOCATING: u32 = 1 << 24;
     /// A floating scaffolding bottom piece, which keeps a thin floor.
     pub const SCAFFOLDING_UNSTABLE: u32 = 1 << 25;
+    /// `BlockTags.CAN_GLIDE_THROUGH`: a gliding player is not climbing it.
+    pub const GLIDE_THROUGH: u32 = 1 << 26;
 }
 
 pub const FLUID_NONE: u8 = 0;
@@ -170,7 +172,7 @@ impl PhysicsData {
                 | "twisting_vines"
                 | "twisting_vines_plant"
                 | "cave_vines"
-                | "cave_vines_plant" => flags |= flag::CLIMBABLE,
+                | "cave_vines_plant" => flags |= flag::CLIMBABLE | flag::GLIDE_THROUGH,
                 "scaffolding" => flags |= flag::CLIMBABLE | flag::SCAFFOLDING,
                 "cobweb" => flags |= flag::WEB,
                 "lily_pad" => flags |= flag::LILY_PAD,

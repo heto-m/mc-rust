@@ -188,23 +188,10 @@ fn visit_cells<W: CollisionWorld + ?Sized>(
                     continue;
                 }
                 let s = data.state(world.block_state(x, y, z));
-                let lava_floor = ctx.stand_on_lava
-                    && s.box_len == 0
-                    && s.fluid == FLUID_LAVA
-                    && s.has(flag::FLUID_SOURCE)
-                    && ctx.y > f64::from(y) + 0.5 - ABOVE_EPS
-                    && data.state(world.block_state(x, y + 1, z)).fluid != FLUID_LAVA;
-                if s.box_len == 0 && !lava_floor && !s.has(flag::POWDER_SNOW | flag::SCAFFOLDING) {
-                    continue;
-                }
                 if border == 1 && !s.has(flag::LARGE) {
                     continue;
                 }
-                let raw = if lava_floor {
-                    std::slice::from_ref(&LAVA_FLOOR)
-                } else {
-                    effective(data, s, p, ctx)
-                };
+                let raw = shape_of(world, data, s, p, ctx);
                 if raw.is_empty() || raw.len() > tmp.len() {
                     continue;
                 }
@@ -221,6 +208,47 @@ fn visit_cells<W: CollisionWorld + ?Sized>(
                 }
             }
         }
+    }
+}
+
+/// The collision shape of the cell at `p` in the entity's context, as `getCollisionShape`.
+pub fn cell_shape<'a, W: CollisionWorld + ?Sized>(
+    world: &W,
+    data: &'a PhysicsData,
+    p: [i32; 3],
+    ctx: &CollisionCtx,
+) -> &'a [[f64; 6]] {
+    shape_of(
+        world,
+        data,
+        data.state(world.block_state(p[0], p[1], p[2])),
+        p,
+        ctx,
+    )
+}
+
+fn shape_of<'a, W: CollisionWorld + ?Sized>(
+    world: &W,
+    data: &'a PhysicsData,
+    s: &'a StateInfo,
+    p: [i32; 3],
+    ctx: &CollisionCtx,
+) -> &'a [[f64; 6]] {
+    if s.box_len != 0 && s.flags & (flag::POWDER_SNOW | flag::SCAFFOLDING) == 0 {
+        return data.boxes(s);
+    }
+    let lava_floor = ctx.stand_on_lava
+        && s.box_len == 0
+        && s.fluid == FLUID_LAVA
+        && s.has(flag::FLUID_SOURCE)
+        && ctx.y > f64::from(p[1]) + 0.5 - ABOVE_EPS
+        && data.state(world.block_state(p[0], p[1] + 1, p[2])).fluid != FLUID_LAVA;
+    if lava_floor {
+        std::slice::from_ref(&LAVA_FLOOR)
+    } else if s.box_len == 0 && !s.has(flag::POWDER_SNOW | flag::SCAFFOLDING) {
+        &[]
+    } else {
+        effective(data, s, p, ctx)
     }
 }
 

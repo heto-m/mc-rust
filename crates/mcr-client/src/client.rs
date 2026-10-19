@@ -31,6 +31,8 @@ use crate::relay::{ClientHooks, LocalAction, Relay, Relayed};
 use crate::state::{ClientState, Outbox, resource_pack_responses};
 
 const MAX_FRAMES_PER_PUMP: usize = 8192;
+/// The boots slot of the player's inventory menu.
+const FEET_SLOT: usize = 8;
 const LOAD_TIMEOUT_TICKS: u32 = 600;
 const MAX_PENDING_PONGS: usize = 64;
 const MAX_SKIP_LOGS: u64 = 16;
@@ -84,9 +86,22 @@ pub struct Client {
     pub(crate) spectator_menu: Option<crate::spectator::SpectatorMenu>,
     pub(crate) combat: crate::combat::Combat,
     relay: Option<Box<dyn Relay>>,
+    bundle: Bundle,
     #[cfg(test)]
     pub(crate) sent: Vec<(i32, Vec<u8>)>,
 }
+
+/// Packets between two bundle delimiters, applied together once the bundle closes, as vanilla's
+/// `PacketBundlePacker` hands them over in one piece.
+#[derive(Debug, Default)]
+struct Bundle {
+    open: bool,
+    bytes: Vec<u8>,
+    packets: Vec<(i32, usize, usize)>,
+}
+
+const MAX_BUNDLE_PACKETS: usize = 4096;
+const MAX_BUNDLE_BYTES: usize = 32 << 20;
 
 const MAX_CUSTOM_ACTION_BYTES: usize = 65_600;
 
@@ -205,6 +220,7 @@ impl Client {
             spectator_menu: None,
             combat: crate::combat::Combat::default(),
             relay,
+            bundle: Bundle::default(),
             #[cfg(test)]
             sent: Vec::new(),
         };
@@ -266,6 +282,11 @@ impl Client {
     }
 
     fn set_phase(&mut self, phase: Phase) {
+        if phase != Phase::Play {
+            self.bundle.open = false;
+            self.bundle.packets.clear();
+            self.bundle.bytes.clear();
+        }
         self.phase = phase;
         self.shared_phase.store(phase as u8, Ordering::Release);
     }
@@ -400,6 +421,7 @@ impl Client {
             spectator_menu: None,
             combat: crate::combat::Combat::default(),
             relay: None,
+            bundle: Bundle::default(),
             sent: Vec::new(),
             pending_pongs: Vec::new(),
             finish_pending: None,
@@ -483,13 +505,59 @@ impl Client {
         result
     }
 
-    fn dispatch(&mut self, id: i32, payload: &[u8]) -> Result<()> {
+    pub(crate) fn dispatch(&mut self, id: i32, payload: &[u8]) -> Result<()> {
         match self.phase {
             Phase::Login => self.handle_login(id, payload),
             Phase::Configuration => self.handle_config(id, payload),
-            Phase::Play => self.handle_play(id, payload),
+            Phase::Play => self.bundle_or_handle(id, payload),
             Phase::Closed => Ok(()),
         }
+    }
+
+    fn bundle_or_handle(&mut self, id: i32, payload: &[u8]) -> Result<()> {
+        let delimiter = PlayClientbound::BundleDelimiter(
+            mcr_protocol::play::clientbound::world::BundleDelimiter,
+        )
+        .id(self.ids);
+        if id == delimiter {
+            if self.bundle.open {
+                return self.apply_bundle();
+            }
+            self.bundle.open = true;
+            return Ok(());
+        }
+        if !self.bundle.open {
+            return self.handle_play(id, payload);
+        }
+        let b = &mut self.bundle;
+        if b.packets.len() >= MAX_BUNDLE_PACKETS || b.bytes.len() + payload.len() > MAX_BUNDLE_BYTES
+        {
+            self.apply_bundle()?;
+            return self.handle_play(id, payload);
+        }
+        let start = b.bytes.len();
+        b.bytes.extend_from_slice(payload);
+        b.packets.push((id, start, b.bytes.len()));
+        Ok(())
+    }
+
+    fn apply_bundle(&mut self) -> Result<()> {
+        let mut bundle = std::mem::take(&mut self.bundle);
+        let mut result = Ok(());
+        for &(id, start, end) in &bundle.packets {
+            if self.phase != Phase::Play {
+                break;
+            }
+            result = self.handle_play(id, &bundle.bytes[start..end]);
+            if result.is_err() {
+                break;
+            }
+        }
+        bundle.open = false;
+        bundle.packets.clear();
+        bundle.bytes.clear();
+        self.bundle = bundle;
+        result
     }
 
     fn handle_login(&mut self, id: i32, payload: &[u8]) -> Result<()> {
@@ -1118,6 +1186,14 @@ impl Client {
             self.state.player.physics.passenger = false;
         }
         self.state.player.physics.glider_equipped = self.glider_equipped();
+        self.state.player.physics.leather_boots = self.state.ids.leather_boots.is_some_and(|id| {
+            self.state
+                .inventory
+                .player
+                .slots
+                .get(FEET_SLOT)
+                .is_some_and(|s| !s.is_empty() && s.item == id)
+        });
         self.state.player.physics.detached_camera = self.state.camera_entity.is_some();
         let mut pushers = std::mem::take(&mut self.pusher_scratch);
         self.state.refresh_collision_env(&mut pushers);

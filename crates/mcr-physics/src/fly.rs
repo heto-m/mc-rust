@@ -1,5 +1,6 @@
 //! Elytra gliding, firework boosts and riptide spins.
 
+use crate::aabb::Aabb;
 use crate::player::PlayerPhysics;
 use crate::trig::{self, DEG_TO_RAD};
 use crate::world::CollisionWorld;
@@ -126,12 +127,32 @@ impl PlayerPhysics {
         }
     }
 
-    pub(crate) fn tick_spin_attack(&mut self) {
-        if self.spin_attack_ticks > 0 {
-            self.spin_attack_ticks -= 1;
-            if self.horizontal_collision {
-                self.spin_attack_ticks = 0;
+    /// `LivingEntity#checkAutoSpinAttack`: the spin ends on a wall and bounces off the first living
+    /// entity swept through.
+    pub(crate) fn tick_spin_attack(&mut self, before: &Aabb) {
+        if self.spin_attack_ticks <= 0 {
+            return;
+        }
+        self.spin_attack_ticks -= 1;
+        let now = self.bounding_box();
+        let swept = Aabb::new(
+            std::array::from_fn(|a| before.min[a].min(now.min[a])),
+            std::array::from_fn(|a| before.max[a].max(now.max[a])),
+        );
+        let mut touched = false;
+        for (bb, living) in &self.spin_targets {
+            if !bb.intersects(&swept) {
+                continue;
             }
+            touched = true;
+            if *living {
+                self.spin_attack_ticks = 0;
+                self.vel = self.vel.map(|v| v * -0.2);
+                return;
+            }
+        }
+        if !touched && self.horizontal_collision {
+            self.spin_attack_ticks = 0;
         }
     }
 }

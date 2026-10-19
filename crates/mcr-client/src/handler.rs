@@ -5,7 +5,8 @@ use mcr_physics::Abilities;
 use mcr_protocol::dispatch::PlayClientbound as P;
 use mcr_protocol::dispatch::PlayServerbound as S;
 use mcr_protocol::play::clientbound::entity::{
-    EntityPositionSync, MoveEntityPos, MoveEntityPosRot, MoveEntityRot, Relatives, TeleportEntity,
+    EntityPositionSync, MoveEntityPos, MoveEntityPosRot, MoveEntityRot, PositionPath,
+    TeleportEntity, VecDelta,
 };
 use mcr_protocol::play::clientbound::player::{
     BoundChatType, CommonPlayerSpawnInfo, EntityAnchor, PlayerInfoAction, PlayerLookAt,
@@ -23,7 +24,9 @@ use mcr_protocol::types::text::Style;
 use mcr_world::{ChunkColumn, ChunkData, ChunkPos, LightData};
 use uuid::Uuid;
 
-use crate::entity::{AttributeState, Entity, MAX_ENTITIES, MobEffect, end_of_delta, end_of_path};
+use crate::entity::{
+    AttributeState, Entity, MAX_ENTITIES, MobEffect, apply_delta, end_of_delta, end_of_path,
+};
 use crate::error::Result;
 use crate::events::{ChatKind, ChatTag, ClientEvent, DamageEffects};
 use crate::inventory::Inventory;
@@ -360,7 +363,10 @@ impl ClientState {
                     e.target_yaw = e.yaw;
                     e.target_pitch = e.pitch;
                     e.snap_head(p.y_head_rot.degrees());
-                    e.velocity = clamp_motion(v3(&p.velocity.0));
+                    let vel = v3(&p.velocity.0);
+                    if sane3(vel) {
+                        e.velocity = vel;
+                    }
                     e.object_data = p.data;
                     e.sim = self.sim_kinds.get(p.entity_type);
                     if self.entities.insert(e) {
@@ -456,7 +462,7 @@ impl ClientState {
                     } else if self.controlled_vehicle == Some(p.entity_id) {
                         self.vehicle_impulse.motion = Some(vel);
                     } else if let Some(e) = self.entities.get_mut(p.entity_id) {
-                        e.velocity = clamp_motion(vel);
+                        e.velocity = vel;
                     }
                 }
             }
@@ -1371,13 +1377,26 @@ impl ClientState {
         if self.controlled_vehicle == Some(id) {
             return;
         }
+        if !self.prepare_lerp(id) {
+            return;
+        }
         let Some(e) = self.entities.get_mut(id) else {
             return;
         };
         match delta {
             Some(d) => {
-                let end = end_of_delta(e.target_pos, d);
-                e.move_or_interpolate_to(end, rot);
+                let base = e.target_pos;
+                let end = end_of_delta(base, d);
+                match d {
+                    VecDelta::Stepped(steps) => {
+                        let path = steps.iter().scan(base, |pos, s| {
+                            *pos = apply_delta(*pos, s.xa, s.ya, s.za);
+                            Some((*pos, s.ticks))
+                        });
+                        e.interpolate_path(end, path, rot);
+                    }
+                    VecDelta::Linear { .. } => e.move_or_interpolate_to(end, rot),
+                }
             }
             None => {
                 if let Some((yaw, pitch)) = rot {
@@ -1387,6 +1406,20 @@ impl ClientState {
         }
         e.on_ground = on_ground;
         out.event(ClientEvent::EntityMoved(id));
+    }
+
+    /// Picks the entity's interpolation once its data says what it is; false when it is unknown.
+    fn prepare_lerp(&mut self, id: i32) -> bool {
+        let Some(e) = self.entities.get(id) else {
+            return false;
+        };
+        if e.lerp.is_none() {
+            let lerp = self.lerp_for(e);
+            if let Some(e) = self.entities.get_mut(id) {
+                e.lerp = Some(lerp);
+            }
+        }
+        true
     }
 
     fn take_item_entity(
@@ -1434,51 +1467,31 @@ impl ClientState {
     }
 
     fn teleport_entity(&mut self, p: &TeleportEntity, out: &mut Outbox) {
+        if !self.prepare_lerp(p.entity_id) {
+            return;
+        }
         let Some(e) = self.entities.get_mut(p.entity_id) else {
             return;
         };
-        let rel = |flag: u32| Relatives(p.relatives.0).contains(flag);
-        let pos = [
-            if rel(Relatives::X) {
-                e.target_pos[0] + p.change.position.x
-            } else {
-                p.change.position.x
-            },
-            if rel(Relatives::Y) {
-                e.target_pos[1] + p.change.position.y
-            } else {
-                p.change.position.y
-            },
-            if rel(Relatives::Z) {
-                e.target_pos[2] + p.change.position.z
-            } else {
-                p.change.position.z
-            },
-        ];
-        let yaw = if rel(Relatives::Y_ROT) {
-            e.target_yaw + p.change.y_rot
-        } else {
-            p.change.y_rot
-        };
-        let pitch = if rel(Relatives::X_ROT) {
-            e.target_pitch + p.change.x_rot
-        } else {
-            p.change.x_rot
-        };
-        if !sane3(pos) || !yaw.is_finite() || !pitch.is_finite() {
+        let (pos, vel, yaw, pitch) = crate::player::absolute_move(
+            (e.pos, e.velocity, e.yaw, e.pitch),
+            &p.change,
+            p.relatives.0,
+        );
+        if !sane3(pos) || !sane3(vel) || !yaw.is_finite() || !pitch.is_finite() {
             return;
         }
-        let vel = v3(&p.change.delta_movement);
-        if sane3(vel) {
-            e.velocity = clamp_motion(vel);
-        }
-        e.move_or_interpolate_to(pos, Some((yaw, pitch.clamp(-90.0, 90.0))));
+        e.velocity = vel;
+        e.move_or_interpolate_to(pos, Some((yaw, pitch)));
         e.on_ground = p.on_ground;
         out.event(ClientEvent::EntityMoved(p.entity_id));
     }
 
     fn position_sync(&mut self, p: &EntityPositionSync, out: &mut Outbox) {
         if self.controlled_vehicle == Some(p.entity_id) {
+            return;
+        }
+        if !self.prepare_lerp(p.entity_id) {
             return;
         }
         let Some(e) = self.entities.get_mut(p.entity_id) else {
@@ -1488,7 +1501,17 @@ impl ClientState {
         if !sane3(pos) || !p.y_rot.is_finite() || !p.x_rot.is_finite() {
             return;
         }
-        e.move_or_interpolate_to(pos, Some((p.y_rot, p.x_rot.clamp(-90.0, 90.0))));
+        let rot = Some((p.y_rot, p.x_rot.clamp(-90.0, 90.0)));
+        match &p.position {
+            PositionPath::Stepped(steps) => {
+                let path = steps
+                    .iter()
+                    .map(|s| ([s.position.x, s.position.y, s.position.z], s.tick_offset))
+                    .filter(|(pos, _)| sane3(*pos));
+                e.interpolate_path(pos, path, rot);
+            }
+            PositionPath::Linear(_) => e.move_or_interpolate_to(pos, rot),
+        }
         e.on_ground = p.on_ground;
         out.event(ClientEvent::EntityMoved(p.entity_id));
     }
@@ -1545,19 +1568,22 @@ impl ClientState {
                 },
             phys.pos[2],
         ];
+        let eyes = |anchor: EntityAnchor, feet: [f64; 3], eye: [f64; 3]| {
+            if anchor == EntityAnchor::Eyes {
+                eye
+            } else {
+                feet
+            }
+        };
         let target = match &p.entity {
+            Some(look) if look.entity_id == self.player.entity_id => eyes(
+                look.anchor,
+                phys.pos,
+                [phys.pos[0], phys.pos[1] + eye, phys.pos[2]],
+            ),
             Some(look) => match self.entities.get(look.entity_id) {
-                Some(e) => [
-                    e.target_pos[0],
-                    e.target_pos[1]
-                        + if look.anchor == EntityAnchor::Eyes {
-                            1.62
-                        } else {
-                            0.0
-                        },
-                    e.target_pos[2],
-                ],
-                None => return,
+                Some(e) => eyes(look.anchor, e.pos, self.entity_eye(e)),
+                None => [p.x, p.y, p.z],
             },
             None => [p.x, p.y, p.z],
         };
@@ -1736,9 +1762,4 @@ fn decoration_style(style: &mcr_nbt::Value) -> Style {
         }
         _ => Style::default(),
     }
-}
-
-/// Vanilla clamps synced motion to this per axis.
-fn clamp_motion(v: [f64; 3]) -> [f64; 3] {
-    v.map(|c| c.clamp(-3.9, 3.9))
 }

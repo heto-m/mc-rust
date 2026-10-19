@@ -254,7 +254,11 @@ impl Client {
                 (i.width.clamp(0.1, 8.0), i.height.clamp(0.1, 8.0))
             });
         match kind {
-            VehicleKind::Boat => Sim::Boat(Boat::new(e.target_pos, e.target_yaw, dims.0, dims.1)),
+            VehicleKind::Boat => {
+                let mut boat = Boat::new(e.target_pos, e.target_yaw, dims.0, dims.1);
+                boat.body.fast_lava = self.state.player.physics.fast_lava;
+                Sim::Boat(boat)
+            }
             VehicleKind::Horse
             | VehicleKind::Pig
             | VehicleKind::Strider
@@ -290,6 +294,7 @@ impl Client {
                 let mut mount =
                     Mount::new(e.target_pos, e.target_yaw, dims.0, dims.1, attrs).with_mode(mode);
                 mount.body.floats_while_ridden = self.floats_while_ridden(e);
+                mount.body.fast_lava = self.state.player.physics.fast_lava;
                 Sim::Mount(mount)
             }
             VehicleKind::Other => Sim::Passive,
@@ -475,7 +480,8 @@ impl Client {
             self.push_event(crate::events::ClientEvent::ViewTurned { yaw: turned });
         }
         let camel = matches!(&ride.sim, Sim::Mount(m) if m.mode == MountMode::Camel);
-        ride.update_sprint(&keys, camel);
+        let blind = self.state.player.physics.effects.blindness;
+        ride.update_sprint(&keys, camel && !blind);
         if !matches!(ride.sim, Sim::Passive)
             && let Some(e) = self.state.entities.get_mut(vehicle)
         {

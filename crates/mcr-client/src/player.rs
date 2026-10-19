@@ -1,4 +1,5 @@
 use mcr_physics::{Abilities, Attributes, Effects, PlayerPhysics};
+use mcr_protocol::play::clientbound::entity::{PositionMoveRotation, Relatives};
 use mcr_protocol::play::clientbound::player::{RelativeFlags, Respawn};
 use mcr_protocol::types::Vec3d;
 use mcr_protocol::types::game::GameType;
@@ -276,59 +277,19 @@ impl LocalPlayer {
         x_rot: f32,
         relatives: RelativeFlags,
     ) {
-        let cur_pos = self.physics.pos;
-        let cur_vel = self.physics.vel;
-        let (cur_yaw, cur_pitch) = (self.physics.yaw, self.physics.pitch);
-        let rel = |flag: RelativeFlags| relatives.contains(flag);
-        let pos = [
-            if rel(RelativeFlags::X) {
-                cur_pos[0] + position.x
-            } else {
-                position.x
-            },
-            if rel(RelativeFlags::Y) {
-                cur_pos[1] + position.y
-            } else {
-                position.y
-            },
-            if rel(RelativeFlags::Z) {
-                cur_pos[2] + position.z
-            } else {
-                position.z
-            },
-        ];
-        let yaw = if rel(RelativeFlags::Y_ROT) {
-            cur_yaw + y_rot
-        } else {
-            y_rot
+        let change = PositionMoveRotation {
+            position,
+            delta_movement: delta,
+            y_rot,
+            x_rot,
         };
-        let pitch = if rel(RelativeFlags::X_ROT) {
-            cur_pitch + x_rot
-        } else {
-            x_rot
-        };
-        let mut vel = cur_vel;
-        if rel(RelativeFlags::ROTATE_DELTA) {
-            vel = rotate_x(vel, (cur_pitch - pitch).to_radians());
-            vel = rotate_y(vel, (cur_yaw - yaw).to_radians());
-        }
-        let vel = [
-            if rel(RelativeFlags::DELTA_X) {
-                vel[0] + delta.x
-            } else {
-                delta.x
-            },
-            if rel(RelativeFlags::DELTA_Y) {
-                vel[1] + delta.y
-            } else {
-                delta.y
-            },
-            if rel(RelativeFlags::DELTA_Z) {
-                vel[2] + delta.z
-            } else {
-                delta.z
-            },
-        ];
+        let cur = (
+            self.physics.pos,
+            self.physics.vel,
+            self.physics.yaw,
+            self.physics.pitch,
+        );
+        let (pos, vel, yaw, pitch) = absolute_move(cur, &change, u32::from(relatives.bits()));
         if !pos.iter().chain(vel.iter()).all(|v| v.is_finite())
             || !yaw.is_finite()
             || !pitch.is_finite()
@@ -342,6 +303,37 @@ impl LocalPlayer {
         self.view_snapped = true;
         self.placed = true;
     }
+}
+
+/// Vanilla `PositionMoveRotation#calculateAbsolute`: `bits` are `Relatives` flags.
+pub(crate) fn absolute_move(
+    (pos, vel, yaw, pitch): ([f64; 3], [f64; 3], f32, f32),
+    change: &PositionMoveRotation,
+    bits: u32,
+) -> ([f64; 3], [f64; 3], f32, f32) {
+    let rel = |flag: u32| Relatives(bits).contains(flag);
+    let offset = |flag: u32, cur: f64| if rel(flag) { cur } else { 0.0 };
+    let c = &change.position;
+    let new_pos = [
+        offset(Relatives::X, pos[0]) + c.x,
+        offset(Relatives::Y, pos[1]) + c.y,
+        offset(Relatives::Z, pos[2]) + c.z,
+    ];
+    let new_yaw = if rel(Relatives::Y_ROT) { yaw } else { 0.0 } + change.y_rot;
+    let new_pitch =
+        (if rel(Relatives::X_ROT) { pitch } else { 0.0 } + change.x_rot).clamp(-90.0, 90.0);
+    let mut rotated = vel;
+    if rel(Relatives::ROTATE_DELTA) {
+        rotated = rotate_x(rotated, (pitch - new_pitch).to_radians());
+        rotated = rotate_y(rotated, (yaw - new_yaw).to_radians());
+    }
+    let d = &change.delta_movement;
+    let new_vel = [
+        offset(Relatives::DELTA_X, rotated[0]) + d.x,
+        offset(Relatives::DELTA_Y, rotated[1]) + d.y,
+        offset(Relatives::DELTA_Z, rotated[2]) + d.z,
+    ];
+    (new_pos, new_vel, new_yaw, new_pitch)
 }
 
 fn rotate_x(v: [f64; 3], angle: f32) -> [f64; 3] {

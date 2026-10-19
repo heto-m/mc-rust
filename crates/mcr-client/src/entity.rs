@@ -1,5 +1,5 @@
 use mcr_data::Version;
-use mcr_physics::{Body, BodyKind, BodyScratch, CollisionWorld, PhysicsData};
+use mcr_physics::{Body, BodyFlags, BodyKind, BodyScratch, CollisionWorld, PhysicsData};
 use mcr_protocol::play::clientbound::entity::{PositionPath, VecDelta};
 use mcr_protocol::types::ItemStack;
 use mcr_protocol::types::component::{AttributeModifier, EquipmentSlot};
@@ -7,6 +7,13 @@ use mcr_protocol::types::entity_data::EntityDataValue;
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
+const NO_GRAVITY: u8 = 5;
+const ARROW_FLAGS: u8 = 8;
+const ARROW_NO_PHYSICS: i8 = 2;
+const TRIDENT_LOYALTY: u8 = 11;
+const WITHER_SKULL_DANGEROUS: u8 = 8;
+const FIREWORK_ATTACHED: u8 = 9;
+const FIREWORK_SHOT_AT_ANGLE: u8 = 10;
 const TNT_FUSE: u8 = 8;
 const TNT_DEFAULT_FUSE: i32 = 80;
 pub const MINECART_TNT_FUSE: i32 = 80;
@@ -16,7 +23,10 @@ const MAX_SIMULATED_PER_TICK: usize = 4096;
 const MAX_PASSENGERS: usize = 4096;
 const MAX_EFFECTS: usize = 64;
 const MAX_ATTRIBUTES: usize = 128;
-const INTERPOLATION_STEPS: u8 = 3;
+/// Steps a stepped interpolation keeps queued; older ones are consumed when more arrive.
+const MAX_QUEUED_STEPS: usize = 32;
+/// Bounds a server-sent step duration.
+const MAX_STEP_TICKS: i32 = 1200;
 const CREEPER_SWELL_DIR: u8 = 16;
 const CREEPER_IGNITED: u8 = 18;
 const TOO_BIG_TO_INTERPOLATE_SQR: f64 = 4096.0;
@@ -41,19 +51,32 @@ pub struct SimKinds {
 
 impl SimKinds {
     pub fn resolve(data: &Version) -> Self {
-        const NAMES: [(&str, BodyKind); 12] = [
+        const NAMES: [(&str, BodyKind); 25] = [
             ("item", BodyKind::Item),
             ("experience_orb", BodyKind::ExperienceOrb),
             ("tnt", BodyKind::Tnt),
             ("falling_block", BodyKind::FallingBlock),
             ("snowball", BodyKind::Thrown),
             ("egg", BodyKind::Thrown),
+            ("blue_egg", BodyKind::Thrown),
+            ("brown_egg", BodyKind::Thrown),
             ("ender_pearl", BodyKind::Thrown),
             ("experience_bottle", BodyKind::ExperienceBottle),
             ("splash_potion", BodyKind::Potion),
             ("lingering_potion", BodyKind::Potion),
             ("arrow", BodyKind::Arrow),
             ("spectral_arrow", BodyKind::Arrow),
+            ("trident", BodyKind::Trident),
+            ("fireball", BodyKind::Fireball),
+            ("small_fireball", BodyKind::Fireball),
+            ("dragon_fireball", BodyKind::Fireball),
+            ("wither_skull", BodyKind::WitherSkull),
+            ("wind_charge", BodyKind::WindCharge),
+            ("breeze_wind_charge", BodyKind::WindCharge),
+            ("llama_spit", BodyKind::LlamaSpit),
+            ("firework_rocket", BodyKind::FireworkRocket),
+            ("eye_of_ender", BodyKind::Drift),
+            ("shulker_bullet", BodyKind::Drift),
         ];
         let by_type = NAMES
             .iter()
@@ -94,6 +117,124 @@ impl SimKinds {
     }
 }
 
+/// How the client moves an entity towards server positions: vanilla's `InterpolationHandler`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lerp {
+    /// No handler: positions apply at once, as for simulated and static entities.
+    Snap,
+    /// `LinearInterpolationHandler` over this many ticks.
+    Linear(u8),
+    /// `SteppedInterpolationHandler` with the type's update interval.
+    Stepped(u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Step {
+    pos: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+    ticks: i32,
+}
+
+/// `SteppedInterpolationHandler.InterpolationData`: the queued path and its playback clock.
+#[derive(Debug, Clone, PartialEq)]
+struct StepQueue {
+    steps: [Step; MAX_QUEUED_STEPS],
+    head: usize,
+    len: usize,
+    last: Step,
+    current_ticks: f32,
+    remaining_ticks: f32,
+    speed: f32,
+}
+
+impl Default for StepQueue {
+    fn default() -> Self {
+        Self {
+            steps: [Step::default(); MAX_QUEUED_STEPS],
+            head: 0,
+            len: 0,
+            last: Step::default(),
+            current_ticks: 0.0,
+            remaining_ticks: 0.0,
+            speed: 1.0,
+        }
+    }
+}
+
+impl StepQueue {
+    fn front(&self) -> Step {
+        self.steps[self.head]
+    }
+
+    fn pop(&mut self) {
+        self.head = (self.head + 1) % MAX_QUEUED_STEPS;
+        self.len -= 1;
+    }
+
+    fn push(&mut self, pos: [f64; 3], yaw: f32, pitch: f32, ticks: i32) {
+        let ticks = ticks.clamp(0, MAX_STEP_TICKS);
+        if self.len == MAX_QUEUED_STEPS {
+            let oldest = self.front();
+            self.current_ticks = (self.current_ticks - oldest.ticks as f32).max(0.0);
+            self.remaining_ticks = (self.remaining_ticks - oldest.ticks as f32).max(0.0);
+            self.last = oldest;
+            self.pop();
+        }
+        self.steps[(self.head + self.len) % MAX_QUEUED_STEPS] = Step {
+            pos,
+            yaw,
+            pitch,
+            ticks,
+        };
+        self.len += 1;
+        self.remaining_ticks += ticks as f32;
+    }
+
+    fn reset(&mut self) {
+        self.len = 0;
+        self.remaining_ticks = 0.0;
+        self.speed = 1.0;
+    }
+
+    /// The pose for this tick, consuming the steps already passed; `None` once all are played.
+    fn sample(&mut self) -> Option<([f64; 3], f32, f32)> {
+        while self.len > 0 {
+            let step = self.front();
+            if self.current_ticks < step.ticks as f32 {
+                let a = self.current_ticks / step.ticks as f32;
+                let t = f64::from(a);
+                let last = self.last;
+                let pos = std::array::from_fn(|i| last.pos[i] + (step.pos[i] - last.pos[i]) * t);
+                return Some((
+                    pos,
+                    lerp_degrees(last.yaw, step.yaw, a),
+                    last.pitch + (step.pitch - last.pitch) * a,
+                ));
+            }
+            self.current_ticks -= step.ticks as f32;
+            self.last = step;
+            self.pop();
+        }
+        None
+    }
+
+    fn advance(&mut self, tick_speed: f32, interval: u8) {
+        let interval = f32::from(interval.max(1));
+        let target_speed = (self.remaining_ticks / interval).max(1.0);
+        self.speed += (target_speed - self.speed) / interval;
+        let mut ticks = tick_speed;
+        if ticks * self.speed < self.remaining_ticks {
+            ticks *= self.speed;
+        } else {
+            ticks = self.remaining_ticks;
+            self.speed = 1.0;
+        }
+        self.current_ticks += ticks;
+        self.remaining_ticks -= ticks;
+    }
+}
+
 /// Everything entity simulation reads from the world for one tick.
 pub(crate) struct SimContext<'a, W: CollisionWorld + ?Sized> {
     pub world: &'a W,
@@ -105,6 +246,11 @@ pub(crate) struct SimContext<'a, W: CollisionWorld + ?Sized> {
     pub frozen_except: Option<i32>,
     pub creeper_type: Option<i32>,
     pub dragon_type: Option<i32>,
+    /// `ClientLevel#getRelativeTickSpeed`: stepped interpolation catches up faster above 20 TPS.
+    pub tick_speed: f32,
+    /// The local player's id, feet and eye height, which loyal tridents and rockets may follow.
+    pub local: Option<(i32, [f64; 3], f64)>,
+    pub version: &'static Version,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -277,8 +423,12 @@ pub struct Entity {
     pub swell: (i32, i32),
     /// `EnderDragon.flightHistory`, kept only for dragons.
     pub flight: Option<Box<FlightHistory>>,
+    /// Chosen at the first position update, once the entity's data says whether it is living.
+    pub lerp: Option<Lerp>,
     sim_ticks: u32,
+    sim_collided: bool,
     interpolation_left: u8,
+    steps: Option<Box<StepQueue>>,
 }
 
 impl Entity {
@@ -310,8 +460,11 @@ impl Entity {
             fuse: -1,
             swell: (0, 0),
             flight: None,
+            lerp: None,
             sim_ticks: 0,
+            sim_collided: false,
             interpolation_left: 0,
+            steps: None,
         }
     }
 
@@ -413,50 +566,178 @@ impl Entity {
     }
 
     pub fn is_interpolating(&self) -> bool {
-        self.interpolation_left > 0
+        self.interpolation_left > 0 || self.steps.as_ref().is_some_and(|q| q.len > 0)
     }
 
-    pub fn move_or_interpolate_to(&mut self, pos: [f64; 3], rot: Option<(f32, f32)>) {
-        let dist_sqr: f64 = (0..3).map(|i| (pos[i] - self.pos[i]).powi(2)).sum();
-        self.target_pos = pos;
-        if let Some((yaw, pitch)) = rot {
-            self.target_yaw = yaw;
-            self.target_pitch = pitch;
-        }
-        if self.sim.is_some() || dist_sqr > TOO_BIG_TO_INTERPOLATE_SQR {
-            self.snap();
+    fn mode(&self) -> Lerp {
+        if self.sim.is_some() {
+            Lerp::Snap
         } else {
-            self.interpolation_left = INTERPOLATION_STEPS;
+            self.lerp.unwrap_or(Lerp::Linear(3))
+        }
+    }
+
+    /// A position update along a path of `(position, ticks)` steps ending at `end`; an empty path
+    /// is a single linear move.
+    pub fn move_or_interpolate_to(&mut self, pos: [f64; 3], rot: Option<(f32, f32)>) {
+        self.interpolate_path(pos, std::iter::empty(), rot);
+    }
+
+    /// Vanilla `moveOrInterpolateTo(PositionPath, yRot, xRot)`.
+    pub fn interpolate_path<I>(&mut self, end: [f64; 3], path: I, rot: Option<(f32, f32)>)
+    where
+        I: Iterator<Item = ([f64; 3], i32)> + Clone,
+    {
+        let dist_sqr: f64 = (0..3).map(|i| (end[i] - self.pos[i]).powi(2)).sum();
+        if dist_sqr > TOO_BIG_TO_INTERPOLATE_SQR {
+            let (yaw, pitch) = rot.unwrap_or((self.yaw, self.pitch));
+            self.snap_to(end, yaw, pitch);
+            return;
+        }
+        let active = self.is_interpolating();
+        let (yaw, pitch) = rot.unwrap_or(if active {
+            (self.target_yaw, self.target_pitch)
+        } else {
+            (self.yaw, self.pitch)
+        });
+        match self.mode() {
+            Lerp::Snap | Lerp::Linear(0) | Lerp::Stepped(0) => {
+                self.target_pos = end;
+                self.pos = end;
+                if rot.is_some() {
+                    self.target_yaw = yaw;
+                    self.target_pitch = pitch;
+                    self.yaw = yaw;
+                    self.pitch = pitch;
+                }
+                self.cancel_interpolation();
+            }
+            Lerp::Linear(steps) => {
+                let same =
+                    end == self.target_pos && yaw == self.target_yaw && pitch == self.target_pitch;
+                self.set_target(end, yaw, pitch);
+                if !active || !same {
+                    self.interpolation_left = steps;
+                }
+            }
+            Lerp::Stepped(interval) => {
+                let same =
+                    end == self.target_pos && yaw == self.target_yaw && pitch == self.target_pitch;
+                if active && same {
+                    return;
+                }
+                self.queue_steps(interval, end, path, yaw, pitch);
+            }
         }
     }
 
     /// A rotation-only update never moves the entity, as vanilla's `moveOrInterpolateTo(yRot, xRot)`.
     pub fn rotate_or_interpolate_to(&mut self, yaw: f32, pitch: f32) {
-        self.target_yaw = yaw;
-        self.target_pitch = pitch;
-        if self.sim.is_some() {
+        let at = if self.is_interpolating() {
+            self.target_pos
+        } else {
+            self.pos
+        };
+        if self.mode() == Lerp::Snap {
+            self.target_yaw = yaw;
+            self.target_pitch = pitch;
             self.yaw = yaw;
             self.pitch = pitch;
-        } else {
-            self.interpolation_left = INTERPOLATION_STEPS;
+            return;
         }
+        let base = self.target_pos;
+        self.interpolate_path(at, std::iter::empty(), Some((yaw, pitch)));
+        self.target_pos = base;
     }
 
-    pub fn snap_to(&mut self, pos: [f64; 3], yaw: f32, pitch: f32) {
+    fn set_target(&mut self, pos: [f64; 3], yaw: f32, pitch: f32) {
         self.target_pos = pos;
         self.target_yaw = yaw;
         self.target_pitch = pitch;
-        self.snap();
     }
 
-    fn snap(&mut self) {
-        self.pos = self.target_pos;
-        self.yaw = self.target_yaw;
-        self.pitch = self.target_pitch;
+    /// `SteppedInterpolationHandler#startInterpolating`.
+    fn queue_steps<I>(&mut self, interval: u8, end: [f64; 3], path: I, yaw: f32, pitch: f32)
+    where
+        I: Iterator<Item = ([f64; 3], i32)> + Clone,
+    {
+        let active = self.is_interpolating();
+        let (old_pos, old_yaw, old_pitch) = (self.target_pos, self.target_yaw, self.target_pitch);
+        let start = Step {
+            pos: self.pos,
+            yaw: self.yaw,
+            pitch: self.pitch,
+            ticks: 0,
+        };
+        let q = self.steps.get_or_insert_with(Default::default);
+        if !active {
+            q.last = start;
+            q.current_ticks = 1.0;
+        }
+        let interval = i32::from(interval);
+        let mut stepped = path.clone().peekable();
+        if end == old_pos || stepped.peek().is_none() {
+            q.push(end, yaw, pitch, interval);
+        } else if yaw == old_yaw && pitch == old_pitch {
+            for (pos, ticks) in path {
+                q.push(pos, yaw, pitch, ticks);
+            }
+        } else {
+            let total: i64 = path
+                .clone()
+                .map(|(_, t)| i64::from(t.clamp(0, MAX_STEP_TICKS)))
+                .sum();
+            let mut offset = 0i64;
+            for (pos, ticks) in path {
+                offset += i64::from(ticks.clamp(0, MAX_STEP_TICKS));
+                let a = if total > 0 {
+                    offset as f32 / total as f32
+                } else {
+                    1.0
+                };
+                q.push(
+                    pos,
+                    lerp_degrees(old_yaw, yaw, a),
+                    old_pitch + (pitch - old_pitch) * a,
+                    ticks,
+                );
+            }
+        }
+        self.set_target(end, yaw, pitch);
+    }
+
+    pub fn snap_to(&mut self, pos: [f64; 3], yaw: f32, pitch: f32) {
+        self.set_target(pos, yaw, pitch);
+        self.pos = pos;
+        self.yaw = yaw;
+        self.pitch = pitch;
+        self.cancel_interpolation();
+    }
+
+    fn cancel_interpolation(&mut self) {
         self.interpolation_left = 0;
+        if let Some(q) = &mut self.steps {
+            q.reset();
+        }
     }
 
     pub fn tick_interpolation(&mut self) {
+        self.tick_interpolation_at(1.0);
+    }
+
+    fn tick_interpolation_at(&mut self, tick_speed: f32) {
+        if let Lerp::Stepped(interval) = self.mode()
+            && let Some(q) = self.steps.as_mut().filter(|q| q.len > 0)
+        {
+            let (pos, yaw, pitch) =
+                q.sample()
+                    .unwrap_or((self.target_pos, self.target_yaw, self.target_pitch));
+            q.advance(tick_speed, interval);
+            self.pos = pos;
+            self.yaw = yaw;
+            self.pitch = pitch;
+            return;
+        }
         if self.interpolation_left == 0 {
             return;
         }
@@ -469,10 +750,55 @@ impl Entity {
         self.interpolation_left -= 1;
     }
 
+    fn flag(&self, index: u8) -> bool {
+        matches!(self.data.get(&index), Some(EntityDataValue::Boolean(true)))
+    }
+
+    fn byte(&self, index: u8) -> i8 {
+        match self.data.get(&index) {
+            Some(EntityDataValue::Byte(b)) => *b,
+            _ => 0,
+        }
+    }
+
+    /// The entity a rocket rides with, or the owner a loyal trident with no physics returns to.
+    fn followed(&self, kind: BodyKind) -> Option<i32> {
+        match kind {
+            BodyKind::FireworkRocket => match self.data.get(&FIREWORK_ATTACHED) {
+                Some(EntityDataValue::OptionalUnsignedInt(Some(id))) => i32::try_from(*id).ok(),
+                _ => None,
+            },
+            BodyKind::Trident
+                if self.byte(TRIDENT_LOYALTY) > 0
+                    && self.byte(ARROW_FLAGS) & ARROW_NO_PHYSICS != 0 =>
+            {
+                Some(self.object_data)
+            }
+            _ => None,
+        }
+    }
+
+    fn body_flags(&self, kind: BodyKind, anchor: Option<[f64; 3]>) -> BodyFlags {
+        let arrow = matches!(kind, BodyKind::Arrow | BodyKind::Trident);
+        BodyFlags {
+            no_gravity: self.flag(NO_GRAVITY),
+            no_physics: arrow && self.byte(ARROW_FLAGS) & ARROW_NO_PHYSICS != 0,
+            dangerous: kind == BodyKind::WitherSkull && self.flag(WITHER_SKULL_DANGEROUS),
+            shot_at_angle: kind == BodyKind::FireworkRocket && self.flag(FIREWORK_SHOT_AT_ANGLE),
+            loyalty: if kind == BodyKind::Trident {
+                self.byte(TRIDENT_LOYALTY).clamp(0, 127) as u8
+            } else {
+                0
+            },
+            anchor,
+        }
+    }
+
     fn tick_sim<W: CollisionWorld + ?Sized>(
         &mut self,
         shape: SimShape,
         cx: &mut SimContext<'_, W>,
+        anchor: Option<[f64; 3]>,
     ) {
         let mut body = Body::new(
             shape.kind,
@@ -483,11 +809,14 @@ impl Entity {
         );
         body.tick_count = self.sim_ticks;
         body.on_ground = self.on_ground;
+        body.horizontal_collision = self.sim_collided;
+        body.flags = self.body_flags(shape.kind, anchor);
         body.tick(cx.world, cx.data, cx.scratch, cx.follow);
         self.sim_ticks = body.tick_count;
         self.pos = body.pos;
         self.velocity = body.vel;
         self.on_ground = body.on_ground;
+        self.sim_collided = body.horizontal_collision;
         if shape.kind.is_projectile() && body.vel != [0.0; 3] {
             let (yaw, pitch) = mcr_physics::aim(body.vel);
             self.yaw = lerp_degrees(self.yaw, yaw, 0.2);
@@ -565,6 +894,7 @@ pub fn end_of_path(path: &PositionPath) -> [f64; 3] {
 #[derive(Debug, Clone, Default)]
 pub struct Entities {
     map: FxHashMap<i32, Entity>,
+    anchors: Vec<(i32, [f64; 3])>,
 }
 
 impl Entities {
@@ -617,8 +947,42 @@ impl Entities {
         self.map.clear();
     }
 
+    /// Where each rocket's rider and each returning trident's owner is, before anything moves.
+    fn collect_anchors<W: CollisionWorld + ?Sized>(&mut self, cx: &SimContext<'_, W>) {
+        self.anchors.clear();
+        for e in self.map.values() {
+            let Some(followed) = e.sim.and_then(|s| e.followed(s.kind)) else {
+                continue;
+            };
+            let rocket = e.sim.is_some_and(|s| s.kind == BodyKind::FireworkRocket);
+            let at = match cx.local {
+                Some((id, feet, eye)) if id == followed => {
+                    Some([feet[0], feet[1] + if rocket { 0.0 } else { eye }, feet[2]])
+                }
+                _ => self.map.get(&followed).map(|o| {
+                    let eye = if rocket {
+                        0.0
+                    } else {
+                        u32::try_from(o.kind)
+                            .ok()
+                            .and_then(|k| cx.version.entity_type_info(k))
+                            .map_or(0.0, |i| f64::from(i.eye_height))
+                    };
+                    [o.pos[0], o.pos[1] + eye, o.pos[2]]
+                }),
+            };
+            if let Some(at) = at
+                && self.anchors.len() < MAX_SIMULATED_PER_TICK
+            {
+                self.anchors.push((e.id, at));
+            }
+        }
+    }
+
     pub(crate) fn tick<W: CollisionWorld + ?Sized>(&mut self, cx: &mut SimContext<'_, W>) {
+        self.collect_anchors(cx);
         let mut simulated = 0usize;
+        let anchors = &self.anchors;
         for entity in self.map.values_mut() {
             if cx
                 .frozen_except
@@ -635,10 +999,14 @@ impl Entities {
                 Some(_) if simulated >= MAX_SIMULATED_PER_TICK => {}
                 Some(shape) => {
                     simulated += 1;
-                    entity.tick_sim(shape, cx);
+                    let anchor = anchors
+                        .iter()
+                        .find(|(id, _)| *id == entity.id)
+                        .map(|(_, at)| *at);
+                    entity.tick_sim(shape, cx, anchor);
                 }
                 None => {
-                    entity.tick_interpolation();
+                    entity.tick_interpolation_at(cx.tick_speed);
                     if cx.dragon_type == Some(entity.kind) {
                         let (y, yaw) = (entity.pos[1], entity.yaw);
                         entity

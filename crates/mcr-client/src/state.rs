@@ -361,6 +361,12 @@ pub(crate) struct PhysicsIds {
     pub jump_boost: Option<i32>,
     pub levitation: Option<i32>,
     pub slow_falling: Option<i32>,
+    pub blindness: Option<i32>,
+    pub dolphins_grace: Option<i32>,
+    pub weaving: Option<i32>,
+    pub friction_modifier: Option<i32>,
+    pub air_drag_modifier: Option<i32>,
+    pub leather_boots: Option<i32>,
     pub scale: Option<i32>,
     pub block_range: Option<i32>,
     pub entity_range: Option<i32>,
@@ -389,6 +395,14 @@ impl PhysicsIds {
             jump_boost: effect("jump_boost"),
             levitation: effect("levitation"),
             slow_falling: effect("slow_falling"),
+            blindness: effect("blindness"),
+            dolphins_grace: effect("dolphins_grace"),
+            weaving: effect("weaving"),
+            friction_modifier: attr("friction_modifier"),
+            air_drag_modifier: attr("air_drag_modifier"),
+            leather_boots: data
+                .item_by_name("minecraft:leather_boots")
+                .and_then(|id| i32::try_from(id).ok()),
             scale: attr("scale"),
             block_range: attr("block_interaction_range"),
             entity_range: attr("entity_interaction_range"),
@@ -641,6 +655,13 @@ impl ClientState {
             frozen_except: frozen.then_some(self.sim_kinds.player_type),
             creeper_type: self.sim_kinds.creeper_type,
             dragon_type: self.sim_kinds.dragon_type,
+            tick_speed: if self.world.tick_rate > 20.0 {
+                (self.world.tick_rate / 20.0).min(500.0)
+            } else {
+                1.0
+            },
+            local: Some((self.player.entity_id, pos, eye)),
+            version: self.data,
         };
         self.entities.tick(&mut cx);
         if !frozen {
@@ -701,22 +722,56 @@ impl ClientState {
                 .unwrap_or(defaults.water_movement_efficiency),
             movement_efficiency: value(ids.movement_efficiency, None)
                 .unwrap_or(defaults.movement_efficiency),
+            friction_modifier: value(ids.friction_modifier, None)
+                .unwrap_or(defaults.friction_modifier),
+            air_drag_modifier: value(ids.air_drag_modifier, None)
+                .unwrap_or(defaults.air_drag_modifier),
             scale: value(ids.scale, None).unwrap_or(defaults.scale),
-            ..defaults
         };
         let level = |id: Option<i32>| {
             let e = self.player.effects.get(&id?)?;
             u8::try_from(e.amplifier).ok()
         };
+        let has = |id: Option<i32>| id.is_some_and(|id| self.player.effects.contains_key(&id));
         let effects = Effects {
             jump_boost: level(ids.jump_boost),
             levitation: level(ids.levitation),
-            slow_falling: ids
-                .slow_falling
-                .is_some_and(|id| self.player.effects.contains_key(&id)),
+            slow_falling: has(ids.slow_falling),
+            blindness: has(ids.blindness),
+            dolphins_grace: has(ids.dolphins_grace),
+            weaving: has(ids.weaving),
         };
         self.player.apply_attributes(attributes);
         self.player.apply_effects(effects);
+        self.player.physics.fast_lava = self.fast_lava();
+    }
+
+    /// The dimension's `gameplay/fast_lava` attribute; the nether has it when the data is not synced.
+    pub(crate) fn fast_lava(&self) -> bool {
+        let entry = self
+            .registries
+            .get(crate::registry::DIMENSION_TYPE)
+            .and_then(|r| r.get(self.dimension.type_id));
+        let synced = entry
+            .and_then(|e| e.data.as_ref())
+            .and_then(|d| d.get_compound("attributes"))
+            .and_then(|a| a.get("minecraft:gameplay/fast_lava"))
+            .map(|v| match v {
+                mcr_nbt::Value::Byte(b) => *b != 0,
+                mcr_nbt::Value::Compound(c) => c.get("argument").is_some_and(truthy),
+                other => truthy(other),
+            });
+        synced.unwrap_or_else(|| {
+            entry.map_or(self.dimension.name.as_str(), |e| e.id.as_str()) == "minecraft:the_nether"
+        })
+    }
+}
+
+fn truthy(v: &mcr_nbt::Value) -> bool {
+    match v {
+        mcr_nbt::Value::Byte(b) => *b != 0,
+        mcr_nbt::Value::Int(i) => *i != 0,
+        _ => false,
     }
 }
 
