@@ -248,9 +248,14 @@ pub fn decode_sprite(name: &str, png: &[u8], mcmeta: Option<&[u8]>) -> Result<Sp
 
 /// The decoded texture; `None` when absent or when a (possibly hostile) pack's file does not decode.
 pub(crate) fn load_sprite(resources: &ResourceManager, path: &str) -> Option<Sprite> {
+    load_sprite_file(resources, path, true)
+}
+
+fn load_sprite_file(resources: &ResourceManager, path: &str, permute: bool) -> Option<Sprite> {
     let png = match resources.read(path) {
         Ok(Some(png)) => png,
-        Ok(None) => return load_permutation(resources, path),
+        Ok(None) if permute => return load_permutation(resources, path),
+        Ok(None) => return None,
         Err(e) => {
             tracing::warn!("{path}: {e}");
             return None;
@@ -271,17 +276,21 @@ fn split_id(id: &str) -> (&str, &str) {
     id.split_once(':').unwrap_or(("minecraft", id))
 }
 
-/// A texture that only exists as an atlas `paletted_permutations` output, such as
-/// `trims/items/helmet_trim_gold`: the base texture recoloured from the key to the named palette.
-fn load_permutation(resources: &ResourceManager, path: &str) -> Option<Sprite> {
-    let (ns, rest) = path.strip_prefix("assets/")?.split_once('/')?;
-    let stem = rest.strip_prefix("textures/")?.strip_suffix(".png")?;
-    let base_exists = stem
-        .match_indices('_')
-        .any(|(i, _)| resources.exists(&format!("assets/{ns}/textures/{}.png", &stem[..i])));
-    if !base_exists {
-        return None;
-    }
+const MAX_PERMUTATION_SOURCES: usize = 256;
+const MAX_PERMUTATION_ENTRIES: usize = 512;
+const MAX_PALETTE_PIXELS: usize = 4096;
+
+/// One atlas `paletted_permutations` source.
+#[derive(Debug)]
+pub(crate) struct PalettedPermutations {
+    textures: Vec<(String, String)>,
+    separator: String,
+    palette_key: String,
+    permutations: Vec<(String, String)>,
+}
+
+pub(crate) fn parse_permutation_sources(resources: &ResourceManager) -> Vec<PalettedPermutations> {
+    let mut out = Vec::new();
     let atlases: Vec<&str> = resources
         .list_prefix("assets/")
         .filter(|p| p.ends_with(".json") && p.split('/').nth(2) == Some("atlases"))
@@ -293,51 +302,92 @@ fn load_permutation(resources: &ResourceManager, path: &str) -> Option<Sprite> {
             };
             let sources = json.get("sources").and_then(|s| s.as_array());
             for source in sources.into_iter().flatten() {
+                if out.len() >= MAX_PERMUTATION_SOURCES {
+                    tracing::warn!(
+                        "more than {MAX_PERMUTATION_SOURCES} paletted permutation sources"
+                    );
+                    return out;
+                }
                 let kind = source.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 if split_id(kind).1 != "paletted_permutations" {
                     continue;
                 }
-                if let Some(sprite) = permutation_from(resources, source, ns, stem) {
-                    return Some(sprite);
-                }
+                let (Some(textures), Some(permutations), Some(key)) = (
+                    source.get("textures").and_then(|t| t.as_array()),
+                    source.get("permutations").and_then(|p| p.as_object()),
+                    source.get("palette_key").and_then(|k| k.as_str()),
+                ) else {
+                    continue;
+                };
+                out.push(PalettedPermutations {
+                    textures: textures
+                        .iter()
+                        .filter_map(|t| t.as_str())
+                        .take(MAX_PERMUTATION_ENTRIES)
+                        .map(|t| {
+                            let (ns, path) = split_id(t);
+                            (ns.to_owned(), path.to_owned())
+                        })
+                        .collect(),
+                    separator: source
+                        .get("separator")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("_")
+                        .to_owned(),
+                    palette_key: key.to_owned(),
+                    permutations: permutations
+                        .iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+                        .take(MAX_PERMUTATION_ENTRIES)
+                        .collect(),
+                });
             }
         }
     }
-    None
+    out
+}
+
+/// A texture that only exists as an atlas `paletted_permutations` output, such as
+/// `trims/items/helmet_trim_gold`: the base texture recoloured from the key to the named palette.
+fn load_permutation(resources: &ResourceManager, path: &str) -> Option<Sprite> {
+    let (ns, rest) = path.strip_prefix("assets/")?.split_once('/')?;
+    let stem = rest.strip_prefix("textures/")?.strip_suffix(".png")?;
+    resources
+        .paletted_permutations()
+        .iter()
+        .find_map(|source| permutation_from(resources, source, ns, stem))
 }
 
 fn permutation_from(
     resources: &ResourceManager,
-    source: &serde_json::Value,
+    source: &PalettedPermutations,
     ns: &str,
     stem: &str,
 ) -> Option<Sprite> {
-    let separator = source
-        .get("separator")
-        .and_then(|s| s.as_str())
-        .unwrap_or("_");
-    let permutations = source.get("permutations")?.as_object()?;
     let (base, palette) = source
-        .get("textures")?
-        .as_array()?
+        .textures
         .iter()
-        .filter_map(|t| t.as_str())
-        .map(split_id)
-        .filter(|(tns, _)| *tns == ns)
+        .filter(|(tns, _)| tns == ns)
         .find_map(|(_, tpath)| {
-            let suffix = stem.strip_prefix(tpath)?.strip_prefix(separator)?;
-            Some((tpath, permutations.get(suffix)?.as_str()?))
+            let suffix = stem
+                .strip_prefix(tpath.as_str())?
+                .strip_prefix(source.separator.as_str())?;
+            let (_, palette) = source.permutations.iter().find(|(s, _)| s == suffix)?;
+            Some((tpath, palette))
         })?;
-    let key = source.get("palette_key")?.as_str()?;
     let read_palette = |id: &str| {
         let (pns, ppath) = split_id(id);
         let path = format!("assets/{pns}/textures/palettes/{ppath}.png");
         let bytes = resources.read(&path).ok()??;
-        decode_png(&path, &bytes).ok().map(|(_, _, rgba)| rgba)
+        let (w, h, rgba) = decode_png(&path, &bytes).ok()?;
+        (w as usize * h as usize <= MAX_PALETTE_PIXELS).then_some(rgba)
     };
-    let (keys, values) = (read_palette(key)?, read_palette(palette)?);
+    let (keys, values) = (read_palette(&source.palette_key)?, read_palette(palette)?);
     if keys.len() != values.len() {
-        tracing::warn!("palette {palette} does not match the size of {key}");
+        tracing::warn!(
+            "palette {palette} does not match the size of {}",
+            source.palette_key
+        );
         return None;
     }
     let mut mapping = HashMap::new();
@@ -351,7 +401,12 @@ fn permutation_from(
             mapping.insert([k[0], k[1], k[2]], *v);
         }
     }
-    let mut sprite = load_sprite(resources, &format!("assets/{ns}/textures/{base}.png"))?;
+    // The base must be a real file: recursing into permutations would let a pack chain lookups.
+    let mut sprite = load_sprite_file(
+        resources,
+        &format!("assets/{ns}/textures/{base}.png"),
+        false,
+    )?;
     for frame in &mut sprite.frames {
         for px in frame.as_chunks_mut::<4>().0 {
             if px[3] == 0 {

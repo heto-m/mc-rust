@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use crate::error::{AssetError, Result};
 use crate::pack::{PackFormat, PackMeta};
 use crate::source::{AssetSource, DirSource, ReadBudget, ZipLimits, ZipSource};
+use crate::texture::PalettedPermutations;
 
 const MAX_NESTED_JARS: usize = 256;
 const MAX_NESTED_JAR_BYTES: usize = 64 << 20;
@@ -46,6 +48,7 @@ pub struct ResourceManager {
     paths: Vec<Box<str>>,
     index: HashMap<Box<str>, Entry>,
     untrusted_budget: ReadBudget,
+    permutations: OnceLock<Vec<PalettedPermutations>>,
 }
 
 impl Default for ResourceManager {
@@ -66,6 +69,7 @@ impl ResourceManager {
             paths: Vec::new(),
             index: HashMap::new(),
             untrusted_budget: ReadBudget::default(),
+            permutations: OnceLock::new(),
         }
     }
 
@@ -179,6 +183,7 @@ impl ResourceManager {
         }
 
         self.packs.push(Pack { name, source, meta });
+        self.permutations = OnceLock::new();
         Ok(())
     }
 
@@ -192,6 +197,12 @@ impl ResourceManager {
                 real_path: real_idx,
             },
         );
+    }
+
+    /// Every atlas `paletted_permutations` source, parsed once per pack stack.
+    pub(crate) fn paletted_permutations(&self) -> &[PalettedPermutations] {
+        self.permutations
+            .get_or_init(|| crate::texture::parse_permutation_sources(self))
     }
 
     pub fn pack_names(&self) -> impl Iterator<Item = &str> {
