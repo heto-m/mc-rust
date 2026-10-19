@@ -326,5 +326,5 @@ Scope: mcr-mesh, mcr-render, mcr-assets, mcr-block-entity.
 
 ## 22. Close out
 
-- [ ] 22.1 Re-audit each batch's gaps against the decompiled client after it merges; record leftovers in a follow-up change
-- [ ] 22.2 Validate and archive the change
+- [x] 22.1 Re-audit each batch's gaps against the decompiled client after it merges; record leftovers in a follow-up change
+- [x] 22.2 Validate and archive the change

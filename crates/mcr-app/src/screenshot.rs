@@ -185,6 +185,7 @@ fn shell_bench(shell: &mut crate::shell::Shell, frames: u32) {
     let mut gpu = Vec::with_capacity(frames as usize);
     let mut draw = Vec::with_capacity(frames as usize);
     let (mut turn_frames, mut handoff_frames) = (0u32, 0u32);
+    let mut draws = Vec::with_capacity(frames as usize);
     for _ in 0..frames {
         let now = Instant::now();
         shell.advance((now - last).as_secs_f32());
@@ -197,6 +198,7 @@ fn shell_bench(shell: &mut crate::shell::Shell, frames: u32) {
         if let Some(g) = shell.frame().and_then(|s| s.gpu) {
             gpu.push(g.frame_ms);
             draw.push(g.draw_ms);
+            draws.push((g.cube_draws + g.model_draws) as f32);
         }
         if let Some(play) = &shell.play {
             turn_frames += u32::from(play.java_turn);
@@ -228,9 +230,10 @@ fn shell_bench(shell: &mut crate::shell::Shell, frames: u32) {
         .as_ref()
         .map_or(0, |p| p.render.renderer.dynamic_lights_drawn());
     println!(
-        "bench: gpu median world {:.3} ms, terrain draws {:.3} ms, dynamic lights {lights}",
+        "bench: gpu median world {:.3} ms, terrain draws {:.3} ms, dynamic lights {lights}, terrain draw calls {}",
         median(&mut gpu),
-        median(&mut draw)
+        median(&mut draw),
+        median(&mut draws)
     );
     if let Some(frames) = shell.mod_frames() {
         println!("bench: {}", frames.lock().stats().summary());

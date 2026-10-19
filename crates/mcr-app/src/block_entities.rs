@@ -40,6 +40,7 @@ type Pos = [i32; 3];
 pub struct BlockEntities {
     pub scene: BlockEntityScene,
     entries: FxHashMap<Pos, (BlockEntityKind, BlockEntityData)>,
+    by_chunk: FxHashMap<ChunkPos, Vec<Pos>>,
     conduit_frames: FxHashMap<Pos, Vec<Pos>>,
 }
 
@@ -203,12 +204,14 @@ impl BlockEntities {
         Some(Self {
             scene,
             entries: FxHashMap::default(),
+            by_chunk: FxHashMap::default(),
             conduit_frames: FxHashMap::default(),
         })
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.by_chunk.clear();
         self.conduit_frames.clear();
         self.scene.clear();
     }
@@ -236,7 +239,12 @@ impl BlockEntities {
             _ => {}
         }
         self.scene.set(pos, block, kind, data.clone());
-        self.entries.insert(pos, (kind, data));
+        if self.entries.insert(pos, (kind, data)).is_none() {
+            self.by_chunk
+                .entry(ChunkPos::from_block(pos[0], pos[2]))
+                .or_default()
+                .push(pos);
+        }
     }
 
     /// Vanilla draws no beam while the beacon has no pyramid (`getBeamSections` with zero levels).
@@ -317,23 +325,31 @@ impl BlockEntities {
         self.conduit_frames.remove(&pos);
         if self.entries.remove(&pos).is_some() {
             self.scene.remove(pos);
+            let chunk = ChunkPos::from_block(pos[0], pos[2]);
+            if let Some(list) = self.by_chunk.get_mut(&chunk) {
+                list.retain(|p| *p != pos);
+                if list.is_empty() {
+                    self.by_chunk.remove(&chunk);
+                }
+            }
+        }
+    }
+
+    fn unload_chunk(&mut self, pos: ChunkPos) {
+        for p in self.by_chunk.remove(&pos).unwrap_or_default() {
+            self.conduit_frames.remove(&p);
+            self.entries.remove(&p);
+            self.scene.remove(p);
         }
     }
 
     pub fn on_event(&mut self, event: &ClientEvent, state: &ClientState) {
         match event {
-            ClientEvent::ChunkLoaded(pos) => self.load_chunk(state, *pos),
-            ClientEvent::ChunkUnloaded(pos) => {
-                let gone: Vec<Pos> = self
-                    .entries
-                    .keys()
-                    .filter(|p| p[0] >> 4 == pos.x && p[2] >> 4 == pos.z)
-                    .copied()
-                    .collect();
-                for p in gone {
-                    self.remove(p);
-                }
+            ClientEvent::ChunkLoaded(pos) => {
+                self.unload_chunk(*pos);
+                self.load_chunk(state, *pos);
             }
+            ClientEvent::ChunkUnloaded(pos) => self.unload_chunk(*pos),
             ClientEvent::BlockEntityChanged(p) => {
                 let at = [p.x, p.y, p.z];
                 if let Some((ty, tag)) = state.block_entities.get(p)

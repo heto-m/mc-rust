@@ -1138,6 +1138,37 @@ in mod mode, where Java plays them, but not in native mode. Effects (`update_mob
   with 4% more quads. The translucent sort takes 2.9 µs for 15 water sections and 145 µs for a
   12288-quad glass checkerboard, on the sort thread.
 
+## Close-out notes
+
+- **Leaves and occlusion.** Vanilla gives leaves `noOcclusion()` (`Blocks#leavesProperties`), so
+  `isSolidRender` is false and `SectionCompiler` never marks them opaque in the `VisGraph`. mcr reads the
+  same flag into `ATTR_SOLID_RENDER`, and batch 21 did not change it. The reported 402-against-154 draw
+  spot did not reproduce. On the main server world (seed 12345, render distance 16, 1920x1080) 1296 views
+  over a 400-block grid, plus forest and beach views in world and connected mode, never kept more draws
+  with occlusion on than the build before batch 21. 98 views kept fewer, because the leaf faces vanilla
+  keeps fill holes in the depth pyramid. With occlusion off the counts are identical. Median GPU time over
+  600 frames, three interleaved runs:
+
+  | View | Before | After |
+  |---|---|---|
+  | Over the dark forest toward the beach, culling on | 0.157 ms, 1102 draws | 0.152 ms, 933 draws |
+  | Under the canopy looking up, culling on | 0.185 ms, 850 draws | 0.197 ms, 702 draws |
+  | Over the forest, culling off | 0.161 ms | 0.175 ms |
+  | Under the canopy, culling off | 0.182 ms | 0.210 ms |
+
+  The remaining cost is fragment work on the leaf faces vanilla keeps. It cannot be culled without
+  changing the picture. Solid and cutout quads share one discarding pipeline, and sections draw in cull
+  order, so leaves behind terrain are shaded more often than in vanilla, which draws SOLID before CUTOUT.
+  Splitting the passes is recorded in `vanilla-parity-5`.
+- **Block entities at join.** `NetworkWorld` folded `ChunkLoaded` and `ChunkUnloaded` into the mesh world
+  and never passed them on, so block entities that arrived in chunk data reached the scene only if the
+  chunk was already loaded when the scene assets were built. End portals, gateways and chests in later
+  chunks were invisible until a block update, and unloaded chunks never released their entries. Chunk
+  events now reach the game too, and the scene indexes its entries by chunk, so a resent chunk replaces
+  its block entities and an unloaded one drops them.
+- **Re-audit.** Every batch was re-read against the decompiled client. The leftovers, with the notes from
+  the batch reports, are collected in `vanilla-parity-5`.
+
 ## Severity totals
 
 | Subsystem | G | V | M | Total |

@@ -18,6 +18,12 @@ pub struct NetworkWorld {
     pub client: Client,
     pub camera: Camera,
     render_distance: i32,
+    inbox: Inbox,
+}
+
+/// What the mesh pipeline and the game take from the client's events.
+#[derive(Debug)]
+struct Inbox {
     loaded: FxHashSet<ChunkPos>,
     unloaded: Vec<ChunkPos>,
     urgent: Vec<SectionPos>,
@@ -37,7 +43,7 @@ pub fn resets_world(event: &ClientEvent) -> bool {
 impl std::fmt::Debug for NetworkWorld {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NetworkWorld")
-            .field("loaded", &self.loaded.len())
+            .field("loaded", &self.inbox.loaded.len())
             .field("render_distance", &self.render_distance)
             .finish_non_exhaustive()
     }
@@ -49,6 +55,36 @@ impl NetworkWorld {
             client,
             camera: Camera::default(),
             render_distance,
+            inbox: Inbox::new(),
+        }
+    }
+
+    pub fn set_render_distance(&mut self, distance: i32) {
+        self.render_distance = distance.clamp(2, 64);
+    }
+
+    pub fn loaded_count(&self) -> usize {
+        self.inbox.loaded.len()
+    }
+
+    /// Runs one client tick; chunk events are folded into the world and, like the rest, left in
+    /// `events`.
+    pub fn tick(&mut self, input: &PlayerInput) -> Result<()> {
+        let result = self.client.tick(input);
+        for event in self.client.drain_events() {
+            self.inbox.absorb(event);
+        }
+        result
+    }
+
+    pub fn take_events(&mut self) -> Vec<ClientEvent> {
+        std::mem::take(&mut self.inbox.events)
+    }
+}
+
+impl Inbox {
+    fn new() -> Self {
+        Self {
             loaded: FxHashSet::default(),
             unloaded: Vec::new(),
             urgent: Vec::new(),
@@ -58,51 +94,26 @@ impl NetworkWorld {
         }
     }
 
-    pub fn set_render_distance(&mut self, distance: i32) {
-        self.render_distance = distance.clamp(2, 64);
-    }
-
-    pub fn loaded_count(&self) -> usize {
-        self.loaded.len()
-    }
-
-    /// Runs one client tick; chunk events are folded into the world, the rest is left in `events`.
-    pub fn tick(&mut self, input: &PlayerInput) -> Result<()> {
-        let result = self.client.tick(input);
-        self.collect_events();
-        result
-    }
-
-    pub fn take_events(&mut self) -> Vec<ClientEvent> {
-        std::mem::take(&mut self.events)
-    }
-
-    fn collect_events(&mut self) {
-        let mut drained: Vec<ClientEvent> = self.client.drain_events().collect();
-        for event in drained.drain(..) {
-            match event {
-                ClientEvent::ChunkLoaded(pos) => {
-                    self.loaded.insert(pos);
-                    self.last_chunk = Instant::now();
-                }
-                ClientEvent::ChunkUnloaded(pos) => {
-                    self.loaded.remove(&pos);
-                    self.unloaded.push(pos);
-                }
-                event if resets_world(&event) => {
-                    self.loaded.clear();
-                    self.unloaded.clear();
-                    self.urgent.clear();
-                    self.reset = true;
-                    self.events.push(event);
-                }
-                ClientEvent::BlockChanged { pos, .. } => {
-                    self.mark_urgent(pos);
-                    self.events.push(event);
-                }
-                other => self.events.push(other),
+    fn absorb(&mut self, event: ClientEvent) {
+        match event {
+            ClientEvent::ChunkLoaded(pos) => {
+                self.loaded.insert(pos);
+                self.last_chunk = Instant::now();
             }
+            ClientEvent::ChunkUnloaded(pos) => {
+                self.loaded.remove(&pos);
+                self.unloaded.push(pos);
+            }
+            ref e if resets_world(e) => {
+                self.loaded.clear();
+                self.unloaded.clear();
+                self.urgent.clear();
+                self.reset = true;
+            }
+            ClientEvent::BlockChanged { pos, .. } => self.mark_urgent(pos),
+            _ => {}
         }
+        self.events.push(event);
     }
 
     fn mark_urgent(&mut self, pos: BlockPos) {
@@ -144,15 +155,15 @@ impl MeshWorld for NetworkWorld {
     }
 
     fn loaded_columns(&self) -> Vec<ChunkPos> {
-        self.loaded.iter().copied().collect()
+        self.inbox.loaded.iter().copied().collect()
     }
 
     fn take_unloaded(&mut self) -> Vec<ChunkPos> {
-        std::mem::take(&mut self.unloaded)
+        std::mem::take(&mut self.inbox.unloaded)
     }
 
     fn take_reset(&mut self) -> bool {
-        std::mem::take(&mut self.reset)
+        std::mem::take(&mut self.inbox.reset)
     }
 
     fn biome_names(&self) -> Vec<String> {
@@ -179,7 +190,7 @@ impl MeshWorld for NetworkWorld {
     }
 
     fn streaming_idle(&self) -> bool {
-        self.client.state.player.loaded && self.last_chunk.elapsed() > QUIET_AFTER_CHUNK
+        self.client.state.player.loaded && self.inbox.last_chunk.elapsed() > QUIET_AFTER_CHUNK
     }
 
     fn biome_seed(&self) -> i64 {
@@ -187,6 +198,25 @@ impl MeshWorld for NetworkWorld {
     }
 
     fn take_urgent(&mut self) -> Vec<SectionPos> {
-        std::mem::take(&mut self.urgent)
+        std::mem::take(&mut self.inbox.urgent)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_events_reach_the_game_too() {
+        let mut inbox = Inbox::new();
+        let pos = ChunkPos::new(3, -4);
+        inbox.absorb(ClientEvent::ChunkLoaded(pos));
+        inbox.absorb(ClientEvent::ChunkUnloaded(pos));
+        assert!(inbox.loaded.is_empty());
+        assert_eq!(inbox.unloaded, [pos]);
+        assert!(matches!(
+            inbox.events[..],
+            [ClientEvent::ChunkLoaded(a), ClientEvent::ChunkUnloaded(b)] if a == pos && b == pos
+        ));
     }
 }
