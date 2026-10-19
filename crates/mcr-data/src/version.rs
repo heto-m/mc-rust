@@ -393,6 +393,27 @@ impl Version {
         }
     }
 
+    /// `BlockState#setValue`: the state of the same block with `key` set to `value`.
+    pub fn with_property(&self, id: StateId, key: &str, value: &str) -> Option<StateId> {
+        let b = &self.tables.blocks;
+        let block = *self.tables.states.block.get(id as usize)? as usize;
+        let props = b.prop_start[block] as usize..b.prop_start[block + 1] as usize;
+        let ordinal = id - b.first_state[block];
+        let mut stride = 1u32;
+        for index in props.rev() {
+            let def = &b.props[index];
+            if self.string(def.name) == key {
+                let current = ordinal / stride % def.value_count;
+                let wanted = (0..def.value_count).find(|&v| {
+                    self.string(b.prop_values[(def.value_start + v) as usize]) == value
+                })?;
+                return Some(id - current * stride + wanted * stride);
+            }
+            stride *= def.value_count;
+        }
+        None
+    }
+
     fn shape(&self, index: u16) -> &[Aabb] {
         let starts = &self.tables.shape_starts;
         let i = index as usize;

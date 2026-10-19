@@ -455,6 +455,7 @@ pub struct ClientState {
     sim_scratch: BodyScratch,
     pub(crate) resource_packs: ResourcePackPolicy,
     pub(crate) in_batch: bool,
+    pub(crate) pistons: crate::piston::PistonTracker,
 }
 
 pub fn default_world_config(
@@ -561,6 +562,7 @@ impl ClientState {
             sim_scratch: BodyScratch::default(),
             resource_packs: config.resource_packs,
             in_batch: false,
+            pistons: crate::piston::PistonTracker::default(),
         }
     }
 
@@ -587,6 +589,7 @@ impl ClientState {
         self.entities.clear();
         self.pickups.clear();
         self.transient_blocks.clear();
+        self.pistons.clear();
         self.world.clocks.clear();
         self.predictions = Default::default();
         self.controlled_vehicle = None;
@@ -621,6 +624,7 @@ impl ClientState {
 
     pub fn tick(&mut self) {
         self.game_ticks += 1;
+        self.pistons.tick();
         let now = self.game_ticks;
         self.cooldowns.retain(|_, c| c.ends_at > now);
         let eye = f64::from(self.player.physics.eye_height());

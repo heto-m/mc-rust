@@ -143,20 +143,20 @@ Scope: mcr-app play and hud, mcr-client actions.
 
 Scope: mcr-app play, effects and audio, mcr-block-entity anim, mcr-audio.
 
-- [ ] 10.1 N1 (V) Almost every level event is dropped in native mode
-- [ ] 10.2 N2 (V) Pistons do not animate; pushed blocks vanish while moving
-- [ ] 10.3 N3 (M) Note blocks show no note particle
-- [ ] 10.4 S2 (V) Lightning makes no sound
-- [ ] 10.5 S3 (V) Stop-sound packet ignored
-- [ ] 10.6 S17 (M) Entity-bound sounds do not follow the entity
-- [ ] 10.7 S18 (M) Bubble column inside sounds missing
-- [ ] 10.8 S19 (M) Sounds keep playing while a local world is paused
-- [ ] 10.9 S20 (M) Sound packet seed ignored
-- [ ] 10.10 I16 (V) Own eating and drinking makes no particles or sounds
-- [ ] 10.11 I17 (V) Item sounds that only the user's client plays are missing
-- [ ] 10.12 H15 (V) Subtitles missing
-- [ ] 10.13 Unit tests: a table test mapping each level event id to its sound or particle, piston moving block progress, stop_sound by name and source, entity-bound sound follows and stops
-- [ ] 10.14 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 10.1 N1 (V) Almost every level event is dropped in native mode
+- [x] 10.2 N2 (V) Pistons do not animate; pushed blocks vanish while moving
+- [x] 10.3 N3 (M) Note blocks show no note particle
+- [x] 10.4 S2 (V) Lightning makes no sound
+- [x] 10.5 S3 (V) Stop-sound packet ignored
+- [x] 10.6 S17 (M) Entity-bound sounds do not follow the entity
+- [x] 10.7 S18 (M) Bubble column inside sounds missing
+- [x] 10.8 S19 (M) Sounds keep playing while a local world is paused
+- [x] 10.9 S20 (M) Sound packet seed ignored
+- [x] 10.10 I16 (V) Own eating and drinking makes no particles or sounds
+- [x] 10.11 I17 (V) Item sounds that only the user's client plays are missing
+- [x] 10.12 H15 (V) Subtitles missing
+- [x] 10.13 Unit tests: a table test mapping each level event id to its sound or particle, piston moving block progress, stop_sound by name and source, entity-bound sound follows and stops
+- [x] 10.14 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 11. Item tooltips, bundles and screen extras
 

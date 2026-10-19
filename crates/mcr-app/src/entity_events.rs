@@ -436,6 +436,46 @@ fn sound_name(holder: &mcr_buf::IdOr<mcr_protocol::types::SoundEvent>) -> Option
     }
 }
 
+/// The `consumable` component vanilla would read: the stack's own, else its item's default.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConsumeSpec {
+    pub drink: bool,
+    pub sound: String,
+    pub particles: bool,
+}
+
+pub fn consumable(stack: &ItemStack) -> Option<ConsumeSpec> {
+    use mcr_protocol::types::component::ItemUseAnimation;
+    if stack.is_empty() {
+        return None;
+    }
+    let patched = stack.components.added.iter().find_map(|c| match c {
+        DataComponent::Consumable(c) => Some(c),
+        _ => None,
+    });
+    if let Some(c) = patched {
+        return Some(ConsumeSpec {
+            drink: c.animation == ItemUseAnimation::Drink,
+            sound: sound_name(&c.sound).unwrap_or_else(|| "entity.generic.eat".to_owned()),
+            particles: c.has_consume_particles,
+        });
+    }
+    let data = mcr_data::v26_3();
+    data.item_consume_seconds(u32::try_from(stack.item).ok()?)?;
+    let (drink, sound) = match item_name(stack) {
+        "minecraft:potion" | "minecraft:ominous_bottle" | "minecraft:milk_bucket" => {
+            (true, "entity.generic.drink")
+        }
+        "minecraft:honey_bottle" => (true, "item.honey_bottle.drink"),
+        _ => (false, "entity.generic.eat"),
+    };
+    Some(ConsumeSpec {
+        drink,
+        sound: sound.to_owned(),
+        particles: !drink,
+    })
+}
+
 fn item_name(stack: &ItemStack) -> &'static str {
     u32::try_from(stack.item)
         .ok()
@@ -723,7 +763,35 @@ impl EntityEvents {
 
     /// Vanilla `LivingEntity.spawnItemParticles` with its five pieces in front of the eyes.
     fn item_burst(&mut self, cx: &mut EventCx<'_>, b: &Body, p: &Particle) {
-        for _ in 0..5 {
+        self.item_particles(cx, b, p, 5);
+    }
+
+    /// `Consumable#emitParticlesAndSounds` for the entity `id` eating or drinking `stack`.
+    pub fn consume(
+        &mut self,
+        cx: &mut EventCx<'_>,
+        id: i32,
+        stack: &ItemStack,
+        spec: &ConsumeSpec,
+        particles: u8,
+    ) {
+        let Some(b) = Body::of(cx.state, id) else {
+            return;
+        };
+        let (volume, pitch) = if spec.drink {
+            (0.5, 0.9 + self.rng.unit() as f32 * 0.1)
+        } else {
+            let volume = if self.rng.unit() < 0.5 { 0.5 } else { 1.0 };
+            (volume, self.rng.triangle(1.0, 0.2) as f32)
+        };
+        if spec.particles {
+            self.item_particles(cx, &b, &item_particle(stack), particles);
+        }
+        cx.play(&spec.sound, b.pos, volume, pitch, b.source);
+    }
+
+    fn item_particles(&mut self, cx: &mut EventCx<'_>, b: &Body, p: &Particle, count: u8) {
+        for _ in 0..count {
             let d = turn(
                 [
                     (self.rng.unit() - 0.5) * 0.1,

@@ -212,6 +212,8 @@ pub struct PistonData {
     pub progress: f32,
     pub extending: bool,
     pub facing: u8,
+    /// The piston's own base or head, not a block it pushes.
+    pub source: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -503,6 +505,7 @@ impl BlockEntityData {
                 progress: tag.get_f32("progress").unwrap_or(0.0).clamp(0.0, 1.0),
                 extending: flag(tag, "extending"),
                 facing: int(tag, "facing").unwrap_or(0).clamp(0, 5) as u8,
+                source: flag(tag, "source"),
             }),
             _ => Self::None,
         }

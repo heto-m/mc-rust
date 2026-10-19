@@ -208,12 +208,16 @@ impl ClientState {
                     out.event(ClientEvent::BlockEntityChanged(p.pos));
                 }
             }
-            P::BlockEvent(p) => out.event(ClientEvent::BlockEvent {
-                pos: p.pos,
-                b0: p.b0,
-                b1: p.b1,
-                block: p.block,
-            }),
+            P::BlockEvent(p) => {
+                self.pistons
+                    .block_event(self.data, p.pos, p.block, p.b0, p.b1);
+                out.event(ClientEvent::BlockEvent {
+                    pos: p.pos,
+                    b0: p.b0,
+                    b1: p.b1,
+                    block: p.block,
+                });
+            }
             P::BlockDestruction(p) => out.event(ClientEvent::BlockDestruction {
                 entity_id: p.entity_id,
                 pos: p.pos,
@@ -252,6 +256,7 @@ impl ClientState {
                 entity_id: None,
                 volume: p.volume,
                 pitch: p.pitch,
+                seed: p.seed,
             }),
             P::SoundEntity(p) => out.event(ClientEvent::Sound {
                 sound: p.sound,
@@ -260,6 +265,7 @@ impl ClientState {
                 entity_id: Some(p.entity_id),
                 volume: p.volume,
                 pitch: p.pitch,
+                seed: p.seed,
             }),
             P::StopSound(p) => out.event(ClientEvent::StopSound {
                 source: p.source,
@@ -1328,6 +1334,10 @@ impl ClientState {
         if self.predictions.hold(pos, new.0) {
             return;
         }
+        let tracking = self.pistons.active();
+        if tracking && let Some(old) = self.chunks.block(pos.x, pos.y, pos.z) {
+            self.pistons.note_old(pos, old.0);
+        }
         if self.chunks.set_block(pos.x, pos.y, pos.z, new).is_some() {
             let has_entity = self
                 .data
@@ -1337,6 +1347,15 @@ impl ClientState {
                 self.block_entities.remove(&pos);
             }
             out.event(ClientEvent::BlockChanged { pos, state });
+            if tracking {
+                let chunks = &self.chunks;
+                let moving = self.pistons.resolve(self.data, pos, state, |p| {
+                    chunks.block(p.x, p.y, p.z).map(|b| b.0)
+                });
+                if let Some(m) = moving {
+                    out.event(m.event());
+                }
+            }
         }
     }
 

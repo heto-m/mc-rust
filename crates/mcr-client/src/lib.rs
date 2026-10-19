@@ -49,6 +49,7 @@ mod menu_tests;
 mod mounts;
 mod packs;
 mod pickup;
+pub mod piston;
 mod player;
 mod probe;
 mod registry;

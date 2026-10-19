@@ -194,6 +194,24 @@ mod tests {
     }
 
     #[test]
+    fn with_property_changes_one_property() {
+        let v = v26_3();
+        let id = v.block_by_name("minecraft:acacia_button").unwrap();
+        let (first, _) = v.block_info(id).unwrap().states;
+        let east = v.with_property(first, "facing", "east").unwrap();
+        let props: Vec<_> = v.state_properties(east).collect();
+        assert_eq!(
+            props,
+            [("face", "floor"), ("facing", "east"), ("powered", "true")]
+        );
+        let off = v.with_property(east, "powered", "false").unwrap();
+        assert!(v.state_properties(off).any(|p| p == ("powered", "false")));
+        assert!(v.state_properties(off).any(|p| p == ("facing", "east")));
+        assert_eq!(v.with_property(first, "facing", "sideways"), None);
+        assert_eq!(v.with_property(first, "nope", "x"), None);
+    }
+
+    #[test]
     fn packet_ids() {
         let v = v26_3();
         assert_eq!(

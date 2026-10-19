@@ -864,6 +864,9 @@ impl Shell {
         let updates = match &mut self.sp {
             Some(sp) => {
                 sp.set_paused(paused);
+                if let Some(play) = &mut self.play {
+                    play.set_world_paused(paused);
+                }
                 sp.poll()
             }
             None => return,

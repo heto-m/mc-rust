@@ -22,6 +22,8 @@ const LIVING_FLAGS: u8 = 8;
 const MAX_USE_TICKS: i32 = 72_000;
 /// `BundleItem` and `BrushItem#getUseDuration`.
 const BUNDLE_BRUSH_USE_TICKS: i32 = 200;
+/// How long after the local countdown ends the server's finish event still gets its burst.
+const FINISHED_CONSUME_TICKS: u64 = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UseTarget {
@@ -66,7 +68,18 @@ pub struct UsingItem {
     pub hand: Hand,
     pub kind: UseKind,
     pub remaining: i32,
+    pub total: i32,
     pub started_tick: u64,
+}
+
+/// Particles of `Consumable#emitParticlesAndSounds` while eating, and when the server finishes it.
+const CONSUME_TICK_PARTICLES: u8 = 5;
+pub(crate) const CONSUME_DONE_PARTICLES: u8 = 16;
+
+/// `Consumable#shouldEmitParticlesAndSounds`: every 4 ticks once the first 21.875% has passed.
+pub fn consume_effects_due(total: i32, remaining: i32) -> bool {
+    let used = total - remaining;
+    used > (total as f32 * 0.21875) as i32 && remaining % 4 == 0
 }
 
 fn short(name: &str) -> &str {
@@ -310,6 +323,18 @@ impl Client {
                     return Ok(Some(UseResult::Consume));
                 }
                 let on_cooldown = self.state.is_on_cooldown(&held);
+                if held_name.is_some_and(|n| short(n) == "flint_and_steel")
+                    && !on_cooldown
+                    && (self.state.may_build()
+                        || self
+                            .state
+                            .adventure_allows(&held, AdventureCheck::CanPlaceOn, pos))
+                {
+                    let pitch = rand::random::<f32>() * 0.4 + 0.8;
+                    if let Some(sound) = self.state.flint_sound(pos, face, pitch) {
+                        self.push_item_sound(sound);
+                    }
+                }
                 if let (Some(item), Some(block)) = (held_name, block)
                     && !on_cooldown
                     && item_use_on_swings(item, block)
@@ -329,6 +354,15 @@ impl Client {
             }
             match kind {
                 Some((UseKind::Instant, _)) => {
+                    let aimed_block = match target {
+                        UseTarget::Block { pos, face, .. } => Some((pos, face)),
+                        _ => None,
+                    };
+                    if let Some(sound) =
+                        held_name.and_then(|n| self.state.bucket_sound(n, aimed_block))
+                    {
+                        self.push_item_sound(sound);
+                    }
                     let gliding = self.state.player.physics.fall_flying;
                     let swings = held_name.is_some_and(|n| {
                         let aimed = if aims_at_fluid(n) {
@@ -353,6 +387,21 @@ impl Client {
             }
         }
         Ok(None)
+    }
+
+    fn push_item_sound(&mut self, s: crate::fluid_clip::ItemSound) {
+        use mcr_protocol::play::clientbound::world::SoundSource;
+        self.push_event(crate::events::ClientEvent::LocalSound {
+            sound: s.sound,
+            pos: s.pos,
+            volume: s.volume,
+            pitch: s.pitch,
+            source: if s.blocks {
+                SoundSource::Blocks
+            } else {
+                SoundSource::Players
+            },
+        });
     }
 
     /// The result of `useWithoutItem` for blocks that consume a bare-handed click.
@@ -485,12 +534,23 @@ impl Client {
         if kind == UseKind::Instant || self.using.is_some() {
             return;
         }
+        let ticks = ticks.clamp(0, MAX_USE_TICKS);
         self.using = Some(UsingItem {
             hand,
             kind,
-            remaining: ticks.clamp(0, MAX_USE_TICKS),
+            remaining: ticks,
+            total: ticks,
             started_tick: self.ticks,
         });
+        if kind == UseKind::Consume && ticks == 0 {
+            self.push_event(crate::events::ClientEvent::ConsumeEffects {
+                hand,
+                particles: CONSUME_DONE_PARTICLES,
+            });
+        }
+        if self.state.is_item(stack, "spyglass") {
+            self.push_event(self.state.player_sound("item.spyglass.use", 1.0, 1.0));
+        }
         let effects = stack
             .components
             .added
@@ -532,8 +592,34 @@ impl Client {
                 self.start_riptide(strength);
             }
         }
+        if self.state.is_item(&stack, "spyglass") {
+            self.push_event(
+                self.state
+                    .player_sound("item.spyglass.stop_using", 1.0, 1.0),
+            );
+        }
         self.stop_using_local();
         self.release_use_item()
+    }
+
+    /// Entity event 9 for the local player (`LivingEntity#completeUsingItem`): the final burst of
+    /// the item it was eating or drinking, also when the local countdown ran out first.
+    pub(crate) fn finish_consuming(&mut self) {
+        let hand = match self.using {
+            Some(u) if u.kind == UseKind::Consume => Some(u.hand),
+            _ => self
+                .combat
+                .finished_consume
+                .filter(|(_, at)| self.ticks.saturating_sub(*at) <= FINISHED_CONSUME_TICKS)
+                .map(|(hand, _)| hand),
+        };
+        self.combat.finished_consume = None;
+        if let Some(hand) = hand {
+            self.push_event(crate::events::ClientEvent::ConsumeEffects {
+                hand,
+                particles: CONSUME_DONE_PARTICLES,
+            });
+        }
     }
 
     /// Per-tick use countdown. Like `LocalPlayer#onSyncedDataUpdated`, only a change of the server's
@@ -568,8 +654,15 @@ impl Client {
             self.stop_using_local();
             return;
         }
+        if u.kind == UseKind::Consume && consume_effects_due(u.total, u.remaining) {
+            self.push_event(crate::events::ClientEvent::ConsumeEffects {
+                hand: u.hand,
+                particles: CONSUME_TICK_PARTICLES,
+            });
+        }
         let remaining = u.remaining - 1;
         if remaining <= 0 && u.kind == UseKind::Consume {
+            self.combat.finished_consume = Some((u.hand, self.ticks));
             self.stop_using_local();
         } else if let Some(using) = self.using.as_mut() {
             using.remaining = remaining.max(0);
@@ -585,6 +678,22 @@ pub(crate) fn seconds_to_ticks(seconds: f32) -> i32 {
 }
 
 impl crate::state::ClientState {
+    /// `Player#playSound` for the local player: a sound only this client plays, at its feet.
+    pub(crate) fn player_sound(
+        &self,
+        sound: &'static str,
+        volume: f32,
+        pitch: f32,
+    ) -> crate::events::ClientEvent {
+        crate::events::ClientEvent::LocalSound {
+            sound,
+            pos: self.player.physics.pos,
+            volume,
+            pitch,
+            source: mcr_protocol::play::clientbound::world::SoundSource::Players,
+        }
+    }
+
     /// `EntityGetter#isUnobstructed` for `state` placed at `at`: any non-spectator entity that
     /// blocks building, the local player included.
     pub(crate) fn placement_obstructed(&self, at: BlockPos, state: u32) -> bool {

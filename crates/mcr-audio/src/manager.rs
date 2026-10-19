@@ -15,6 +15,7 @@ pub struct SoundManager {
     handle: AudioHandle,
     cache: PcmCache,
     last_sound: Option<String>,
+    last_range: f32,
 }
 
 impl SoundManager {
@@ -30,6 +31,7 @@ impl SoundManager {
             handle,
             cache: PcmCache::default(),
             last_sound: None,
+            last_range: f32::INFINITY,
         }
     }
 
@@ -58,6 +60,11 @@ impl SoundManager {
     /// The sound file picked by the last successful play, e.g. `music/game/clark`.
     pub fn last_sound(&self) -> Option<&str> {
         self.last_sound.as_deref()
+    }
+
+    /// How far the last successful play carries (`SoundEngine#getRange`); infinite when global.
+    pub fn last_range(&self) -> f32 {
+        self.last_range
     }
 
     pub fn handle(&mut self) -> &mut AudioHandle {
@@ -133,6 +140,10 @@ impl SoundManager {
             looping,
             ..PlayRequest::new(source, category)
         })?;
+        self.last_range = match spatial {
+            Spatial::Positioned { max_distance, .. } => max_distance,
+            _ => f32::INFINITY,
+        };
         self.last_sound = Some(sound.name);
         Some(id)
     }

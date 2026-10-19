@@ -41,6 +41,8 @@ pub struct Anim {
     pub ticks: i32,
     pub book: Book,
     pub skull_ticks: i32,
+    pub piston: f32,
+    pub o_piston: f32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -61,6 +63,16 @@ pub struct Book {
 impl Anim {
     pub fn lid(&self, pt: f32) -> f32 {
         lerp(pt, self.o_open, self.open)
+    }
+
+    /// `PistonMovingBlockEntity#getProgress`.
+    pub fn piston_progress(&self, pt: f32) -> f32 {
+        lerp(pt.min(1.0), self.o_piston, self.piston)
+    }
+
+    pub fn start_piston(&mut self, progress: f32) {
+        self.piston = progress;
+        self.o_piston = progress;
     }
 
     pub fn event(&mut self, kind: BlockEntityKind, b0: u8, b1: u8, game_time: i64) {
@@ -140,6 +152,10 @@ impl Anim {
                 }
             }
             K::EnchantingTable => self.book.tick(player_near),
+            K::Piston => {
+                self.o_piston = self.piston;
+                self.piston = (self.piston + 0.5).min(1.0);
+            }
             _ => {}
         }
     }
@@ -233,6 +249,21 @@ mod tests {
         a.tick(BlockEntityKind::Chest, false, None);
         assert!((a.lid(0.0) - 1.0).abs() < 1e-5);
         assert!((a.lid(1.0) - 0.9).abs() < 1e-5);
+    }
+
+    #[test]
+    fn piston_moves_in_two_ticks_and_interpolates() {
+        let mut a = Anim::default();
+        a.start_piston(0.0);
+        assert_eq!(a.piston_progress(1.0), 0.0);
+        a.tick(BlockEntityKind::Piston, false, None);
+        assert!((a.piston_progress(0.5) - 0.25).abs() < 1e-6);
+        a.tick(BlockEntityKind::Piston, false, None);
+        assert!((a.piston_progress(0.0) - 0.5).abs() < 1e-6);
+        assert_eq!(a.piston_progress(1.0), 1.0);
+        a.tick(BlockEntityKind::Piston, false, None);
+        assert_eq!(a.piston_progress(0.0), 1.0);
+        assert_eq!(a.piston_progress(7.0), 1.0);
     }
 
     #[test]

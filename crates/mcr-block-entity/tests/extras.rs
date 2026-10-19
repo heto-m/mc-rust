@@ -67,6 +67,7 @@ fn extras() {
             progress: 0.5,
             extending: true,
             facing: 1,
+            source: false,
         }),
     );
     s.set(

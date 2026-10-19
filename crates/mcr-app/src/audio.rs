@@ -63,6 +63,22 @@ pub enum MusicEvent {
 }
 
 const MAX_RECORDS: usize = 64;
+/// More than the mixer can hold, so a voice it stole only lingers until the oldest is dropped.
+const MAX_TRACKED: usize = 320;
+const MAX_BOUND: usize = 128;
+const MAX_SUBTITLE_CUES: usize = 64;
+/// `Minecraft#runTick` pauses everything but these while a local world is paused.
+const PAUSED_CATEGORIES: [SoundSource; 9] = [
+    SoundSource::Master,
+    SoundSource::Records,
+    SoundSource::Weather,
+    SoundSource::Blocks,
+    SoundSource::Hostile,
+    SoundSource::Neutral,
+    SoundSource::Players,
+    SoundSource::Ambient,
+    SoundSource::Voice,
+];
 /// Menus never drain music events, so only the latest few are kept.
 const MAX_MUSIC_EVENTS: usize = 16;
 const RECORD_RANGE: f64 = 64.0;
@@ -75,8 +91,111 @@ fn push_capped<T>(queue: &mut Vec<T>, item: T, cap: usize) {
     queue.push(item);
 }
 
+/// A playing voice: its event (hashed, for `stop_sound`) and category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Tracked {
+    id: VoiceId,
+    event: u64,
+    category: SoundSource,
+}
+
+/// A sound the subtitle overlay should list: `SoundEventListener#onPlaySound`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubtitleCue {
+    pub key: String,
+    pub pos: [f64; 3],
+    pub range: f32,
+    pub looping: bool,
+}
+
+fn event_hash(event: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    event
+        .strip_prefix("minecraft:")
+        .unwrap_or(event)
+        .hash(&mut h);
+    h.finish()
+}
+
+/// Which playing voices belong to which event, category and entity.
+#[derive(Debug, Default)]
+struct VoiceBook {
+    tracked: Vec<Tracked>,
+    /// `EntityBoundSoundInstance`: voices that follow an entity until it is gone.
+    bound: Vec<(VoiceId, i32)>,
+}
+
+impl VoiceBook {
+    fn track(&mut self, id: VoiceId, event: &str, category: SoundSource) {
+        if self.tracked.len() >= MAX_TRACKED {
+            self.tracked.remove(0);
+        }
+        self.tracked.push(Tracked {
+            id,
+            event: event_hash(event),
+            category,
+        });
+    }
+
+    fn bind(&mut self, id: VoiceId, entity: i32) {
+        if self.bound.len() >= MAX_BOUND {
+            self.bound.remove(0);
+        }
+        self.bound.push((id, entity));
+    }
+
+    /// Removes and returns the voices a `stop_sound` for `name` and `category` stops.
+    fn take_matching(&mut self, name: Option<&str>, category: Option<SoundSource>) -> Vec<VoiceId> {
+        let event = name.map(event_hash);
+        let mut stopped = Vec::new();
+        self.tracked.retain(|t| {
+            let hit =
+                event.is_none_or(|e| e == t.event) && category.is_none_or(|c| c == t.category);
+            if hit {
+                stopped.push(t.id);
+            }
+            !hit
+        });
+        self.forget(&stopped);
+        stopped
+    }
+
+    fn forget(&mut self, gone: &[VoiceId]) {
+        self.tracked.retain(|t| !gone.contains(&t.id));
+        self.bound.retain(|(v, _)| !gone.contains(v));
+    }
+
+    /// Moves each bound voice to its entity; returns the voices whose entity is gone.
+    fn follow(
+        &mut self,
+        position_of: impl Fn(i32) -> Option<[f64; 3]>,
+        mut moved: impl FnMut(VoiceId, [f64; 3]),
+    ) -> Vec<VoiceId> {
+        let mut gone = Vec::new();
+        self.bound
+            .retain(|&(id, entity)| match position_of(entity) {
+                Some(pos) => {
+                    moved(id, pos);
+                    true
+                }
+                None => {
+                    gone.push(id);
+                    false
+                }
+            });
+        self.tracked.retain(|t| !gone.contains(&t.id));
+        gone
+    }
+}
+
 pub struct Audio {
     manager: SoundManager,
+    book: VoiceBook,
+    moves: Vec<(VoiceId, [f64; 3])>,
+    subtitles_on: bool,
+    subtitle_cues: Vec<SubtitleCue>,
+    paused: bool,
     _engine: AudioEngine,
     seed: i64,
     data: &'static Version,
@@ -148,6 +267,11 @@ impl Audio {
         });
         Some(Self {
             manager,
+            book: VoiceBook::default(),
+            moves: Vec::new(),
+            subtitles_on: options.show_subtitles,
+            subtitle_cues: Vec::new(),
+            paused: false,
             _engine: engine,
             seed: 1,
             data,
@@ -227,6 +351,10 @@ impl Audio {
     }
 
     pub fn apply_volumes(&mut self, options: &Options) {
+        self.subtitles_on = options.show_subtitles;
+        if !self.subtitles_on {
+            self.subtitle_cues.clear();
+        }
         let frequency = music_frequency(options.music_frequency);
         if frequency != self.frequency {
             self.frequency = frequency;
@@ -279,6 +407,21 @@ impl Audio {
             .seed
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
+        self.play_seeded(event, position, volume, pitch, category, self.seed, looping)
+    }
+
+    /// `ClientLevel#playSeededSound`: the server's seed picks the variant.
+    #[allow(clippy::too_many_arguments)]
+    pub fn play_seeded(
+        &mut self,
+        event: &str,
+        position: Option<[f64; 3]>,
+        volume: f32,
+        pitch: f32,
+        category: SoundSource,
+        seed: i64,
+        looping: bool,
+    ) -> Option<VoiceId> {
         let name = event.strip_prefix("minecraft:").unwrap_or(event);
         let id = self.manager.play_looping(
             name,
@@ -286,11 +429,125 @@ impl Audio {
             volume,
             pitch,
             category,
-            self.seed,
+            seed,
             looping,
         );
         self.log_sound(name, position, volume, pitch, category, id.is_some());
+        if let Some(id) = id {
+            self.book.track(id, name, category);
+            self.cue_subtitle(name, position, looping);
+        }
         id
+    }
+
+    fn cue_subtitle(&mut self, event: &str, position: Option<[f64; 3]>, looping: bool) {
+        if !self.subtitles_on {
+            return;
+        }
+        let Some(key) = self.manager.events().subtitle(event) else {
+            return;
+        };
+        if self.subtitle_cues.len() >= MAX_SUBTITLE_CUES {
+            self.subtitle_cues.remove(0);
+        }
+        let range = self.manager.last_range();
+        self.subtitle_cues.push(SubtitleCue {
+            key: key.to_owned(),
+            pos: position.unwrap_or(self.listener),
+            range,
+            looping,
+        });
+    }
+
+    /// Sounds started since the last call that carry a subtitle.
+    pub fn take_subtitle_cues(&mut self) -> Vec<SubtitleCue> {
+        std::mem::take(&mut self.subtitle_cues)
+    }
+
+    /// `ClientPacketListener#handleStopSoundEvent`: by event name, by category, both, or everything.
+    pub fn stop_sound(&mut self, name: Option<&str>, category: Option<SoundSource>) {
+        let everything = name.is_none() && category.is_none();
+        let stopped = self.book.take_matching(name, category);
+        let source = category.map_or("-", SoundSource::name);
+        self.note(&format!(
+            "stop_sound name={} source={source} stopped={}",
+            name.unwrap_or("-"),
+            stopped.len()
+        ));
+        if everything {
+            self.manager.handle().send(mcr_audio::Command::StopAll);
+            self.book = VoiceBook::default();
+            self.records.clear();
+            if self.music_voice.take().is_some() {
+                self.push_music_event(MusicEvent::Stopped);
+            }
+            return;
+        }
+        for &id in &stopped {
+            self.manager.stop(id);
+        }
+        self.forget(&stopped);
+    }
+
+    /// Drops bookkeeping for voices that are gone.
+    fn forget(&mut self, gone: &[VoiceId]) {
+        if gone.is_empty() {
+            return;
+        }
+        self.book.forget(gone);
+        self.records.retain(|(_, v)| !gone.contains(v));
+        if self.music_voice.is_some_and(|v| gone.contains(&v)) {
+            self.music_voice = None;
+            self.push_music_event(MusicEvent::Stopped);
+        }
+    }
+
+    /// Plays a sound that follows `entity` (`EntityBoundSoundInstance`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn play_bound(
+        &mut self,
+        event: &str,
+        entity: i32,
+        position: [f64; 3],
+        volume: f32,
+        pitch: f32,
+        category: SoundSource,
+        seed: i64,
+    ) -> Option<VoiceId> {
+        let id = self.play_seeded(event, Some(position), volume, pitch, category, seed, false)?;
+        self.book.bind(id, entity);
+        Some(id)
+    }
+
+    /// Once per tick: bound voices move with their entity and stop once it is removed.
+    pub fn tick_bound(&mut self, position_of: impl Fn(i32) -> Option<[f64; 3]>) {
+        if self.book.bound.is_empty() {
+            return;
+        }
+        let mut moves = std::mem::take(&mut self.moves);
+        let gone = self
+            .book
+            .follow(position_of, |id, pos| moves.push((id, pos)));
+        for (id, pos) in moves.drain(..) {
+            self.set_voice_position(id, pos);
+        }
+        self.moves = moves;
+        for id in gone {
+            self.manager.stop(id);
+        }
+    }
+
+    /// Pauses or resumes every world sound while a local world is paused; music and UI keep playing.
+    pub fn pause_world(&mut self, paused: bool) {
+        if paused == self.paused || self.java_owned() {
+            return;
+        }
+        self.paused = paused;
+        for category in PAUSED_CATEGORIES {
+            self.manager
+                .handle()
+                .send(mcr_audio::Command::PauseCategory(category, paused));
+        }
     }
 
     pub fn note(&mut self, text: &str) {
@@ -356,11 +613,7 @@ impl Audio {
             return;
         }
         let ended = std::mem::take(&mut self.ended);
-        self.records.retain(|(_, v)| !ended.contains(v));
-        if self.music_voice.is_some_and(|v| ended.contains(&v)) {
-            self.music_voice = None;
-            self.push_music_event(MusicEvent::Stopped);
-        }
+        self.forget(&ended);
         self.ended = ended;
     }
 
@@ -385,6 +638,8 @@ impl Audio {
     /// Leaving a world: records and every non-music, non-UI voice stop.
     pub fn stop_world_sounds(&mut self) {
         self.records.clear();
+        self.book.bound.clear();
+        self.pause_world(false);
         for category in [
             SoundSource::Records,
             SoundSource::Weather,
@@ -532,6 +787,68 @@ pub fn sound_type(data: &'static Version, state: u32) -> Option<SoundType<'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_sound_matches_by_name_and_source() {
+        let mut book = VoiceBook::default();
+        book.track(VoiceId(1), "entity.pig.ambient", SoundSource::Neutral);
+        book.track(
+            VoiceId(2),
+            "minecraft:entity.pig.ambient",
+            SoundSource::Hostile,
+        );
+        book.track(VoiceId(3), "music.game", SoundSource::Music);
+        book.track(VoiceId(4), "block.chest.open", SoundSource::Blocks);
+        assert_eq!(
+            book.take_matching(
+                Some("minecraft:entity.pig.ambient"),
+                Some(SoundSource::Hostile)
+            ),
+            [VoiceId(2)]
+        );
+        assert_eq!(
+            book.take_matching(None, Some(SoundSource::Music)),
+            [VoiceId(3)]
+        );
+        assert_eq!(
+            book.take_matching(Some("entity.pig.ambient"), None),
+            [VoiceId(1)]
+        );
+        assert!(book.take_matching(Some("nothing"), None).is_empty());
+        assert_eq!(book.take_matching(None, None), [VoiceId(4)]);
+        assert!(book.tracked.is_empty());
+    }
+
+    #[test]
+    fn bound_sounds_follow_their_entity_and_stop_with_it() {
+        let mut book = VoiceBook::default();
+        book.track(VoiceId(7), "entity.minecart.riding", SoundSource::Neutral);
+        book.bind(VoiceId(7), 42);
+        book.track(VoiceId(8), "entity.cat.purr", SoundSource::Neutral);
+        book.bind(VoiceId(8), 43);
+        let mut moved = Vec::new();
+        let gone = book.follow(
+            |e| (e == 42 || e == 43).then_some([f64::from(e), 64.0, 0.0]),
+            |id, pos| moved.push((id, pos)),
+        );
+        assert!(gone.is_empty());
+        assert_eq!(
+            moved,
+            [
+                (VoiceId(7), [42.0, 64.0, 0.0]),
+                (VoiceId(8), [43.0, 64.0, 0.0])
+            ]
+        );
+        let gone = book.follow(|e| (e == 43).then_some([0.0; 3]), |_, _| {});
+        assert_eq!(gone, [VoiceId(7)]);
+        assert_eq!(book.bound, [(VoiceId(8), 43)]);
+        assert_eq!(book.tracked.len(), 1);
+        for i in 0..10_000 {
+            book.track(VoiceId(i), "x", SoundSource::Blocks);
+            book.bind(VoiceId(i), i as i32);
+        }
+        assert!(book.tracked.len() <= MAX_TRACKED && book.bound.len() <= MAX_BOUND);
+    }
 
     #[test]
     fn undrained_music_events_stay_bounded() {

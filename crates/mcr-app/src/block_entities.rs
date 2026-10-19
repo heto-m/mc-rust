@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use mcr_block_entity::{
     BeaconData, BeamBlock, BlockEntityData, BlockEntityFrame, BlockEntityKind, BlockEntityScene,
-    DyeColor, beam_sections,
+    DyeColor, PistonData, beam_sections,
 };
 use mcr_client::{ClientEvent, ClientState};
 use mcr_entity_model::glam::Quat;
@@ -331,6 +331,22 @@ impl BlockEntities {
                     }
                     None => {}
                 }
+            }
+            ClientEvent::PistonMoving {
+                pos,
+                moved_state,
+                facing,
+                extending,
+                source,
+            } => {
+                let data = BlockEntityData::Piston(PistonData {
+                    moved_state: *moved_state,
+                    progress: 0.0,
+                    extending: *extending,
+                    facing: *facing,
+                    source: *source,
+                });
+                self.put(state, [pos.x, pos.y, pos.z], BlockEntityKind::Piston, data);
             }
             ClientEvent::BlockEvent { pos, b0, b1, .. } => {
                 self.scene

@@ -55,6 +55,7 @@ fn now_millis() -> i64 {
 
 /// The server skips the breaker when it broadcasts this event, so the client raises it for its own breaks.
 const LEVEL_EVENT_DESTROY_BLOCK: i32 = 2001;
+const LEVEL_EVENT_DESTROY_PROGRESS_SOUND: i32 = 2020;
 
 impl Client {
     pub(crate) fn next_sequence(&mut self) -> i32 {
@@ -208,6 +209,14 @@ impl Client {
                 item: self.state.held_stack().clone(),
                 progress: 0.0,
                 ticks: 0,
+            });
+            // The server repeats this every tick (2019/2020) for everyone, so only the start is local.
+            self.push_event(crate::events::ClientEvent::LevelEvent {
+                event: LEVEL_EVENT_DESTROY_PROGRESS_SOUND,
+                pos,
+                data: face as i32,
+                global: false,
+                predicted: true,
             });
         }
         self.send_play(&S::PlayerAction(sb::PlayerAction {

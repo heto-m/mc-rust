@@ -23,6 +23,66 @@ fn underwater_transition(was: &mut bool, underwater: bool, spectator: bool) -> O
         underwater
     })
 }
+/// `BubbleColumnAmbientSoundHandler`: the inside sound when the body enters a column.
+#[derive(Debug, Clone, Copy)]
+pub struct BubbleColumn {
+    was_inside: bool,
+    first_tick: bool,
+}
+
+impl Default for BubbleColumn {
+    fn default() -> Self {
+        Self {
+            was_inside: false,
+            first_tick: true,
+        }
+    }
+}
+
+impl BubbleColumn {
+    /// `column` is the first bubble column the body touches and whether it drags down.
+    pub fn tick(&mut self, column: Option<bool>, spectator: bool) -> Option<&'static str> {
+        let sound = match column {
+            Some(drag) if !self.was_inside && !self.first_tick && !spectator => Some(if drag {
+                "block.bubble_column.whirlpool_inside"
+            } else {
+                "block.bubble_column.upwards_inside"
+            }),
+            _ => None,
+        };
+        self.was_inside = column.is_some();
+        self.first_tick = false;
+        sound
+    }
+}
+
+/// The first bubble column in the player's box shrunk by 0.4 at top and bottom: its drag flag.
+fn bubble_column_at(state: &ClientState) -> Option<bool> {
+    let b = state.player.physics.bounding_box();
+    let lo = [b.min[0] + 1e-6, b.min[1] + 0.4 + 1e-6, b.min[2] + 1e-6];
+    let hi = [b.max[0] - 1e-6, b.max[1] - 0.4 - 1e-6, b.max[2] - 1e-6];
+    if (0..3).any(|a| !(0.0..=8.0).contains(&(hi[a] - lo[a]))) {
+        return None;
+    }
+    let data = state.data;
+    let column = data.block_by_name("minecraft:bubble_column")?;
+    let [x0, y0, z0] = lo.map(|v| v.floor() as i32);
+    let [x1, y1, z1] = hi.map(|v| v.floor() as i32);
+    for x in x0..=x1 {
+        for y in y0..=y1 {
+            for z in z0..=z1 {
+                let Some(s) = state.chunks.block(x, y, z) else {
+                    continue;
+                };
+                if data.block_state(s.0).is_some_and(|i| i.block == column) {
+                    return Some(data.state_properties(s.0).any(|p| p == ("drag", "true")));
+                }
+            }
+        }
+    }
+    None
+}
+
 const DIMENSION_TYPE: &str = "minecraft:dimension_type";
 const MAX_MINECARTS: usize = 64;
 const MINECART_PITCH_STEP: f32 = 0.0025;
@@ -70,6 +130,7 @@ pub struct Ambience {
     additions: Vec<usize>,
     last_biome: Option<usize>,
     credits_open: bool,
+    bubble: BubbleColumn,
 }
 
 impl std::fmt::Debug for Ambience {
@@ -105,6 +166,7 @@ impl Ambience {
             additions: Vec::new(),
             last_biome: None,
             credits_open: false,
+            bubble: BubbleColumn::default(),
         }
     }
 
@@ -239,6 +301,9 @@ impl Ambience {
 
         self.tick_music(state, &attrs, underwater, audio);
         self.tick_underwater(underwater, spectator, feet, audio);
+        if let Some(sound) = self.bubble.tick(bubble_column_at(state), spectator) {
+            audio.play(sound, Some(feet), 1.0, 1.0, SoundSource::Players);
+        }
         if let Some(sounds) = &attrs.ambient_sounds {
             self.tick_biome(state, sounds, feet, eye, audio);
         } else {
@@ -508,6 +573,25 @@ pub fn biome_at(state: &ClientState, pos: [i32; 3]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bubble_column_sounds_only_on_entering() {
+        let mut b = BubbleColumn::default();
+        assert_eq!(b.tick(Some(false), false), None, "not on the first tick");
+        assert_eq!(b.tick(Some(false), false), None);
+        assert_eq!(b.tick(None, false), None);
+        assert_eq!(
+            b.tick(Some(true), false),
+            Some("block.bubble_column.whirlpool_inside")
+        );
+        assert_eq!(b.tick(None, false), None);
+        assert_eq!(
+            b.tick(Some(false), false),
+            Some("block.bubble_column.upwards_inside")
+        );
+        b.tick(None, true);
+        assert_eq!(b.tick(Some(false), true), None, "spectators hear nothing");
+    }
     use mcr_physics::{PlayerInput, PlayerPhysics};
     use mcr_world::{BlockState, ChunkColumn, ChunkPos, ChunkStore, WorldConfig};
 

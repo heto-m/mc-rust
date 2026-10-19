@@ -776,6 +776,7 @@ impl Client {
             }
         }
         if use_completed {
+            self.finish_consuming();
             self.stop_using_local();
         }
         for request in std::mem::take(&mut out.dialogs) {

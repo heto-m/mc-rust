@@ -98,6 +98,7 @@ const BIOME_REGISTRY: &str = "minecraft:worldgen/biome";
 const SNOW_TEMPERATURE: f32 = 0.15;
 const MAX_DECALS: usize = 128;
 const LIGHTNING_FLASH_TICKS: u32 = 2;
+const ENTITY_SILENT: u8 = 4;
 const TREE_LINE: f32 = 80.0;
 
 pub fn effect_assets(assets: &Assets) -> EffectAssets {
@@ -413,14 +414,16 @@ impl WorldEffects {
         }
     }
 
-    pub fn on_entity_added(&mut self, state: &ClientState, id: i32) {
-        if state
+    /// Starts the sky flash for a lightning bolt; true when `id` is one.
+    pub fn on_entity_added(&mut self, state: &ClientState, id: i32) -> bool {
+        let lightning = state
             .entities
             .get(id)
-            .is_some_and(|e| e.kind == self.lightning_type)
-        {
+            .is_some_and(|e| e.kind == self.lightning_type);
+        if lightning {
             self.flash_ticks = LIGHTNING_FLASH_TICKS;
         }
+        lightning
     }
 
     pub fn flash(&self) -> bool {
@@ -992,6 +995,39 @@ pub fn tick_boss_darkening(current: f32, darken: bool) -> f32 {
     } else {
         (current - 0.0125).max(0.0)
     }
+}
+
+pub fn is_silent(e: &mcr_client::Entity) -> bool {
+    matches!(
+        e.data.get(&ENTITY_SILENT),
+        Some(mcr_protocol::types::entity_data::EntityDataValue::Boolean(
+            true
+        ))
+    )
+}
+
+/// `LightningBolt#tick` on its first client tick: thunder heard from anywhere, and the impact.
+pub fn lightning_sounds(audio: &mut crate::audio::Audio, bolt: &mcr_client::Entity) {
+    if is_silent(bolt) {
+        return;
+    }
+    let thunder = 0.8 + crate::play::rand_unit() * 0.2;
+    let impact = 0.5 + crate::play::rand_unit() * 0.2;
+    let source = mcr_audio::SoundSource::Weather;
+    audio.play(
+        "entity.lightning_bolt.thunder",
+        Some(bolt.pos),
+        10_000.0,
+        thunder,
+        source,
+    );
+    audio.play(
+        "entity.lightning_bolt.impact",
+        Some(bolt.pos),
+        2.0,
+        impact,
+        source,
+    );
 }
 
 pub fn particle_id(name: &str) -> Particle {

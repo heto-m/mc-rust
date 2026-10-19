@@ -101,8 +101,22 @@ pub enum Command {
     SetVoiceSpatial(VoiceId, Spatial),
     Pause(VoiceId),
     Resume(VoiceId),
+    /// Pauses or resumes every voice of a category (`SoundEngine#pauseAllExcept`).
+    PauseCategory(SoundSource, bool),
     AttachProducer(Box<dyn CommandProducer>),
     DetachProducer,
+}
+
+fn pause_voice(v: &mut Voice, paused: bool) {
+    v.paused = paused;
+    if let Some(link) = &v.state {
+        let (from, to) = if paused {
+            (VOICE_PLAYING, VOICE_PAUSED)
+        } else {
+            (VOICE_PAUSED, VOICE_PLAYING)
+        };
+        link.transition(from, to);
+    }
 }
 
 /// OpenAL linear distance model with reference distance 0 and rolloff 1.
@@ -446,6 +460,11 @@ impl Mixer {
             }
             Command::Pause(id) => self.set_paused(id, true),
             Command::Resume(id) => self.set_paused(id, false),
+            Command::PauseCategory(c, paused) => {
+                for v in self.voices.iter_mut().filter(|v| v.category == c) {
+                    pause_voice(v, paused);
+                }
+            }
             Command::AttachProducer(p) => self.producer = Some(p),
             Command::DetachProducer => self.producer = None,
         }
@@ -458,15 +477,7 @@ impl Mixer {
 
     fn set_paused(&mut self, id: VoiceId, paused: bool) {
         if let Some(v) = self.voice_mut(id) {
-            v.paused = paused;
-            if let Some(link) = &v.state {
-                let (from, to) = if paused {
-                    (VOICE_PLAYING, VOICE_PAUSED)
-                } else {
-                    (VOICE_PAUSED, VOICE_PLAYING)
-                };
-                link.transition(from, to);
-            }
+            pause_voice(v, paused);
         }
     }
 
@@ -863,6 +874,24 @@ mod tests {
         m.apply(Command::Resume(VoiceId(0)));
         let after = render(&mut m, 1)[0];
         assert!((after - before).abs() < 1e-3, "{before} -> {after}");
+    }
+
+    #[test]
+    fn category_pause_spares_other_categories() {
+        let mut m = Mixer::new(RATE);
+        let mut music = request(&ramp(RATE as usize), Spatial::Global);
+        music.category = SoundSource::Music;
+        m.apply(Command::Play(VoiceId(0), music));
+        m.apply(Command::Play(
+            VoiceId(1),
+            request(&ramp(RATE as usize), Spatial::Global),
+        ));
+        let blocks = m.voices[1].category;
+        m.apply(Command::PauseCategory(blocks, true));
+        assert!(!m.voices[0].paused);
+        assert!(m.voices[1].paused);
+        m.apply(Command::PauseCategory(blocks, false));
+        assert!(!m.voices[1].paused);
     }
 
     #[test]

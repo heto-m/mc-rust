@@ -249,7 +249,15 @@ impl BlockEntityScene {
     pub fn set(&mut self, pos: [i32; 3], state: u32, kind: BlockEntityKind, data: BlockEntityData) {
         let place = Placement::from_state(state);
         let old = self.entries.remove(&pos);
+        let restart = match (&data, &old) {
+            (BlockEntityData::Piston(p), Some(e)) => (e.data != data).then_some(p.progress),
+            (BlockEntityData::Piston(p), None) => Some(p.progress),
+            _ => None,
+        };
         let mut anim = old.map(|e| e.anim).unwrap_or_default();
+        if let Some(progress) = restart {
+            anim.start_piston(progress);
+        }
         if let BlockEntityData::Spawner(s) = &data {
             anim.delay = i32::from(s.delay);
         }
@@ -1877,6 +1885,8 @@ impl BlockEntityScene {
         });
     }
 
+    /// `PistonHeadRenderer`: the moved block slides with the progress; a retracting piston draws its
+    /// head sliding back and its base standing extended.
     fn emit_piston(
         &mut self,
         e: &Entry,
@@ -1891,32 +1901,51 @@ impl BlockEntityScene {
         if p.moved_state == 0 {
             return;
         }
-        let _ = pt;
-        let dir = Dir::from_data3d(p.facing);
+        let v = mcr_data::v26_3();
+        let progress = e.anim.piston_progress(pt);
         let amount = if p.extending {
-            p.progress - 1.0
+            progress - 1.0
         } else {
-            1.0 - p.progress
+            1.0 - progress
         };
-        let s = dir.step();
-        let mut data = FxHashMap::default();
-        data.insert(
-            11,
-            EntityDataValue::Vector3(Vec3f {
-                x: s[0] as f32 * amount,
-                y: s[1] as f32 * amount,
-                z: s[2] as f32 * amount,
-            }),
-        );
-        data.insert(23, EntityDataValue::BlockState(p.moved_state as i32));
-        displays.push(Display {
-            entity: "minecraft:block_display",
-            pos: origin,
-            data,
-            yaw: 0.0,
-            scale: 1.0,
-            light,
-        });
+        let s = Dir::from_data3d(p.facing).step();
+        let offset = [
+            s[0] as f32 * amount,
+            s[1] as f32 * amount,
+            s[2] as f32 * amount,
+        ];
+        let bool_str = |b: bool| if b { "true" } else { "false" };
+        let name = v.state_block_name(p.moved_state).unwrap_or("");
+        let moved = p.moved_state;
+        if name == "minecraft:piston_head" {
+            let head = v
+                .with_property(moved, "short", bool_str(progress <= 0.5))
+                .unwrap_or(moved);
+            displays.push(block_display(origin, head, offset, light));
+        } else if p.source && !p.extending {
+            let facing = v
+                .state_properties(moved)
+                .find(|(k, _)| *k == "facing")
+                .map_or("north", |(_, f)| f);
+            let kind = if name == "minecraft:sticky_piston" {
+                "sticky"
+            } else {
+                "normal"
+            };
+            let head = v
+                .block_by_name("minecraft:piston_head")
+                .and_then(|b| v.block_info(b))
+                .and_then(|i| v.with_property(i.default_state, "facing", facing))
+                .and_then(|h| v.with_property(h, "type", kind))
+                .and_then(|h| v.with_property(h, "short", bool_str(progress >= 0.5)));
+            if let Some(head) = head {
+                displays.push(block_display(origin, head, offset, light));
+            }
+            let base = v.with_property(moved, "extended", "true").unwrap_or(moved);
+            displays.push(block_display(origin, base, [0.0; 3], light));
+        } else {
+            displays.push(block_display(origin, moved, offset, light));
+        }
     }
 
     /// Uploads this frame's instances; call after `update`.
@@ -1956,6 +1985,27 @@ impl BlockEntityScene {
     pub fn render(&mut self, pass: &mut wgpu::RenderPass<'_>, frame: &BlockEntityFrame) {
         self.prepare(frame);
         self.draw(pass);
+    }
+}
+
+fn block_display(origin: [f64; 3], state: u32, offset: [f32; 3], light: [u8; 2]) -> Display {
+    let mut data = FxHashMap::default();
+    data.insert(
+        11,
+        EntityDataValue::Vector3(Vec3f {
+            x: offset[0],
+            y: offset[1],
+            z: offset[2],
+        }),
+    );
+    data.insert(23, EntityDataValue::BlockState(state as i32));
+    Display {
+        entity: "minecraft:block_display",
+        pos: origin,
+        data,
+        yaw: 0.0,
+        scale: 1.0,
+        light,
     }
 }
 

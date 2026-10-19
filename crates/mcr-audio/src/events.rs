@@ -90,6 +90,7 @@ struct Entry {
 #[derive(Debug, Clone, Default)]
 struct Event {
     entries: Vec<Entry>,
+    subtitle: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -120,9 +121,12 @@ struct RawSound {
 
 #[derive(Deserialize)]
 struct RawEvent {
+    #[serde(default)]
     sounds: Vec<RawEntry>,
     #[serde(default)]
     replace: bool,
+    #[serde(default)]
+    subtitle: Option<String>,
 }
 
 fn one_f32() -> f32 {
@@ -221,9 +225,17 @@ impl SoundEvents {
             if event.replace {
                 slot.entries.clear();
             }
+            if event.subtitle.is_some() {
+                slot.subtitle = event.subtitle;
+            }
             slot.entries
                 .extend(event.sounds.into_iter().map(Entry::from));
         }
+    }
+
+    /// The event's `subtitle` translation key, as `WeighedSoundEvents#getSubtitle`.
+    pub fn subtitle(&self, event: &str) -> Option<&str> {
+        self.events.get(strip_namespace(event))?.subtitle.as_deref()
     }
 
     pub fn contains(&self, event: &str) -> bool {
@@ -317,6 +329,23 @@ mod tests {
         "loop": {"sounds": [{"name": "loop", "type": "event"}]},
         "r": {"sounds": ["old"]}
     }"#;
+
+    #[test]
+    fn subtitles_parse_and_packs_override_them() {
+        let mut e = SoundEvents::parse(
+            r#"{"entity.pig.ambient": {"sounds": ["mob/pig/say1"], "subtitle": "subtitles.entity.pig.ambient"}, "quiet": {"sounds": ["q"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            e.subtitle("minecraft:entity.pig.ambient"),
+            Some("subtitles.entity.pig.ambient")
+        );
+        assert_eq!(e.subtitle("quiet"), None);
+        e.merge_namespaced("minecraft", r#"{"quiet": {"subtitle": "pack.quiet"}}"#)
+            .unwrap();
+        assert_eq!(e.subtitle("quiet"), Some("pack.quiet"));
+        assert!(e.pick("quiet", &mut JavaRandom::new(0)).is_some());
+    }
 
     fn spread(seed: i64) -> i64 {
         seed.wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as i64)

@@ -10,7 +10,6 @@ use mcr_client::{
 };
 use mcr_particles::ParticleEngine;
 use mcr_physics::Pose;
-use mcr_protocol::play::serverbound::Facing;
 use mcr_protocol::types::ItemStack;
 use mcr_render::glam::{DVec3, Mat4};
 use mcr_render::{Camera, Environment, FrameStats, Overlay, OverlayCtx, Renderer, wgpu};
@@ -110,7 +109,7 @@ fn tag_label(tag: &mcr_client::ChatTag) -> &'static str {
 }
 
 /// Uniform in [0, 1) for cosmetic jitter such as sound pitch.
-fn rand_unit() -> f32 {
+pub(crate) fn rand_unit() -> f32 {
     thread_local!(static SEED: std::cell::Cell<u32> = const { std::cell::Cell::new(0x2545_f491) });
     SEED.with(|s| {
         let mut x = s.get();
@@ -491,6 +490,8 @@ pub struct Play {
     block_animation: BlockAnimation,
     loops: EntityLoops,
     entity_events: crate::entity_events::EntityEvents,
+    level_events: crate::level_events::LevelEvents,
+    subtitles: crate::subtitles::Subtitles,
     skins: crate::skins::SkinStore,
     boss_darkening: (f32, f32),
     spectate_view: Option<(f32, f32)>,
@@ -665,6 +666,8 @@ impl Play {
             block_animation: BlockAnimation::new(data, animate_assets),
             loops: EntityLoops::new(data),
             entity_events: Default::default(),
+            level_events: Default::default(),
+            subtitles: Default::default(),
             boss_darkening: (0.0, 0.0),
             spectate_view: None,
             bed_view: None,
@@ -722,6 +725,13 @@ impl Play {
     /// A pausing screen is open (only the singleplayer pause menu pauses).
     pub fn pause_open(&self) -> bool {
         self.stack.any_pauses_game()
+    }
+
+    /// The local world froze or resumed: world sounds pause with it, music and UI keep playing.
+    pub fn set_world_paused(&mut self, paused: bool) {
+        if let Some(audio) = &mut self.audio {
+            audio.pause_world(paused);
+        }
     }
 
     pub fn ready(&self) -> bool {
@@ -1003,20 +1013,6 @@ impl Play {
                 audio.play("weather.rain", Some(at), 0.2, 1.0, SoundSource::Weather);
             }
         }
-        if let (Some(dig), Some(Target::Block(hit))) = (self.world.client.digging(), self.target)
-            && dig.pos == hit.pos
-        {
-            let face = match hit.face {
-                Facing::Down => 0,
-                Facing::Up => 1,
-                Facing::North => 2,
-                Facing::South => 3,
-                Facing::West => 4,
-                Facing::East => 5,
-            };
-            self.effects
-                .block_crack(&self.world.client.state, hit.pos, face, hit.state as i32);
-        }
     }
 
     /// The type id of the entity the camera follows, `None` for the player's own eyes.
@@ -1200,7 +1196,13 @@ impl Play {
                 }
             }
             ClientEvent::EntityAdded(id) => {
-                self.effects.on_entity_added(&self.world.client.state, id);
+                let state = &self.world.client.state;
+                if self.effects.on_entity_added(state, id)
+                    && let Some(e) = state.entities.get(id)
+                    && let Some(audio) = world_audio(&mut self.audio)
+                {
+                    crate::effects::lightning_sounds(audio, e);
+                }
             }
             ClientEvent::Particle {
                 particle,
@@ -1243,6 +1245,7 @@ impl Play {
             event if crate::net_world::resets_world(&event) => {
                 self.effects.clear();
                 self.entity_events.clear();
+                self.subtitles.clear();
                 if let Some(entities) = &mut self.entities {
                     entities.clear();
                 }
@@ -1380,16 +1383,32 @@ impl Play {
                 entity_id,
                 volume,
                 pitch,
+                seed,
             } => {
                 let name = self.sound_name(&sound);
-                let at = pos.or_else(|| {
-                    let e = self.world.client.state.entities.get(entity_id?)?;
-                    Some(e.pos)
-                });
-                if let (Some(name), Some(audio)) = (name, &mut self.audio) {
-                    audio.play(&name, at, volume, pitch, wire_category(source));
+                let category = wire_category(source);
+                let state = &self.world.client.state;
+                match (name, &mut self.audio, entity_id) {
+                    (Some(name), Some(audio), Some(id)) => {
+                        if let Some(at) = sound_entity_pos(state, id) {
+                            audio.play_bound(&name, id, at, volume, pitch, category, seed);
+                        }
+                    }
+                    (Some(name), Some(audio), None) => {
+                        audio.play_seeded(&name, pos, volume, pitch, category, seed, false);
+                    }
+                    _ => {}
                 }
             }
+            ClientEvent::StopSound { source, name } => {
+                if let Some(audio) = &mut self.audio {
+                    audio.stop_sound(name.as_ref().map(|n| n.as_str()), source.map(wire_category));
+                }
+            }
+            ClientEvent::ConsumeEffects { hand, particles } => {
+                self.consume_effects(hand, particles)
+            }
+            ClientEvent::BlockEvent { pos, b1, block, .. } => self.note_particle(pos, b1, block),
             ClientEvent::ItemTaken {
                 pos,
                 experience_orb,
@@ -1398,18 +1417,6 @@ impl Play {
             } => {
                 if let Some(audio) = &mut self.audio {
                     audio.play_pickup(pos, experience_orb);
-                }
-            }
-            ClientEvent::LevelEvent {
-                event: 2001,
-                pos,
-                data,
-                ..
-            } => {
-                self.effects
-                    .block_break(&self.world.client.state, pos, data);
-                if let (Ok(state), Some(audio)) = (u32::try_from(data), &mut self.audio) {
-                    audio.play_block(state, BlockSound::Break, center(pos));
                 }
             }
             ClientEvent::LevelEvent {
@@ -1430,7 +1437,80 @@ impl Play {
                     audio.stop_record([pos.x, pos.y, pos.z]);
                 }
             }
+            ClientEvent::LevelEvent {
+                event,
+                pos,
+                data,
+                global,
+                ..
+            } => {
+                let mut cx = crate::level_events::Cx {
+                    state: &self.world.client.state,
+                    effects: &mut self.effects,
+                    audio: self.audio.as_mut(),
+                    camera: self.cur_eye,
+                };
+                self.level_events.handle(&mut cx, event, pos, data, global);
+            }
             _ => {}
+        }
+    }
+
+    /// `ItemStack#onUseTick` and `completeUsingItem` of the local player's food or drink.
+    fn consume_effects(&mut self, hand: mcr_protocol::types::game::Hand, particles: u8) {
+        let state = &self.world.client.state;
+        let stack = state.hand_stack(hand);
+        let Some(c) = crate::entity_events::consumable(&stack) else {
+            return;
+        };
+        let mut cx = crate::entity_events::EventCx {
+            state,
+            effects: &mut self.effects,
+            audio: world_audio(&mut self.audio),
+        };
+        self.entity_events
+            .consume(&mut cx, state.player.entity_id, &stack, &c, particles);
+    }
+
+    /// `NoteBlock#triggerEvent`: tunable instruments show a note coloured by its pitch.
+    fn note_particle(&mut self, pos: BlockPos, b1: u8, block: i32) {
+        let _ = b1;
+        let data = self.data;
+        if u32::try_from(block).ok() != data.block_by_name("minecraft:note_block") {
+            return;
+        }
+        let Some(state) = self.world.client.state.chunks.block(pos.x, pos.y, pos.z) else {
+            return;
+        };
+        let mut note = None;
+        let mut tunable = true;
+        for (k, v) in data.state_properties(state.0) {
+            match k {
+                "note" => note = v.parse::<u8>().ok(),
+                "instrument" => {
+                    tunable = !matches!(
+                        v,
+                        "zombie"
+                            | "skeleton"
+                            | "creeper"
+                            | "dragon"
+                            | "wither_skeleton"
+                            | "piglin"
+                            | "custom_head"
+                    )
+                }
+                _ => {}
+            }
+        }
+        if let (true, Some(note)) = (tunable, note) {
+            let at = [
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 1.2,
+                f64::from(pos.z) + 0.5,
+            ];
+            let particle = effects::particle_id("minecraft:note");
+            self.effects
+                .add_particle(&particle, at, [f64::from(note) / 24.0, 0.0, 0.0]);
         }
     }
 
@@ -1494,11 +1574,6 @@ impl Play {
         if let Some((at, state)) = out.placed {
             self.play_block(state, BlockSound::Place, center(at));
         }
-        if let (Some(pos), Some(Target::Block(hit))) = (out.dig_hit, self.target)
-            && hit.pos == pos
-        {
-            self.play_block(hit.state, BlockSound::Hit, center(pos));
-        }
         if out.stab {
             self.play_stab();
         }
@@ -1544,6 +1619,11 @@ impl Play {
         let Some(audio) = &mut self.audio else { return };
         audio.poll(self.ticks);
         let state = &self.world.client.state;
+        audio.tick_bound(|id| sound_entity_pos(state, id));
+        let now = self.started.elapsed().as_millis() as u64;
+        for cue in audio.take_subtitle_cues() {
+            self.subtitles.push(cue, now);
+        }
         self.movement.steps_replaced = self.java_steps;
         self.movement.tick(state, self.ticks, audio);
         if audio.java_owned() {
@@ -2763,6 +2843,18 @@ impl Play {
                 );
             }
             self.hud.draw(&mut frame, &mut self.gui.icons, &input);
+            if !hidden && self.options.show_subtitles {
+                let dir = view_direction(self.yaw, self.pitch);
+                let yaw = f64::from(self.yaw).to_radians();
+                let lines = self.subtitles.lines(
+                    self.cur_eye,
+                    dir,
+                    [-yaw.cos(), 0.0, -yaw.sin()],
+                    input.millis,
+                    self.options.notification_display_time,
+                );
+                crate::subtitles::draw(&mut frame, &lines, &self.options);
+            }
             if !hidden {
                 let scoping = self.perspective == Perspective::First
                     && self.hand.as_ref().is_some_and(HeldHand::scoping);
@@ -3014,6 +3106,15 @@ impl Play {
             })
             .collect()
     }
+}
+
+/// Where an entity-bound sound plays; `None` once the entity is gone or silent, which stops it.
+fn sound_entity_pos(state: &mcr_client::ClientState, id: i32) -> Option<[f64; 3]> {
+    if id == state.player.entity_id {
+        return Some(state.player.pos());
+    }
+    let e = state.entities.get(id)?;
+    (!crate::effects::is_silent(e)).then_some(e.pos)
 }
 
 fn center(pos: BlockPos) -> [f64; 3] {

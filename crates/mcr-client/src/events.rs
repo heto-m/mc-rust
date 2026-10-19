@@ -224,6 +224,8 @@ pub enum ClientEvent {
         entity_id: Option<i32>,
         volume: f32,
         pitch: f32,
+        /// Picks the variant, as vanilla's `playSeededSound`.
+        seed: i64,
     },
     StopSound {
         source: Option<SoundSource>,
@@ -261,6 +263,21 @@ pub enum ClientEvent {
         volume: f32,
         pitch: f32,
         source: SoundSource,
+    },
+    /// `Consumable#emitParticlesAndSounds` for the local player's item in `hand`: every 4 ticks while
+    /// eating or drinking (5 particles) and once when the server finishes the use (16).
+    ConsumeEffects {
+        hand: mcr_protocol::types::game::Hand,
+        particles: u8,
+    },
+    /// The client created a moving piston block at `pos`, as vanilla's `PistonBaseBlock#triggerEvent`
+    /// does on the client; the block entity data is synthesized locally.
+    PistonMoving {
+        pos: BlockPos,
+        moved_state: u32,
+        facing: u8,
+        extending: bool,
+        source: bool,
     },
     /// Configuration's `reset_chat`: the chat starts empty after reconfiguring.
     ChatCleared,

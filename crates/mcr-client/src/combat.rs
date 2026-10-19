@@ -31,6 +31,8 @@ pub(crate) struct Combat {
     swap_ticker: u32,
     last_main_item: i32,
     pub(crate) placed: Option<(BlockPos, u32)>,
+    /// The hand whose eating or drinking ran out locally, and when, until the server confirms it.
+    pub(crate) finished_consume: Option<(Hand, u64)>,
 }
 
 /// One tick of the attack and use keys: presses since the last tick and whether each is held.
@@ -49,8 +51,6 @@ pub struct CombatOutcome {
     pub swing: bool,
     /// A predicted block placement: where, and the placed state.
     pub placed: Option<(BlockPos, u32)>,
-    /// The dig tick on which a hit sound is due.
-    pub dig_hit: Option<BlockPos>,
     /// A piercing weapon stabbed; its swing sound is the client's to play.
     pub stab: bool,
     pub released: bool,
@@ -261,13 +261,6 @@ impl Client {
                 if self.continue_destroy(pos, face)? {
                     self.attack_swing()?;
                     out.swing = true;
-                    if self
-                        .digging
-                        .as_ref()
-                        .is_some_and(|d| d.pos == pos && d.ticks % 4 == 0)
-                    {
-                        out.dig_hit = Some(pos);
-                    }
                 }
             }
             _ => self.stop_destroy()?,

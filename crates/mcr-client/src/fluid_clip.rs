@@ -168,3 +168,152 @@ impl ClientState {
         name == "powder_snow" || info.fluid.is_some_and(|f| f.source)
     }
 }
+
+/// A sound vanilla's item code plays through `level.playSound(player, …)`, which the server skips
+/// for that player, so only this client plays it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ItemSound {
+    pub sound: &'static str,
+    pub pos: [f64; 3],
+    pub volume: f32,
+    pub pitch: f32,
+    pub blocks: bool,
+}
+
+fn center(pos: BlockPos) -> [f64; 3] {
+    [
+        f64::from(pos.x) + 0.5,
+        f64::from(pos.y) + 0.5,
+        f64::from(pos.z) + 0.5,
+    ]
+}
+
+fn relative(pos: BlockPos, face: mcr_protocol::play::serverbound::Facing) -> BlockPos {
+    use mcr_protocol::play::serverbound::Facing as F;
+    let [dx, dy, dz] = match face {
+        F::Down => [0, -1, 0],
+        F::Up => [0, 1, 0],
+        F::North => [0, 0, -1],
+        F::South => [0, 0, 1],
+        F::West => [-1, 0, 0],
+        F::East => [1, 0, 0],
+    };
+    BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
+}
+
+impl ClientState {
+    fn block_props(&self, pos: BlockPos) -> Option<(&'static str, u32)> {
+        let state = self.chunks.block(pos.x, pos.y, pos.z)?.0;
+        let info = self.data.block_state(state)?;
+        Some((self.data.block_name(info.block).map_or("", short), state))
+    }
+
+    fn has_prop(&self, state: u32, key: &str, value: &str) -> bool {
+        self.data.state_properties(state).any(|p| p == (key, value))
+    }
+
+    fn open_for_fluid(&self, pos: BlockPos) -> bool {
+        self.chunks
+            .block(pos.x, pos.y, pos.z)
+            .and_then(|b| self.data.block_state(b.0))
+            .is_some_and(|i| i.is_air() || i.is_replaceable() || i.is_liquid())
+    }
+
+    /// `BucketItem#use`: the fill sound at the player, or the empty sound where the fluid goes.
+    pub(crate) fn bucket_sound(
+        &self,
+        item: &str,
+        target: Option<(BlockPos, mcr_protocol::play::serverbound::Facing)>,
+    ) -> Option<ItemSound> {
+        let item = short(item);
+        if item == "bucket" {
+            if !self.fluid_item_succeeds(item) {
+                return None;
+            }
+            let hit = self.clip_from_eye(ClipFluid::SourceOnly, self.block_interaction_range())?;
+            let info = self.data.block_state(hit.state)?;
+            let name = self.data.block_name(info.block).map_or("", short);
+            let lava = info
+                .fluid
+                .and_then(|f| self.data.fluid_name(f.fluid))
+                .is_some_and(|n| n.contains("lava"));
+            let sound = if name == "powder_snow" {
+                "item.bucket.fill_powder_snow"
+            } else if lava {
+                "item.bucket.fill_lava"
+            } else {
+                "item.bucket.fill"
+            };
+            return Some(ItemSound {
+                sound,
+                pos: self.player.physics.pos,
+                volume: 1.0,
+                pitch: 1.0,
+                blocks: false,
+            });
+        }
+        let sound = match item {
+            "water_bucket" => "item.bucket.empty",
+            "lava_bucket" => "item.bucket.empty_lava",
+            "milk_bucket" | "powder_snow_bucket" => return None,
+            _ if item.ends_with("_bucket") => "item.bucket.empty_fish",
+            _ => return None,
+        };
+        let (pos, face) = target?;
+        if !self.may_build()
+            && !self.adventure_allows(self.held_stack(), AdventureCheck::CanPlaceOn, pos)
+        {
+            return None;
+        }
+        let (_, clicked) = self.block_props(pos)?;
+        let water = item != "lava_bucket";
+        let at = if water && self.has_prop(clicked, "waterlogged", "false") {
+            pos
+        } else {
+            relative(pos, face)
+        };
+        (at == pos || self.open_for_fluid(at)).then_some(ItemSound {
+            sound,
+            pos: center(at),
+            volume: 1.0,
+            pitch: 1.0,
+            blocks: true,
+        })
+    }
+
+    /// `FlintAndSteelItem#useOn`: lights a campfire or candle, or sets fire next to the block.
+    pub(crate) fn flint_sound(
+        &self,
+        pos: BlockPos,
+        face: mcr_protocol::play::serverbound::Facing,
+        pitch: f32,
+    ) -> Option<ItemSound> {
+        let (name, state) = self.block_props(pos)?;
+        let lightable = (name.ends_with("campfire")
+            && !self.has_prop(state, "waterlogged", "true")
+            || name.ends_with("candle")
+            || name.ends_with("candle_cake"))
+            && self.has_prop(state, "lit", "false");
+        let at = if lightable {
+            pos
+        } else {
+            let at = relative(pos, face);
+            let air = self
+                .chunks
+                .block(at.x, at.y, at.z)
+                .and_then(|b| self.data.block_state(b.0))
+                .is_some_and(|i| i.is_air());
+            if !air {
+                return None;
+            }
+            at
+        };
+        Some(ItemSound {
+            sound: "item.flintandsteel.use",
+            pos: center(at),
+            volume: 1.0,
+            pitch,
+            blocks: true,
+        })
+    }
+}
