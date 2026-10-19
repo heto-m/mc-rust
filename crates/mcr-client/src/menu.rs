@@ -247,7 +247,10 @@ impl Menu<'_> {
         }
         let clicked = self.slots[i].clone();
         let mut carried = std::mem::take(self.cursor);
-        if button == 1 && (self.rules.is_bundle(&carried) || self.rules.is_bundle(&clicked)) {
+        let bundle_action = |bundle: &ItemStack, other: &ItemStack| {
+            self.rules.is_bundle(bundle) && (button == 1 || !other.is_empty())
+        };
+        if bundle_action(&carried, &clicked) || bundle_action(&clicked, &carried) {
             self.unknown = true;
             *self.cursor = carried;
             return;

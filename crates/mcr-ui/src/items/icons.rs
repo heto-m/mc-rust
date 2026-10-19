@@ -25,6 +25,8 @@ pub struct ItemView<'a> {
     pub props: &'a dyn ItemProps,
     pub glint: bool,
     pub cooldown: f32,
+    /// A bar other than durability, such as a bundle's fullness: width and ARGB colour.
+    pub bar: Option<(i32, u32)>,
 }
 
 impl std::fmt::Debug for ItemView<'_> {
@@ -291,7 +293,7 @@ impl ItemIcons {
     /// Count, durability bar and cooldown overlay.
     pub fn decorations(&self, frame: &mut UiFrame<'_>, view: &ItemView, x: i32, y: i32) {
         let props = view.props;
-        if let Some((width, color)) = durability_bar(props) {
+        if let Some((width, color)) = durability_bar(props).or(view.bar) {
             frame.fill_rect(x + 2, y + 13, x + 2 + 13, y + 15, 0xFF00_0000);
             frame.fill_rect(x + 2, y + 13, x + 2 + width, y + 14, color);
         }

@@ -1,0 +1,1304 @@
+air b
+stone b
+granite b
+polished_granite b
+diorite b
+polished_diorite b
+andesite b
+polished_andesite b
+deepslate b
+cobbled_deepslate b
+polished_deepslate b
+calcite b
+tuff b
+tuff_slab b
+tuff_stairs b
+tuff_wall b
+chiseled_tuff b
+polished_tuff b
+polished_tuff_slab b
+polished_tuff_stairs b
+polished_tuff_wall b
+tuff_bricks b
+tuff_brick_slab b
+tuff_brick_stairs b
+tuff_brick_wall b
+chiseled_tuff_bricks b
+sulfur b
+potent_sulfur b
+sulfur_slab b
+sulfur_stairs b
+sulfur_wall b
+polished_sulfur b
+polished_sulfur_slab b
+polished_sulfur_stairs b
+polished_sulfur_wall b
+sulfur_bricks b
+sulfur_brick_slab b
+sulfur_brick_stairs b
+sulfur_brick_wall b
+chiseled_sulfur b
+cinnabar b
+cinnabar_slab b
+cinnabar_stairs b
+cinnabar_wall b
+polished_cinnabar b
+polished_cinnabar_slab b
+polished_cinnabar_stairs b
+polished_cinnabar_wall b
+cinnabar_bricks b
+cinnabar_brick_slab b
+cinnabar_brick_stairs b
+cinnabar_brick_wall b
+chiseled_cinnabar b
+dripstone_block b
+grass_block b
+dirt b
+coarse_dirt b
+podzol b
+rooted_dirt b
+mud b
+crimson_nylium b
+warped_nylium b
+cobblestone b
+oak_planks b
+spruce_planks b
+birch_planks b
+jungle_planks b
+acacia_planks b
+cherry_planks b
+dark_oak_planks b
+pale_oak_planks b
+mangrove_planks b
+poplar_planks b
+bamboo_planks b
+crimson_planks b
+warped_planks b
+bamboo_mosaic b
+oak_sapling b
+spruce_sapling b
+birch_sapling b
+jungle_sapling b
+acacia_sapling b
+cherry_sapling b
+dark_oak_sapling b
+pale_oak_sapling b
+mangrove_propagule b
+poplar_sapling b
+bedrock b
+sand b
+suspicious_sand b
+suspicious_gravel b
+red_sand b
+gravel b
+coal_ore b
+deepslate_coal_ore b
+iron_ore b
+deepslate_iron_ore b
+copper_ore b
+deepslate_copper_ore b
+gold_ore b
+deepslate_gold_ore b
+redstone_ore b
+deepslate_redstone_ore b
+emerald_ore b
+deepslate_emerald_ore b
+lapis_ore b
+deepslate_lapis_ore b
+diamond_ore b
+deepslate_diamond_ore b
+nether_gold_ore b
+nether_quartz_ore b
+ancient_debris b
+coal_block b
+raw_iron_block b
+raw_copper_block b
+raw_gold_block b
+heavy_core r3 b
+amethyst_block b
+budding_amethyst b
+iron_block b
+copper_block b
+exposed_copper b
+weathered_copper b
+oxidized_copper b
+waxed_copper_block b
+waxed_exposed_copper b
+waxed_weathered_copper b
+waxed_oxidized_copper b
+gold_block b
+diamond_block b
+netherite_block b
+chiseled_copper b
+exposed_chiseled_copper b
+weathered_chiseled_copper b
+oxidized_chiseled_copper b
+waxed_chiseled_copper b
+waxed_exposed_chiseled_copper b
+waxed_weathered_chiseled_copper b
+waxed_oxidized_chiseled_copper b
+cut_copper b
+exposed_cut_copper b
+weathered_cut_copper b
+oxidized_cut_copper b
+waxed_cut_copper b
+waxed_exposed_cut_copper b
+waxed_weathered_cut_copper b
+waxed_oxidized_cut_copper b
+cut_copper_stairs b
+exposed_cut_copper_stairs b
+weathered_cut_copper_stairs b
+oxidized_cut_copper_stairs b
+waxed_cut_copper_stairs b
+waxed_exposed_cut_copper_stairs b
+waxed_weathered_cut_copper_stairs b
+waxed_oxidized_cut_copper_stairs b
+cut_copper_slab b
+exposed_cut_copper_slab b
+weathered_cut_copper_slab b
+oxidized_cut_copper_slab b
+waxed_cut_copper_slab b
+waxed_exposed_cut_copper_slab b
+waxed_weathered_cut_copper_slab b
+waxed_oxidized_cut_copper_slab b
+oak_log b
+spruce_log b
+birch_log b
+jungle_log b
+acacia_log b
+cherry_log b
+pale_oak_log b
+dark_oak_log b
+mangrove_log b
+poplar_log b
+mangrove_roots b
+muddy_mangrove_roots b
+crimson_stem b
+warped_stem b
+bamboo_block b
+stripped_oak_log b
+stripped_spruce_log b
+stripped_birch_log b
+stripped_jungle_log b
+stripped_acacia_log b
+stripped_cherry_log b
+stripped_dark_oak_log b
+stripped_pale_oak_log b
+stripped_mangrove_log b
+stripped_poplar_log b
+stripped_crimson_stem b
+stripped_warped_stem b
+stripped_oak_wood b
+stripped_spruce_wood b
+stripped_birch_wood b
+stripped_jungle_wood b
+stripped_acacia_wood b
+stripped_cherry_wood b
+stripped_dark_oak_wood b
+stripped_pale_oak_wood b
+stripped_mangrove_wood b
+stripped_poplar_wood b
+stripped_crimson_hyphae b
+stripped_warped_hyphae b
+stripped_bamboo_block b
+oak_wood b
+spruce_wood b
+birch_wood b
+jungle_wood b
+acacia_wood b
+cherry_wood b
+pale_oak_wood b
+dark_oak_wood b
+mangrove_wood b
+poplar_wood b
+crimson_hyphae b
+warped_hyphae b
+oak_leaves b
+spruce_leaves b
+birch_leaves b
+jungle_leaves b
+acacia_leaves b
+cherry_leaves b
+dark_oak_leaves b
+pale_oak_leaves b
+mangrove_leaves b
+red_poplar_leaves b
+orange_poplar_leaves b
+yellow_poplar_leaves b
+azalea_leaves b
+flowering_azalea_leaves b
+sponge b
+wet_sponge b
+glass b
+tinted_glass b
+lapis_block b
+sandstone b
+chiseled_sandstone b
+cut_sandstone b
+cobweb b
+short_grass b
+fern b
+bush b
+red_shrub b
+azalea b
+flowering_azalea b
+dead_bush b
+firefly_bush b
+short_dry_grass b
+tall_dry_grass b
+seagrass b
+sea_pickle b
+white_wool b
+orange_wool b
+magenta_wool b
+light_blue_wool b
+yellow_wool b
+lime_wool b
+pink_wool b
+gray_wool b
+light_gray_wool b
+cyan_wool b
+purple_wool b
+blue_wool b
+brown_wool b
+green_wool b
+red_wool b
+black_wool b
+white_wool_stairs b
+orange_wool_stairs b
+magenta_wool_stairs b
+light_blue_wool_stairs b
+yellow_wool_stairs b
+lime_wool_stairs b
+pink_wool_stairs b
+gray_wool_stairs b
+light_gray_wool_stairs b
+cyan_wool_stairs b
+purple_wool_stairs b
+blue_wool_stairs b
+brown_wool_stairs b
+green_wool_stairs b
+red_wool_stairs b
+black_wool_stairs b
+white_wool_slab b
+orange_wool_slab b
+magenta_wool_slab b
+light_blue_wool_slab b
+yellow_wool_slab b
+lime_wool_slab b
+pink_wool_slab b
+gray_wool_slab b
+light_gray_wool_slab b
+cyan_wool_slab b
+purple_wool_slab b
+blue_wool_slab b
+brown_wool_slab b
+green_wool_slab b
+red_wool_slab b
+black_wool_slab b
+dandelion b
+golden_dandelion b
+open_eyeblossom b
+closed_eyeblossom b
+poppy b
+blue_orchid b
+allium b
+azure_bluet b
+red_tulip b
+orange_tulip b
+white_tulip b
+pink_tulip b
+oxeye_daisy b
+cornflower b
+lily_of_the_valley b
+wither_rose b
+torchflower b
+pitcher_plant b
+spore_blossom b
+brown_mushroom b
+red_mushroom b
+shelf_mushroom b
+crimson_fungus b
+warped_fungus b
+crimson_roots b
+warped_roots b
+nether_sprouts b
+weeping_vines b
+twisting_vines b
+sugar_cane b
+kelp b
+pink_petals b
+wildflowers b
+leaf_litter b
+moss_carpet b
+moss_block b
+pale_moss_carpet b
+pale_hanging_moss b
+pale_moss_block b
+hanging_roots b
+big_dripleaf b
+small_dripleaf b
+bamboo b
+oak_slab b
+spruce_slab b
+birch_slab b
+jungle_slab b
+acacia_slab b
+cherry_slab b
+dark_oak_slab b
+pale_oak_slab b
+mangrove_slab b
+poplar_slab b
+bamboo_slab b
+bamboo_mosaic_slab b
+crimson_slab b
+warped_slab b
+stone_slab b
+smooth_stone_slab b
+sandstone_slab b
+cut_sandstone_slab b
+petrified_oak_slab b
+cobblestone_slab b
+brick_slab b
+stone_brick_slab b
+mud_brick_slab b
+nether_brick_slab b
+quartz_slab b
+red_sandstone_slab b
+cut_red_sandstone_slab b
+purpur_slab b
+prismarine_slab b
+prismarine_brick_slab b
+dark_prismarine_slab b
+smooth_quartz b
+smooth_red_sandstone b
+smooth_sandstone b
+smooth_stone b
+bricks b
+acacia_shelf b
+bamboo_shelf b
+birch_shelf b
+cherry_shelf b
+crimson_shelf b
+dark_oak_shelf b
+jungle_shelf b
+mangrove_shelf b
+poplar_shelf b
+oak_shelf b
+pale_oak_shelf b
+spruce_shelf b
+warped_shelf b
+bookshelf b
+chiseled_bookshelf b
+decorated_pot b
+mossy_cobblestone b
+obsidian b
+torch b
+end_rod b
+chorus_plant b
+chorus_flower b
+purpur_block b
+purpur_pillar b
+purpur_stairs b
+spawner b
+creaking_heart b
+chest b
+crafting_table b
+farmland b
+furnace b
+ladder b
+cobblestone_stairs b
+snow b
+ice b
+snow_block b
+cactus b
+cactus_flower b
+clay b
+jukebox b
+oak_fence b
+spruce_fence b
+birch_fence b
+jungle_fence b
+acacia_fence b
+cherry_fence b
+dark_oak_fence b
+pale_oak_fence b
+mangrove_fence b
+poplar_fence b
+bamboo_fence b
+crimson_fence b
+warped_fence b
+pumpkin b
+carved_pumpkin b a=waypoint_transmit_range,waypoint_transmit_range_hide,-1,add_multiplied_total,head,hidden
+jack_o_lantern b
+netherrack b
+soul_sand b
+soul_soil b
+basalt b
+polished_basalt b
+smooth_basalt b
+soul_torch b
+copper_torch b
+glowstone b
+infested_stone b
+infested_cobblestone b
+infested_stone_bricks b
+infested_mossy_stone_bricks b
+infested_cracked_stone_bricks b
+infested_chiseled_stone_bricks b
+infested_deepslate b
+stone_bricks b
+mossy_stone_bricks b
+cracked_stone_bricks b
+chiseled_stone_bricks b
+packed_mud b
+mud_bricks b
+deepslate_bricks b
+cracked_deepslate_bricks b
+deepslate_tiles b
+cracked_deepslate_tiles b
+chiseled_deepslate b
+reinforced_deepslate b
+brown_mushroom_block b
+red_mushroom_block b
+mushroom_stem b
+iron_bars b
+copper_bars b
+exposed_copper_bars b
+weathered_copper_bars b
+oxidized_copper_bars b
+waxed_copper_bars b
+waxed_exposed_copper_bars b
+waxed_weathered_copper_bars b
+waxed_oxidized_copper_bars b
+iron_chain b
+copper_chain b
+exposed_copper_chain b
+weathered_copper_chain b
+oxidized_copper_chain b
+waxed_copper_chain b
+waxed_exposed_copper_chain b
+waxed_weathered_copper_chain b
+waxed_oxidized_copper_chain b
+glass_pane b
+melon b
+vine b
+glow_lichen b
+resin_block b
+resin_bricks b
+resin_brick_stairs b
+resin_brick_slab b
+resin_brick_wall b
+chiseled_resin_bricks b
+brick_stairs b
+stone_brick_stairs b
+mud_brick_stairs b
+mycelium b
+lily_pad b
+nether_bricks b
+cracked_nether_bricks b
+chiseled_nether_bricks b
+nether_brick_fence b
+nether_brick_stairs b
+sculk b
+sculk_vein b
+sculk_catalyst b
+sculk_shrieker b
+enchanting_table b
+end_portal_frame b
+end_stone b
+end_stone_bricks b
+dragon_egg r3 b
+sandstone_stairs b
+ender_chest b
+emerald_block b
+oak_stairs b
+spruce_stairs b
+birch_stairs b
+jungle_stairs b
+acacia_stairs b
+cherry_stairs b
+dark_oak_stairs b
+pale_oak_stairs b
+mangrove_stairs b
+poplar_stairs b
+bamboo_stairs b
+bamboo_mosaic_stairs b
+crimson_stairs b
+warped_stairs b
+command_block r3 b
+beacon r2 b
+cobblestone_wall b
+mossy_cobblestone_wall b
+brick_wall b
+prismarine_wall b
+red_sandstone_wall b
+mossy_stone_brick_wall b
+granite_wall b
+stone_brick_wall b
+mud_brick_wall b
+nether_brick_wall b
+andesite_wall b
+red_nether_brick_wall b
+sandstone_wall b
+end_stone_brick_wall b
+diorite_wall b
+blackstone_wall b
+polished_blackstone_wall b
+polished_blackstone_brick_wall b
+cobbled_deepslate_wall b
+polished_deepslate_wall b
+deepslate_brick_wall b
+deepslate_tile_wall b
+anvil b
+chipped_anvil b
+damaged_anvil b
+chiseled_quartz_block b
+quartz_block b
+quartz_bricks b
+quartz_pillar b
+quartz_stairs b
+white_terracotta b
+orange_terracotta b
+magenta_terracotta b
+light_blue_terracotta b
+yellow_terracotta b
+lime_terracotta b
+pink_terracotta b
+gray_terracotta b
+light_gray_terracotta b
+cyan_terracotta b
+purple_terracotta b
+blue_terracotta b
+brown_terracotta b
+green_terracotta b
+red_terracotta b
+black_terracotta b
+barrier r3 b
+light r3 b
+hay_block b
+white_carpet b
+orange_carpet b
+magenta_carpet b
+light_blue_carpet b
+yellow_carpet b
+lime_carpet b
+pink_carpet b
+gray_carpet b
+light_gray_carpet b
+cyan_carpet b
+purple_carpet b
+blue_carpet b
+brown_carpet b
+green_carpet b
+red_carpet b
+black_carpet b
+terracotta b
+packed_ice b
+dirt_path b
+sunflower b
+lilac b
+rose_bush b
+peony b
+tall_grass b
+large_fern b
+white_stained_glass b
+orange_stained_glass b
+magenta_stained_glass b
+light_blue_stained_glass b
+yellow_stained_glass b
+lime_stained_glass b
+pink_stained_glass b
+gray_stained_glass b
+light_gray_stained_glass b
+cyan_stained_glass b
+purple_stained_glass b
+blue_stained_glass b
+brown_stained_glass b
+green_stained_glass b
+red_stained_glass b
+black_stained_glass b
+white_stained_glass_pane b
+orange_stained_glass_pane b
+magenta_stained_glass_pane b
+light_blue_stained_glass_pane b
+yellow_stained_glass_pane b
+lime_stained_glass_pane b
+pink_stained_glass_pane b
+gray_stained_glass_pane b
+light_gray_stained_glass_pane b
+cyan_stained_glass_pane b
+purple_stained_glass_pane b
+blue_stained_glass_pane b
+brown_stained_glass_pane b
+green_stained_glass_pane b
+red_stained_glass_pane b
+black_stained_glass_pane b
+prismarine b
+prismarine_bricks b
+dark_prismarine b
+prismarine_stairs b
+prismarine_brick_stairs b
+dark_prismarine_stairs b
+sea_lantern b
+red_sandstone b
+chiseled_red_sandstone b
+cut_red_sandstone b
+red_sandstone_stairs b
+repeating_command_block r3 b
+chain_command_block r3 b
+magma_block b
+nether_wart_block b
+warped_wart_block b
+red_nether_bricks b
+bone_block b
+structure_void r3 b
+shulker_box b
+white_shulker_box b
+orange_shulker_box b
+magenta_shulker_box b
+light_blue_shulker_box b
+yellow_shulker_box b
+lime_shulker_box b
+pink_shulker_box b
+gray_shulker_box b
+light_gray_shulker_box b
+cyan_shulker_box b
+purple_shulker_box b
+blue_shulker_box b
+brown_shulker_box b
+green_shulker_box b
+red_shulker_box b
+black_shulker_box b
+white_glazed_terracotta b
+orange_glazed_terracotta b
+magenta_glazed_terracotta b
+light_blue_glazed_terracotta b
+yellow_glazed_terracotta b
+lime_glazed_terracotta b
+pink_glazed_terracotta b
+gray_glazed_terracotta b
+light_gray_glazed_terracotta b
+cyan_glazed_terracotta b
+purple_glazed_terracotta b
+blue_glazed_terracotta b
+brown_glazed_terracotta b
+green_glazed_terracotta b
+red_glazed_terracotta b
+black_glazed_terracotta b
+white_concrete b
+orange_concrete b
+magenta_concrete b
+light_blue_concrete b
+yellow_concrete b
+lime_concrete b
+pink_concrete b
+gray_concrete b
+light_gray_concrete b
+cyan_concrete b
+purple_concrete b
+blue_concrete b
+brown_concrete b
+green_concrete b
+red_concrete b
+black_concrete b
+white_concrete_stairs b
+orange_concrete_stairs b
+magenta_concrete_stairs b
+light_blue_concrete_stairs b
+yellow_concrete_stairs b
+lime_concrete_stairs b
+pink_concrete_stairs b
+gray_concrete_stairs b
+light_gray_concrete_stairs b
+cyan_concrete_stairs b
+purple_concrete_stairs b
+blue_concrete_stairs b
+brown_concrete_stairs b
+green_concrete_stairs b
+red_concrete_stairs b
+black_concrete_stairs b
+white_concrete_slab b
+orange_concrete_slab b
+magenta_concrete_slab b
+light_blue_concrete_slab b
+yellow_concrete_slab b
+lime_concrete_slab b
+pink_concrete_slab b
+gray_concrete_slab b
+light_gray_concrete_slab b
+cyan_concrete_slab b
+purple_concrete_slab b
+blue_concrete_slab b
+brown_concrete_slab b
+green_concrete_slab b
+red_concrete_slab b
+black_concrete_slab b
+white_concrete_powder b
+orange_concrete_powder b
+magenta_concrete_powder b
+light_blue_concrete_powder b
+yellow_concrete_powder b
+lime_concrete_powder b
+pink_concrete_powder b
+gray_concrete_powder b
+light_gray_concrete_powder b
+cyan_concrete_powder b
+purple_concrete_powder b
+blue_concrete_powder b
+brown_concrete_powder b
+green_concrete_powder b
+red_concrete_powder b
+black_concrete_powder b
+turtle_egg b
+sniffer_egg r1 b
+dried_ghast b
+dead_tube_coral_block b
+dead_brain_coral_block b
+dead_bubble_coral_block b
+dead_fire_coral_block b
+dead_horn_coral_block b
+tube_coral_block b
+brain_coral_block b
+bubble_coral_block b
+fire_coral_block b
+horn_coral_block b
+tube_coral b
+brain_coral b
+bubble_coral b
+fire_coral b
+horn_coral b
+dead_brain_coral b
+dead_bubble_coral b
+dead_fire_coral b
+dead_horn_coral b
+dead_tube_coral b
+tube_coral_fan b
+brain_coral_fan b
+bubble_coral_fan b
+fire_coral_fan b
+horn_coral_fan b
+dead_tube_coral_fan b
+dead_brain_coral_fan b
+dead_bubble_coral_fan b
+dead_fire_coral_fan b
+dead_horn_coral_fan b
+blue_ice b
+conduit r1 b
+polished_granite_stairs b
+smooth_red_sandstone_stairs b
+mossy_stone_brick_stairs b
+polished_diorite_stairs b
+mossy_cobblestone_stairs b
+end_stone_brick_stairs b
+stone_stairs b
+smooth_sandstone_stairs b
+smooth_quartz_stairs b
+granite_stairs b
+andesite_stairs b
+red_nether_brick_stairs b
+polished_andesite_stairs b
+diorite_stairs b
+cobbled_deepslate_stairs b
+polished_deepslate_stairs b
+deepslate_brick_stairs b
+deepslate_tile_stairs b
+polished_granite_slab b
+smooth_red_sandstone_slab b
+mossy_stone_brick_slab b
+polished_diorite_slab b
+mossy_cobblestone_slab b
+end_stone_brick_slab b
+smooth_sandstone_slab b
+smooth_quartz_slab b
+granite_slab b
+andesite_slab b
+red_nether_brick_slab b
+polished_andesite_slab b
+diorite_slab b
+cobbled_deepslate_slab b
+polished_deepslate_slab b
+deepslate_brick_slab b
+deepslate_tile_slab b
+scaffolding b
+redstone_torch b
+redstone_block b
+repeater b
+comparator b
+piston b
+sticky_piston b
+slime_block b
+honey_block b
+observer b
+hopper b
+dispenser b
+dropper b
+lectern b
+target b
+lever b
+lightning_rod b
+exposed_lightning_rod b
+weathered_lightning_rod b
+oxidized_lightning_rod b
+waxed_lightning_rod b
+waxed_exposed_lightning_rod b
+waxed_weathered_lightning_rod b
+waxed_oxidized_lightning_rod b
+daylight_detector b
+sculk_sensor b
+calibrated_sculk_sensor b
+tripwire_hook b
+trapped_chest b
+tnt b
+redstone_lamp b
+note_block b
+stone_button b
+polished_blackstone_button b
+oak_button b
+spruce_button b
+birch_button b
+jungle_button b
+acacia_button b
+cherry_button b
+dark_oak_button b
+pale_oak_button b
+mangrove_button b
+poplar_button b
+bamboo_button b
+crimson_button b
+warped_button b
+stone_pressure_plate b
+polished_blackstone_pressure_plate b
+light_weighted_pressure_plate b
+heavy_weighted_pressure_plate b
+oak_pressure_plate b
+spruce_pressure_plate b
+birch_pressure_plate b
+jungle_pressure_plate b
+acacia_pressure_plate b
+cherry_pressure_plate b
+dark_oak_pressure_plate b
+pale_oak_pressure_plate b
+mangrove_pressure_plate b
+poplar_pressure_plate b
+bamboo_pressure_plate b
+crimson_pressure_plate b
+warped_pressure_plate b
+iron_door b
+oak_door b
+spruce_door b
+birch_door b
+jungle_door b
+acacia_door b
+cherry_door b
+dark_oak_door b
+pale_oak_door b
+mangrove_door b
+poplar_door b
+bamboo_door b
+crimson_door b
+warped_door b
+copper_door b
+exposed_copper_door b
+weathered_copper_door b
+oxidized_copper_door b
+waxed_copper_door b
+waxed_exposed_copper_door b
+waxed_weathered_copper_door b
+waxed_oxidized_copper_door b
+iron_trapdoor b
+oak_trapdoor b
+spruce_trapdoor b
+birch_trapdoor b
+jungle_trapdoor b
+acacia_trapdoor b
+cherry_trapdoor b
+dark_oak_trapdoor b
+pale_oak_trapdoor b
+mangrove_trapdoor b
+poplar_trapdoor b
+bamboo_trapdoor b
+crimson_trapdoor b
+warped_trapdoor b
+copper_trapdoor b
+exposed_copper_trapdoor b
+weathered_copper_trapdoor b
+oxidized_copper_trapdoor b
+waxed_copper_trapdoor b
+waxed_exposed_copper_trapdoor b
+waxed_weathered_copper_trapdoor b
+waxed_oxidized_copper_trapdoor b
+oak_fence_gate b
+spruce_fence_gate b
+birch_fence_gate b
+jungle_fence_gate b
+acacia_fence_gate b
+cherry_fence_gate b
+dark_oak_fence_gate b
+pale_oak_fence_gate b
+mangrove_fence_gate b
+poplar_fence_gate b
+bamboo_fence_gate b
+crimson_fence_gate b
+warped_fence_gate b
+powered_rail b
+detector_rail b
+rail b
+activator_rail b
+elytra r3
+structure_block r3 b
+jigsaw r3 b
+test_block r3 b
+test_instance_block r3 b
+turtle_helmet a=armor,armor.helmet,2,add_value,head a=armor_toughness,armor.helmet,0,add_value,head
+wolf_armor a=armor,armor.body,11,add_value,body a=armor_toughness,armor.body,0,add_value,body
+wooden_sword a=attack_damage,base_attack_damage,3,add_value,mainhand a=attack_speed,base_attack_speed,-2.4000000953674316,add_value,mainhand
+wooden_shovel a=attack_damage,base_attack_damage,1.5,add_value,mainhand a=attack_speed,base_attack_speed,-3,add_value,mainhand
+wooden_pickaxe a=attack_damage,base_attack_damage,1,add_value,mainhand a=attack_speed,base_attack_speed,-2.799999952316284,add_value,mainhand
+wooden_axe a=attack_damage,base_attack_damage,6,add_value,mainhand a=attack_speed,base_attack_speed,-3.200000047683716,add_value,mainhand
+wooden_hoe a=attack_damage,base_attack_damage,0,add_value,mainhand a=attack_speed,base_attack_speed,-3,add_value,mainhand
+copper_sword a=attack_damage,base_attack_damage,4,add_value,mainhand a=attack_speed,base_attack_speed,-2.4000000953674316,add_value,mainhand
+copper_shovel a=attack_damage,base_attack_damage,2.5,add_value,mainhand a=attack_speed,base_attack_speed,-3,add_value,mainhand
+copper_pickaxe a=attack_damage,base_attack_damage,2,add_value,mainhand a=attack_speed,base_attack_speed,-2.799999952316284,add_value,mainhand
+copper_axe a=attack_damage,base_attack_damage,8,add_value,mainhand a=attack_speed,base_attack_speed,-3.200000047683716,add_value,mainhand
+copper_hoe a=attack_damage,base_attack_damage,0,add_value,mainhand a=attack_speed,base_attack_speed,-2,add_value,mainhand
+stone_sword a=attack_damage,base_attack_damage,4,add_value,mainhand a=attack_speed,base_attack_speed,-2.4000000953674316,add_value,mainhand
+stone_shovel a=attack_damage,base_attack_damage,2.5,add_value,mainhand a=attack_speed,base_attack_speed,-3,add_value,mainhand
+stone_pickaxe a=attack_damage,base_attack_damage,2,add_value,mainhand a=attack_speed,base_attack_speed,-2.799999952316284,add_value,mainhand
+stone_axe a=attack_damage,base_attack_damage,8,add_value,mainhand a=attack_speed,base_attack_speed,-3.200000047683716,add_value,mainhand
+stone_hoe a=attack_damage,base_attack_damage,0,add_value,mainhand a=attack_speed,base_attack_speed,-2,add_value,mainhand
+golden_sword a=attack_damage,base_attack_damage,3,add_value,mainhand a=attack_speed,base_attack_speed,-2.4000000953674316,add_value,mainhand
+golden_shovel a=attack_damage,base_attack_damage,1.5,add_value,mainhand a=attack_speed,base_attack_speed,-3,add_value,mainhand
+golden_pickaxe a=attack_damage,base_attack_damage,1,add_value,mainhand a=attack_speed,base_attack_speed,-2.799999952316284,add_value,mainhand
+golden_axe a=attack_damage,base_attack_damage,6,add_value,mainhand a=attack_speed,base_attack_speed,-3,add_value,mainhand
+golden_hoe a=attack_damage,base_attack_damage,0,add_value,mainhand a=attack_speed,base_attack_speed,-3,add_value,mainhand
+iron_sword a=attack_damage,base_attack_damage,5,add_value,mainhand a=attack_speed,base_attack_speed,-2.4000000953674316,add_value,mainhand
+iron_shovel a=attack_damage,base_attack_damage,3.5,add_value,mainhand a=attack_speed,base_attack_speed,-3,add_value,mainhand
+iron_pickaxe a=attack_damage,base_attack_damage,3,add_value,mainhand a=attack_speed,base_attack_speed,-2.799999952316284,add_value,mainhand
+iron_axe a=attack_damage,base_attack_damage,8,add_value,mainhand a=attack_speed,base_attack_speed,-3.0999999046325684,add_value,mainhand
+iron_hoe a=attack_damage,base_attack_damage,0,add_value,mainhand a=attack_speed,base_attack_speed,-1,add_value,mainhand
+diamond_sword a=attack_damage,base_attack_damage,6,add_value,mainhand a=attack_speed,base_attack_speed,-2.4000000953674316,add_value,mainhand
+diamond_shovel a=attack_damage,base_attack_damage,4.5,add_value,mainhand a=attack_speed,base_attack_speed,-3,add_value,mainhand
+diamond_pickaxe a=attack_damage,base_attack_damage,4,add_value,mainhand a=attack_speed,base_attack_speed,-2.799999952316284,add_value,mainhand
+diamond_axe a=attack_damage,base_attack_damage,8,add_value,mainhand a=attack_speed,base_attack_speed,-3,add_value,mainhand
+diamond_hoe a=attack_damage,base_attack_damage,0,add_value,mainhand a=attack_speed,base_attack_speed,0,add_value,mainhand
+netherite_sword a=attack_damage,base_attack_damage,7,add_value,mainhand a=attack_speed,base_attack_speed,-2.4000000953674316,add_value,mainhand
+netherite_shovel a=attack_damage,base_attack_damage,5.5,add_value,mainhand a=attack_speed,base_attack_speed,-3,add_value,mainhand
+netherite_pickaxe a=attack_damage,base_attack_damage,5,add_value,mainhand a=attack_speed,base_attack_speed,-2.799999952316284,add_value,mainhand
+netherite_axe a=attack_damage,base_attack_damage,9,add_value,mainhand a=attack_speed,base_attack_speed,-3,add_value,mainhand
+netherite_hoe a=attack_damage,base_attack_damage,0,add_value,mainhand a=attack_speed,base_attack_speed,0,add_value,mainhand
+leather_helmet a=armor,armor.helmet,1,add_value,head a=armor_toughness,armor.helmet,0,add_value,head
+leather_chestplate a=armor,armor.chestplate,3,add_value,chest a=armor_toughness,armor.chestplate,0,add_value,chest
+leather_leggings a=armor,armor.leggings,2,add_value,legs a=armor_toughness,armor.leggings,0,add_value,legs
+leather_boots a=armor,armor.boots,1,add_value,feet a=armor_toughness,armor.boots,0,add_value,feet
+copper_helmet a=armor,armor.helmet,2,add_value,head a=armor_toughness,armor.helmet,0,add_value,head
+copper_chestplate a=armor,armor.chestplate,4,add_value,chest a=armor_toughness,armor.chestplate,0,add_value,chest
+copper_leggings a=armor,armor.leggings,3,add_value,legs a=armor_toughness,armor.leggings,0,add_value,legs
+copper_boots a=armor,armor.boots,1,add_value,feet a=armor_toughness,armor.boots,0,add_value,feet
+chainmail_helmet r1 a=armor,armor.helmet,2,add_value,head a=armor_toughness,armor.helmet,0,add_value,head
+chainmail_chestplate r1 a=armor,armor.chestplate,5,add_value,chest a=armor_toughness,armor.chestplate,0,add_value,chest
+chainmail_leggings r1 a=armor,armor.leggings,4,add_value,legs a=armor_toughness,armor.leggings,0,add_value,legs
+chainmail_boots r1 a=armor,armor.boots,1,add_value,feet a=armor_toughness,armor.boots,0,add_value,feet
+iron_helmet a=armor,armor.helmet,2,add_value,head a=armor_toughness,armor.helmet,0,add_value,head
+iron_chestplate a=armor,armor.chestplate,6,add_value,chest a=armor_toughness,armor.chestplate,0,add_value,chest
+iron_leggings a=armor,armor.leggings,5,add_value,legs a=armor_toughness,armor.leggings,0,add_value,legs
+iron_boots a=armor,armor.boots,2,add_value,feet a=armor_toughness,armor.boots,0,add_value,feet
+diamond_helmet a=armor,armor.helmet,3,add_value,head a=armor_toughness,armor.helmet,2,add_value,head
+diamond_chestplate a=armor,armor.chestplate,8,add_value,chest a=armor_toughness,armor.chestplate,2,add_value,chest
+diamond_leggings a=armor,armor.leggings,6,add_value,legs a=armor_toughness,armor.leggings,2,add_value,legs
+diamond_boots a=armor,armor.boots,3,add_value,feet a=armor_toughness,armor.boots,2,add_value,feet
+golden_helmet a=armor,armor.helmet,2,add_value,head a=armor_toughness,armor.helmet,0,add_value,head
+golden_chestplate a=armor,armor.chestplate,5,add_value,chest a=armor_toughness,armor.chestplate,0,add_value,chest
+golden_leggings a=armor,armor.leggings,3,add_value,legs a=armor_toughness,armor.leggings,0,add_value,legs
+golden_boots a=armor,armor.boots,1,add_value,feet a=armor_toughness,armor.boots,0,add_value,feet
+netherite_helmet a=armor,armor.helmet,3,add_value,head a=armor_toughness,armor.helmet,3,add_value,head a=knockback_resistance,armor.helmet,0.10000000149011612,add_value,head
+netherite_chestplate a=armor,armor.chestplate,8,add_value,chest a=armor_toughness,armor.chestplate,3,add_value,chest a=knockback_resistance,armor.chestplate,0.10000000149011612,add_value,chest
+netherite_leggings a=armor,armor.leggings,6,add_value,legs a=armor_toughness,armor.leggings,3,add_value,legs a=knockback_resistance,armor.leggings,0.10000000149011612,add_value,legs
+netherite_boots a=armor,armor.boots,3,add_value,feet a=armor_toughness,armor.boots,3,add_value,feet a=knockback_resistance,armor.boots,0.10000000149011612,add_value,feet
+enchanted_golden_apple r2
+oak_sign b
+spruce_sign b
+birch_sign b
+jungle_sign b
+acacia_sign b
+cherry_sign b
+dark_oak_sign b
+pale_oak_sign b
+mangrove_sign b
+poplar_sign b
+bamboo_sign b
+crimson_sign b
+warped_sign b
+oak_hanging_sign b
+spruce_hanging_sign b
+birch_hanging_sign b
+jungle_hanging_sign b
+acacia_hanging_sign b
+cherry_hanging_sign b
+dark_oak_hanging_sign b
+pale_oak_hanging_sign b
+mangrove_hanging_sign b
+poplar_hanging_sign b
+bamboo_hanging_sign b
+crimson_hanging_sign b
+warped_hanging_sign b
+dried_kelp_block b
+recovery_compass r1
+cake b
+white_bed b
+orange_bed b
+magenta_bed b
+light_blue_bed b
+yellow_bed b
+lime_bed b
+pink_bed b
+gray_bed b
+light_gray_bed b
+cyan_bed b
+purple_bed b
+blue_bed b
+brown_bed b
+green_bed b
+red_bed b
+black_bed b
+straw_bed b
+crafter b
+potion potion
+brewing_stand b
+cauldron b
+experience_bottle r1
+mace r3 a=attack_damage,base_attack_damage,5,add_value,mainhand a=attack_speed,base_attack_speed,-3.4000000953674316,add_value,mainhand
+flower_pot b
+skeleton_skull r1 b a=waypoint_transmit_range,waypoint_transmit_range_hide,-1,add_multiplied_total,head,hidden
+wither_skeleton_skull r2 b a=waypoint_transmit_range,waypoint_transmit_range_hide,-1,add_multiplied_total,head,hidden
+player_head r1 b a=waypoint_transmit_range,waypoint_transmit_range_hide,-1,add_multiplied_total,head,hidden
+zombie_head r1 b a=waypoint_transmit_range,waypoint_transmit_range_hide,-1,add_multiplied_total,head,hidden
+creeper_head r1 b a=waypoint_transmit_range,waypoint_transmit_range_hide,-1,add_multiplied_total,head,hidden
+dragon_head r3 b a=waypoint_transmit_range,waypoint_transmit_range_hide,-1,add_multiplied_total,head,hidden
+piglin_head r1 b a=waypoint_transmit_range,waypoint_transmit_range_hide,-1,add_multiplied_total,head,hidden
+nether_star r2
+firework_rocket f=1
+enchanted_book r2
+copper_horse_armor a=armor,armor.body,4,add_value,body a=armor_toughness,armor.body,0,add_value,body
+iron_horse_armor a=armor,armor.body,5,add_value,body a=armor_toughness,armor.body,0,add_value,body
+golden_horse_armor a=armor,armor.body,7,add_value,body a=armor_toughness,armor.body,0,add_value,body
+diamond_horse_armor a=armor,armor.body,11,add_value,body a=armor_toughness,armor.body,2,add_value,body
+netherite_horse_armor a=armor,armor.body,19,add_value,body a=armor_toughness,armor.body,3,add_value,body a=knockback_resistance,armor.body,0.10000000149011612,add_value,body
+leather_horse_armor a=armor,armor.body,3,add_value,body a=armor_toughness,armor.body,0,add_value,body
+command_block_minecart r3
+white_banner b
+orange_banner b
+magenta_banner b
+light_blue_banner b
+yellow_banner b
+lime_banner b
+pink_banner b
+gray_banner b
+light_gray_banner b
+cyan_banner b
+purple_banner b
+blue_banner b
+brown_banner b
+green_banner b
+red_banner b
+black_banner b
+dragon_breath r1
+splash_potion potion
+tipped_arrow scale=0.125 potion
+lingering_potion scale=0.25 potion
+wooden_spear a=attack_damage,base_attack_damage,0,add_value,mainhand a=attack_speed,base_attack_speed,-2.4615384340286255,add_value,mainhand
+stone_spear a=attack_damage,base_attack_damage,1,add_value,mainhand a=attack_speed,base_attack_speed,-2.666666626930237,add_value,mainhand
+copper_spear a=attack_damage,base_attack_damage,1,add_value,mainhand a=attack_speed,base_attack_speed,-2.8235294818878174,add_value,mainhand
+iron_spear a=attack_damage,base_attack_damage,2,add_value,mainhand a=attack_speed,base_attack_speed,-2.9473683834075928,add_value,mainhand
+golden_spear a=attack_damage,base_attack_damage,0,add_value,mainhand a=attack_speed,base_attack_speed,-2.9473683834075928,add_value,mainhand
+diamond_spear a=attack_damage,base_attack_damage,3,add_value,mainhand a=attack_speed,base_attack_speed,-3.0476189851760864,add_value,mainhand
+netherite_spear a=attack_damage,base_attack_damage,4,add_value,mainhand a=attack_speed,base_attack_speed,-3.13043475151062,add_value,mainhand
+totem_of_undying r1
+knowledge_book r3
+debug_stick r3
+music_disc_13 r1 j=13
+music_disc_cat r1 j=cat
+music_disc_blocks r1 j=blocks
+music_disc_bounce r1 j=bounce
+music_disc_chirp r1 j=chirp
+music_disc_creator r2 j=creator
+music_disc_creator_music_box r1 j=creator_music_box
+music_disc_far r1 j=far
+music_disc_lava_chicken r2 j=lava_chicken
+music_disc_mall r1 j=mall
+music_disc_mellohi r1 j=mellohi
+music_disc_stal r1 j=stal
+music_disc_strad r1 j=strad
+music_disc_ward r1 j=ward
+music_disc_11 r1 j=11
+music_disc_wait r1 j=wait
+music_disc_otherside r2 j=otherside
+music_disc_relic r1 j=relic
+music_disc_5 r1 j=5
+music_disc_pigstep r2 j=pigstep
+music_disc_precipice r1 j=precipice
+music_disc_tears r1 j=tears
+disc_fragment_5 r1
+trident r2 a=attack_damage,base_attack_damage,8,add_value,mainhand a=attack_speed,base_attack_speed,-2.9000000953674316,add_value,mainhand
+nautilus_shell r1
+iron_nautilus_armor a=armor,armor.body,5,add_value,body a=armor_toughness,armor.body,0,add_value,body
+golden_nautilus_armor a=armor,armor.body,7,add_value,body a=armor_toughness,armor.body,0,add_value,body
+diamond_nautilus_armor a=armor,armor.body,11,add_value,body a=armor_toughness,armor.body,2,add_value,body
+netherite_nautilus_armor a=armor,armor.body,19,add_value,body a=armor_toughness,armor.body,3,add_value,body a=knockback_resistance,armor.body,0.10000000149011612,add_value,body
+copper_nautilus_armor a=armor,armor.body,4,add_value,body a=armor_toughness,armor.body,0,add_value,body
+heart_of_the_sea r1
+suspicious_stew stew
+loom b
+creeper_banner_pattern r1
+skull_banner_pattern r2
+mojang_banner_pattern r2
+piglin_banner_pattern r1
+flow_banner_pattern r2
+guster_banner_pattern r2
+goat_horn r1 h=ponder_goat_horn
+composter b
+barrel b
+smoker b
+blast_furnace b
+cartography_table b
+fletching_table b
+grindstone b
+smithing_table b
+stonecutter b
+bell b
+lantern b
+soul_lantern b
+copper_lantern b
+exposed_copper_lantern b
+weathered_copper_lantern b
+oxidized_copper_lantern b
+waxed_copper_lantern b
+waxed_exposed_copper_lantern b
+waxed_weathered_copper_lantern b
+waxed_oxidized_copper_lantern b
+campfire b
+soul_campfire b
+shroomlight b
+bee_nest b honey=0 bees
+beehive b honey=0 bees
+honeycomb_block b
+lodestone b
+crying_obsidian b
+blackstone b
+blackstone_slab b
+blackstone_stairs b
+gilded_blackstone b
+polished_blackstone b
+polished_blackstone_slab b
+polished_blackstone_stairs b
+chiseled_polished_blackstone b
+polished_blackstone_bricks b
+polished_blackstone_brick_slab b
+polished_blackstone_brick_stairs b
+cracked_polished_blackstone_bricks b
+respawn_anchor b
+candle b
+white_candle b
+orange_candle b
+magenta_candle b
+light_blue_candle b
+yellow_candle b
+lime_candle b
+pink_candle b
+gray_candle b
+light_gray_candle b
+cyan_candle b
+purple_candle b
+blue_candle b
+brown_candle b
+green_candle b
+red_candle b
+black_candle b
+small_amethyst_bud b
+medium_amethyst_bud b
+large_amethyst_bud b
+amethyst_cluster b
+pointed_dripstone b
+sulfur_spike b
+ochre_froglight b
+verdant_froglight b
+pearlescent_froglight b
+frogspawn b
+echo_shard r1
+netherite_upgrade_smithing_template r1
+sentry_armor_trim_smithing_template r1
+dune_armor_trim_smithing_template r1
+coast_armor_trim_smithing_template r1
+wild_armor_trim_smithing_template r1
+ward_armor_trim_smithing_template r2
+eye_armor_trim_smithing_template r2
+vex_armor_trim_smithing_template r2
+tide_armor_trim_smithing_template r1
+snout_armor_trim_smithing_template r1
+rib_armor_trim_smithing_template r1
+spire_armor_trim_smithing_template r2
+wayfinder_armor_trim_smithing_template r1
+shaper_armor_trim_smithing_template r1
+silence_armor_trim_smithing_template r3
+raiser_armor_trim_smithing_template r1
+host_armor_trim_smithing_template r1
+flow_armor_trim_smithing_template r1
+bolt_armor_trim_smithing_template r1
+angler_pottery_sherd r1
+archer_pottery_sherd r1
+arms_up_pottery_sherd r1
+blade_pottery_sherd r1
+brewer_pottery_sherd r1
+burn_pottery_sherd r1
+danger_pottery_sherd r1
+explorer_pottery_sherd r1
+flow_pottery_sherd r1
+friend_pottery_sherd r1
+guster_pottery_sherd r1
+heart_pottery_sherd r1
+heartbreak_pottery_sherd r1
+howl_pottery_sherd r1
+miner_pottery_sherd r1
+mourner_pottery_sherd r1
+plenty_pottery_sherd r1
+prize_pottery_sherd r1
+scrape_pottery_sherd r1
+sheaf_pottery_sherd r1
+shelter_pottery_sherd r1
+skull_pottery_sherd r1
+snort_pottery_sherd r1
+copper_grate b
+exposed_copper_grate b
+weathered_copper_grate b
+oxidized_copper_grate b
+waxed_copper_grate b
+waxed_exposed_copper_grate b
+waxed_weathered_copper_grate b
+waxed_oxidized_copper_grate b
+copper_bulb b
+exposed_copper_bulb b
+weathered_copper_bulb b
+oxidized_copper_bulb b
+waxed_copper_bulb b
+waxed_exposed_copper_bulb b
+waxed_weathered_copper_bulb b
+waxed_oxidized_copper_bulb b
+copper_chest b
+exposed_copper_chest b
+weathered_copper_chest b
+oxidized_copper_chest b
+waxed_copper_chest b
+waxed_exposed_copper_chest b
+waxed_weathered_copper_chest b
+waxed_oxidized_copper_chest b
+copper_golem_statue b
+exposed_copper_golem_statue b
+weathered_copper_golem_statue b
+oxidized_copper_golem_statue b
+waxed_copper_golem_statue b
+waxed_exposed_copper_golem_statue b
+waxed_weathered_copper_golem_statue b
+waxed_oxidized_copper_golem_statue b
+trial_spawner b
+vault b
+ominous_bottle r1 o=0

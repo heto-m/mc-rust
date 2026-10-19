@@ -622,7 +622,8 @@ impl RecipeBook {
             if names.len() > 512 {
                 break;
             }
-            names.push_str(&cx.item_tooltip(stack).first_plain().to_lowercase());
+            let tip = cx.item_tooltip(stack);
+            names.push_str(&tip.first_plain_in(cx.frame.ui().lang()).to_lowercase());
             names.push(' ');
             if let Some(view) = StackView::new(stack) {
                 let id = view.name();

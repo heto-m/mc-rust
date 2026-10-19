@@ -162,16 +162,16 @@ Scope: mcr-app play, effects and audio, mcr-block-entity anim, mcr-audio.
 
 Scope: mcr-ui gui, items and tooltip, mcr-app view.
 
-- [ ] 11.1 C8 (V) Item tooltips show only the base item name
-- [ ] 11.2 C9 (V) Bundle UI missing
-- [ ] 11.3 C12 (V) Status effects list missing from inventory screens
-- [ ] 11.4 C13 (V) Screen previews missing: smithing armour stand, enchanting book, cartography map
-- [ ] 11.5 C15 (V) Smithing cycling slot icons and onboarding tooltips missing
-- [ ] 11.6 C16 (M) Quick-craft preview details
-- [ ] 11.7 C18 (M) Lectern buttons
-- [ ] 11.8 C19 (M) Screen keys hard-coded
-- [ ] 11.9 Unit tests: tooltip line order for enchanted, potion, dyed, renamed and attribute items with tooltip_display; bundle selection packet; advanced tooltips
-- [ ] 11.10 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 11.1 C8 (V) Item tooltips show only the base item name
+- [x] 11.2 C9 (V) Bundle UI missing
+- [x] 11.3 C12 (V) Status effects list missing from inventory screens
+- [x] 11.4 C13 (V) Screen previews missing: smithing armour stand, enchanting book, cartography map
+- [x] 11.5 C15 (V) Smithing cycling slot icons and onboarding tooltips missing
+- [x] 11.6 C16 (M) Quick-craft preview details
+- [x] 11.7 C18 (M) Lectern buttons
+- [x] 11.8 C19 (M) Screen keys hard-coded
+- [x] 11.9 Unit tests: tooltip line order for enchanted, potion, dyed, renamed and attribute items with tooltip_display; bundle selection packet; advanced tooltips
+- [x] 11.10 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 12. HUD
 

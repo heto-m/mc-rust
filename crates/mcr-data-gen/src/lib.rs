@@ -582,6 +582,111 @@ fn item_components(
     Ok(())
 }
 
+/// Tooltip-relevant default components per item, one line per item that has any:
+/// `<item> [r<rarity>] [b] [a=<attribute>,<id>,<amount>,<operation>,<slot>[,hidden]]* [j=<song>] [h=<instrument>]
+/// [f=<flight>] [o=<amplifier>] [scale=<potion duration scale>] [honey=<level>] [bees] [potion] [stew]`.
+pub fn item_tooltips(inputs: &Inputs) -> Result<String> {
+    let registries: Map<String, Value> = read_json(&inputs.reports.join("registries.json"))?;
+    let entries = registries["minecraft:item"]["entries"]
+        .as_object()
+        .context("item entries")?;
+    let mut names: Vec<(u64, &str)> = entries
+        .iter()
+        .map(|(n, e)| {
+            Ok((
+                e["protocol_id"].as_u64().context("protocol_id")?,
+                n.as_str(),
+            ))
+        })
+        .collect::<Result<_>>()?;
+    names.sort_unstable();
+    let dir = inputs.reports.join("minecraft/components/item");
+    let short = |s: &str| s.strip_prefix("minecraft:").unwrap_or(s).to_owned();
+    let mut out = String::new();
+    for (_, name) in names {
+        let file = dir.join(format!("{}.json", short(name)));
+        if !file.is_file() {
+            continue;
+        }
+        let comps = read_json::<Value>(&file)?["components"].clone();
+        let get = |k: &str| comps.get(format!("minecraft:{k}"));
+        let mut tokens = Vec::new();
+        let rarity = match get("rarity").and_then(Value::as_str) {
+            Some("uncommon") => 1,
+            Some("rare") => 2,
+            Some("epic") => 3,
+            _ => 0,
+        };
+        if rarity != 0 {
+            tokens.push(format!("r{rarity}"));
+        }
+        if get("item_name")
+            .and_then(|n| n["translate"].as_str())
+            .is_some_and(|k| k.starts_with("block."))
+        {
+            tokens.push("b".to_owned());
+        }
+        for m in get("attribute_modifiers")
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice)
+        {
+            let field = |k: &str| {
+                m[k].as_str()
+                    .map(short)
+                    .with_context(|| format!("{name}: {k}"))
+            };
+            let amount = m["amount"].as_f64().context("amount")?;
+            let mut token = format!(
+                "a={},{},{amount},{},{}",
+                field("type")?,
+                field("id")?,
+                field("operation")?,
+                field("slot").unwrap_or_else(|_| "any".to_owned())
+            );
+            if m["display"]["type"].as_str() == Some("hidden") {
+                token.push_str(",hidden");
+            }
+            tokens.push(token);
+        }
+        if let Some(song) = get("jukebox_playable").and_then(Value::as_str) {
+            tokens.push(format!("j={}", short(song)));
+        }
+        if let Some(horn) = get("instrument").and_then(Value::as_str) {
+            tokens.push(format!("h={}", short(horn)));
+        }
+        if let Some(flight) = get("fireworks").and_then(|f| f["flight_duration"].as_i64()) {
+            tokens.push(format!("f={flight}"));
+        }
+        if let Some(amp) = get("ominous_bottle_amplifier").and_then(Value::as_i64) {
+            tokens.push(format!("o={amp}"));
+        }
+        if let Some(scale) = get("potion_duration_scale").and_then(Value::as_f64) {
+            tokens.push(format!("scale={scale}"));
+        }
+        if let Some(level) = get("block_state").and_then(|b| b["honey_level"].as_str()) {
+            tokens.push(format!("honey={level}"));
+        }
+        for (key, token) in [
+            ("bees", "bees"),
+            ("potion_contents", "potion"),
+            ("suspicious_stew_effects", "stew"),
+        ] {
+            if get(key).is_some() {
+                tokens.push(token.to_owned());
+            }
+        }
+        if !tokens.is_empty() {
+            out.push_str(&short(name));
+            for t in tokens {
+                out.push(' ');
+                out.push_str(&t);
+            }
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
 fn component_type_ids(inputs: &Inputs) -> Result<HashMap<String, usize>> {
     let report: Map<String, Value> = read_json(&inputs.reports.join("registries.json"))?;
     let entries = report["minecraft:data_component_type"]["entries"]
@@ -596,12 +701,15 @@ fn component_type_ids(inputs: &Inputs) -> Result<HashMap<String, usize>> {
         .collect()
 }
 
-pub fn write_module(out_dir: &Path, blob: &[u8]) -> Result<()> {
+pub fn write_module(out_dir: &Path, blob: &[u8], tooltips: &str) -> Result<()> {
     fs::create_dir_all(out_dir)?;
     fs::write(out_dir.join("data.bin"), blob)?;
+    fs::write(out_dir.join("item_tooltips.txt"), tooltips)?;
     fs::write(
         out_dir.join("mod.rs"),
-        "pub static BLOB: &[u8] = include_bytes!(\"data.bin\");\n",
+        "pub static BLOB: &[u8] = include_bytes!(\"data.bin\");\n\
+         pub static CREATIVE_TABS: &str = include_str!(\"creative_tabs.txt\");\n\
+         pub static ITEM_TOOLTIPS: &str = include_str!(\"item_tooltips.txt\");\n",
     )?;
     Ok(())
 }
@@ -640,6 +748,15 @@ mod tests {
         assert!(
             first == committed_blob(),
             "committed tables are stale; rerun mcr-data-gen"
+        );
+        let tooltips = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../mcr-data/src/generated/v26_3/item_tooltips.txt"),
+        )
+        .unwrap();
+        assert!(
+            item_tooltips(&inputs).unwrap() == tooltips,
+            "committed item tooltips are stale; rerun mcr-data-gen"
         );
     }
 

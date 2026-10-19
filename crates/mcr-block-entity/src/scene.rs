@@ -1948,6 +1948,27 @@ impl BlockEntityScene {
         }
     }
 
+    /// Replaces this frame's instances with just the enchanting-table book at `xf` (block units),
+    /// for the enchanting screen; `open` is the lid angle in radians.
+    pub fn update_book(&mut self, xf: Mat4, open: f32, flip1: f32, flip2: f32) {
+        self.gpu.begin_frame();
+        self.flat.begin_frame();
+        self.has_gateway = false;
+        self.display.update(&(), std::iter::empty());
+        let tex = self.tex("entity/enchantment/enchanting_table_book");
+        self.put(
+            "book",
+            tex,
+            Pipeline::Cutout,
+            WHITE,
+            xf,
+            &mut |m, poses| Self::book_pose(m, poses, open, flip1, flip2),
+            [0.0; 3],
+            [15, 15],
+            false,
+        );
+    }
+
     /// Uploads this frame's instances; call after `update`.
     pub fn prepare(&mut self, frame: &BlockEntityFrame) {
         self.gpu.prepare(

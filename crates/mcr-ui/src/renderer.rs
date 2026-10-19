@@ -51,6 +51,7 @@ pub struct UiRenderer {
     indices: wgpu::Buffer,
     index_quads: usize,
     draws: Vec<Draw>,
+    upper: usize,
     stats: UiStats,
 }
 
@@ -191,6 +192,7 @@ impl UiRenderer {
             indices,
             index_quads: INITIAL_QUADS,
             draws: Vec::new(),
+            upper: 0,
             stats: UiStats::default(),
         }
     }
@@ -344,18 +346,34 @@ impl UiRenderer {
             }),
         );
         self.draws.clear();
-        self.draws.extend(
-            batch
-                .cmds
-                .iter()
-                .filter(|c| c.scissor[2] > 0 && c.scissor[3] > 0)
-                .map(|c| Draw {
+        let split = batch.preview_split.unwrap_or(u32::MAX);
+        self.upper = usize::MAX;
+        for c in batch
+            .cmds
+            .iter()
+            .filter(|c| c.scissor[2] > 0 && c.scissor[3] > 0)
+        {
+            let mut quads = c.quads.clone();
+            if quads.start < split && quads.end > split {
+                self.draws.push(Draw {
                     kind: c.page.kind,
                     page: c.page.index as usize,
                     scissor: c.scissor,
-                    indices: c.quads.start * 6..c.quads.end * 6,
-                }),
-        );
+                    indices: quads.start * 6..split * 6,
+                });
+                quads.start = split;
+            }
+            if quads.start >= split && self.upper == usize::MAX {
+                self.upper = self.draws.len();
+            }
+            self.draws.push(Draw {
+                kind: c.page.kind,
+                page: c.page.index as usize,
+                scissor: c.scissor,
+                indices: quads.start * 6..quads.end * 6,
+            });
+        }
+        self.upper = self.upper.min(self.draws.len());
         self.stats = UiStats {
             draw_calls: self.draws.len(),
             quads,
@@ -363,14 +381,32 @@ impl UiRenderer {
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        if self.draws.is_empty() {
+        self.draw_range(pass, 0..self.draws.len());
+    }
+
+    /// Whether this frame has quads above a screen preview.
+    pub fn has_preview_split(&self) -> bool {
+        self.upper < self.draws.len()
+    }
+
+    /// The quads below the screen preview mark (all of them without one).
+    pub fn draw_below_preview(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_range(pass, 0..self.upper);
+    }
+
+    pub fn draw_above_preview(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_range(pass, self.upper..self.draws.len());
+    }
+
+    fn draw_range(&self, pass: &mut wgpu::RenderPass<'_>, range: Range<usize>) {
+        let Some(draws) = self.draws.get(range).filter(|d| !d.is_empty()) else {
             return;
-        }
+        };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.globals_bg, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-        for d in &self.draws {
+        for d in draws {
             let pages = match d.kind {
                 PageKind::Sprite => &self.sprite_pages,
                 PageKind::Glyph => &self.glyph_pages,

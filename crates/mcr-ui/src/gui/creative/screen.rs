@@ -12,7 +12,7 @@ use crate::gui::edit_box::EditBox;
 use crate::gui::env::{Env, GameView, RenderCx, is_empty};
 use crate::gui::input::{Key, Modifiers, MouseButton, UiInput, contains};
 use crate::gui::screen::{ClickType, ContainerClick, Screen, ScreenAction};
-use crate::gui::tooltip::{TooltipLine, TooltipLines};
+use crate::gui::tooltip::TooltipLines;
 use crate::items::StackView;
 use mcr_assets::ItemProps;
 
@@ -102,23 +102,14 @@ fn scroll_for_row(row: usize, len: usize) -> f32 {
     (row as f32 / rows as f32).clamp(0.0, 1.0)
 }
 
-fn lines_with(stack_lines: TooltipLines, extra: Vec<String>) -> TooltipLines {
-    if extra.is_empty() {
+fn lines_with(mut stack_lines: TooltipLines, extra: Vec<String>) -> TooltipLines {
+    if stack_lines.is_empty() {
         return stack_lines;
     }
-    let mut out = TooltipLines::default();
-    for (i, line) in stack_lines.lines().iter().enumerate() {
-        match line {
-            TooltipLine::Legacy(text) => out.push_text(text.clone()),
-            TooltipLine::Component(c) => out.push_component(c.clone()),
-        }
-        if i == 0 {
-            for (n, text) in extra.iter().enumerate() {
-                out.insert_text(1 + n, text.clone());
-            }
-        }
+    for (n, text) in extra.into_iter().enumerate() {
+        stack_lines.insert_text(1 + n, text);
     }
-    out
+    stack_lines
 }
 
 /// Vanilla's `CreativeModeInventoryScreen`.
@@ -211,6 +202,14 @@ impl CreativeScreen {
 
     pub fn scroll_offset(&self) -> f32 {
         self.scroll
+    }
+
+    /// The saved hotbar a placeholder in the grid stands for: its row in the hotbars tab.
+    fn hotbar_row(&self, hit: Hit) -> usize {
+        match hit {
+            Hit::Grid(i) => (i / COLS + row_for_scroll(self.scroll, self.items.len())).min(8),
+            _ => 0,
+        }
     }
 
     pub fn grid_item(&self, index: usize) -> Option<&ItemStack> {
@@ -344,8 +343,9 @@ impl CreativeScreen {
             .iter()
             .map(|stack| {
                 let lines = cx.item_tooltip(stack);
+                let text = lines.plain_lines(cx.frame.ui().lang()).join("\n");
                 let id = StackView::new(stack).map_or(String::new(), |v| v.name().to_owned());
-                format!("{}\n{id}", lines.first_plain()).to_lowercase()
+                format!("{text}\n{id}").to_lowercase()
             })
             .collect();
         self.search_pool = pool;
@@ -649,10 +649,8 @@ impl CreativeScreen {
             return true;
         }
         let hovered = self.hovered_stack(env.view);
-        let number = match key {
-            Key::Digit(d @ 1..=9) => Some(usize::from(d) - 1),
-            _ => None,
-        };
+        let keys = env.view.screen_keys();
+        let number = keys.hotbar_key(key);
         if let (Some(n), Some((hit, stack))) = (number, &hovered) {
             match hit {
                 Hit::Grid(_) => out.push(ScreenAction::CreativeSetSlot {
@@ -671,7 +669,7 @@ impl CreativeScreen {
         }
         if !searching {
             match key {
-                Key::Letter('t') => {
+                k if keys.chat.is_key(k) => {
                     self.ignore_text = true;
                     if let Some(i) = creative_tabs()
                         .iter()
@@ -681,11 +679,11 @@ impl CreativeScreen {
                     }
                     return true;
                 }
-                Key::Letter('e') => {
+                k if keys.inventory.is_key(k) => {
                     out.push(ScreenAction::CloseContainer);
                     return true;
                 }
-                Key::Letter('q') => {
+                k if keys.drop.is_key(k) => {
                     if let Some((hit, stack)) = hovered {
                         let count = match hit {
                             Hit::Grid(_) if mods.ctrl => max_stack(&stack),
@@ -819,7 +817,9 @@ impl Screen for CreativeScreen {
             let title = cx.lang(&self.tab().title_key);
             cx.text(&title, self.left + 8, self.top + 6, LABEL, false);
         }
+        cx.frame.mark_preview_layer();
         self.draw_slots(cx);
+        crate::gui::effects_list::draw_effects(cx, self.left, self.top, WIDTH);
         self.draw_carried(cx);
         self.draw_tooltips(cx);
     }
@@ -969,7 +969,11 @@ impl CreativeScreen {
             return;
         };
         let lines = if locked(&stack) {
-            let text = cx.lang_fmt("inventory.hotbarInfo", &["C", "1"]);
+            let keys = view.screen_keys();
+            let row = self.hotbar_row(hit);
+            let lang = cx.frame.ui().lang();
+            let (save, slot) = (keys.save_hotbar.label(lang), keys.hotbar[row].label(lang));
+            let text = cx.lang_fmt("inventory.hotbarInfo", &[&save, &slot]);
             TooltipLines::text(text)
         } else {
             let lines = cx.item_tooltip(&stack);

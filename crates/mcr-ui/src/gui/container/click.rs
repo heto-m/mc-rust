@@ -327,18 +327,19 @@ impl ClickMachine {
         let Some(hovered) = g.slot_at(mouse.0, mouse.1) else {
             return false;
         };
+        let keys = view.screen_keys();
         if is_empty(view.carried()) {
-            let button = match key {
-                Key::Letter('f') => Some(40),
-                Key::Digit(d @ 1..=9) => Some(i32::from(d) - 1),
-                _ => None,
+            let button = if keys.swap_offhand.is_key(key) {
+                Some(40)
+            } else {
+                keys.hotbar_key(key).map(|i| i as i32)
             };
             if let Some(button) = button {
                 send(out, Some(hovered), hovered as i32, button, ClickType::Swap);
                 return true;
             }
         }
-        if !is_empty(view.slot(hovered)) && key == Key::Letter('q') {
+        if !is_empty(view.slot(hovered)) && keys.drop.is_key(key) {
             let button = i32::from(mods.ctrl);
             send(out, Some(hovered), hovered as i32, button, ClickType::Throw);
             return true;
@@ -357,9 +358,14 @@ mod tests {
         slots: Vec<Option<ItemStack>>,
         carried: Option<ItemStack>,
         creative: bool,
+        keys: crate::gui::keys::ScreenKeys,
     }
 
     impl GameView for Table {
+        fn screen_keys(&self) -> crate::gui::keys::ScreenKeys {
+            self.keys
+        }
+
         fn slot(&self, index: usize) -> Option<&ItemStack> {
             self.slots.get(index)?.as_ref()
         }
@@ -407,6 +413,7 @@ mod tests {
                     slots: vec![None; n],
                     carried: None,
                     creative: false,
+                    keys: Default::default(),
                 },
                 machine: ClickMachine::default(),
             }
@@ -607,6 +614,32 @@ mod tests {
     }
 
     #[test]
+    fn rebound_keys_replace_the_defaults() {
+        use crate::gui::keys::ScreenKey;
+        let mut f = Fixture::chest();
+        f.view.keys.hotbar[0] = ScreenKey::key(Key::Letter('z'), "key.keyboard.z");
+        f.view.keys.swap_offhand = ScreenKey::key(Key::Letter('g'), "key.keyboard.g");
+        f.view.keys.drop = ScreenKey::key(Key::Letter('x'), "key.keyboard.x");
+        f.view.slots[10] = Some(item("stone", 3));
+        let pos = f.at(10);
+        assert!(f.key(pos, Key::Digit(1), Modifiers::NONE).is_empty());
+        assert!(f.key(pos, Key::Letter('f'), Modifiers::NONE).is_empty());
+        assert!(f.key(pos, Key::Letter('q'), Modifiers::NONE).is_empty());
+        assert_eq!(
+            f.key(pos, Key::Letter('z'), Modifiers::NONE),
+            [c(10, 0, ClickType::Swap)]
+        );
+        assert_eq!(
+            f.key(pos, Key::Letter('g'), Modifiers::NONE),
+            [c(10, 40, ClickType::Swap)]
+        );
+        assert_eq!(
+            f.key(pos, Key::Letter('x'), Modifiers::NONE),
+            [c(10, 0, ClickType::Throw)]
+        );
+    }
+
+    #[test]
     fn swap_key_needs_a_hovered_slot() {
         let mut f = Fixture::chest();
         assert!(f.key((0.0, 0.0), Key::Digit(1), Modifiers::NONE).is_empty());
@@ -689,6 +722,7 @@ mod tests {
                 slots: vec![None; n],
                 carried: Some(item("stone", 1)),
                 creative: false,
+                keys: Default::default(),
             },
             machine: ClickMachine::default(),
         };
@@ -814,6 +848,7 @@ mod tests {
                 slots: vec![None; n],
                 carried: Some(item("stone", 8)),
                 creative: false,
+                keys: Default::default(),
             },
             machine: ClickMachine::default(),
         };

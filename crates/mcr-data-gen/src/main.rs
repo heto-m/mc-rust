@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use mcr_data_gen::{Inputs, generate, write_module};
+use mcr_data_gen::{Inputs, generate, item_tooltips, write_module};
 
 fn default_cache() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -24,8 +24,10 @@ fn main() -> Result<()> {
         },
         PathBuf::from,
     );
-    let blob = generate(&Inputs::in_cache(&cache, &version)).context("generating tables")?;
-    write_module(&out, &blob)?;
+    let inputs = Inputs::in_cache(&cache, &version);
+    let blob = generate(&inputs).context("generating tables")?;
+    let tooltips = item_tooltips(&inputs).context("generating item tooltips")?;
+    write_module(&out, &blob, &tooltips)?;
     println!("wrote {} ({} bytes)", out.display(), blob.len());
     Ok(())
 }

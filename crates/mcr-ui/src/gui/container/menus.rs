@@ -83,10 +83,24 @@ impl ContainerScreen {
             MenuKind::Lectern => {
                 let middle = self.gui.0 / 2;
                 let y = 2 + 192 + 2;
-                self.widgets
-                    .add(Button::new(BOOK_DONE, [middle - 100, y, 98, 20], "Done"));
-                self.widgets
-                    .add(Button::new(BOOK_TAKE, [middle + 2, y, 98, 20], "Take Book"));
+                if self.lectern_may_build {
+                    self.widgets.add(Button::new(
+                        BOOK_DONE,
+                        [middle - 100, y, 98, 20],
+                        "lang:gui.done",
+                    ));
+                    self.widgets.add(Button::new(
+                        BOOK_TAKE,
+                        [middle + 2, y, 98, 20],
+                        "lang:lectern.take_book",
+                    ));
+                } else {
+                    self.widgets.add(Button::new(
+                        BOOK_DONE,
+                        [(self.gui.0 - 200) / 2, y, 200, 20],
+                        "lang:gui.done",
+                    ));
+                }
                 let left = (self.gui.0 - 192) / 2;
                 self.widgets
                     .add(Button::new(BOOK_PREV, [left + 43, 2 + 157, 23, 13], "").flat());
@@ -193,7 +207,10 @@ impl ContainerScreen {
                 if current != self.anvil_item {
                     let name = current
                         .as_ref()
-                        .map(|s| cx.item_tooltip(s).first_plain())
+                        .map(|s| {
+                            let tip = cx.item_tooltip(s);
+                            tip.first_plain_in(cx.frame.ui().lang())
+                        })
                         .unwrap_or_default();
                     if let Some(e) = self.widgets.edit_mut(ANVIL_NAME) {
                         e.set_value(&name);
@@ -498,6 +515,7 @@ impl ContainerScreen {
             }
             MenuKind::CartographyTable => self.draw_cartography(cx),
             MenuKind::Smithing => {
+                self.draw_smithing_icons(cx);
                 if view.data(0) == 1 {
                     cx.sprite("container/smithing/error", l + 65, t + 46, 28, 21);
                 }
@@ -897,7 +915,8 @@ impl ContainerScreen {
         }
     }
 
-    fn draw_cartography(&self, cx: &mut RenderCx<'_, '_>) {
+    /// `CartographyTableScreen#extractBackground`: frames, the error icon and the resulting map.
+    fn draw_cartography(&mut self, cx: &mut RenderCx<'_, '_>) {
         let view = cx.view;
         let (l, t) = (self.left, self.top);
         let name_of = |s: Option<&ItemStack>| {
@@ -912,7 +931,52 @@ impl ContainerScreen {
         let scaling = extra.as_deref() == Some("paper");
         let duplicating = extra.as_deref() == Some("map");
         let locking = extra.as_deref() == Some("glass_pane");
-        if scaling {
+        let map_item = view.slot(0).filter(|s| !s.is_empty());
+        let map_id = map_item.and_then(|s| {
+            match s
+                .components
+                .get(mcr_protocol::types::component::component_type_id("map_id")?)
+            {
+                Some(mcr_protocol::types::component::DataComponent::MapId(id)) => Some(id.0),
+                _ => None,
+            }
+        });
+        let data = map_id.and_then(|id| view.map(id).map(|m| (id, m)));
+        let mut locked = false;
+        if let Some((_, map)) = &data {
+            let error = (28, 21);
+            if map.locked {
+                locked = true;
+                if scaling || locking {
+                    cx.sprite(
+                        "container/cartography_table/error",
+                        l + 35,
+                        t + 31,
+                        error.0,
+                        error.1,
+                    );
+                }
+            }
+            let extendable = name_of(map_item).as_deref() == Some("filled_map");
+            if scaling && (!extendable || map.scale >= 4) {
+                locked = true;
+                cx.sprite(
+                    "container/cartography_table/error",
+                    l + 35,
+                    t + 31,
+                    error.0,
+                    error.1,
+                );
+            }
+        }
+        let sprite = self.map_texture(cx, data.map(|(id, m)| (id, m.colors)));
+        let map = |cx: &mut RenderCx<'_, '_>, x: i32, y: i32, scale: f32| {
+            if let Some(id) = sprite {
+                let size = (128.0 * scale).round() as i32;
+                cx.frame.sprite(id, x, y, size, size);
+            }
+        };
+        if scaling && !locked {
             cx.sprite(
                 "container/cartography_table/scaled_map",
                 l + 67,
@@ -920,6 +984,7 @@ impl ContainerScreen {
                 66,
                 66,
             );
+            map(cx, l + 85, t + 31, 0.226);
         } else if duplicating {
             cx.sprite(
                 "container/cartography_table/duplicated_map",
@@ -928,6 +993,7 @@ impl ContainerScreen {
                 50,
                 66,
             );
+            map(cx, l + 86, t + 16, 0.34);
             cx.sprite(
                 "container/cartography_table/duplicated_map",
                 l + 67,
@@ -935,8 +1001,10 @@ impl ContainerScreen {
                 50,
                 66,
             );
+            map(cx, l + 70, t + 32, 0.34);
         } else {
             cx.sprite("container/cartography_table/map", l + 67, t + 13, 66, 66);
+            map(cx, l + 71, t + 17, 0.45);
             if locking {
                 cx.sprite(
                     "container/cartography_table/locked",
@@ -947,6 +1015,37 @@ impl ContainerScreen {
                 );
             }
         }
+    }
+
+    /// Uploads the map's pixels into a runtime sprite, again only when they change.
+    fn map_texture(
+        &mut self,
+        cx: &mut RenderCx<'_, '_>,
+        map: Option<(i32, &[u8])>,
+    ) -> Option<crate::sprites::SpriteId> {
+        let (id, colors) = map?;
+        let sprites = cx.frame.ui().sprites_mut();
+        match self.map_sprite {
+            Some((shown, sprite)) if shown == id && self.map_colors == colors => {
+                return Some(sprite);
+            }
+            Some((_, sprite)) => {
+                if self.map_colors != colors {
+                    sprites.rewrite(sprite, &crate::items::map_rgba(colors));
+                }
+                self.map_sprite = Some((id, sprite));
+            }
+            None => {
+                let size = crate::items::MAP_SIZE as u32;
+                let sprite =
+                    self.owned_sprites
+                        .add(sprites, size, size, &crate::items::map_rgba(colors))?;
+                self.map_sprite = Some((id, sprite));
+            }
+        }
+        self.map_colors.clear();
+        self.map_colors.extend_from_slice(colors);
+        self.map_sprite.map(|s| s.1)
     }
 
     fn draw_loom(&self, cx: &mut RenderCx<'_, '_>) {
@@ -1205,6 +1304,10 @@ impl ContainerScreen {
     }
 
     pub(super) fn render_book(&mut self, cx: &mut RenderCx<'_, '_>) {
+        if cx.view.may_build() != self.lectern_may_build {
+            self.lectern_may_build = cx.view.may_build();
+            self.setup_widgets();
+        }
         let left = (self.gui.0 - 192) / 2;
         cx.texture("book", (0, 0), (left, 2, 192, 192));
         let view = cx.view;
@@ -1312,6 +1415,21 @@ mod tests {
     use mcr_protocol::types::text::Component;
 
     use super::*;
+
+    #[test]
+    fn lectern_offers_take_book_only_to_players_who_may_build() {
+        let mut screen = ContainerScreen::new(MenuKind::Lectern, Component::text(""));
+        crate::gui::screen::Screen::init(&mut screen, 400, 300);
+        assert!(screen.widgets.button_mut(BOOK_TAKE).is_some());
+        assert_eq!(
+            screen.widgets.button_mut(BOOK_DONE).unwrap().label,
+            "lang:gui.done"
+        );
+        screen.lectern_may_build = false;
+        screen.setup_widgets();
+        assert!(screen.widgets.button_mut(BOOK_TAKE).is_none());
+        assert_eq!(screen.widgets.button_mut(BOOK_DONE).unwrap().rect[2], 200);
+    }
 
     fn anvil(item: ItemStack, hover: &str) -> ContainerScreen {
         let mut screen = ContainerScreen::new(MenuKind::Anvil, Component::text(""));

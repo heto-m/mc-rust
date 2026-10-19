@@ -1,7 +1,10 @@
+mod bundle;
 mod click;
+mod enchanting_book;
 mod kind;
 mod menus;
 mod screen;
+mod smithing;
 
 pub use click::{
     ClickMachine, SlotGeometry, can_quick_replace, may_place, quick_craft_mask,

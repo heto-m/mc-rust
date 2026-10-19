@@ -19,7 +19,8 @@ use mcr_settings::{HeldState, InputKey, KeyBindings, MAPPINGS, Options, SOUND_CA
 use mcr_ui::{
     CREDITS_PATH, ChatScreen, ContainerScreen, CreativeScreen, CreditsScreen, CreditsSource,
     DeathScreen, Env, HotbarStore, MenuKind, Modifiers, MouseButton, POEM_PATH, POSTCREDITS_PATH,
-    PauseScreen, RenderCx, Screen, ScreenAction, ScreenStack, Ui, UiInput, UiRenderer,
+    PauseScreen, RenderCx, Screen, ScreenAction, ScreenPreview, ScreenStack, Ui, UiInput,
+    UiRenderer,
 };
 
 use crate::assets::Assets;
@@ -336,10 +337,29 @@ impl Overlay for FrameOverlay<'_> {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.ui_renderer.draw(&mut pass);
+            self.ui_renderer.draw_below_preview(&mut pass);
         }
         if let Some(preview) = self.preview {
             preview.record(ctx);
+        }
+        if self.ui_renderer.has_preview_split() {
+            let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ui-above-preview"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: ctx.color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.ui_renderer.draw_above_preview(&mut pass);
         }
     }
 }
@@ -1820,6 +1840,18 @@ impl Play {
         }
     }
 
+    fn screen_keys(&self) -> mcr_ui::ScreenKeys {
+        let key = |index: usize| crate::input::screen_key(self.bindings.input(index));
+        mcr_ui::ScreenKeys {
+            hotbar: self.keys.hotbar.map(key),
+            swap_offhand: key(self.keys.swap),
+            drop: key(self.keys.drop),
+            inventory: key(self.keys.inventory),
+            chat: key(self.keys.chat),
+            save_hotbar: key(self.keys.save_hotbar),
+        }
+    }
+
     fn screen_key(&mut self, key: InputKey, pressed: bool, text: Option<&str>) {
         for input in ui_inputs(key, pressed, text, self.mods, self.mouse) {
             self.ui_input(input);
@@ -1836,6 +1868,8 @@ impl Play {
             let view = StateView {
                 state: &self.world.client.state,
                 operator_items: self.options.operator_items_tab,
+                advanced_tooltips: self.options.advanced_item_tooltips,
+                keys: self.screen_keys(),
                 cache: &self.view_cache,
             };
             let mut env = Env {
@@ -2237,6 +2271,8 @@ impl Play {
             let view = StateView {
                 state: &self.world.client.state,
                 operator_items: self.options.operator_items_tab,
+                advanced_tooltips: self.options.advanced_item_tooltips,
+                keys: self.screen_keys(),
                 cache: &self.view_cache,
             };
             let mut env = Env {
@@ -2357,6 +2393,9 @@ impl Play {
                 }
                 ScreenAction::RenameItem(name) => {
                     self.net(|c| c.rename_item(&name));
+                }
+                ScreenAction::SelectBundleItem { slot, index } => {
+                    self.net(|c| c.select_bundle_item(slot, index));
                 }
                 ScreenAction::SetBeacon { primary, secondary } => {
                     let effects = self.data.registry("minecraft:mob_effect");
@@ -2815,6 +2854,8 @@ impl Play {
             let view = StateView {
                 state: &self.world.client.state,
                 operator_items: self.options.operator_items_tab,
+                advanced_tooltips: self.options.advanced_item_tooltips,
+                keys: self.screen_keys(),
                 cache: &self.view_cache,
             };
             let max_scale = u32::try_from(self.gui_scale()).unwrap_or(0);
@@ -3051,13 +3092,31 @@ impl Play {
             .top()
             .and_then(|s| s.entity_rect())
             .filter(|_| self.player_inventory);
+        let extra = self.stack.top().and_then(|s| s.screen_preview());
         let (_, scale) = gui::gui_size(size, self.gui_scale());
-        match (&mut self.preview, &mut self.entities, rect) {
-            (Some(preview), Some(layer), Some(rect)) => {
+        match (&mut self.preview, &mut self.entities, rect, extra) {
+            (Some(preview), Some(layer), Some(rect), _) => {
                 let view = layer.local_view(state);
                 preview.prepare(view, &state.registries, rect, scale, self.mouse, size);
             }
-            (Some(preview), _, _) => preview.hide(),
+            (Some(preview), _, _, Some(ScreenPreview::ArmorStand { rect })) => {
+                let stand = mcr_data::v26_3()
+                    .entity_type_by_name("minecraft:armor_stand")
+                    .map_or(-1, |id| id as i32);
+                let result = state
+                    .inventory
+                    .open
+                    .as_ref()
+                    .and_then(|c| c.slots.get(3))
+                    .filter(|s| !s.is_empty())
+                    .map(|s| (s, crate::preview::stand_slot(s)));
+                preview.prepare_armor_stand(stand, result, &state.registries, rect, scale, size);
+            }
+            (Some(preview), _, _, Some(ScreenPreview::Book { rect, open, flip })) => {
+                let lerp = |v: [f32; 2]| v[0] + (v[1] - v[0]) * partial;
+                preview.prepare_book(rect, scale, size, lerp(open), lerp(flip));
+            }
+            (Some(preview), ..) => preview.hide(),
             _ => {}
         }
         self.render

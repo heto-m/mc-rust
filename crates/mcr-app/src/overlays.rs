@@ -217,6 +217,7 @@ impl Overlays {
             props: &view,
             glint: false,
             cooldown: 0.0,
+            bar: None,
         };
         icons.draw_sized(frame, &item, cx as i32 - w / 2, cy as i32 - h / 2, w, h);
     }

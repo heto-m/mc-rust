@@ -49,6 +49,23 @@ pub struct MerchantInfo {
     pub can_restock: bool,
 }
 
+/// A map's colour bytes (128x128, row-major) with its saved data flags.
+#[derive(Clone, Copy, Debug)]
+pub struct MapView<'a> {
+    pub colors: &'a [u8],
+    pub scale: i8,
+    pub locked: bool,
+}
+
+/// One of the player's active mob effects; `duration` is in ticks, -1 for infinite.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveEffect {
+    pub effect: String,
+    pub amplifier: i32,
+    pub duration: i32,
+    pub ambient: bool,
+}
+
 /// Live game state the screens read; the app implements it over its own state.
 pub trait GameView {
     fn slot(&self, _index: usize) -> Option<&ItemStack> {
@@ -79,6 +96,15 @@ pub trait GameView {
 
     fn spectator(&self) -> bool {
         false
+    }
+
+    fn screen_keys(&self) -> super::keys::ScreenKeys {
+        super::keys::ScreenKeys::default()
+    }
+
+    /// `Player#mayBuild`: false in adventure and spectator mode.
+    fn may_build(&self) -> bool {
+        true
     }
 
     /// The player lies in a bed; the in-bed chat screen closes once this turns false.
@@ -116,12 +142,25 @@ pub trait GameView {
         None
     }
 
+    /// The full tooltip of `stack`; the app builds it from its registries and caches it per hovered stack.
     fn item_tooltip(&self, _stack: &ItemStack) -> Option<TooltipLines> {
         None
     }
 
     fn trim_materials(&self) -> &[String] {
         &[]
+    }
+
+    fn map(&self, _id: i32) -> Option<MapView<'_>> {
+        None
+    }
+
+    fn active_effects(&self) -> Vec<ActiveEffect> {
+        Vec::new()
+    }
+
+    fn tick_rate(&self) -> f32 {
+        20.0
     }
 
     fn score(&self) -> i32 {
@@ -372,20 +411,11 @@ impl<'a, 'f> RenderCx<'a, 'f> {
         if let Some(lines) = self.view.item_tooltip(stack) {
             return lines;
         }
-        let mut lines = TooltipLines::default();
-        if let Some(view) = StackView::new(stack) {
-            let name = view
-                .name()
-                .strip_prefix("minecraft:")
-                .unwrap_or(view.name());
-            let ui = self.frame.ui();
-            let text = ["item", "block"]
-                .iter()
-                .find_map(|kind| ui.lang().get(&format!("{kind}.minecraft.{name}")))
-                .map_or_else(|| name.to_owned(), str::to_owned);
-            lines.push_text(text);
-        }
-        lines
+        let flags = crate::items::TooltipFlags {
+            advanced: false,
+            creative: self.view.creative(),
+        };
+        super::tooltip::item_tooltip(stack, &crate::items::NoTooltipSource, flags)
     }
 
     pub fn set_tooltip(&mut self, lines: TooltipLines) {

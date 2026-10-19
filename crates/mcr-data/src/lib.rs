@@ -114,6 +114,12 @@ pub fn creative_tabs_26_3() -> &'static str {
     generated::v26_3::CREATIVE_TABS
 }
 
+/// Tooltip-relevant item defaults written by `mcr-data-gen`: one line per item with any, keyed by the item
+/// path, carrying rarity, the block-name flag, attribute modifiers and the default values that add lines.
+pub fn item_tooltips_26_3() -> &'static str {
+    generated::v26_3::ITEM_TOOLTIPS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

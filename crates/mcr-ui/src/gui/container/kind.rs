@@ -392,9 +392,9 @@ impl ContainerLayout {
                 title_pos = (8, 5);
             }
             MenuKind::Smithing => {
-                slots.push(one(8, 48).icon("container/slot/smithing_template_armor_trim"));
-                slots.push(one(26, 48).icon("container/slot/helmet"));
-                slots.push(one(44, 48).icon("container/slot/ingot"));
+                slots.push(one(8, 48));
+                slots.push(one(26, 48));
+                slots.push(one(44, 48));
                 slots.push(result(98, 48));
                 player_slots(&mut slots, 8, 84);
                 texture = "container/smithing";

@@ -95,6 +95,13 @@ impl Client {
         Ok(())
     }
 
+    pub fn select_bundle_item(&mut self, slot: i32, index: i32) -> Result<()> {
+        self.send_play(&S::BundleItemSelected(sb::BundleItemSelected {
+            slot_id: slot,
+            selected_item_index: index.max(-1),
+        }))
+    }
+
     /// Effect ids are `mob_effect` registry ids.
     pub fn set_beacon(&mut self, primary: Option<i32>, secondary: Option<i32>) -> Result<()> {
         self.send_play(&S::SetBeacon(sb::SetBeacon {

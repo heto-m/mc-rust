@@ -207,6 +207,24 @@ pub fn ui_inputs(
     out
 }
 
+/// A bound key as the container screens see it.
+pub fn screen_key(key: InputKey) -> mcr_ui::ScreenKey {
+    let input = match key {
+        InputKey::Unbound => mcr_ui::KeyInput::Unbound,
+        InputKey::Keyboard(_) => mcr_ui::KeyInput::Key(ui_key_from_input(key)),
+        InputKey::Mouse(n) => mcr_ui::KeyInput::Mouse(match n {
+            1 => UiMouseButton::Left,
+            2 => UiMouseButton::Middle,
+            3 => UiMouseButton::Right,
+            n => UiMouseButton::Other(n.clamp(0, 255) as u8),
+        }),
+    };
+    mcr_ui::ScreenKey {
+        input,
+        name: key.name(),
+    }
+}
+
 /// USB HID usage of a keyboard key to the UI crate's key enum.
 pub fn ui_key_from_input(key: InputKey) -> Key {
     let InputKey::Keyboard(hid) = key else {
@@ -291,6 +309,19 @@ mod tests {
         assert_eq!(
             key_from_winit(KeyCode::Slash),
             InputKey::from_name("key.keyboard.slash").unwrap()
+        );
+    }
+
+    #[test]
+    fn screen_keys_follow_the_bindings() {
+        let k = screen_key(InputKey::Keyboard(9));
+        assert_eq!(k.input, mcr_ui::KeyInput::Key(Key::Letter('f')));
+        assert_eq!(k.name, "key.keyboard.f");
+        let m = screen_key(InputKey::Mouse(4));
+        assert_eq!(m.input, mcr_ui::KeyInput::Mouse(UiMouseButton::Other(4)));
+        assert_eq!(
+            screen_key(InputKey::Unbound).input,
+            mcr_ui::KeyInput::Unbound
         );
     }
 

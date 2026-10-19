@@ -6,7 +6,7 @@ use super::kind::{ContainerLayout, MenuKind, SlotKind};
 use crate::gui::env::{Env, GameView, RenderCx, is_empty};
 use crate::gui::input::{Key, MouseButton, UiInput, contains};
 use crate::gui::recipe_book::RecipeBook;
-use crate::gui::screen::{ClickType, ContainerClick, Screen, ScreenAction};
+use crate::gui::screen::{ClickType, ContainerClick, Screen, ScreenAction, ScreenPreview};
 use crate::gui::widgets::WidgetSet;
 use crate::items::StackView;
 use mcr_assets::ItemProps;
@@ -15,6 +15,7 @@ pub(super) const LABEL: u32 = 0xFF40_4040;
 const OVERLAY_TOP: u32 = 0xC010_1010;
 const OVERLAY_BOTTOM: u32 = 0xD010_1010;
 const QUICK_PREVIEW: u32 = 0x80FF_FFFF;
+const YELLOW: u32 = 0xFFFF_FF55;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ScrollState {
@@ -44,6 +45,15 @@ pub struct ContainerScreen {
     pub(super) pending_rename: Option<String>,
     pub(super) book_layout: Option<crate::gui::book::PageLayout>,
     pub(super) recipes: Option<RecipeBook>,
+    pub(super) bundle_selection: Option<(usize, usize)>,
+    pub(super) bundle_hovered: Option<usize>,
+    pub(super) bundle_wheel: super::bundle::ScrollWheel,
+    pub(super) smithing_icons: [super::smithing::CyclingIcons; 3],
+    pub(super) lectern_may_build: bool,
+    pub(super) book: super::enchanting_book::BookAnim,
+    pub(super) map_sprite: Option<(i32, crate::sprites::SpriteId)>,
+    pub(super) map_colors: Vec<u8>,
+    pub(super) owned_sprites: crate::sprites::OwnedSprites,
 }
 
 impl ContainerScreen {
@@ -68,6 +78,15 @@ impl ContainerScreen {
             pending_rename: None,
             book_layout: None,
             recipes: RecipeBook::for_menu(kind),
+            bundle_selection: None,
+            bundle_hovered: None,
+            bundle_wheel: Default::default(),
+            smithing_icons: Default::default(),
+            lectern_may_build: true,
+            book: Default::default(),
+            map_sprite: None,
+            map_colors: Vec::new(),
+            owned_sprites: Default::default(),
         }
     }
 
@@ -117,9 +136,8 @@ impl ContainerScreen {
         if !self.machine.quick_crafting() {
             return None;
         }
-        let max = max_stack(carried);
         if self.machine.quick_kind() == 2 {
-            return Some(max);
+            return Some(max_stack(carried));
         }
         let slots = self.machine.quick_slots();
         let place = quick_craft_place_count(slots.len(), self.machine.quick_kind(), carried);
@@ -129,7 +147,7 @@ impl ContainerScreen {
                 .slot(s)
                 .filter(|x| !x.is_empty())
                 .map_or(0, |x| x.count);
-            let new = place.saturating_add(carry).min(max);
+            let new = place.saturating_add(carry).min(self.slot_max(s, carried));
             remaining -= i64::from(new) - i64::from(carry);
         }
         Some(remaining.clamp(0, i64::from(i32::MAX)) as i32)
@@ -169,13 +187,14 @@ impl ContainerScreen {
             }
             let mut stack = view.slot(i).filter(|s| !s.is_empty()).cloned();
             let mut preview = false;
+            let mut capped = false;
             if let (true, Some(carried)) = (drag_slots.contains(&i), carried) {
                 if drag_slots.len() == 1 {
                     continue;
                 }
                 if can_quick_replace(view.slot(i), carried) {
                     preview = true;
-                    let max = max_stack(carried);
+                    let max = self.slot_max(i, carried);
                     let carry = stack.as_ref().map_or(0, |s| s.count);
                     let place = quick_craft_place_count(
                         drag_slots.len(),
@@ -183,7 +202,9 @@ impl ContainerScreen {
                         carried,
                     );
                     let mut shown = carried.clone();
-                    shown.count = place.saturating_add(carry).min(max);
+                    let wanted = place.saturating_add(carry);
+                    capped = wanted > max;
+                    shown.count = wanted.min(max);
                     stack = Some(shown);
                 }
             }
@@ -193,11 +214,19 @@ impl ContainerScreen {
                         cx.sprite(icon, x, y, 16, 16);
                     }
                 }
-                Some(stack) => {
+                Some(mut stack) => {
                     if preview {
                         cx.frame.fill_rect(x, y, x + 16, y + 16, QUICK_PREVIEW);
                     }
-                    cx.stack(&stack, x, y);
+                    if capped {
+                        let text = stack.count.to_string();
+                        stack.count = 1;
+                        cx.stack(&stack, x, y);
+                        let w = cx.text_width(&text);
+                        cx.text(&text, x + 19 - 2 - w, y + 6 + 3, YELLOW, true);
+                    } else {
+                        cx.stack(&stack, x, y);
+                    }
                 }
             }
         }
@@ -219,17 +248,15 @@ impl ContainerScreen {
         };
         let (mx, my) = (self.mouse.0 as i32, self.mouse.1 as i32);
         let mut shown = carried.clone();
-        let mut zero = false;
         if self.machine.quick_slots().len() > 1
             && let Some(rest) = self.quick_craft_remaining(cx.view)
         {
-            shown.count = rest.max(1);
-            zero = rest <= 0;
+            if rest <= 0 {
+                return;
+            }
+            shown.count = rest;
         }
         cx.stack(&shown, mx - 8, my - 8);
-        if zero {
-            cx.text("0", mx - 8 + 19 - 2 - 6, my - 8 + 6 + 3, 0xFFFF_FF55, true);
-        }
     }
 
     fn draw_labels(&mut self, cx: &mut RenderCx<'_, '_>) {
@@ -266,6 +293,52 @@ fn geometry_of(layout: &ContainerLayout, left: i32, top: i32) -> SlotGeometry<'_
     }
 }
 
+impl ContainerScreen {
+    /// `checkHotbarMouseClicked`: hotbar and offhand keys bound to extra mouse buttons swap the hovered slot.
+    fn hotbar_mouse(
+        &mut self,
+        view: &dyn GameView,
+        button: MouseButton,
+        out: &mut Vec<ScreenAction>,
+    ) -> bool {
+        if matches!(button, MouseButton::Left | MouseButton::Right)
+            || (button == MouseButton::Middle && view.creative())
+            || !is_empty(view.carried())
+        {
+            return false;
+        }
+        let keys = view.screen_keys();
+        let target = if keys.swap_offhand.is_mouse(button) {
+            Some(40)
+        } else {
+            keys.hotbar_mouse(button).map(|i| i as i32)
+        };
+        let (Some(target), Some(slot)) = (target, self.hovered_slot()) else {
+            return false;
+        };
+        self.emit(
+            view,
+            vec![ContainerClick::new(slot as i32, target, ClickType::Swap)],
+            out,
+        );
+        true
+    }
+
+    /// `min(item max, Slot#getMaxStackSize(stack))` for the quick-craft preview.
+    fn slot_max(&self, index: usize, stack: &ItemStack) -> i32 {
+        let max = max_stack(stack);
+        let single = match self.layout.slots.get(index).map(|s| s.kind) {
+            Some(SlotKind::Armor(_) | SlotKind::MountArmor | SlotKind::Saddle) => true,
+            _ => match self.layout.kind {
+                MenuKind::Beacon | MenuKind::Enchantment => index == 0,
+                MenuKind::BrewingStand => index < 3,
+                _ => false,
+            },
+        };
+        if single { max.min(1) } else { max }
+    }
+}
+
 pub(super) fn max_stack(stack: &ItemStack) -> i32 {
     StackView::new(stack).map_or(64, |v| v.max_stack_size())
 }
@@ -284,6 +357,11 @@ impl Screen for ContainerScreen {
     fn tick(&mut self, env: &mut Env<'_>, out: &mut Vec<ScreenAction>) {
         if let Some(name) = self.pending_rename.take() {
             out.push(ScreenAction::RenameItem(name));
+        }
+        match self.layout.kind {
+            MenuKind::Smithing => self.smithing_tick(env.view),
+            MenuKind::Enchantment => self.book.tick_view(env.view),
+            _ => {}
         }
         if let Some(book) = &mut self.recipes {
             book.tick(env.view, &self.layout);
@@ -316,22 +394,31 @@ impl Screen for ContainerScreen {
         }
         self.sync(cx);
         self.draw_background(cx);
+        cx.frame.mark_preview_layer();
         self.widgets.render(cx);
         self.draw_labels(cx);
         self.draw_slots(cx);
         self.draw_ghost(cx);
         self.draw_foreground(cx);
         self.render_recipes(cx);
+        if self.layout.kind == MenuKind::PlayerInventory {
+            crate::gui::effects_list::draw_effects(cx, self.left, self.top, self.layout.width);
+        }
         self.draw_carried(cx);
-        if is_empty(cx.view.carried())
-            && let Some(h) = self.hovered_slot()
-        {
+        if let Some(h) = self.hovered_slot() {
+            let carrying = !is_empty(cx.view.carried());
             if let Some(stack) = cx.view.slot(h).filter(|s| !s.is_empty()) {
-                let lines = cx.item_tooltip(stack);
-                cx.set_tooltip(lines);
-            } else if let Some(book) = &self.recipes {
+                let mut lines = cx.item_tooltip(stack);
+                if !carrying || lines.bundle.is_some() {
+                    lines.select_bundle_item(self.bundle_selected(cx.view, h));
+                    cx.set_tooltip(lines);
+                }
+            } else if !carrying && let Some(book) = &self.recipes {
                 book.ghost_tooltip(cx, h);
             }
+        }
+        if self.layout.kind == MenuKind::Smithing {
+            self.smithing_tooltip(cx);
         }
     }
 
@@ -354,6 +441,9 @@ impl Screen for ContainerScreen {
                 if self.pre_press(env, (x, y), button, out) {
                     return true;
                 }
+                if self.hotbar_mouse(view, button, out) {
+                    return true;
+                }
                 let mut clicks = Vec::new();
                 let g = geometry_of(&self.layout, self.left, self.top);
                 self.machine
@@ -363,6 +453,7 @@ impl Screen for ContainerScreen {
             }
             UiInput::MouseMove { x, y } => {
                 self.mouse = (x, y);
+                self.bundle_hover_changed(view, out);
                 self.drag_scroll(view, y);
                 let g = geometry_of(&self.layout, self.left, self.top);
                 self.machine.mouse_move(&g, view, (x, y));
@@ -379,7 +470,9 @@ impl Screen for ContainerScreen {
                 self.emit(view, clicks, out);
                 true
             }
-            UiInput::Scroll { dy, .. } => self.scroll(view, dy),
+            UiInput::Scroll { dy, .. } => {
+                self.bundle_scroll(view, dy, out) || self.scroll(view, dy)
+            }
             UiInput::Key { key, mods, .. } => {
                 if key == Key::Escape {
                     out.push(ScreenAction::CloseContainer);
@@ -393,7 +486,7 @@ impl Screen for ContainerScreen {
                 if self.text_focused() {
                     return true;
                 }
-                if key == Key::Letter('e') {
+                if view.screen_keys().inventory.is_key(key) {
                     out.push(ScreenAction::CloseContainer);
                     return true;
                 }
@@ -418,11 +511,24 @@ impl Screen for ContainerScreen {
         let (x, y, w, h) = match self.layout.kind {
             MenuKind::PlayerInventory => (26, 8, 49, 70),
             MenuKind::Mount { .. } => (26, 18, 52, 52),
-            MenuKind::Smithing => (121, 20, 40, 60),
-            MenuKind::Enchantment => (14, 14, 38, 31),
             _ => return None,
         };
         Some([self.left + x, self.top + y, w, h])
+    }
+
+    fn screen_preview(&self) -> Option<ScreenPreview> {
+        let (l, t) = (self.left, self.top);
+        match self.layout.kind {
+            MenuKind::Smithing => Some(ScreenPreview::ArmorStand {
+                rect: [l + 121, t + 20, 40, 60],
+            }),
+            MenuKind::Enchantment => Some(ScreenPreview::Book {
+                rect: [l + 14, t + 14, 38, 31],
+                open: [self.book.o_open, self.book.open],
+                flip: [self.book.o_flip, self.book.flip],
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -439,6 +545,7 @@ impl ContainerScreen {
                 book.crafting_slot_clicked(slot, &self.layout);
             }
             self.crafter_hook(view, click, out);
+            self.bundle_clicked(view, &click, out);
             out.push(ScreenAction::ContainerClick(click));
         }
     }
@@ -566,3 +673,22 @@ impl ContainerScreen {
 
 #[allow(dead_code)]
 fn unused(_: MouseButton) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quick_craft_preview_caps_at_the_slot_limit() {
+        let potion = ItemStack::new(
+            mcr_data::v26_3().item_by_name("minecraft:stone").unwrap() as i32,
+            64,
+        );
+        let brewing = ContainerScreen::new(MenuKind::BrewingStand, Component::text(""));
+        assert_eq!(brewing.slot_max(0, &potion), 1);
+        assert_eq!(brewing.slot_max(3, &potion), 64);
+        let inventory = ContainerScreen::player_inventory();
+        assert_eq!(inventory.slot_max(5, &potion), 1);
+        assert_eq!(inventory.slot_max(10, &potion), 64);
+    }
+}

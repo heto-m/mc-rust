@@ -13,12 +13,17 @@ use mcr_protocol::types::component::HolderSet;
 use mcr_protocol::types::entity_data::EntityDataValue;
 use mcr_protocol::types::game::GameType;
 use mcr_protocol::types::item::ItemStack;
-use mcr_ui::{CommandSuggester, GameView, MerchantInfo, Suggestion, SuggestionSet, TradeOffer};
+use mcr_ui::{
+    CommandSuggester, GameView, MapInfo, MerchantInfo, RegistryRef, Suggestion, SuggestionSet,
+    TooltipFlags, TooltipLines, TooltipSource, TradeOffer,
+};
 use rustc_hash::FxHashMap;
 
 pub struct StateView<'a> {
     pub state: &'a ClientState,
     pub operator_items: bool,
+    pub advanced_tooltips: bool,
+    pub keys: mcr_ui::ScreenKeys,
     pub cache: &'a ViewCache,
 }
 
@@ -33,6 +38,55 @@ pub struct ViewCache {
     stonecutter_key: Option<(i32, i32, u64)>,
     stonecutter: Vec<ItemStack>,
     trim_materials: Vec<String>,
+    tooltip: RefCell<Option<CachedTooltip>>,
+}
+
+/// The tooltip of the last hovered stack; it is rebuilt only when the stack or the flags change.
+struct CachedTooltip {
+    stack: ItemStack,
+    flags: TooltipFlags,
+    lines: TooltipLines,
+}
+
+/// Registry and map lookups for tooltips over the client state.
+pub struct TooltipCx<'a>(pub &'a ClientState);
+
+impl TooltipSource for TooltipCx<'_> {
+    fn entry(&self, registry: &str, id: i32) -> Option<RegistryRef<'_>> {
+        let e = self.0.registries.get(registry)?.get(id)?;
+        Some(RegistryRef {
+            id,
+            name: e.id.as_str(),
+            data: e.data.as_ref(),
+        })
+    }
+
+    fn entry_named(&self, registry: &str, name: &str) -> Option<RegistryRef<'_>> {
+        let r = self.0.registries.get(registry)?;
+        let id = r.id_of(name)?;
+        let e = r.get(i32::try_from(id).ok()?)?;
+        Some(RegistryRef {
+            id: id as i32,
+            name: e.id.as_str(),
+            data: e.data.as_ref(),
+        })
+    }
+
+    fn tag(&self, registry: &str, tag: &str) -> Option<&[i32]> {
+        self.0.registries.tag(registry, tag)
+    }
+
+    fn map_info(&self, id: i32) -> Option<MapInfo> {
+        let map = self.0.gameplay.maps.get(&id)?;
+        Some(MapInfo {
+            scale: map.scale,
+            locked: map.locked,
+        })
+    }
+
+    fn tick_rate(&self) -> f32 {
+        self.0.world.tick_rate
+    }
 }
 
 impl ViewCache {
@@ -207,6 +261,17 @@ impl GameView for StateView<'_> {
         self.state.player.game_mode == GameType::Spectator
     }
 
+    fn screen_keys(&self) -> mcr_ui::ScreenKeys {
+        self.keys
+    }
+
+    fn may_build(&self) -> bool {
+        matches!(
+            self.state.player.game_mode,
+            GameType::Survival | GameType::Creative
+        )
+    }
+
     fn sleeping(&self) -> bool {
         self.state.player.is_sleeping()
     }
@@ -225,6 +290,59 @@ impl GameView for StateView<'_> {
 
     fn trim_materials(&self) -> &[String] {
         &self.cache.trim_materials
+    }
+
+    fn active_effects(&self) -> Vec<mcr_ui::ActiveEffect> {
+        let Some(registry) = self.state.data.registry("minecraft:mob_effect") else {
+            return Vec::new();
+        };
+        self.state
+            .player
+            .effects
+            .iter()
+            .filter_map(|(&id, e)| {
+                Some(mcr_ui::ActiveEffect {
+                    effect: registry.name_of(u32::try_from(id).ok()?)?.to_owned(),
+                    amplifier: e.amplifier,
+                    duration: e.duration_ticks,
+                    ambient: e.flags & 1 != 0,
+                })
+            })
+            .collect()
+    }
+
+    fn tick_rate(&self) -> f32 {
+        self.state.world.tick_rate
+    }
+
+    fn map(&self, id: i32) -> Option<mcr_ui::MapView<'_>> {
+        let map = self.state.gameplay.maps.get(&id)?;
+        Some(mcr_ui::MapView {
+            colors: &map.colors,
+            scale: map.scale,
+            locked: map.locked,
+        })
+    }
+
+    fn item_tooltip(&self, stack: &ItemStack) -> Option<TooltipLines> {
+        let flags = TooltipFlags {
+            advanced: self.advanced_tooltips,
+            creative: self.state.player.instabuild,
+        };
+        let mut cache = self.cache.tooltip.borrow_mut();
+        if let Some(c) = cache.as_ref()
+            && c.flags == flags
+            && c.stack == *stack
+        {
+            return Some(c.lines.clone());
+        }
+        let lines = mcr_ui::item_tooltip(stack, &TooltipCx(self.state), flags);
+        *cache = Some(CachedTooltip {
+            stack: stack.clone(),
+            flags,
+            lines: lines.clone(),
+        });
+        Some(lines)
     }
 
     fn score(&self) -> i32 {
@@ -557,6 +675,8 @@ mod tests {
         StateView {
             state,
             operator_items: false,
+            advanced_tooltips: false,
+            keys: mcr_ui::ScreenKeys::default(),
             cache,
         }
     }

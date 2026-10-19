@@ -400,6 +400,26 @@ mod tests {
     }
 
     #[test]
+    fn left_clicks_that_fill_or_empty_a_bundle_are_left_to_the_server() {
+        let bundle = mcr_data::v26_3().item_by_name("minecraft:bundle").unwrap() as i32;
+        let mut inv = Inventory {
+            cursor: stack(bundle, 1),
+            ..Inventory::default()
+        };
+        inv.player.slots[10] = stack(1, 5);
+        inv.predict_click(&cx(), false, 0, 10, 0, ContainerInput::Pickup);
+        assert_eq!(inv.cursor.item, bundle);
+        assert_eq!(inv.player.slots[10].count, 5);
+        inv.cursor = stack(1, 5);
+        inv.player.slots[10] = stack(bundle, 1);
+        inv.predict_click(&cx(), false, 0, 10, 0, ContainerInput::Pickup);
+        assert_eq!((inv.cursor.item, inv.player.slots[10].item), (1, bundle));
+        inv.cursor = ItemStack::default();
+        inv.predict_click(&cx(), false, 0, 10, 0, ContainerInput::Pickup);
+        assert_eq!(inv.cursor.item, bundle);
+    }
+
+    #[test]
     fn hotbar_swap_exchanges_slots() {
         let mut inv = Inventory::default();
         inv.player.slots[10] = stack(1, 2);

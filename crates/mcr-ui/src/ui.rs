@@ -59,6 +59,8 @@ pub struct Batch {
     pub cmds: Vec<DrawCmd>,
     pub scale: u32,
     pub framebuffer: (u32, u32),
+    /// First quad drawn above the app's 3D screen preview, when a screen marked one.
+    pub preview_split: Option<u32>,
 }
 
 impl Batch {
@@ -201,6 +203,7 @@ impl Ui {
         self.frames += 1;
         self.batch.vertices.clear();
         self.batch.cmds.clear();
+        self.batch.preview_split = None;
         self.batch.scale = scale;
         self.batch.framebuffer = (width, height);
         UiFrame {
@@ -249,6 +252,11 @@ fn uv_corners(uv: [f32; 4]) -> [[f32; 2]; 4] {
 impl UiFrame<'_> {
     pub fn gui_size(&self) -> (i32, i32) {
         (self.gui_width, self.gui_height)
+    }
+
+    /// Everything drawn after this goes above the screen's 3D preview, like vanilla's background layer.
+    pub fn mark_preview_layer(&mut self) {
+        self.ui.batch.preview_split = Some(self.ui.batch.quad_count() as u32);
     }
 
     pub fn scale(&self) -> u32 {

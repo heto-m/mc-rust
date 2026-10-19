@@ -18,7 +18,14 @@ pub use atlas::{Atlas, Slot};
 pub use error::{Result, UiError};
 pub use font::{Baked, FontOptions, Fonts, GlyphInfo};
 pub use gui::*;
-pub use items::{IconStats, ItemIcons, ItemView, StackView, durability_bar};
+pub use items::{
+    BundleWeight, EffectCategory, EffectInfo, IconStats, ItemDefaults, ItemIcons, ItemRef,
+    ItemView, MAP_SIZE, MapInfo, NoTooltipSource, RegistryRef, StackView, TooltipFlags,
+    TooltipSource, bundle_bar, bundle_contents, bundle_items, bundle_weight, durability_bar,
+    effect_description, effect_info, enchantment_name, format_amount, format_ticks, hover_name,
+    is_bundle, item_defaults, item_weight, items_to_show, map_color, map_rgba, rarity_color,
+    styled_hover_name, tooltip_lines, weight_safe,
+};
 pub use lang::{DEFAULT_LANGUAGE, LanguageInfo, available_languages};
 pub use renderer::{UiRenderer, UiStats};
 pub use screens::{

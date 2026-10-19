@@ -78,6 +78,7 @@ impl<'a> StackView<'a> {
             props: self,
             glint: self.has_foil(),
             cooldown,
+            bar: super::bundle::bundle_bar(self.stack),
         }
     }
 }

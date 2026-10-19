@@ -58,6 +58,11 @@ pub enum ScreenAction {
         enabled: bool,
     },
     SelectTrade(usize),
+    /// The bundle in menu slot `slot` selected content `index`, or -1 to clear it.
+    SelectBundleItem {
+        slot: i32,
+        index: i32,
+    },
     RenameItem(String),
     SetBeacon {
         primary: Option<String>,
@@ -149,6 +154,11 @@ impl std::fmt::Debug for ScreenAction {
                 .finish(),
             Self::SelectTrade(i) => f.debug_tuple("SelectTrade").field(i).finish(),
             Self::RenameItem(s) => f.debug_tuple("RenameItem").field(s).finish(),
+            Self::SelectBundleItem { slot, index } => f
+                .debug_struct("SelectBundleItem")
+                .field("slot", slot)
+                .field("index", index)
+                .finish(),
             Self::SetBeacon { primary, secondary } => f
                 .debug_struct("SetBeacon")
                 .field("primary", primary)
@@ -232,6 +242,19 @@ impl ScreenAction {
     }
 }
 
+/// A 3D picture the app draws for the screen, besides the local player in [`Screen::entity_rect`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScreenPreview {
+    /// The smithing result worn by an armour stand.
+    ArmorStand { rect: [i32; 4] },
+    /// The enchanting table book; `open` and `flip` are the previous and current tick's values.
+    Book {
+        rect: [i32; 4],
+        open: [f32; 2],
+        flip: [f32; 2],
+    },
+}
+
 pub trait Screen {
     fn init(&mut self, width: i32, height: i32);
 
@@ -262,6 +285,10 @@ pub trait Screen {
 
     /// Rectangle (x, y, w, h) in GUI pixels where the app may draw a 3D preview such as the player model.
     fn entity_rect(&self) -> Option<[i32; 4]> {
+        None
+    }
+
+    fn screen_preview(&self) -> Option<ScreenPreview> {
         None
     }
 
