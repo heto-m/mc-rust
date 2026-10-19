@@ -6,14 +6,15 @@
 //! - `w0`: x `[0,5)`, y `[5,10)`, z `[10,15)` block coords inside the section, face `[15,18)`,
 //!   width-1 `[18,22)`, height-1 `[22,26)`, tint kind `[26,32)`.
 //! - `w1`: texture layer `[0,16)`, AO `[16,28)` as four 3-bit levels (0..=4, brightness `0.2 + 0.2 * level`),
-//!   UV orientation `[28,31)`: quarter turns in the low two bits, bit 2 mirrors u first.
+//!   UV orientation `[28,31)`: quarter turns in the low two bits, bit 2 mirrors u first; bit 31 draws the
+//!   texture without alpha cutout.
 //! - `w2`, `w3`: corner light, corners 0,1 and 2,3, 16 bits each.
 //!
 //! Model quad, 40 bytes (ten `u32`):
 //! - `w0..w3`: corner offsets from the base cell, `x[0,9) y[9,18) z[18,27)` in 1/128 block with a -1 block
 //!   bias; the spare top bits of `w0..w2` hold the base cell x, y, z (4 bits each, `[27,31)`).
 //! - `w4,w5`: corner UVs, 16 bits each (`u[0,8) v[8,16)`, 1/16 tile units), corners 0,1 and 2,3.
-//! - `w6`: layer `[0,16)`, shading face `[16,19)`, flags `[19,24)`, tint kind `[24,30)`.
+//! - `w6`: layer `[0,16)`, shading face `[16,19)`, flags `[19,24)` (`MODEL_FLAG_*`), tint kind `[24,30)`.
 //! - `w7,w8`: corner light, corners 0,1 and 2,3, 16 bits each.
 //! - `w9`: AO as four 6-bit brightness values (`v / 63`) `[0,24)`.
 //!
@@ -72,6 +73,11 @@ pub const fn light_block(light: u16) -> u8 {
     light as u8
 }
 
+/// Model quad flag: the texture is drawn without alpha cutout.
+pub const MODEL_FLAG_OPAQUE: u8 = 1;
+/// Model quad flag: also shaded by the up face, like vanilla's fluid sides.
+pub const MODEL_FLAG_UP_SHADE: u8 = 2;
+
 /// Full daylight and no block light.
 pub const LIGHT_FULL_SKY: u16 = pack_light(240, 0);
 
@@ -104,6 +110,7 @@ pub struct CubeQuad {
     pub light: [u16; 4],
     pub tint: u8,
     pub rotation: u8,
+    pub opaque: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
@@ -140,7 +147,10 @@ impl PackedQuad {
             | u32::from(q.width - 1) << 18
             | u32::from(q.height - 1) << 22
             | check("tint", q.tint.into(), 63)? << 26;
-        let w1 = u32::from(q.layer) | ao << 16 | check("rotation", q.rotation.into(), 7)? << 28;
+        let w1 = u32::from(q.layer)
+            | ao << 16
+            | check("rotation", q.rotation.into(), 7)? << 28
+            | u32::from(q.opaque) << 31;
         let l = |i: usize| u32::from(q.light[i]);
         Ok(Self([w0, w1, l(0) | l(1) << 16, l(2) | l(3) << 16]))
     }
@@ -159,6 +169,7 @@ impl PackedQuad {
             light: [w2 as u16, (w2 >> 16) as u16, w3 as u16, (w3 >> 16) as u16],
             tint: (w0 >> 26) as u8,
             rotation: (w1 >> 28 & 7) as u8,
+            opaque: w1 >> 31 != 0,
         }
     }
 
@@ -286,6 +297,35 @@ impl ModelQuad {
     }
 }
 
+/// Section-local centre of a model quad, the point vanilla's translucent sort measures from.
+pub fn model_centroid(q: &ModelQuad) -> [f32; 3] {
+    let mut sum = [0u32; 3];
+    for w in &q.0[..4] {
+        sum[0] += w & 511;
+        sum[1] += w >> 9 & 511;
+        sum[2] += w >> 18 & 511;
+    }
+    std::array::from_fn(|a| sum[a] as f32 / (4.0 * POS_SCALE) - 1.0 + (q.0[a] >> 27 & 15) as f32)
+}
+
+/// Orders translucent quads back to front from `eye` (section-local), like vanilla's
+/// `VertexSorting.byDistance`: farthest centroid first, ties in their original order.
+pub fn sort_back_to_front(quads: &mut [ModelQuad], eye: [f32; 3], scratch: &mut Vec<u64>) {
+    scratch.clear();
+    scratch.extend(quads.iter().enumerate().map(|(i, q)| {
+        let c = model_centroid(q);
+        let d = (0..3)
+            .map(|a| (c[a] - eye[a]) * (c[a] - eye[a]))
+            .sum::<f32>();
+        u64::from(!d.to_bits()) << 32 | i as u64
+    }));
+    scratch.sort_unstable();
+    let original = quads.to_vec();
+    for (slot, key) in quads.iter_mut().zip(scratch.iter()) {
+        *slot = original[(*key & 0xffff_ffff) as usize];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +343,7 @@ mod tests {
             light: [0xf000, 0x00f0, 0x1234, 0xffff],
             tint: 63,
             rotation: 7,
+            opaque: true,
         }
     }
 
@@ -382,6 +423,37 @@ mod tests {
         let mut q = sample_model();
         q.ao[0] = 64;
         assert!(ModelQuad::encode(&q).is_err());
+    }
+
+    #[test]
+    fn centroid_is_the_mean_corner() {
+        let q = ModelQuad::encode(&sample_model()).unwrap();
+        let c = model_centroid(&q);
+        let corners = q.decode().corners;
+        for a in 0..3 {
+            let mean = corners.iter().map(|p| p[a]).sum::<f32>() / 4.0;
+            assert!((c[a] - mean).abs() < 1e-4, "{a}: {} vs {mean}", c[a]);
+        }
+    }
+
+    #[test]
+    fn sort_puts_the_farthest_quad_first_and_keeps_ties() {
+        let at = |x: f32, layer: u16| {
+            let mut d = sample_model();
+            d.cell = [x as u8, 0, 0];
+            d.corners = [
+                [x, 0.0, 0.0],
+                [x + 1.0, 0.0, 0.0],
+                [x, 1.0, 0.0],
+                [x + 1.0, 1.0, 0.0],
+            ];
+            d.layer = layer;
+            ModelQuad::encode(&d).unwrap()
+        };
+        let mut quads = [at(2.0, 1), at(9.0, 2), at(5.0, 3), at(9.0, 4)];
+        sort_back_to_front(&mut quads, [0.0, 0.5, 0.0], &mut Vec::new());
+        let order: Vec<u16> = quads.iter().map(|q| q.decode().layer).collect();
+        assert_eq!(order, [2, 4, 3, 1]);
     }
 
     #[test]

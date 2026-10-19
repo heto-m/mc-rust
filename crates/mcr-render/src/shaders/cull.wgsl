@@ -107,7 +107,7 @@ fn emit(s: SectionMeta, lo: vec3<f32>, late: bool) {
                 cmd = slot;
             }
             cube_cmds[cmd] = DrawIndexedIndirect(n * 6u, 1u, 0u, 0, slot);
-            cube_draws[slot] = DrawData(lo, offset, s.bases.w, 0u, 0u, 0u);
+            cube_draws[slot] = DrawData(lo, offset, s.bases.w, 0u, s.counts_b.z, 0u);
         }
         offset += n;
     }
@@ -124,7 +124,7 @@ fn emit(s: SectionMeta, lo: vec3<f32>, late: bool) {
             cmd = slot;
         }
         model_cmds[cmd] = DrawIndexedIndirect(s.bases.z * 6u, 1u, 0u, 0, slot);
-        model_draws[slot] = DrawData(lo, s.bases.y, s.bases.w, 0u, 0u, 0u);
+        model_draws[slot] = DrawData(lo, s.bases.y, s.bases.w, 0u, s.counts_b.z, 0u);
     }
 }
 

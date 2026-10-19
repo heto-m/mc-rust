@@ -8,6 +8,7 @@ struct CubeQuad {
     light: vec4<u32>,
     tint: u32,
     rotation: u32,
+    opaque: bool,
 }
 
 fn decode_cube(q: vec4<u32>) -> CubeQuad {
@@ -20,6 +21,7 @@ fn decode_cube(q: vec4<u32>) -> CubeQuad {
     d.layer = q.y & 0xffffu;
     d.ao = vec4<u32>((q.y >> 16u) & 7u, (q.y >> 19u) & 7u, (q.y >> 22u) & 7u, (q.y >> 25u) & 7u);
     d.rotation = (q.y >> 28u) & 7u;
+    d.opaque = (q.y >> 31u) != 0u;
     d.light = vec4<u32>(q.z & 0xffffu, q.z >> 16u, q.w & 0xffffu, q.w >> 16u);
     return d;
 }

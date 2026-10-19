@@ -28,7 +28,7 @@ struct VsOutDyn {
     @location(2) @interpolate(flat) layer: u32,
     @location(3) @interpolate(flat) tint: vec2<u32>,
     @location(4) cell: vec3<f32>,
-    @location(5) fog_distance: vec2<f32>,
+    @location(5) fog_distance: vec3<f32>,
     @location(6) sample_pos: vec3<f32>,
     // Sky level, AO times face shade.
     @location(7) sky_shade: vec2<f32>,
@@ -97,11 +97,11 @@ fn dyn_color(in: VsOutDyn) -> vec3<f32> {
 @fragment
 fn fs_main_dyn(in: VsOutDyn) -> @location(0) vec4<f32> {
     let c = opaque_texel(in.uv, in.layer, in.tint, in.cell) * dyn_color(in);
-    return vec4<f32>(apply_fog(c, in.fog_distance), 1.0);
+    return vec4<f32>(apply_faded_fog(c, in.fog_distance), 1.0);
 }
 
 @fragment
 fn fs_translucent_dyn(in: VsOutDyn) -> @location(0) vec4<f32> {
     let t = translucent_texel(in.uv, in.layer, in.tint, in.cell);
-    return vec4<f32>(apply_fog(t.rgb * dyn_color(in), in.fog_distance), t.a);
+    return vec4<f32>(apply_faded_fog(t.rgb * dyn_color(in), in.fog_distance), t.a);
 }

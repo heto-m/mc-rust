@@ -25,8 +25,9 @@ pub use input::{MeshInput, PAD, PADDED, UNLIT_LIGHT, pidx, quart_index};
 pub use mesher::{MeshOptions, Mesher, Shading};
 pub use pool::{MeshPool, MeshResult};
 pub use random::{JavaRandom, OffsetSpec, block_offset, mth_get_seed, offset_spec};
+pub use simplex::Simplex;
 pub use tint::{
     BiomeClimate, BiomeColors, ColorMaps, DEFAULT_BLEND_RADIUS, GrassModifier, MAX_BLEND_RADIUS,
-    NO_Y, PALETTE_LEN, TINT_CONST_BASE, TINT_DRY_FOLIAGE, TINT_FOLIAGE, TINT_GRASS, TINT_NONE,
-    TINT_WATER, constant_palette, tint_kinds,
+    MAX_TINT_SLOTS, PALETTE_LEN, TINT_CONST_BASE, TINT_DRY_FOLIAGE, TINT_FOLIAGE, TINT_GRASS,
+    TINT_NONE, TINT_WATER, constant_palette, tint_kinds,
 };

@@ -110,6 +110,7 @@ fn shader_decoder_matches_rust_encoder() {
                 light,
                 tint: 5,
                 rotation,
+                opaque: false,
             })
             .unwrap()
         },
@@ -342,6 +343,7 @@ fn one_quad_per_face() -> SectionMesh {
                 light: [LIGHT_FULL_SKY; 4],
                 tint: 0,
                 rotation: 0,
+                opaque: false,
             })
             .unwrap(),
         );
@@ -453,6 +455,7 @@ fn translucent_scene(with_glass: bool) -> Option<[u8; 4]> {
             light: [LIGHT_FULL_SKY; 4],
             tint: 0,
             rotation: 0,
+            opaque: false,
         })
         .unwrap(),
     );
@@ -547,6 +550,9 @@ fn translucent_draws_wait_for_their_upload() {
     blue.translucent.push(glass(1));
     let mut green = wall(0, 0);
     green.translucent.extend([glass(2), glass(2)]);
+    for mesh in [&mut blue, &mut green] {
+        mesh.sort_camera = Some(cam.position.to_array());
+    }
 
     r.set_section([0, 0, 0], &blue).unwrap();
     let first = center(&mut r);
@@ -596,6 +602,7 @@ fn wall(layer: u16, tint: u8) -> SectionMesh {
             light: [LIGHT_FULL_SKY; 4],
             tint,
             rotation: 0,
+            opaque: false,
         })
         .unwrap(),
     );
@@ -659,6 +666,57 @@ fn tint_tables_and_constant_palette_colour_quads() {
     );
 }
 
+#[test]
+fn blocks_pick_their_tint_table_by_height() {
+    let white = [flat_group(&[[255, 255, 255, 255]])];
+    let words = mcr_render::TINT_TABLE_WORDS;
+    let mut tables = vec![0u32; 2 * words];
+    tables[..256].fill(0x00ff00);
+    tables[words..words + 256].fill(0x0000ff);
+    for word in &mut tables[..16] {
+        *word |= 1 << 24;
+    }
+    let mut tinted = wall(0, 1);
+    tinted.tints = Some(tables.into_boxed_slice());
+    let Some(red) = center_pixel(&white, &tinted, &[]) else {
+        return;
+    };
+    assert!(red[0] > 150 && red[1] < 10, "{red:?}");
+}
+
+#[test]
+fn every_texture_filter_mode_draws_the_texture() {
+    use mcr_render::{FilterMode, TextureFilter};
+    for mode in [
+        FilterMode::Rgss,
+        FilterMode::Anisotropic,
+        FilterMode::Nearest,
+    ] {
+        let Some(mut r) = renderer(64, 64) else {
+            return;
+        };
+        r.set_texture_groups(&[flat_group(&[[255, 0, 0, 255]])]);
+        r.set_texture_filter(TextureFilter {
+            mode,
+            anisotropy: 4,
+            mip_levels: 4,
+        });
+        r.set_section([0, 0, 0], &wall(0, 0)).unwrap();
+        let cam = Camera {
+            position: DVec3::new(8.0, 8.0, 20.0),
+            ..Camera::default()
+        };
+        frame(&mut r, &cam);
+        let px = r.read_offscreen().unwrap();
+        let i = (32 * 64 + 32) * 4;
+        assert!(
+            px[i] > 150 && px[i + 1] < 10,
+            "{mode:?}: {:?}",
+            &px[i..i + 4]
+        );
+    }
+}
+
 fn lit_wall(layer: u16, light: u16) -> SectionMesh {
     let mut m = SectionMesh::default();
     m.push_cube(
@@ -674,6 +732,7 @@ fn lit_wall(layer: u16, light: u16) -> SectionMesh {
             light: [light; 4],
             tint: 0,
             rotation: 0,
+            opaque: false,
         })
         .unwrap(),
     );

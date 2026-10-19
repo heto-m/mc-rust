@@ -22,7 +22,7 @@ use glam::{Mat4, Vec3};
 pub use assets::{EffectAssets, EffectImage};
 pub use border::WorldBorderVisual;
 pub use clouds::{CloudMode, CloudSettings};
-pub use destroy::{DestroyDecal, MAX_BOXES_PER_DECAL, MAX_DECALS};
+pub use destroy::{DestroyDecal, MAX_BOXES_PER_DECAL, MAX_DECALS, MAX_QUADS_PER_DECAL};
 pub use weather::{MAX_WEATHER_RADIUS, MIN_WEATHER_RADIUS, Precipitation, WeatherSource};
 
 use crate::environment::{Environment, Skybox};

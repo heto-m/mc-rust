@@ -15,9 +15,30 @@ pub struct SectionMesh {
     pub faces: [Vec<PackedQuad>; 6],
     pub model: Vec<ModelQuad>,
     pub translucent: Vec<ModelQuad>,
-    pub tints: Option<Box<TintTable>>,
+    /// One or more [`TintTable`]s back to back; the top byte of word `y` of the first names the table
+    /// that blocks at section-local height `y` read.
+    pub tints: Option<Box<[u32]>>,
     /// Face-to-face connectivity through non-opaque cells, kept even when the mesh is empty.
     pub visibility: SectionVisibility,
+    /// The world camera position `translucent` is sorted back to front for.
+    pub sort_camera: Option<[f64; 3]>,
+}
+
+/// The tint colour of `kind` (1 to 4) at a section-local block in `tables`.
+pub fn tint_at(tables: &[u32], kind: u8, x: u8, y: u8, z: u8) -> u32 {
+    let slot = tables
+        .get(usize::from(y & 15))
+        .map_or(0, |w| (w >> 24) as usize);
+    let at = |slot: usize| {
+        slot * TINT_TABLE_WORDS
+            + (usize::from(kind).clamp(1, TINT_KINDS) - 1) * 256
+            + usize::from(z & 15) * 16
+            + usize::from(x & 15)
+    };
+    tables
+        .get(at(slot))
+        .or_else(|| tables.get(at(0)))
+        .map_or(0, |c| c & 0xff_ffff)
 }
 
 impl SectionMesh {
@@ -39,5 +60,6 @@ impl SectionMesh {
         self.translucent.clear();
         self.tints = None;
         self.visibility = SectionVisibility::ALL;
+        self.sort_camera = None;
     }
 }

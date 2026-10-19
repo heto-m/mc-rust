@@ -583,6 +583,36 @@ pub fn beam_sections(
     sections
 }
 
+/// Vanilla's `BeaconBlockEntity#updateBase`: complete pyramid layers under the beacon at `pos`, up to
+/// four, each a square of `is_base` blocks one wider per step.
+pub fn beacon_levels(
+    pos: [i32; 3],
+    min_y: i32,
+    mut is_base: impl FnMut(i32, i32, i32) -> bool,
+) -> u8 {
+    let mut levels = 0;
+    for step in 1..=4 {
+        let (Some(y), Some(x0), Some(x1), Some(z0), Some(z1)) = (
+            pos[1].checked_sub(step),
+            pos[0].checked_sub(step),
+            pos[0].checked_add(step),
+            pos[2].checked_sub(step),
+            pos[2].checked_add(step),
+        ) else {
+            break;
+        };
+        if y < min_y {
+            break;
+        }
+        let full = (x0..=x1).all(|x| (z0..=z1).all(|z| is_base(x, y, z)));
+        if !full {
+            break;
+        }
+        levels = step as u8;
+    }
+    levels
+}
+
 fn mix(a: u32, b: u32) -> u32 {
     let ch = |shift: u32| (((a >> shift) & 0xFF) + ((b >> shift) & 0xFF)) / 2;
     (ch(16) << 16) | (ch(8) << 8) | ch(0)
@@ -838,6 +868,28 @@ mod tests {
         assert_eq!(sections[1].color, 0xFF0000);
         assert_eq!(sections[2].color, 0x7F007F);
         assert_eq!(sections.iter().map(|s| s.height).sum::<i32>(), 21);
+    }
+
+    #[test]
+    fn beacon_levels_count_complete_layers() {
+        let pyramid = |levels: i32| {
+            move |x: i32, y: i32, z: i32| {
+                let step = 10 - y;
+                (1..=levels).contains(&step) && x.abs() <= step && z.abs() <= step
+            }
+        };
+        assert_eq!(beacon_levels([0, 10, 0], -64, |_, _, _| false), 0);
+        assert_eq!(beacon_levels([0, 10, 0], -64, pyramid(1)), 1);
+        assert_eq!(beacon_levels([0, 10, 0], -64, pyramid(4)), 4);
+        assert_eq!(beacon_levels([0, 10, 0], -64, |_, _, _| true), 4);
+        let holed = |x: i32, y: i32, z: i32| pyramid(4)(x, y, z) && (x, y, z) != (2, 8, -1);
+        assert_eq!(beacon_levels([0, 10, 0], -64, holed), 1);
+        assert_eq!(beacon_levels([0, -63, 0], -64, |_, _, _| true), 1);
+        assert_eq!(
+            beacon_levels([i32::MAX, 0, i32::MIN], -64, |_, _, _| true),
+            0
+        );
+        assert_eq!(beacon_levels([0, i32::MIN, 0], i32::MIN, |_, _, _| true), 0);
     }
 
     #[test]

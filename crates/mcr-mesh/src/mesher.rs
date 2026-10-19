@@ -3,37 +3,40 @@
 use std::sync::Arc;
 
 use mcr_render::{
-    CubeQuad, Face, ModelQuad, ModelQuadDesc, PackedQuad, SectionMesh, cube_ao_brightness, model_ao,
+    CubeQuad, Face, MODEL_FLAG_OPAQUE, ModelQuad, ModelQuadDesc, PackedQuad, SectionMesh,
+    cube_ao_brightness, model_ao,
 };
 
 use crate::cache::{
-    ATTR_AIR, ATTR_EMISSIVE, ATTR_FULL_COLLISION, ATTR_HALF_TRANSPARENT, ATTR_LEAVES,
-    ATTR_LIGHT_OPAQUE, ATTR_SOLID_RENDER, Alt, CubeFace, FluidKind, LAYER_NONE, META_ATTR_MASK,
-    META_EMISSION_SHIFT, META_FULL_SHIFT, META_PARTIAL_SHIFT, ModelCache, NO_CULL, QuadDef,
-    RenderLayer, Shape, StateModel,
+    ATTR_AIR, ATTR_EMISSIVE, ATTR_FULL_COLLISION, ATTR_LIGHT_OPAQUE, ATTR_SOLID_RENDER, Alt,
+    CubeFace, FluidKind, LAYER_NONE, META_ATTR_MASK, META_EMISSION_SHIFT, META_FULL_SHIFT,
+    META_PARTIAL_SHIFT, META_SHADE_DARK, ModelCache, NO_CULL, Picks, QuadDef, RenderLayer, Shape,
+    SkipRule, StateModel,
 };
 use crate::faces::{
     NORMAL, RENDER_TO_VANILLA, TANGENTS, VANILLA_OFFSET, axis, corner_position, corner_uv,
 };
 use crate::fluid;
 use crate::input::{MeshInput, PADDED, pidx};
-use crate::random::{JavaRandom, OFFSET_NONE, block_offset, mth_get_seed};
-use crate::tint::{BiomeColors, NO_Y, TINT_WATER};
+use crate::random::{OFFSET_NONE, block_offset};
+use crate::tint::{BiomeColors, TINT_WATER};
 use crate::visgraph::section_visibility;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MeshOptions {
     pub greedy: bool,
-    /// Drops faces between two leaves that are both enclosed by leaves or opaque blocks, so dense
-    /// canopies lose their interior faces while every leaf on the surface keeps its fancy look.
-    pub leaves_culling: bool,
+    /// Vanilla's `cutoutLeaves`: off draws leaves opaque and hides the faces between them.
+    pub cutout_leaves: bool,
+    /// Vanilla's `ao` option: off lights every block flat.
+    pub ambient_occlusion: bool,
 }
 
 impl Default for MeshOptions {
     fn default() -> Self {
         Self {
             greedy: true,
-            leaves_culling: true,
+            cutout_leaves: true,
+            ambient_occlusion: true,
         }
     }
 }
@@ -98,6 +101,7 @@ pub(crate) struct Ctx<'a> {
     pub light: &'a [u8; PADDED],
     pub meta: &'a [u32; PADDED],
     pub origin: [i32; 3],
+    pub cutout_leaves: bool,
 }
 
 #[inline]
@@ -129,13 +133,6 @@ impl Ctx<'_> {
         (self.meta(c) & META_ATTR_MASK) as u8
     }
 
-    /// Every neighbour is leaves or an opaque full block; unknown cells past the padding are not.
-    fn enclosed(&self, c: [i32; 3]) -> bool {
-        NORMAL
-            .iter()
-            .all(|n| self.attr(add(c, *n)) & (ATTR_LEAVES | ATTR_SOLID_RENDER) != 0)
-    }
-
     /// Sky and block light at `c` as vanilla's `getLightCoords` reads it: emitting blocks raise block
     /// light and emissive ones are fully bright.
     #[inline]
@@ -157,9 +154,9 @@ impl Ctx<'_> {
         self.attr(c) & ATTR_LIGHT_OPAQUE == 0
     }
 
-    /// Shade in fifths: 1 for full-collision blocks, 5 otherwise.
+    /// Vanilla's shade brightness in fifths: 1 (0.2) or 5 (1.0).
     fn shade5(&self, c: [i32; 3]) -> i32 {
-        if self.attr(c) & ATTR_FULL_COLLISION != 0 {
+        if self.meta(c) & META_SHADE_DARK != 0 {
             1
         } else {
             5
@@ -174,12 +171,10 @@ impl Ctx<'_> {
             return false;
         }
         let nid = self.state(neighbor);
-        if skips_same(
-            self.cache.attr(state),
-            self.cache.state(state).block,
-            self.cache,
-            nid,
-        ) {
+        if self
+            .cache
+            .skips(self.cache.state(state), nid, face, self.cutout_leaves)
+        {
             return false;
         }
         if m >> (META_PARTIAL_SHIFT + opp as u32) & 1 == 0 {
@@ -213,9 +208,10 @@ pub struct Mesher {
     occupied: Vec<[u64; 4]>,
     overlays: [Vec<PackedQuad>; 6],
     meta: Vec<u32>,
-    tint_y: [u8; 256],
+    tint_levels: [u16; 256],
     flood: Vec<u16>,
     pub(crate) fluid_tops: Vec<fluid::FluidTop>,
+    sort_keys: Vec<u64>,
 }
 
 impl std::fmt::Debug for Mesher {
@@ -235,8 +231,11 @@ struct Key {
     otint: u8,
     rot: u8,
     orot: u8,
+    opaque: bool,
     shading: Shading,
 }
+
+const KEY_OPAQUE: u128 = 1 << 126;
 
 fn pack_key(k: &Key) -> u128 {
     let mut ao = 0u128;
@@ -248,6 +247,7 @@ fn pack_key(k: &Key) -> u128 {
         light |= u128::from(*l) << (16 * i);
     }
     VALID
+        | if k.opaque { KEY_OPAQUE } else { 0 }
         | u128::from(k.layer)
         | u128::from(k.overlay) << 16
         | u128::from(k.tint) << 32
@@ -285,14 +285,6 @@ fn cube_slots(face: usize) -> [usize; 4] {
     }
 }
 
-const MAX_PARTS: usize = 32;
-
-/// The chosen alternative of every part of a random model.
-struct Picks {
-    alts: [u32; MAX_PARTS],
-    count: usize,
-}
-
 impl Mesher {
     pub fn new(cache: Arc<ModelCache>, colors: Arc<BiomeColors>) -> Self {
         Self::with_options(cache, colors, MeshOptions::default())
@@ -312,14 +304,24 @@ impl Mesher {
             occupied: vec![[0; 4]; 6 * 16],
             overlays: Default::default(),
             meta: vec![0; PADDED],
-            tint_y: [NO_Y; 256],
+            tint_levels: [0; 256],
             flood: Vec::new(),
             fluid_tops: Vec::new(),
+            sort_keys: Vec::new(),
         }
     }
 
     pub fn cache(&self) -> &Arc<ModelCache> {
         &self.cache
+    }
+
+    fn smooth(&self, sm: &StateModel) -> bool {
+        sm.ao && self.options.ambient_occlusion
+    }
+
+    /// Vanilla's `forceOpaque`: leaves without cutout draw their transparent texels.
+    fn forced_opaque(&self, sm: &StateModel) -> bool {
+        !self.options.cutout_leaves && sm.skip == SkipRule::Leaves
     }
 
     pub fn mesh(&mut self, input: &MeshInput, out: &mut SectionMesh) {
@@ -340,10 +342,11 @@ impl Mesher {
             states: &input.states,
             light: &input.light,
             meta: meta.as_slice().try_into().expect("padded size"),
-            origin: [input.pos.x * 16, input.pos.y * 16, input.pos.z * 16],
+            origin: [input.pos.x, input.pos.y, input.pos.z].map(|v| v.wrapping_mul(16)),
+            cutout_leaves: self.options.cutout_leaves,
         };
         self.occupied.iter_mut().for_each(|o| *o = [0; 4]);
-        self.tint_y = [NO_Y; 256];
+        self.tint_levels = [0; 256];
         self.fluid_tops.clear();
         let mut needs_tint = false;
         const STEP: [usize; 6] = [1, 1, 18 * 18, 18 * 18, 18, 18];
@@ -382,6 +385,7 @@ impl Mesher {
                 }
             }
         }
+        let ctx_origin = ctx.origin;
         out.visibility = section_visibility(
             meta.as_slice().try_into().expect("padded size"),
             &mut self.flood,
@@ -390,22 +394,24 @@ impl Mesher {
         self.flush_cubes(out);
 
         if needs_tint {
-            let mut table = self.colors.new_table();
-            self.colors
-                .fill_table_zoomed(input, &self.tint_y, &mut table);
-            out.tints = Some(table);
+            out.tints = Some(self.colors.fill_tables(input, &self.tint_levels));
         }
         let tints = out.tints.take();
         self.flush_fluid_tops(tints.as_deref(), out);
         out.tints = tints;
+        if let Some(cam) = input.camera
+            && !out.translucent.is_empty()
+        {
+            let eye = std::array::from_fn(|a| (cam[a] - f64::from(ctx_origin[a])) as f32);
+            mcr_render::sort_back_to_front(&mut out.translucent, eye, &mut self.sort_keys);
+            out.sort_camera = Some(cam);
+        }
     }
 
     pub(crate) fn note_tint(&mut self, cell: [i32; 3]) {
         let col = cell[2] as usize * 16 + cell[0] as usize;
         let y = cell[1] as u8;
-        if self.tint_y[col] == NO_Y || self.tint_y[col] < y {
-            self.tint_y[col] = y;
-        }
+        self.tint_levels[col] |= 1 << y;
     }
 
     /// Corner light and occlusion for a quad facing `face`, shaded around `base` with `center` the cell
@@ -475,46 +481,11 @@ impl Mesher {
     }
 
     fn world_cell(ctx: &Ctx, cell: [i32; 3]) -> [i32; 3] {
-        add(ctx.origin, cell)
+        std::array::from_fn(|a| ctx.origin[a].wrapping_add(cell[a]))
     }
 
     fn picks(&self, ctx: &Ctx, cell: [i32; 3], sm: &StateModel) -> Picks {
-        let w = Self::world_cell(ctx, cell);
-        let model = self.cache.random_model(sm).expect("random state");
-        let mut rng = JavaRandom::new(mth_get_seed(w[0], w[1], w[2]));
-        let mut picks = Picks {
-            alts: [0; MAX_PARTS],
-            count: 0,
-        };
-        let seed = if model.multipart {
-            Some(rng.next_long())
-        } else {
-            None
-        };
-        for p in 0..(model.part_count as usize).min(MAX_PARTS) {
-            if let Some(s) = seed {
-                rng.set_seed(s);
-            }
-            let span = self.cache.part_span(model.part_start + p as u32);
-            let alt = if span.alt_count > 1 {
-                let mut roll = rng.next_int(span.total_weight as i32) as u32;
-                let mut chosen = span.alt_start;
-                for a in span.alt_start..span.alt_start + span.alt_count {
-                    let weight = self.cache.alt(a).weight;
-                    if roll < weight {
-                        chosen = a;
-                        break;
-                    }
-                    roll -= weight;
-                }
-                chosen
-            } else {
-                span.alt_start
-            };
-            picks.alts[p] = alt;
-            picks.count = p + 1;
-        }
-        picks
+        self.cache.picks(sm, Self::world_cell(ctx, cell))
     }
 
     fn cube(
@@ -533,6 +504,7 @@ impl Mesher {
         };
         let mut tinted = false;
         let attr = ctx.attr(cell);
+        let opaque = self.forced_opaque(sm);
         for (face, cf) in faces.iter().copied().enumerate() {
             if cf.layer == LAYER_NONE {
                 continue;
@@ -541,15 +513,7 @@ impl Mesher {
             if !ctx.face_visible(id, neighbor, face) {
                 continue;
             }
-            if self.options.leaves_culling
-                && attr & ATTR_LEAVES != 0
-                && ctx.attr(neighbor) & ATTR_LEAVES != 0
-                && ctx.enclosed(cell)
-                && ctx.enclosed(neighbor)
-            {
-                continue;
-            }
-            let shading = if sm.ao {
+            let shading = if self.smooth(sm) {
                 self.shade(ctx, face, neighbor, neighbor)
             } else {
                 Self::flat(ctx, neighbor, sm, attr)
@@ -574,6 +538,7 @@ impl Mesher {
                 otint: cf.overlay_tint,
                 rot: cf.rot,
                 orot: cf.overlay_rot,
+                opaque,
                 shading,
             });
             self.keys[(face * 16 + slice) * 256 + v * 16 + u] = key;
@@ -683,6 +648,7 @@ impl Mesher {
                     light: key_light(key),
                     tint: (key >> 32 & 63) as u8,
                     rotation: (key >> 44 & 7) as u8,
+                    opaque: key & KEY_OPAQUE != 0,
                 };
                 if let Ok(p) = PackedQuad::encode(&q) {
                     out.faces[face].push(p);
@@ -768,7 +734,7 @@ impl Mesher {
         let face = usize::from(qd.normal);
         let front = add(cell, NORMAL[face]);
         let cubic = qd.boundary || (qd.flat && ctx.attr(cell) & ATTR_FULL_COLLISION != 0);
-        let shading = if sm.ao {
+        let shading = if self.smooth(sm) {
             let memo = face * 2 + usize::from(cubic);
             *st.shaded[memo].get_or_insert_with(|| {
                 let base = if cubic { front } else { cell };
@@ -812,7 +778,7 @@ impl Mesher {
             let block: f32 = (0..4)
                 .map(|c| w[c] * f32::from(mcr_render::light_block(shading.light[c])))
                 .sum();
-            light[s] = mcr_render::pack_light(sky as u8, block as u8);
+            light[s] = with_emission(mcr_render::pack_light(sky as u8, block as u8), qd.emission);
             let b: f32 = (0..4)
                 .map(|c| w[c] * cube_ao_brightness(shading.ao[c]))
                 .sum();
@@ -824,7 +790,11 @@ impl Mesher {
             layer: qd.layer,
             light,
             shade_face: FACE_TO_PACKED[usize::from(qd.shade)],
-            flags: 0,
+            flags: if self.forced_opaque(sm) {
+                MODEL_FLAG_OPAQUE
+            } else {
+                0
+            },
             ao,
             tint: qd.tint,
             cell: [cell[0] as u8, cell[1] as u8, cell[2] as u8],
@@ -865,13 +835,17 @@ struct ModelState<'a, 'b> {
     tinted: bool,
 }
 
-/// Whether faces of a glass-like block against neighbour state `nid` are hidden because both are the
-/// same block.
-fn skips_same(attr: u8, block: u16, cache: &ModelCache, nid: u32) -> bool {
-    attr & ATTR_HALF_TRANSPARENT != 0
-        && attr & ATTR_LEAVES == 0
-        && cache.attr(nid) & ATTR_HALF_TRANSPARENT != 0
-        && cache.state(nid).block == block
+/// Vanilla's `lightCoordsWithEmission`: an emitting element lights both channels to at least its level,
+/// dropping the smooth fraction.
+fn with_emission(light: u16, emission: u8) -> u16 {
+    if emission == 0 {
+        return light;
+    }
+    let level = |v: u8| (v / 16).max(emission) * 16;
+    mcr_render::pack_light(
+        level(mcr_render::light_sky(light)),
+        level(mcr_render::light_block(light)),
+    )
 }
 
 #[cfg(test)]
@@ -1067,23 +1041,40 @@ mod tests {
         assert_eq!(pair(STAINED_GLASS, GLASS).translucent.len(), 6);
     }
 
-    #[test]
-    fn faces_between_enclosed_leaves_are_culled() {
-        let blob = |x: i32, y: i32, z: i32| [x, y, z].iter().all(|v| (2..=6).contains(v));
-        let culled = run(false, |x, y, z| if blob(x, y, z) { LEAVES } else { AIR });
-        // Only faces between two cells of the enclosed 3^3 core go: 2 planes of 9 per direction.
-        let full = 5 * 5 * 5;
-        assert_eq!(culled.faces[0].len(), full - 2 * 9);
-        assert_eq!(culled.faces[1].len(), full - 2 * 9);
+    fn leaves_with(cutout: bool, f: impl Fn(i32, i32, i32) -> u32) -> SectionMesh {
+        let mut m = Mesher::with_options(
+            Arc::new(test_cache()),
+            Arc::new(crate::tint::BiomeColors::from_climates(
+                &[crate::tint::BiomeClimate::default()],
+                &crate::tint::ColorMaps::flat(0x112233, 0x445566, 0x778899),
+            )),
+            MeshOptions {
+                greedy: false,
+                cutout_leaves: cutout,
+                ..MeshOptions::default()
+            },
+        );
+        let mut out = SectionMesh::default();
+        m.mesh(&input_from(f), &mut out);
+        out
     }
 
     #[test]
-    fn leaves_do_not_cull_each_other() {
-        let mesh = run(false, |x, y, z| match (x, y, z) {
+    fn cutout_leaves_keep_every_face_between_leaves() {
+        let blob = |x: i32, y: i32, z: i32| [x, y, z].iter().all(|v| (2..=6).contains(v));
+        let mesh = leaves_with(true, |x, y, z| if blob(x, y, z) { LEAVES } else { AIR });
+        assert_eq!(mesh.cube_count(), 6 * 5 * 5 * 5);
+        assert!(mesh.faces[0].iter().all(|q| !q.decode().opaque));
+    }
+
+    #[test]
+    fn leaves_without_cutout_hide_shared_faces_and_draw_opaque() {
+        let mesh = leaves_with(false, |x, y, z| match (x, y, z) {
             (3, 3, 3) | (4, 3, 3) => LEAVES,
             _ => AIR,
         });
-        assert_eq!(mesh.cube_count(), 12);
+        assert_eq!(mesh.cube_count(), 10);
+        assert!(mesh.faces.iter().flatten().all(|q| q.decode().opaque));
     }
 
     #[test]

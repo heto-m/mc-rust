@@ -1,4 +1,4 @@
-//! Vanilla's 2D simplex noise, used for swamp grass colour.
+//! Vanilla's 2D simplex noise, used for swamp grass colour and biome temperature.
 
 use crate::random::JavaRandom;
 
@@ -32,7 +32,11 @@ pub struct Simplex {
 impl Simplex {
     /// `new SimplexNoise(new WorldgenRandom(new LegacyRandomSource(seed)), true)`.
     pub fn new(seed: i64) -> Self {
-        let mut random = JavaRandom::new(seed);
+        Self::from_random(&mut JavaRandom::new(seed))
+    }
+
+    /// `new SimplexNoise(random, true)`, advancing `random` like vanilla so noises can share one.
+    pub fn from_random(random: &mut JavaRandom) -> Self {
         for _ in 0..3 {
             random.next_double();
         }

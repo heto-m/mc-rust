@@ -12,7 +12,7 @@ use mcr_render::{SpriteAnimation, SpriteFrame};
 
 use crate::faces::{self, VANILLA_TO_RENDER};
 use crate::java::{JavaModels, JavaState, JavaTint};
-use crate::random::{OffsetSpec, offset_spec};
+use crate::random::{JavaRandom, OFFSET_NONE, OffsetSpec, block_offset, mth_get_seed, offset_spec};
 use crate::tint::{self, TINT_NONE, constant_palette, tint_kinds};
 
 pub const LAYER_NONE: u16 = 0xffff;
@@ -20,13 +20,14 @@ pub const NO_CULL: u8 = 0xff;
 
 pub const ATTR_SOLID_RENDER: u8 = 1;
 pub const ATTR_FULL_COLLISION: u8 = 2;
-/// Glass-like blocks hide faces against the same block, and fluids use their overlay sprite beside them.
+/// Vanilla's `HalfTransparentBlock`s (glass, ice, slime, honey, copper grates): fluids use their overlay
+/// sprite beside them and leaves.
 pub const ATTR_HALF_TRANSPARENT: u8 = 4;
 pub const ATTR_LEAVES: u8 = 8;
 pub const ATTR_AIR: u8 = 16;
 /// Solid-render blocks that dampen light (vanilla's `!isLightPermeable`).
 pub const ATTR_LIGHT_OPAQUE: u8 = 32;
-/// Rendered at full brightness regardless of light (magma block, sculk sensor).
+/// Rendered at full brightness regardless of light (magma block, active sculk sensors).
 pub const ATTR_EMISSIVE: u8 = 64;
 /// Vanilla's `isSolid` (fluid heights and flow treat these as walls).
 pub const ATTR_SOLID: u8 = 128;
@@ -35,6 +36,8 @@ pub const META_ATTR_MASK: u32 = 0xff;
 pub const META_FULL_SHIFT: u32 = 8;
 pub const META_PARTIAL_SHIFT: u32 = 16;
 pub const META_EMISSION_SHIFT: u32 = 24;
+/// Vanilla's `getShadeBrightness` is 0.2 rather than 1.0: smooth lighting darkens corners next to it.
+pub const META_SHADE_DARK: u32 = 1 << 28;
 
 pub const MASK_EMPTY: u16 = 0;
 pub const MASK_FULL: u16 = 1;
@@ -63,6 +66,25 @@ impl RenderLayer {
         }
     }
 }
+
+/// Vanilla's per-block `skipRendering`: faces hidden by the neighbouring state alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkipRule {
+    #[default]
+    None,
+    /// `HalfTransparentBlock` and powder snow: hidden against the same block.
+    SameBlock,
+    /// Mangrove roots: hidden against the same block above and below only.
+    SameBlockVertical,
+    /// Hidden against any leaves when cutout leaves are off.
+    Leaves,
+    /// Panes and bars: hidden against the same block (or two bars) vertically, and horizontally where
+    /// both connect.
+    Bars,
+}
+
+/// `StateModel::conn` bit of blocks in vanilla's `#bars` tag; bits 0 to 5 are connections per render face.
+pub const CONN_BARS_TAG: u8 = 1 << 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
@@ -128,6 +150,12 @@ pub struct StateModel {
     pub emission: u8,
     /// Layer of the model's `particle` texture; `LAYER_NONE` when it has none.
     pub particle: u16,
+    pub skip: SkipRule,
+    /// Pane and bar connections by render face, plus [`CONN_BARS_TAG`].
+    pub conn: u8,
+    /// From this cell to the one whose position seeds the variant pick (the lower half of doors and
+    /// tall plants, the head of beds).
+    pub seed_offset: [i8; 3],
 }
 
 impl StateModel {
@@ -148,6 +176,9 @@ impl StateModel {
         offset: OffsetSpec::NONE,
         emission: 0,
         particle: LAYER_NONE,
+        skip: SkipRule::None,
+        conn: 0,
+        seed_offset: [0; 3],
     };
 }
 
@@ -190,6 +221,16 @@ pub struct QuadDef {
     pub boundary: bool,
     /// Flat along its normal axis.
     pub flat: bool,
+    /// The element's `light_emission`.
+    pub emission: u8,
+}
+
+pub(crate) const MAX_PARTS: usize = 32;
+
+/// The chosen alternative of every part of a random model.
+pub(crate) struct Picks {
+    pub alts: [u32; MAX_PARTS],
+    pub count: usize,
 }
 
 /// Sprites, layer and tint of a modded fluid, from Java's fluid model.
@@ -246,11 +287,12 @@ pub struct ModelCache {
     pub java_states: usize,
 }
 
-fn compute_meta(attr: u8, occ: u8, partial: u8, emission: u8) -> u32 {
+fn compute_meta(attr: u8, occ: u8, partial: u8, emission: u8, dark: bool) -> u32 {
     u32::from(attr)
         | u32::from(occ) << META_FULL_SHIFT
         | u32::from(partial) << META_PARTIAL_SHIFT
         | u32::from(emission.min(15)) << META_EMISSION_SHIFT
+        | if dark { META_SHADE_DARK } else { 0 }
 }
 
 impl ModelCache {
@@ -307,6 +349,85 @@ impl ModelCache {
         &self.alts[index as usize]
     }
 
+    /// The weighted alternative of every part of a random state at world position `pos`, seeded like
+    /// vanilla's `BlockState#getSeed`.
+    pub(crate) fn picks(&self, sm: &StateModel, pos: [i32; 3]) -> Picks {
+        let w: [i32; 3] =
+            std::array::from_fn(|a| pos[a].wrapping_add(i32::from(sm.seed_offset[a])));
+        let model = self.random_model(sm).expect("random state");
+        let mut rng = JavaRandom::new(mth_get_seed(w[0], w[1], w[2]));
+        let mut picks = Picks {
+            alts: [0; MAX_PARTS],
+            count: 0,
+        };
+        let seed = model.multipart.then(|| rng.next_long());
+        for p in 0..(model.part_count as usize).min(MAX_PARTS) {
+            if let Some(s) = seed {
+                rng.set_seed(s);
+            }
+            let span = self.part_span(model.part_start + p as u32);
+            let alt = if span.alt_count > 1 {
+                let mut roll = rng.next_int(span.total_weight as i32) as u32;
+                let mut chosen = span.alt_start;
+                for a in span.alt_start..span.alt_start + span.alt_count {
+                    let weight = self.alt(a).weight;
+                    if roll < weight {
+                        chosen = a;
+                        break;
+                    }
+                    roll -= weight;
+                }
+                chosen
+            } else {
+                span.alt_start
+            };
+            picks.alts[p] = alt;
+            picks.count = p + 1;
+        }
+        picks
+    }
+
+    /// Block-local corners of every quad `state` draws at world position `pos`, with its variant and
+    /// offset, for vanilla's crumbling overlay; empty for states without a model.
+    pub fn model_quads(&self, state: u32, pos: [i32; 3], out: &mut Vec<[[f32; 3]; 4]>) {
+        let sm = self.state(state);
+        let offset = if sm.offset.kind == OFFSET_NONE {
+            [0.0; 3]
+        } else {
+            block_offset(sm.offset, pos[0], pos[2])
+        };
+        let shifted = |q: [[f32; 3]; 4]| q.map(|c| std::array::from_fn(|a| c[a] + offset[a]));
+        let mut emit = |cube: &[CubeFace; 6], quads: &[QuadDef]| {
+            for (face, f) in cube.iter().enumerate() {
+                if f.layer != LAYER_NONE {
+                    let [ua, va] = faces::TANGENTS[faces::axis(face)];
+                    let ccw = (ua + 1) % 3 == va;
+                    let order = if ccw == faces::is_positive(face) {
+                        [(0, 0), (1, 0), (1, 1), (0, 1)]
+                    } else {
+                        [(0, 0), (0, 1), (1, 1), (1, 0)]
+                    };
+                    out.push(shifted(
+                        order.map(|(u, v)| faces::corner_position(face, [0, 0, 0], u, v)),
+                    ));
+                }
+            }
+            out.extend(quads.iter().map(|q| shifted(q.pos)));
+        };
+        match sm.shape {
+            Shape::Empty => {}
+            _ if sm.random != 0 => {
+                let picks = self.picks(sm, pos);
+                for &a in &picks.alts[..picks.count] {
+                    let alt = self.alt(a);
+                    emit(&alt.cube, self.quads_range(alt.quad_start, alt.quad_count));
+                }
+            }
+            Shape::Cube => emit(&sm.cube, &[]),
+            Shape::Model => emit(&[CubeFace::NONE; 6], self.quads(sm)),
+        }
+    }
+
     #[inline]
     pub fn attr(&self, id: u32) -> u8 {
         self.attrs.get(id as usize).copied().unwrap_or(0)
@@ -343,6 +464,23 @@ impl ModelCache {
 
     pub fn mask(&self, id: u16) -> &FaceMask {
         self.masks.get(id as usize).unwrap_or(&FULL_MASK)
+    }
+
+    /// Vanilla's `skipRendering` of `state` against neighbour state `nid` across render face `face`.
+    #[inline]
+    pub fn skips(&self, state: &StateModel, nid: u32, face: usize, cutout_leaves: bool) -> bool {
+        match state.skip {
+            SkipRule::None => false,
+            SkipRule::SameBlock => self.state(nid).block == state.block,
+            SkipRule::SameBlockVertical => face >> 1 == 1 && self.state(nid).block == state.block,
+            SkipRule::Leaves => !cutout_leaves && self.state(nid).skip == SkipRule::Leaves,
+            SkipRule::Bars => {
+                let n = self.state(nid);
+                let paired = n.skip == SkipRule::Bars
+                    && (n.block == state.block || state.conn & n.conn & CONN_BARS_TAG != 0);
+                paired && (face >> 1 == 1 || state.conn >> face & n.conn >> (face ^ 1) & 1 != 0)
+            }
+        }
     }
 
     /// Vanilla `Block.shouldRenderFace` on occlusion shapes, without the same-block skip rule.
@@ -422,7 +560,11 @@ impl ModelCache {
         occlusion: Vec<u8>,
     ) -> Self {
         let meta = (0..states.len())
-            .map(|i| compute_meta(attrs[i], occlusion[i], 0, states[i].emission))
+            .map(|i| {
+                let dark =
+                    attrs[i] & ATTR_FULL_COLLISION != 0 && attrs[i] & ATTR_HALF_TRANSPARENT == 0;
+                compute_meta(attrs[i], occlusion[i], 0, states[i].emission, dark)
+            })
             .collect();
         Self {
             states,
@@ -445,6 +587,14 @@ impl ModelCache {
             java_requests: Vec::new(),
             java_states: 0,
         }
+    }
+
+    /// Overrides the shade brightness of a hand-built cache's state: `dark` is vanilla's 0.2.
+    pub fn with_shade(mut self, id: u32, dark: bool) -> Self {
+        if let Some(m) = self.meta.get_mut(id as usize) {
+            *m = *m & !META_SHADE_DARK | if dark { META_SHADE_DARK } else { 0 };
+        }
+        self
     }
 
     /// Adds partial occlusion masks to a hand-built cache: `shapes[state]` gives the mask of each face.
@@ -621,6 +771,7 @@ impl ModelCache {
             let mut block = 0;
             let mut emission = 0;
             let mut face_ids = [MASK_EMPTY; 6];
+            let mut full_collision = false;
             if let Some(info) = info {
                 block = info.block as u16;
                 emission = info.light_emission;
@@ -632,6 +783,7 @@ impl ModelCache {
                 }
                 if info.is_full_collision() {
                     attr |= ATTR_FULL_COLLISION;
+                    full_collision = true;
                 }
                 if is_legacy_solid(version.collision_shape(id)) {
                     attr |= ATTR_SOLID;
@@ -682,41 +834,37 @@ impl ModelCache {
                     };
                 }
             }
-            if short.ends_with("glass")
-                || short.ends_with("stained_glass")
-                || matches!(
-                    short,
-                    "ice"
-                        | "frosted_ice"
-                        | "slime_block"
-                        | "honey_block"
-                        | "powder_snow"
-                        | "mangrove_roots"
-                )
-            {
+            let props: Vec<(&str, &str)> = version.state_properties(id).collect();
+            let class = BlockClass::of(short, &props);
+            if class.half_transparent {
                 attr |= ATTR_HALF_TRANSPARENT;
             }
-            if short.ends_with("_leaves") {
-                attr |= ATTR_LEAVES | ATTR_HALF_TRANSPARENT;
+            if class.skip == SkipRule::Leaves {
+                attr |= ATTR_LEAVES;
             }
-            if matches!(short, "magma_block" | "sculk_sensor") {
+            if class.emissive {
                 attr |= ATTR_EMISSIVE;
             }
+            let dark = class.shade_dark.unwrap_or(full_collision);
             let partial = (0..6).fold(0u8, |acc, f| {
                 acc | u8::from(face_ids[f] != MASK_EMPTY && face_ids[f] != MASK_FULL) << f
             });
             cache.attrs.push(attr);
             cache.occlusion.push(occ);
-            cache.meta.push(compute_meta(attr, occ, partial, emission));
+            cache
+                .meta
+                .push(compute_meta(attr, occ, partial, emission, dark));
             cache.face_masks.push(face_ids);
 
             let mut sm = StateModel::EMPTY;
+            sm.skip = class.skip;
+            sm.conn = class.conn;
+            sm.seed_offset = class.seed_offset;
             sm.block = block;
             sm.fluid = fluid;
             sm.emission = emission;
             sm.offset = offset_spec(name);
             if let Some(model) = model {
-                let props: Vec<(&str, &str)> = version.state_properties(id).collect();
                 let kinds = match java_tints.get(&id) {
                     Some(t) => [cache.java_tint_kind(t[0]), cache.java_tint_kind(t[1])],
                     None => tint_kinds(name, &props),
@@ -1147,6 +1295,7 @@ fn quad_bits(q: &QuadDef) -> [u32; 22] {
     bits[20] = u32::from(q.layer) << 16 | u32::from(q.tint) << 8 | u32::from(q.cull);
     bits[21] = u32::from(q.normal) << 16
         | u32::from(q.shade) << 8
+        | u32::from(q.emission) << 3
         | u32::from(q.translucent) << 2
         | u32::from(q.boundary) << 1
         | u32::from(q.flat);
@@ -1211,6 +1360,71 @@ fn compile_quad(q: &BakedQuad, layer: u16, tint: u8, rl: RenderLayer) -> QuadDef
         translucent: rl == RenderLayer::Translucent,
         boundary,
         flat,
+        emission: q.light_emission.min(15),
+    }
+}
+
+/// What a block's vanilla class changes about rendering, read from its name and properties.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct BlockClass {
+    half_transparent: bool,
+    skip: SkipRule,
+    conn: u8,
+    emissive: bool,
+    /// `Some` where the block overrides `getShadeBrightness`; otherwise full collision decides.
+    shade_dark: Option<bool>,
+    seed_offset: [i8; 3],
+}
+
+impl BlockClass {
+    fn of(short: &str, props: &[(&str, &str)]) -> Self {
+        let prop = |key: &str| props.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
+        let mut c = Self::default();
+        let transparent = short.ends_with("glass") || short.ends_with("copper_grate");
+        c.half_transparent =
+            transparent || matches!(short, "ice" | "frosted_ice" | "slime_block" | "honey_block");
+        let bars_tag = short == "iron_bars" || short.ends_with("copper_bars");
+        if c.half_transparent || short == "powder_snow" {
+            c.skip = SkipRule::SameBlock;
+        } else if short.ends_with("_leaves") {
+            c.skip = SkipRule::Leaves;
+        } else if short == "mangrove_roots" {
+            c.skip = SkipRule::SameBlockVertical;
+        } else if bars_tag || short.ends_with("glass_pane") {
+            c.skip = SkipRule::Bars;
+            for (face, key) in [(0, "east"), (1, "west"), (4, "south"), (5, "north")] {
+                if prop(key) == Some("true") {
+                    c.conn |= 1 << face;
+                }
+            }
+            if bars_tag {
+                c.conn |= CONN_BARS_TAG;
+            }
+        }
+        c.emissive = short == "magma_block"
+            || (matches!(short, "sculk_sensor" | "calibrated_sculk_sensor")
+                && prop("sculk_sensor_phase") == Some("active"));
+        c.shade_dark = if transparent || matches!(short, "barrier" | "light" | "structure_void") {
+            Some(false)
+        } else if matches!(short, "soul_sand" | "mud") {
+            Some(true)
+        } else if short == "snow" {
+            Some(prop("layers") == Some("8"))
+        } else {
+            None
+        };
+        if prop("half") == Some("upper") {
+            c.seed_offset = [0, -1, 0];
+        } else if prop("part") == Some("foot") {
+            c.seed_offset = match prop("facing") {
+                Some("north") => [0, 0, -1],
+                Some("south") => [0, 0, 1],
+                Some("west") => [-1, 0, 0],
+                Some("east") => [1, 0, 0],
+                _ => [0; 3],
+            };
+        }
+        c
     }
 }
 

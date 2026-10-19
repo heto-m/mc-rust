@@ -306,23 +306,23 @@ Scope: mcr-app settings, play and shell, mcr-settings, mcr-client client info.
 
 Scope: mcr-mesh, mcr-render, mcr-assets, mcr-block-entity.
 
-- [ ] 21.1 R8 (V) AO ignores per-block shade brightness
-- [ ] 21.2 R9 (V) Translucent quads not sorted within a section
-- [ ] 21.3 R10 (V) Pane and bar faces between neighbours not culled
-- [ ] 21.4 R11 (V) Per-element light_emission dropped
-- [ ] 21.5 R12 (V) Emissive block list wrong
-- [ ] 21.6 R13 (V) Beacon beam without a pyramid
-- [ ] 21.7 R15 (M) Rendering options parsed but never applied
-- [ ] 21.8 R16 (M) New chunks do not fade in
-- [ ] 21.9 R17 (M) Leaf, grate, mangrove root and water-overlay culling sets
-- [ ] 21.10 R19 (M) Snow line and frozen-ocean rain simplified
-- [ ] 21.11 R20 (M) Break cracks follow the outline box, not the model
-- [ ] 21.12 R21 (M) Fluid side shading in the Nether
-- [ ] 21.13 R22 (M) Biome tint height per column
-- [ ] 21.14 R23 (M) Variant seeds for two-block blocks
-- [ ] 21.15 R24 (M) End portal draws all six faces
-- [ ] 21.16 Mesh tests: shade brightness per block, pane culling, emission per element, sculk phase, beacon without pyramid; criterion bench for the translucent sort
-- [ ] 21.17 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 21.1 R8 (V) AO ignores per-block shade brightness
+- [x] 21.2 R9 (V) Translucent quads not sorted within a section
+- [x] 21.3 R10 (V) Pane and bar faces between neighbours not culled
+- [x] 21.4 R11 (V) Per-element light_emission dropped
+- [x] 21.5 R12 (V) Emissive block list wrong
+- [x] 21.6 R13 (V) Beacon beam without a pyramid
+- [x] 21.7 R15 (M) Rendering options parsed but never applied
+- [x] 21.8 R16 (M) New chunks do not fade in
+- [x] 21.9 R17 (M) Leaf, grate, mangrove root and water-overlay culling sets
+- [x] 21.10 R19 (M) Snow line and frozen-ocean rain simplified
+- [x] 21.11 R20 (M) Break cracks follow the outline box, not the model
+- [x] 21.12 R21 (M) Fluid side shading in the Nether
+- [x] 21.13 R22 (M) Biome tint height per column
+- [x] 21.14 R23 (M) Variant seeds for two-block blocks
+- [x] 21.15 R24 (M) End portal draws all six faces
+- [x] 21.16 Mesh tests: shade brightness per block, pane culling, emission per element, sculk phase, beacon without pyramid; criterion bench for the translucent sort
+- [x] 21.17 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 22. Close out
 

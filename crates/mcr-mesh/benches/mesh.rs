@@ -43,6 +43,7 @@ fn surface_inputs(b: &TerrainBlocks) -> Vec<MeshInput> {
             for sy in 2..=6 {
                 let mut input = MeshInput::blank(SectionPos::new(sx, sy, sz), 2);
                 fill_terrain_input(&mut input, b, SEED, |_, _| 0);
+                input.camera = Some([48.0, 72.0, 48.0]);
                 if !input.is_all_air() && input.states.contains(&0) {
                     out.push(input);
                 }
@@ -156,9 +157,67 @@ fn bench_mesh(c: &mut Criterion) {
     });
 }
 
+/// Back-to-front sorting of translucent quads: water surfaces and a checkerboard of stained glass, the
+/// worst case for one section.
+fn bench_translucent_sort(c: &mut Criterion) {
+    let Some(f) = fixture() else { return };
+    let b = blocks();
+    let mut mesher = Mesher::new(f.cache.clone(), f.colors.clone());
+    let mut water = Vec::new();
+    for input in surface_inputs(&b) {
+        let mut out = SectionMesh::default();
+        mesher.mesh(&input, &mut out);
+        if !out.translucent.is_empty() {
+            water.push((out.translucent.clone(), input.pos));
+        }
+    }
+    let glass = state_of("minecraft:red_stained_glass", &[]);
+    let mut input = MeshInput::blank(SectionPos::new(0, 4, 0), 2);
+    for y in 0..16 {
+        for z in 0..16 {
+            for x in 0..16 {
+                if (x + y + z) % 2 == 0 {
+                    input.set_state(x, y, z, glass);
+                }
+            }
+        }
+    }
+    let mut checker = SectionMesh::default();
+    mesher.mesh(&input, &mut checker);
+    let quads: usize = water.iter().map(|w| w.0.len()).sum();
+    println!(
+        "{} water sections, {quads} translucent quads; checkerboard {} quads",
+        water.len(),
+        checker.translucent.len()
+    );
+    let mut scratch = Vec::new();
+    let mut work = Vec::new();
+    c.bench_function("translucent_sort_water_sections", |bench| {
+        bench.iter(|| {
+            for (q, pos) in &water {
+                work.clone_from(q);
+                let eye = [
+                    48.0 - pos.x as f32 * 16.0,
+                    72.0 - pos.y as f32 * 16.0,
+                    48.0 - pos.z as f32 * 16.0,
+                ];
+                mcr_render::sort_back_to_front(&mut work, eye, &mut scratch);
+            }
+            black_box(&work);
+        })
+    });
+    c.bench_function("translucent_sort_glass_checkerboard", |bench| {
+        bench.iter(|| {
+            work.clone_from(&checker.translucent);
+            mcr_render::sort_back_to_front(&mut work, [8.0, 30.0, -4.0], &mut scratch);
+            black_box(&work);
+        })
+    });
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(20);
-    targets = bench_mesh
+    targets = bench_mesh, bench_translucent_sort
 }
 criterion_main!(benches);

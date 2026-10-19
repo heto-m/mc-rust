@@ -3,8 +3,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use mcr_mesh::{ATTR_SOLID_RENDER, MeshInput, MeshPool, MeshResult};
-use mcr_render::{Camera, FrameInputs, FrameStats, Overlay, Renderer};
+use mcr_mesh::{ATTR_SOLID_RENDER, MeshInput, MeshOptions, MeshPool, MeshResult};
+use mcr_render::{Camera, FilterMode, FrameInputs, FrameStats, Overlay, Renderer, TextureFilter};
+use mcr_settings::Options;
+use mcr_settings::value::TextureFiltering;
 use mcr_world::{ChunkPos, ChunkStore, SectionPos};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -30,6 +32,8 @@ pub struct RenderSystem {
     assets: Arc<Assets>,
     pool: MeshPool,
     mesh_threads: usize,
+    mesh_options: MeshOptions,
+    blend_radius: usize,
     known_biomes: usize,
     last_biome_check: Instant,
     waiting: FxHashMap<ChunkPos, u128>,
@@ -129,6 +133,8 @@ impl RenderSystem {
             assets,
             pool,
             mesh_threads,
+            mesh_options: MeshOptions::default(),
+            blend_radius: mcr_mesh::DEFAULT_BLEND_RADIUS,
             known_biomes: names.len(),
             last_biome_check: Instant::now(),
             waiting: FxHashMap::default(),
@@ -150,20 +156,57 @@ impl RenderSystem {
             .set_texture_groups(&assets.cache.texture_groups());
         self.renderer.set_tint_palette(&assets.cache.palette());
         self.renderer.set_animations(assets.cache.animations());
-        let names = world.biome_names();
-        self.known_biomes = names.len();
-        self.pool = MeshPool::new(
-            assets.cache.clone(),
-            assets.biome_colors(&names, &world.biome_climates()),
-            self.mesh_threads,
-            mcr_mesh::DEFAULT_BLEND_RADIUS,
-        );
-        self.pool.set_biome_seed(world.biome_seed());
         self.assets = assets;
+        self.rebuild_pool(world);
         self.ready.clear();
         self.urgent.clear();
         self.urgent_inflight.clear();
         self.requeue_all(world);
+    }
+
+    fn rebuild_pool(&mut self, world: &dyn MeshWorld) {
+        let names = world.biome_names();
+        self.known_biomes = names.len();
+        self.pool = MeshPool::with_options(
+            self.assets.cache.clone(),
+            self.assets.biome_colors(&names, &world.biome_climates()),
+            self.mesh_threads,
+            self.blend_radius,
+            self.mesh_options,
+        );
+        self.pool.set_biome_seed(world.biome_seed());
+    }
+
+    /// Applies the video options that change how terrain is meshed and drawn; vanilla rebuilds every
+    /// section when ambient occlusion, biome blend or cutout leaves change.
+    pub fn apply_options(&mut self, options: &Options, world: &dyn MeshWorld) {
+        self.renderer
+            .set_section_fade(options.chunk_section_fade_in_time as f32);
+        self.renderer.set_texture_filter(TextureFilter {
+            mode: match options.texture_filtering {
+                TextureFiltering::None => FilterMode::Nearest,
+                TextureFiltering::Rgss => FilterMode::Rgss,
+                TextureFiltering::Anisotropic => FilterMode::Anisotropic,
+            },
+            anisotropy: 1 << options.max_anisotropy_bit.clamp(1, 3),
+            mip_levels: options.mipmap_levels.clamp(0, 4) as u32,
+        });
+        let mesh_options = MeshOptions {
+            cutout_leaves: options.cutout_leaves,
+            ambient_occlusion: options.ambient_occlusion,
+            ..MeshOptions::default()
+        };
+        let radius = options
+            .biome_blend_radius
+            .clamp(0, mcr_mesh::MAX_BLEND_RADIUS as i32) as usize;
+        if (mesh_options, radius) != (self.mesh_options, self.blend_radius) {
+            self.mesh_options = mesh_options;
+            self.blend_radius = radius;
+            self.rebuild_pool(world);
+            self.ready.clear();
+            self.urgent_inflight.clear();
+            self.requeue_all(world);
+        }
     }
 
     /// F3+A: remeshes every loaded section with the current assets.
@@ -287,13 +330,7 @@ impl RenderSystem {
         if names.len() == self.known_biomes {
             return;
         }
-        self.known_biomes = names.len();
-        self.pool = MeshPool::new(
-            self.assets.cache.clone(),
-            self.assets.biome_colors(&names, &world.biome_climates()),
-            self.mesh_threads,
-            mcr_mesh::DEFAULT_BLEND_RADIUS,
-        );
+        self.rebuild_pool(world);
         self.ready.clear();
         self.urgent_inflight.clear();
         self.requeue_all(world);
@@ -375,9 +412,10 @@ impl RenderSystem {
             };
             if column.section(index as usize).is_none_or(|s| s.is_empty()) {
                 self.renderer.remove_section([pos.x, pos.y, pos.z]);
-            } else if let Some(input) =
+            } else if let Some(mut input) =
                 MeshInput::snapshot(world.store(), pos, self.pool.blend_radius())
             {
+                input.camera = Some(world.camera().position.to_array());
                 self.pool.submit(input, 0);
                 self.urgent_inflight.insert(pos);
             }
@@ -436,9 +474,10 @@ impl RenderSystem {
                 if column.section(index as usize).is_none_or(|s| s.is_empty()) {
                     self.renderer
                         .remove_section([section.x, section.y, section.z]);
-                } else if let Some(input) =
+                } else if let Some(mut input) =
                     MeshInput::snapshot(world.store(), section, self.pool.blend_radius())
                 {
+                    input.camera = Some(cam.to_array());
                     self.pool
                         .submit(input, ((rank as u32) << 5 | index as u32) + 1);
                 }

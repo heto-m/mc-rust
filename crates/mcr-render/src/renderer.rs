@@ -22,6 +22,7 @@ use crate::occlusion::HiZ;
 use crate::overlay::{Overlay, OverlayCtx};
 use crate::post::{MAX_POST_CHAINS, PostChain, PostOverrides, PostStack};
 use crate::quad::{ModelQuad, PackedQuad};
+use crate::resort::{self, SortJob, Sorter, TranslucentQuads, UNSORTED};
 use crate::staging::{Dest, Uploader};
 use crate::texture::{MAX_TEXTURE_GROUPS, TextureArrayData, TextureGroupData};
 
@@ -50,6 +51,10 @@ const MAX_QUADS_PER_DRAW: u32 = 1 << 17;
 const DRAW_DATA_SIZE: u64 = 32;
 const TINT_PALETTE_WORDS: usize = 64;
 const NO_TINT_TABLE: u32 = u32::MAX;
+/// Set in a section's tint base when its blocks pick a table per height.
+const MULTI_TINT_TABLES: u32 = 1 << 30;
+/// Tint tables one section may upload, whatever its mesh holds.
+const MAX_TINT_UNITS: usize = 16;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
@@ -192,6 +197,7 @@ struct GlobalsGpu {
     shade_a: [f32; 4],
     shade_b: [f32; 4],
     cull: [f32; 4],
+    fade: [f32; 4],
 }
 
 #[repr(C)]
@@ -235,9 +241,14 @@ struct SectionSlot {
     serial: u64,
     cube: Option<(u32, u32)>,
     model: Option<(u32, u32)>,
-    tint: Option<u32>,
+    /// First tint arena unit and unit count.
+    tint: Option<(u32, u32)>,
     /// What the translucent pass draws: the last mesh whose upload was written.
     drawn: Option<TranslucentDraw>,
+    /// The latest mesh's translucent quads, kept to sort them again as the camera moves.
+    translucent: Option<TranslucentQuads>,
+    /// Renderer seconds of the section's first upload, for the fade-in.
+    born: f32,
 }
 
 #[derive(Debug)]
@@ -328,14 +339,14 @@ pub struct Renderer {
     trans_cull_bg: wgpu::BindGroup,
     cull_bgl: wgpu::BindGroupLayout,
     cull_bg: wgpu::BindGroup,
-    cube_pipeline: wgpu::RenderPipeline,
-    model_pipeline: wgpu::RenderPipeline,
-    trans_pipeline: wgpu::RenderPipeline,
+    terrain_shader: TerrainShader,
+    terrain: TerrainPipelines,
     trans_geom_bg: wgpu::BindGroup,
     globals_bgl: wgpu::BindGroupLayout,
     globals_bg: wgpu::BindGroup,
     geom_bg: wgpu::BindGroup,
     sampler: wgpu::Sampler,
+    filter: TextureFilter,
     textures: Vec<wgpu::Texture>,
     dummy_texture: wgpu::Texture,
     tint_arena: Arena,
@@ -359,6 +370,14 @@ pub struct Renderer {
     uploader: Uploader<TranslucentCommit>,
     commits: Vec<TranslucentCommit>,
     next_serial: u64,
+    sorter: Sorter,
+    sort_generation: u64,
+    started: Instant,
+    fade_seconds: f32,
+    /// First upload time of every loaded section, empty ones included, like vanilla's `uploadedTime`.
+    born: HashMap<[i32; 3], f32>,
+    last_sort_block: Option<[i32; 3]>,
+    resort_cursor: usize,
 
     timestamps: Option<Timestamps>,
     stats_gpu: wgpu::Buffer,
@@ -374,11 +393,78 @@ pub struct Renderer {
     screenshot: Option<Capture>,
 }
 
-/// Terrain pipelines with the dynamic light term, its uniform and this frame's sources.
-struct DynamicLights {
+/// A terrain shader's entry points, specialised into pipelines per texture filter mode.
+struct TerrainShader {
+    module: wgpu::ShaderModule,
+    layout: wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+    label: &'static str,
+    /// Cube and model vertex entry points.
+    vs: [&'static str; 2],
+    /// Opaque and translucent fragment entry points.
+    fs: [&'static str; 2],
+}
+
+struct TerrainPipelines {
     cube: wgpu::RenderPipeline,
     model: wgpu::RenderPipeline,
     trans: wgpu::RenderPipeline,
+}
+
+impl TerrainShader {
+    fn pipelines(&self, device: &wgpu::Device, mode: FilterMode) -> TerrainPipelines {
+        let constants = [("FILTER_MODE", f64::from(mode as u8))];
+        let build = |what: &str, vs: &str, fs: &str, blend: bool| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(&format!("{} {what}", self.label)),
+                layout: Some(&self.layout),
+                vertex: wgpu::VertexState {
+                    module: &self.module,
+                    entry_point: Some(vs),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(!blend),
+                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &self.module,
+                    entry_point: Some(fs),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &constants,
+                        ..Default::default()
+                    },
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.color_format,
+                        blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        TerrainPipelines {
+            cube: build("cube", self.vs[0], self.fs[0], false),
+            model: build("model", self.vs[1], self.fs[0], false),
+            trans: build("translucent", self.vs[1], self.fs[1], true),
+        }
+    }
+}
+
+/// Terrain pipelines with the dynamic light term, its uniform and this frame's sources.
+struct DynamicLights {
+    pipelines: TerrainPipelines,
+    shader: TerrainShader,
     buffer: wgpu::Buffer,
     grid_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -459,6 +545,64 @@ fn uniform_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGrou
         },
         count: None,
     }
+}
+
+/// How block textures are sampled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum FilterMode {
+    /// Hardware nearest filtering.
+    #[default]
+    Nearest = 0,
+    /// Vanilla's rotated-grid supersampling once texels shrink below a pixel.
+    Rgss = 1,
+    /// Linear anisotropic filtering with texel-sharp magnification, like vanilla's `sampleNearest`.
+    Anisotropic = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureFilter {
+    pub mode: FilterMode,
+    /// Used by [`FilterMode::Anisotropic`]; 1 to 16.
+    pub anisotropy: u16,
+    /// Mip levels sampled past the base level.
+    pub mip_levels: u32,
+}
+
+impl Default for TextureFilter {
+    fn default() -> Self {
+        Self {
+            mode: FilterMode::Nearest,
+            anisotropy: 1,
+            mip_levels: 4,
+        }
+    }
+}
+
+fn block_sampler(device: &wgpu::Device, filter: TextureFilter) -> wgpu::Sampler {
+    let linear = filter.mode != FilterMode::Nearest;
+    let anisotropy = if filter.mode == FilterMode::Anisotropic {
+        filter.anisotropy.clamp(1, 16)
+    } else {
+        1
+    };
+    let texel = if linear {
+        wgpu::FilterMode::Linear
+    } else {
+        wgpu::FilterMode::Nearest
+    };
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("blocks"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: texel,
+        min_filter: texel,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        lod_max_clamp: filter.mip_levels.min(16) as f32,
+        anisotropy_clamp: anisotropy,
+        ..Default::default()
+    })
 }
 
 fn depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
@@ -874,16 +1018,7 @@ impl Renderer {
                 bind(4, &geo.tints),
             ],
         });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("blocks"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            address_mode_w: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            ..Default::default()
-        });
+        let sampler = block_sampler(&device, TextureFilter::default());
         let dummy_texture =
             create_group_texture(&device, &queue, &TextureGroupData::single_pixel());
         let textures = group_textures(
@@ -930,76 +1065,15 @@ impl Renderer {
             bind_group_layouts: &[Some(&globals_bgl), Some(&geom_bgl)],
             immediate_size: 0,
         });
-        let terrain_pipeline = |module: &wgpu::ShaderModule,
-                                layout: &wgpu::PipelineLayout,
-                                label: &str,
-                                vs_entry: &str,
-                                fs_entry: &str,
-                                cull: Option<wgpu::Face>,
-                                blend: bool| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(layout),
-                vertex: wgpu::VertexState {
-                    module,
-                    entry_point: Some(vs_entry),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: cull,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(!blend),
-                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module,
-                    entry_point: Some(fs_entry),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: color_format,
-                        blend: blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
+        let terrain_shader = TerrainShader {
+            module: terrain_module,
+            layout: draw_layout,
+            color_format,
+            label: "terrain",
+            vs: ["vs_cube", "vs_model"],
+            fs: ["fs_main", "fs_translucent"],
         };
-        let make_pipeline =
-            |label: &str, vs_entry: &str, fs_entry: &str, cull: Option<wgpu::Face>, blend: bool| {
-                terrain_pipeline(
-                    &terrain_module,
-                    &draw_layout,
-                    label,
-                    vs_entry,
-                    fs_entry,
-                    cull,
-                    blend,
-                )
-            };
-        let cube_pipeline =
-            make_pipeline("cube", "vs_cube", "fs_main", Some(wgpu::Face::Back), false);
-        let model_pipeline = make_pipeline(
-            "model",
-            "vs_model",
-            "fs_main",
-            Some(wgpu::Face::Back),
-            false,
-        );
-        let trans_pipeline = make_pipeline(
-            "translucent",
-            "vs_model",
-            "fs_translucent",
-            Some(wgpu::Face::Back),
-            true,
-        );
+        let terrain = terrain_shader.pipelines(&device, FilterMode::default());
         let dyn_lights = config.dynamic_lights.then(|| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("terrain dynamic lights"),
@@ -1038,19 +1112,17 @@ impl Renderer {
                 layout: &bgl,
                 entries: &[bind(0, &buffer), bind(1, &grid_buffer)],
             });
-            let back = Some(wgpu::Face::Back);
-            let pipeline = |label, vs, fs, blend| {
-                terrain_pipeline(&module, &layout, label, vs, fs, back, blend)
+            let shader = TerrainShader {
+                module,
+                layout,
+                color_format,
+                label: "terrain dynamic lights",
+                vs: ["vs_cube_dyn", "vs_model_dyn"],
+                fs: ["fs_main_dyn", "fs_translucent_dyn"],
             };
             DynamicLights {
-                cube: pipeline("cube dynamic lights", "vs_cube_dyn", "fs_main_dyn", false),
-                model: pipeline("model dynamic lights", "vs_model_dyn", "fs_main_dyn", false),
-                trans: pipeline(
-                    "translucent dynamic lights",
-                    "vs_model_dyn",
-                    "fs_translucent_dyn",
-                    true,
-                ),
+                pipelines: shader.pipelines(&device, FilterMode::default()),
+                shader,
                 buffer,
                 grid_buffer,
                 bind_group,
@@ -1063,9 +1135,9 @@ impl Renderer {
         });
         let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sky"),
-            layout: Some(&draw_layout),
+            layout: Some(&terrain_shader.layout),
             vertex: wgpu::VertexState {
-                module: &terrain_module,
+                module: &terrain_shader.module,
                 entry_point: Some("vs_sky"),
                 compilation_options: Default::default(),
                 buffers: &[],
@@ -1080,7 +1152,7 @@ impl Renderer {
             }),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
-                module: &terrain_module,
+                module: &terrain_shader.module,
                 entry_point: Some("fs_sky"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
@@ -1180,14 +1252,14 @@ impl Renderer {
             trans_cull_bg,
             cull_bgl,
             cull_bg,
-            cube_pipeline,
-            model_pipeline,
-            trans_pipeline,
+            terrain_shader,
+            terrain,
             trans_geom_bg,
             globals_bgl,
             globals_bg,
             geom_bg,
             sampler,
+            filter: TextureFilter::default(),
             textures,
             dummy_texture,
             sections: HashMap::new(),
@@ -1196,6 +1268,13 @@ impl Renderer {
             uploader: Uploader::default(),
             commits: Vec::new(),
             next_serial: 0,
+            sorter: Sorter::spawn(),
+            sort_generation: 0,
+            started: Instant::now(),
+            fade_seconds: 0.0,
+            born: HashMap::new(),
+            last_sort_block: None,
+            resort_cursor: 0,
             timestamps,
             stats_gpu,
             readbacks,
@@ -1326,6 +1405,22 @@ impl Renderer {
         self.set_texture_groups(&[data.clone().into_group()]);
     }
 
+    /// Vanilla's `textureFiltering`, `maxAnisotropyBit` and `mipmapLevels` for block textures.
+    pub fn set_texture_filter(&mut self, filter: TextureFilter) {
+        if filter == self.filter {
+            return;
+        }
+        if filter.mode != self.filter.mode {
+            self.terrain = self.terrain_shader.pipelines(&self.device, filter.mode);
+            if let Some(d) = &mut self.dyn_lights {
+                d.pipelines = d.shader.pipelines(&self.device, filter.mode);
+            }
+        }
+        self.filter = filter;
+        self.sampler = block_sampler(&self.device, filter);
+        self.rebind_globals();
+    }
+
     /// Up to four size groups; a quad's layer field is `group << 14 | layer`.
     pub fn set_texture_groups(&mut self, groups: &[TextureGroupData]) {
         self.textures = group_textures(&self.device, &self.queue, groups);
@@ -1334,6 +1429,10 @@ impl Renderer {
             .flat_map(|g| g.animations.iter().cloned())
             .collect();
         self.set_animations(animations);
+        self.rebind_globals();
+    }
+
+    fn rebind_globals(&mut self) {
         self.globals_bg = make_globals_bg(
             &self.device,
             &self.globals_bgl,
@@ -1514,9 +1613,25 @@ impl Renderer {
         self.device.generate_allocator_report()
     }
 
+    fn seconds(&self) -> f32 {
+        self.started.elapsed().as_secs_f32()
+    }
+
+    /// Vanilla's `chunkSectionFadeInTime`: newly loaded sections beyond 16 blocks fade in from the fog
+    /// colour over this many seconds; zero shows them at once.
+    pub fn set_section_fade(&mut self, seconds: f32) {
+        self.fade_seconds = if seconds.is_finite() {
+            seconds.clamp(0.0, 10.0)
+        } else {
+            0.0
+        };
+    }
+
     /// Replaces (or inserts) the geometry of the section at `key` (section coordinates).
     pub fn set_section(&mut self, key: [i32; 3], mesh: &SectionMesh) -> Result<(), RenderError> {
         self.graph.set(key, mesh.visibility);
+        let now = self.seconds();
+        let born = *self.born.entry(key).or_insert(now);
         if mesh.is_empty() {
             self.remove_geometry(key);
             return Ok(());
@@ -1559,9 +1674,12 @@ impl Renderer {
         } else {
             None
         };
+        let tint_units = mesh.tints.as_ref().map_or(0, |t| {
+            (t.len() / TINT_TABLE_WORDS).clamp(1, MAX_TINT_UNITS) as u32
+        });
         let tint = match &mesh.tints {
-            Some(_) => match self.tint_arena.alloc(1) {
-                Some(i) => Some(i),
+            Some(_) => match self.tint_arena.alloc(tint_units) {
+                Some(i) => Some((i, tint_units)),
                 None => {
                     free_cube(self);
                     if let Some((o, n)) = model {
@@ -1587,8 +1705,8 @@ impl Renderer {
                     if let Some((o, n)) = model {
                         self.model_arena.free(o, n);
                     }
-                    if let Some(t) = tint {
-                        self.tint_arena.free(t, 1);
+                    if let Some((t, n)) = tint {
+                        self.tint_arena.free(t, n);
                     }
                     return Err(RenderError::TooManySections);
                 }
@@ -1625,14 +1743,16 @@ impl Renderer {
                 bytemuck::cast_slice(translucent_quads),
             );
         }
-        let tint_base = tint.map_or(NO_TINT_TABLE, |t| {
-            (TINT_PALETTE_WORDS + t as usize * TINT_TABLE_WORDS) as u32
+        let tint_base = tint.map_or(NO_TINT_TABLE, |(t, n)| {
+            let multi = if n > 1 { MULTI_TINT_TABLES } else { 0 };
+            (TINT_PALETTE_WORDS + t as usize * TINT_TABLE_WORDS) as u32 | multi
         });
-        if let (Some(t), Some(table)) = (tint, &mesh.tints) {
+        if let (Some((t, n)), Some(table)) = (tint, &mesh.tints) {
+            let words = &table[..table.len().min(n as usize * TINT_TABLE_WORDS)];
             self.uploader.push(
                 Dest::Tints,
                 (TINT_PALETTE_WORDS + t as usize * TINT_TABLE_WORDS) as u64 * 4,
-                bytemuck::cast_slice(table.as_slice()),
+                bytemuck::cast_slice(words),
             );
         }
         let meta = SectionMetaGpu {
@@ -1644,7 +1764,7 @@ impl Renderer {
                 tint_base,
             ],
             counts_a: [counts[0], counts[1], counts[2], counts[3]],
-            counts_b: [counts[4], counts[5], 0, 0],
+            counts_b: [counts[4], counts[5], born.to_bits(), 0],
         };
         self.uploader.push(
             Dest::Sections,
@@ -1658,6 +1778,18 @@ impl Renderer {
                 count: translucent_total,
                 tint_base,
             });
+        let translucent = draw.map(|d| {
+            self.sort_generation += 1;
+            TranslucentQuads {
+                quads: translucent_quads.into(),
+                base: d.base,
+                generation: self.sort_generation,
+                pov: mesh.sort_camera.map_or(UNSORTED, |c| {
+                    resort::point_of_view(resort::section_of(c), key)
+                }),
+                pending: false,
+            }
+        });
         self.uploader
             .end_batch_with(TranslucentCommit { key, serial, draw });
         self.graph.set_slot(key, Some(index));
@@ -1670,6 +1802,8 @@ impl Renderer {
                 model,
                 tint,
                 drawn,
+                translucent,
+                born,
             },
         );
         Ok(())
@@ -1682,8 +1816,8 @@ impl Renderer {
         if let Some((o, n)) = slot.model {
             self.model_arena.free(o, n);
         }
-        if let Some(t) = slot.tint {
-            self.tint_arena.free(t, 1);
+        if let Some((t, n)) = slot.tint {
+            self.tint_arena.free(t, n);
         }
     }
 
@@ -1694,6 +1828,7 @@ impl Renderer {
             self.remove_geometry(key);
         }
         self.graph.clear();
+        self.born.clear();
     }
 
     pub fn graph_nodes(&self) -> usize {
@@ -1702,6 +1837,7 @@ impl Renderer {
 
     pub fn remove_section(&mut self, key: [i32; 3]) {
         self.graph.remove(key);
+        self.born.remove(&key);
         self.remove_geometry(key);
     }
 
@@ -1745,16 +1881,83 @@ impl Renderer {
         (f.bytes, f.writes)
     }
 
+    /// Uploads the quads the sort thread reordered, unless their section was meshed again since.
+    fn collect_sorted(&mut self) {
+        for done in self.sorter.finished() {
+            let Some(t) = self
+                .sections
+                .get_mut(&done.key)
+                .and_then(|s| s.translucent.as_mut())
+                .filter(|t| t.generation == done.generation)
+            else {
+                continue;
+            };
+            t.pending = false;
+            self.uploader.push(
+                Dest::Model,
+                u64::from(t.base) * ModelQuad::SIZE as u64,
+                bytemuck::cast_slice(&done.quads),
+            );
+            self.uploader.end_batch();
+        }
+    }
+
+    /// Vanilla's `scheduleTranslucentSectionResort`: sections next to the camera resort whenever its
+    /// block changes, the rest when their point of view changes (or on a block change while the camera
+    /// is level with them on an axis), a rotating window of them per frame.
+    fn schedule_resorts(&mut self, camera: [f64; 3], visible: &[[i32; 3]]) {
+        let block = camera.map(|v| v.floor() as i32);
+        let moved = self.last_sort_block != Some(block);
+        self.last_sort_block = Some(block);
+        if visible.is_empty() {
+            return;
+        }
+        let here = resort::section_of(camera);
+        let near = |k: &[i32; 3]| (0..3).all(|a| (i64::from(k[a]) - i64::from(here[a])).abs() <= 1);
+        let window = (visible.len() / 8).max(15).min(visible.len());
+        let start = self.resort_cursor % visible.len();
+        self.resort_cursor = start + window;
+        let candidates = visible.iter().filter(|k| near(k)).map(|k| (k, true)).chain(
+            (0..window)
+                .map(|i| &visible[(start + i) % visible.len()])
+                .map(|k| (k, false)),
+        );
+        for (key, nearby) in candidates {
+            let Some(t) = self
+                .sections
+                .get_mut(key)
+                .and_then(|s| s.translucent.as_mut())
+            else {
+                continue;
+            };
+            let pov = resort::point_of_view(here, *key);
+            let changed = pov != t.pov;
+            if t.pending || !(changed || moved && (nearby || resort::axis_aligned(pov))) {
+                continue;
+            }
+            t.pov = pov;
+            t.pending = true;
+            self.sorter.submit(SortJob {
+                key: *key,
+                generation: t.generation,
+                quads: Arc::clone(&t.quads),
+                eye: std::array::from_fn(|a| (camera[a] - f64::from(key[a]) * 16.0) as f32),
+            });
+        }
+    }
+
     /// Writes back-to-front draws for sections with translucent quads and returns their count.
     fn build_translucent(
         &mut self,
         frustum: &crate::Frustum,
+        camera: [f64; 3],
         cam_int: [i32; 3],
         cam_frac: glam::Vec3,
         graph: bool,
         fog_end: f32,
     ) -> u32 {
-        let mut visible: Vec<(f32, glam::Vec3, u32, u32, u32, u32)> = Vec::new();
+        let mut visible: Vec<(f32, glam::Vec3, u32, u32, u32, u32, f32)> = Vec::new();
+        let mut keys: Vec<[i32; 3]> = Vec::new();
         for (key, slot) in &self.sections {
             let Some(TranslucentDraw {
                 base,
@@ -1784,8 +1987,11 @@ impl Renderer {
                 count,
                 tint_base,
                 slot.index,
+                slot.born,
             ));
+            keys.push(*key);
         }
+        self.schedule_resorts(camera, &keys);
         visible.sort_by(|a, b| b.0.total_cmp(&a.0));
         visible.truncate(self.config.max_translucent_sections as usize);
         let cmds: Vec<[u32; 5]> = visible
@@ -1799,7 +2005,7 @@ impl Renderer {
                 origin: v.1.to_array(),
                 first_quad: v.2,
                 tint_base: v.4,
-                pad: [v.5, 0, 0],
+                pad: [v.5, v.6.to_bits(), 0],
             })
             .collect();
         if !cmds.is_empty() {
@@ -1927,6 +2133,7 @@ impl Renderer {
         mut overlay: Option<&mut dyn Overlay>,
     ) -> Result<FrameStats, RenderError> {
         let start = Instant::now();
+        self.collect_sorted();
         let (uploaded_bytes, uploaded_writes) = self.flush_uploads();
         self.collect_gpu_stats();
 
@@ -1978,6 +2185,7 @@ impl Renderer {
             ],
             shade_b: [env.cardinal[4], env.cardinal[5], 0.0, 0.0],
             cull: [w as f32, h as f32, self.hiz.mip_count() as f32, cam.near],
+            fade: [self.seconds(), self.fade_seconds, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
@@ -2009,7 +2217,14 @@ impl Renderer {
                 graph_ms = started.elapsed().as_secs_f32() * 1000.0;
             }
         }
-        let trans_n = self.build_translucent(&frustum, [ci.x, ci.y, ci.z], cf, graph, rd_end);
+        let trans_n = self.build_translucent(
+            &frustum,
+            cam.position.to_array(),
+            [ci.x, ci.y, ci.z],
+            cf,
+            graph,
+            rd_end,
+        );
         self.effects.prepare(&env, cam.position.to_array());
 
         let mut surface_tex = None;
@@ -2468,7 +2683,7 @@ impl Renderer {
         if let Some(d) = dyn_lights {
             pass.set_bind_group(2, &d.bind_group, &[]);
         }
-        pass.set_pipeline(dyn_lights.map_or(&self.cube_pipeline, |d| &d.cube));
+        pass.set_pipeline(dyn_lights.map_or(&self.terrain.cube, |d| &d.pipelines.cube));
         pass.set_index_buffer(self.geo.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
         if self.draw_count_supported {
             pass.multi_draw_indexed_indirect_count(
@@ -2481,7 +2696,7 @@ impl Renderer {
         } else {
             pass.multi_draw_indexed_indirect(&self.geo.cube_cmds, cube_offset, cube_max);
         }
-        pass.set_pipeline(dyn_lights.map_or(&self.model_pipeline, |d| &d.model));
+        pass.set_pipeline(dyn_lights.map_or(&self.terrain.model, |d| &d.pipelines.model));
         if self.draw_count_supported {
             pass.multi_draw_indexed_indirect_count(
                 &self.geo.model_cmds,
@@ -2510,9 +2725,9 @@ impl Renderer {
             match self.dyn_lights.as_ref().filter(|d| d.active) {
                 Some(d) => {
                     pass.set_bind_group(2, &d.bind_group, &[]);
-                    pass.set_pipeline(&d.trans);
+                    pass.set_pipeline(&d.pipelines.trans);
                 }
-                None => pass.set_pipeline(&self.trans_pipeline),
+                None => pass.set_pipeline(&self.terrain.trans),
             }
             pass.set_bind_group(1, &self.trans_geom_bg, &[]);
             pass.set_index_buffer(self.geo.quad_indices.slice(..), wgpu::IndexFormat::Uint32);

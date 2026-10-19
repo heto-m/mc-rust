@@ -615,7 +615,7 @@ impl BlockEntityScene {
                     self.emit_beacon(b, pos, ctx);
                 }
             }
-            K::EndPortal => self.emit_portal(pos, ctx, false, 0x3F),
+            K::EndPortal => self.emit_portal(pos, ctx, false, 0b11),
             K::EndGateway => self.emit_gateway(&e.anim, pos, ctx),
             K::Sign | K::HangingSign => {
                 if let BlockEntityData::Sign(s) = &e.data {
@@ -1461,8 +1461,9 @@ impl BlockEntityScene {
                 c(1.0, y1, 0.0),
             ],
         ];
+        let facing = portal_faces_toward_camera(o, y0, y1);
         for (i, q) in quads.iter().enumerate() {
-            if faces & (1 << i) != 0 {
+            if faces & (1 << i) != 0 && facing[i] {
                 self.flat.push_quad(
                     FlatKind::Portal,
                     if gateway {
@@ -2040,4 +2041,34 @@ fn spawner_entity(id: &str) -> &'static str {
             .collect()
     });
     names.get(id).copied().unwrap_or("minecraft:pig")
+}
+
+/// Faces (down, up, north, south, west, east) of a portal box whose outside the camera is on, `o` being
+/// the block corner relative to the camera; the flat pipeline draws both sides, vanilla's portal culls.
+fn portal_faces_toward_camera(o: [f32; 3], y0: f32, y1: f32) -> [bool; 6] {
+    [
+        o[1] + y0 > 0.0,
+        o[1] + y1 < 0.0,
+        o[2] > 0.0,
+        o[2] + 1.0 < 0.0,
+        o[0] > 0.0,
+        o[0] + 1.0 < 0.0,
+    ]
+}
+
+#[cfg(test)]
+mod portal_tests {
+    use super::portal_faces_toward_camera;
+
+    #[test]
+    fn only_the_portal_faces_toward_the_camera_draw() {
+        let above = portal_faces_toward_camera([-0.5, -2.0, -0.5], 0.375, 0.75);
+        assert_eq!(above[..2], [false, true]);
+        let below = portal_faces_toward_camera([-0.5, 2.0, -0.5], 0.375, 0.75);
+        assert_eq!(below[..2], [true, false]);
+        let inside = portal_faces_toward_camera([-0.5, -0.5, -0.5], 0.375, 0.75);
+        assert_eq!(inside, [false; 6]);
+        let north_east = portal_faces_toward_camera([-3.0, -0.5, 2.0], 0.0, 1.0);
+        assert_eq!(north_east, [false, false, true, false, false, true]);
+    }
 }

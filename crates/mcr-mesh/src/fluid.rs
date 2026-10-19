@@ -1,9 +1,12 @@
 //! Water and lava surfaces, following vanilla's fluid renderer.
 
-use mcr_render::{Face, ModelQuadDesc, SectionMesh, TintTable, model_ao, pack_light};
+use mcr_render::{
+    Face, MODEL_FLAG_UP_SHADE, ModelQuadDesc, SectionMesh, model_ao, pack_light, tint_at,
+};
 
 use crate::cache::{
-    ATTR_HALF_TRANSPARENT, ATTR_SOLID, FluidKind, LAYER_NONE, MASK_EMPTY, MASK_FULL, StateModel,
+    ATTR_HALF_TRANSPARENT, ATTR_LEAVES, ATTR_SOLID, FluidKind, LAYER_NONE, MASK_EMPTY, MASK_FULL,
+    StateModel,
 };
 use crate::mesher::{Ctx, Mesher};
 use crate::tint::{TINT_NONE, TINT_WATER};
@@ -246,6 +249,11 @@ pub(crate) fn mesh_fluid(
                 layer,
                 light,
                 shade,
+                flags: if shade.normal()[1] == 0 {
+                    MODEL_FLAG_UP_SHADE
+                } else {
+                    0
+                },
                 back,
                 translucent,
                 tint,
@@ -339,7 +347,8 @@ pub(crate) fn mesh_fluid(
         if occluded(ctx, *face, h0.max(h1), ncell) {
             continue;
         }
-        let overlay = overlay_sprite != LAYER_NONE && ctx.attr(ncell) & ATTR_HALF_TRANSPARENT != 0;
+        let overlay = overlay_sprite != LAYER_NONE
+            && ctx.attr(ncell) & (ATTR_HALF_TRANSPARENT | ATTR_LEAVES) != 0;
         let layer = if overlay { overlay_sprite } else { flow_sprite };
         emit(
             [
@@ -393,6 +402,7 @@ struct Surface {
     layer: u16,
     light: u16,
     shade: Face,
+    flags: u8,
     back: bool,
     translucent: bool,
     tint: u8,
@@ -416,7 +426,7 @@ fn push_surface(mesher: &Mesher, out: &mut SectionMesh, s: &Surface) {
                 layer: s.layer,
                 light: [s.light; 4],
                 shade_face: s.shade,
-                flags: 0,
+                flags: s.flags,
                 ao: [model_ao(1.0); 4],
                 tint: s.tint,
                 cell: s.cell,
@@ -494,13 +504,11 @@ pub(crate) fn merge_tops(
 
 impl Mesher {
     /// Emits the buffered fluid top faces merged; `tints` is the section's tint table.
-    pub(crate) fn flush_fluid_tops(&mut self, tints: Option<&TintTable>, out: &mut SectionMesh) {
+    pub(crate) fn flush_fluid_tops(&mut self, tints: Option<&[u32]>, out: &mut SectionMesh) {
         let mut tops = std::mem::take(&mut self.fluid_tops);
         let tint_of = |t: &FluidTop| match (t.key.tint, tints) {
             (0, _) => 0,
-            (k @ 1..=TINT_WATER, Some(table)) => {
-                table[(usize::from(k) - 1) * 256 + usize::from(t.z) * 16 + usize::from(t.x)]
-            }
+            (k @ 1..=TINT_WATER, Some(table)) => tint_at(table, k, t.x, t.key.y, t.z),
             (k, _) => u32::from(k) << 24,
         };
         merge_tops(&mut tops, tint_of, |r| {
@@ -518,6 +526,7 @@ impl Mesher {
                     layer: k.layer,
                     light: k.light,
                     shade: Face::PosY,
+                    flags: 0,
                     back: k.back,
                     translucent: k.translucent,
                     tint: k.tint,

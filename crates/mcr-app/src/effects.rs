@@ -97,7 +97,6 @@ const SNOW_TEMPERATURE: f32 = 0.15;
 const MAX_DECALS: usize = 128;
 const LIGHTNING_FLASH_TICKS: u32 = 2;
 const ENTITY_SILENT: u8 = 4;
-const TREE_LINE: f32 = 80.0;
 
 pub fn effect_assets(assets: &Assets) -> EffectAssets {
     EffectAssets::load(&|path| assets.read(path))
@@ -291,30 +290,97 @@ impl ParticleWorld for ClientParticleWorld<'_> {
     }
 }
 
-/// Per biome `(has_precipitation, temperature)` from the synced registry.
-pub(crate) fn precipitation_table(registry: &mcr_client::Registry) -> Vec<(bool, f32)> {
+/// A biome's climate as precipitation reads it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Climate {
+    pub precipitation: bool,
+    pub temperature: f32,
+    /// `temperature_modifier: frozen` (frozen oceans): ice patches rain.
+    pub frozen: bool,
+}
+
+/// Per biome climate from the synced registry.
+pub(crate) fn precipitation_table(registry: &mcr_client::Registry) -> Vec<Climate> {
     registry
         .entries
         .iter()
         .map(|e| {
             let data = e.data.as_ref();
-            (
-                data.and_then(|d| d.get_bool("has_precipitation"))
+            Climate {
+                precipitation: data
+                    .and_then(|d| d.get_bool("has_precipitation"))
                     .unwrap_or(true),
-                data.and_then(|d| d.get_f32("temperature")).unwrap_or(0.5),
-            )
+                temperature: data.and_then(|d| d.get_f32("temperature")).unwrap_or(0.5),
+                frozen: data.and_then(|d| d.get_str("temperature_modifier")) == Some("frozen"),
+            }
         })
         .collect()
+}
+
+struct ClimateNoise {
+    temperature: mcr_mesh::Simplex,
+    frozen: [mcr_mesh::Simplex; 3],
+    biome_info: mcr_mesh::Simplex,
+}
+
+fn climate_noise() -> &'static ClimateNoise {
+    static NOISE: std::sync::OnceLock<ClimateNoise> = std::sync::OnceLock::new();
+    NOISE.get_or_init(|| {
+        let mut random = mcr_mesh::JavaRandom::new(3456);
+        ClimateNoise {
+            temperature: mcr_mesh::Simplex::new(1234),
+            frozen: std::array::from_fn(|_| mcr_mesh::Simplex::from_random(&mut random)),
+            biome_info: mcr_mesh::Simplex::new(2345),
+        }
+    })
+}
+
+/// Vanilla's `Biome#getHeightAdjustedTemperature`, with the frozen modifier's ice patches.
+pub(crate) fn height_adjusted_temperature(
+    climate: &Climate,
+    x: i32,
+    y: i32,
+    z: i32,
+    sea_level: i32,
+) -> f32 {
+    let noise = climate_noise();
+    let mut temperature = climate.temperature;
+    if climate.frozen {
+        let (fx, fz) = (f64::from(x), f64::from(z));
+        let large: f64 = [(1.0, 1.0 / 7.0), (0.5, 2.0 / 7.0), (0.25, 4.0 / 7.0)]
+            .iter()
+            .zip(&noise.frozen)
+            .map(|(&(freq, amp), n): (&(f64, f32), _)| {
+                f64::from(amp * n.get(fx * 0.05 * freq, fz * 0.05 * freq))
+            })
+            .sum::<f64>()
+            * 7.0;
+        let edge = f64::from(noise.biome_info.get(fx * 0.2, fz * 0.2));
+        if large + edge < 0.3 && noise.biome_info.get(fx * 0.09, fz * 0.09) < 0.8 {
+            temperature = 0.2;
+        }
+    }
+    let snow_level = i64::from(sea_level) + 17;
+    let y = i64::from(y);
+    if y > snow_level {
+        let v = noise
+            .temperature
+            .get(f64::from(x as f32 / 8.0), f64::from(z as f32 / 8.0))
+            * 8.0;
+        temperature - (v + (y - snow_level) as f32) * 0.05 / 40.0
+    } else {
+        temperature
+    }
 }
 
 /// Precipitation from the synced biome registry and the client's heightmaps.
 pub struct ClientWeather<'a> {
     state: &'a ClientState,
-    biomes: &'a [(bool, f32)],
+    biomes: &'a [Climate],
 }
 
 impl<'a> ClientWeather<'a> {
-    pub(crate) fn new(state: &'a ClientState, biomes: &'a [(bool, f32)]) -> Self {
+    pub(crate) fn new(state: &'a ClientState, biomes: &'a [Climate]) -> Self {
         Self { state, biomes }
     }
 }
@@ -337,10 +403,9 @@ impl WeatherSource for ClientWeather<'_> {
         let Some(column) = chunks.column(ChunkPos::new(x >> 4, z >> 4)) else {
             return Precipitation::None;
         };
-        let rel = y - min_y;
-        if rel < 0 {
+        let Some(rel) = y.checked_sub(min_y).filter(|r| *r >= 0) else {
             return Precipitation::None;
-        }
+        };
         let Some(section) = column.section((rel >> 4) as usize) else {
             return Precipitation::None;
         };
@@ -351,18 +416,14 @@ impl WeatherSource for ClientWeather<'_> {
                 ((z & 15) >> 2) as usize,
             )
             .0 as usize;
-        let Some(&(has, temperature)) = self.biomes.get(biome) else {
+        let Some(climate) = self.biomes.get(biome) else {
             return Precipitation::None;
         };
-        if !has {
+        if !climate.precipitation {
             return Precipitation::None;
         }
-        let adjusted = if y as f32 > TREE_LINE {
-            temperature - (y as f32 - TREE_LINE) * 0.05 / 40.0
-        } else {
-            temperature
-        };
-        if adjusted < SNOW_TEMPERATURE {
+        let sea_level = self.state.dimension.sea_level;
+        if height_adjusted_temperature(climate, x, y, z, sea_level) < SNOW_TEMPERATURE {
             Precipitation::Snow
         } else {
             Precipitation::Rain
@@ -413,8 +474,9 @@ impl BreakingDecals {
 
 pub struct WorldEffects {
     pub particles: ParticleEngine,
+    cache: Arc<mcr_mesh::ModelCache>,
     rain: RainTicker,
-    biomes: Vec<(bool, f32)>,
+    biomes: Vec<Climate>,
     biome_count: usize,
     breaking: BreakingDecals,
     flash_ticks: u32,
@@ -440,6 +502,7 @@ impl WorldEffects {
     pub fn new(assets: Arc<Assets>) -> Self {
         let atlas = ParticleAtlas::load(&|path| assets.read(path));
         Self {
+            cache: assets.cache.clone(),
             particles: ParticleEngine::new(atlas, Box::new(AppParticleAssets::new(assets))),
             rain: RainTicker::default(),
             biomes: Vec::new(),
@@ -502,6 +565,11 @@ impl WorldEffects {
         self.flash_ticks > 0
     }
 
+    /// The block models crack decals follow, after a resource reload.
+    pub fn set_model_cache(&mut self, cache: Arc<mcr_mesh::ModelCache>) {
+        self.cache = cache;
+    }
+
     pub fn destruction(&mut self, entity_id: i32, pos: BlockPos, progress: u8) {
         self.breaking.update(entity_id, pos, progress);
     }
@@ -509,21 +577,24 @@ impl WorldEffects {
     pub fn decals(&self, state: &ClientState, own: Option<(BlockPos, u8)>) -> Vec<DestroyDecal> {
         let data = mcr_data::v26_3();
         let make = |pos: BlockPos, stage: u8| {
-            let boxes = state
-                .chunks
-                .block(pos.x, pos.y, pos.z)
-                .map(|s| {
-                    data.outline_shape(s.0)
-                        .iter()
-                        .map(|b| [b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]])
-                        .collect()
-                })
-                .unwrap_or_default();
-            DestroyDecal {
+            let mut decal = DestroyDecal {
                 pos: [pos.x, pos.y, pos.z],
                 stage,
-                boxes,
+                ..DestroyDecal::default()
+            };
+            let Some(s) = state.chunks.block(pos.x, pos.y, pos.z) else {
+                return decal;
+            };
+            self.cache.model_quads(s.0, decal.pos, &mut decal.quads);
+            // Block entity models crack themselves in vanilla; their outline stands in for them here.
+            if decal.quads.is_empty() {
+                decal.boxes = data
+                    .outline_shape(s.0)
+                    .iter()
+                    .map(|b| [b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]])
+                    .collect();
             }
+            decal
         };
         self.breaking
             .0
@@ -1069,6 +1140,100 @@ fn is_air(state: &ClientState, at: [f64; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn climate_noise_matches_vanilla() {
+        // Values printed by vanilla's SimplexNoise and the frozen NoiseStack.
+        let reference: [(i32, i32, f32, f64, f64); 5] = [
+            (0, 0, 0.0, 0.0, 0.0),
+            (
+                100,
+                200,
+                -0.26197782,
+                -0.16632233560085297,
+                -0.09642118960618973,
+            ),
+            (
+                -350,
+                40,
+                0.2996354,
+                0.07124486565589905,
+                -0.8486581444740295,
+            ),
+            (
+                1234,
+                -5678,
+                0.37734666,
+                0.4309020936489105,
+                0.23624788224697113,
+            ),
+            (
+                77,
+                -77,
+                -0.27643952,
+                -0.03653084486722946,
+                -0.4951015114784241,
+            ),
+        ];
+        let n = climate_noise();
+        for (x, z, temperature, frozen, info) in reference {
+            let (fx, fz) = (f64::from(x), f64::from(z));
+            let t = n
+                .temperature
+                .get(f64::from(x as f32 / 8.0), f64::from(z as f32 / 8.0));
+            assert!((t - temperature).abs() < 1e-6, "{x},{z}: {t}");
+            let stack: f64 = [(1.0, 1.0 / 7.0), (0.5, 2.0 / 7.0), (0.25, 4.0 / 7.0)]
+                .iter()
+                .zip(&n.frozen)
+                .map(|(&(freq, amp), s): (&(f64, f32), _)| {
+                    f64::from(amp * s.get(fx * 0.05 * freq, fz * 0.05 * freq))
+                })
+                .sum();
+            assert!((stack - frozen).abs() < 1e-6, "{x},{z}: {stack}");
+            let i = f64::from(n.biome_info.get(fx * 0.2, fz * 0.2));
+            assert!((i - info).abs() < 1e-6, "{x},{z}: {i}");
+        }
+    }
+
+    #[test]
+    fn snow_line_follows_sea_level_and_frozen_oceans_have_rainy_patches() {
+        let plains = Climate {
+            precipitation: true,
+            temperature: 0.8,
+            frozen: false,
+        };
+        assert_eq!(height_adjusted_temperature(&plains, 5, 80, 5, 63), 0.8);
+        let high = height_adjusted_temperature(&plains, 5, 300, 5, 63);
+        assert!(high < 0.8 - 0.25, "{high}");
+        let ocean = Climate {
+            precipitation: true,
+            temperature: 0.0,
+            frozen: true,
+        };
+        let warm = (0..64)
+            .flat_map(|x| (0..64).map(move |z| (x * 7, z * 7)))
+            .filter(|&(x, z)| height_adjusted_temperature(&ocean, x, 63, z, 63) >= 0.15)
+            .count();
+        assert!(warm > 0 && warm < 64 * 64, "{warm} rainy columns");
+    }
+
+    #[test]
+    fn hostile_sea_levels_do_not_overflow() {
+        let plains = Climate {
+            precipitation: true,
+            temperature: 0.8,
+            frozen: true,
+        };
+        for (y, sea) in [
+            (i32::MAX, i32::MIN),
+            (i32::MIN, i32::MAX),
+            (319, i32::MIN),
+            (0, i32::MAX),
+        ] {
+            let t = height_adjusted_temperature(&plains, i32::MAX, y, i32::MIN, sea);
+            assert!(!t.is_nan(), "{y} {sea}: {t}");
+        }
+    }
 
     #[test]
     fn abandoned_crack_decals_expire() {

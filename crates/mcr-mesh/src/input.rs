@@ -28,6 +28,8 @@ pub struct MeshInput {
     pub blend_radius: usize,
     /// The hashed world seed vanilla's biome zoom is keyed with.
     pub biome_seed: i64,
+    /// World camera position to sort translucent quads for, like vanilla's compile-time sort.
+    pub camera: Option<[f64; 3]>,
 }
 
 pub const QUART_SPAN: usize = 10;
@@ -59,6 +61,7 @@ impl MeshInput {
             biomes: vec![0; QUART_SPAN * QUART_SPAN * QUART_SPAN_Y],
             blend_radius: radius,
             biome_seed: 0,
+            camera: None,
         }
     }
 

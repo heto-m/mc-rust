@@ -16,6 +16,11 @@
 @group(1) @binding(4) var<storage, read> tints: array<u32>;
 
 const NO_TINT_TABLE: u32 = 0xffffffffu;
+const MULTI_TINT_TABLES: u32 = 0x40000000u;
+// Set in the tint kind passed to the fragment stage: draw without alpha cutout.
+const TINT_OPAQUE: u32 = 0x100u;
+const MODEL_FLAG_OPAQUE: u32 = 1u;
+const MODEL_FLAG_UP_SHADE: u32 = 2u;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -24,7 +29,8 @@ struct VsOut {
     @location(2) @interpolate(flat) layer: u32,
     @location(3) @interpolate(flat) tint: vec2<u32>,
     @location(4) cell: vec3<f32>,
-    @location(5) fog_distance: vec2<f32>,
+    // Fog distances, then vanilla's chunk fade-in visibility (0 draws the fog colour, 1 the terrain).
+    @location(5) fog_distance: vec3<f32>,
 }
 
 fn face_shade(face: u32) -> f32 {
@@ -92,6 +98,8 @@ struct Corner {
     light: u32,
     shade: f32,
     normal: vec3<f32>,
+    // Seconds since start when the section was first uploaded.
+    born: f32,
 }
 
 fn face_normal(face: u32) -> vec3<f32> {
@@ -141,11 +149,12 @@ fn cube_corner(vi: u32, slot: u32) -> Corner {
     let v = select(cv, 1.0 - cv, mirror_v);
     out.uv = rotate_uv(vec2<f32>(u * f32(q.width), v * f32(q.height)), q.rotation);
     out.layer = q.layer;
-    out.tint = vec2<u32>(q.tint, draw.tint_base);
+    out.tint = vec2<u32>(q.tint | select(0u, TINT_OPAQUE, q.opaque), draw.tint_base);
     out.cell = p + nudge;
     out.light = q.light[c];
     out.shade = (0.2 + 0.2 * f32(q.ao[c])) * face_shade(q.face);
     out.normal = nudge * -2.0;
+    out.born = bitcast<f32>(draw.pad1);
     return out;
 }
 
@@ -160,11 +169,16 @@ fn model_corner(vi: u32, slot: u32) -> Corner {
     out.rel = draw.origin + p;
     out.uv = decode_model_uv(q, c);
     out.layer = decode_model_layer(q);
-    out.tint = vec2<u32>(decode_model_tint(q), draw.tint_base);
+    let flags = decode_model_flags(q);
+    out.tint = vec2<u32>(decode_model_tint(q) | select(0u, TINT_OPAQUE, (flags & MODEL_FLAG_OPAQUE) != 0u), draw.tint_base);
     out.cell = model_cell(q) + vec3<f32>(0.5, 0.0, 0.5);
     out.light = decode_model_light(q, c);
     out.shade = f32(decode_model_ao(q, c)) / 63.0 * face_shade(shade_face);
+    if (flags & MODEL_FLAG_UP_SHADE) != 0u {
+        out.shade *= face_shade(2u);
+    }
     out.normal = face_normal(shade_face);
+    out.born = bitcast<f32>(draw.pad1);
     return out;
 }
 
@@ -176,9 +190,20 @@ fn corner_out(c: Corner) -> VsOut {
     out.tint = c.tint;
     out.cell = c.cell;
     out.color = light_color(c.light) * c.shade;
-    out.fog_distance = fog_distances(c.rel);
+    let fog = fog_distances(c.rel);
+    out.fog_distance = vec3<f32>(fog, section_visibility(c.born, fog.x));
     return out;
 }
+
+// Fully visible within 16 blocks, fading in over the option's time beyond 32.
+fn section_visibility(born: f32, distance: f32) -> f32 {
+    var faded = 1.0;
+    if g.fade.y > 0.0 {
+        faded = clamp((g.fade.x - born) / g.fade.y, 0.0, 1.0);
+    }
+    return mix(1.0, faded, clamp((distance - 16.0) / 16.0, 0.0, 1.0));
+}
+
 
 @vertex
 fn vs_cube(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) -> VsOut {
@@ -190,7 +215,8 @@ fn vs_model(@builtin(vertex_index) vi: u32, @builtin(instance_index) slot: u32) 
     return corner_out(model_corner(vi, slot));
 }
 
-fn tint_color(kind: u32, base: u32, cell: vec3<f32>) -> vec3<f32> {
+fn tint_color(tint: u32, base: u32, cell: vec3<f32>) -> vec3<f32> {
+    let kind = tint & 63u;
     if kind == 0u {
         return vec3<f32>(1.0);
     }
@@ -202,25 +228,80 @@ fn tint_color(kind: u32, base: u32, cell: vec3<f32>) -> vec3<f32> {
     } else {
         let x = u32(clamp(floor(cell.x), 0.0, 15.0));
         let z = u32(clamp(floor(cell.z), 0.0, 15.0));
-        packed = tints[base + (kind - 1u) * 256u + z * 16u + x];
+        var table = base & ~MULTI_TINT_TABLES;
+        if (base & MULTI_TINT_TABLES) != 0u {
+            // Word y of the first table names the table for blocks at that height.
+            let y = u32(clamp(floor(cell.y), 0.0, 15.0));
+            table += (tints[table + y] >> 24u) * 1024u;
+        }
+        packed = tints[table + (kind - 1u) * 256u + z * 16u + x];
     }
     return vec3<f32>(f32(packed & 255u), f32((packed >> 8u) & 255u), f32((packed >> 16u) & 255u)) / 255.0;
+}
+
+// Vanilla's `sampleNearest`: texel centres stay sharp under linear filtering, with a pixel-wide blend
+// at texel edges.
+fn sample_sharp(t: texture_2d_array<f32>, uv: vec2<f32>, l: i32, dx: vec2<f32>, dy: vec2<f32>, pixel: vec2<f32>) -> vec4<f32> {
+    let texel_screen = max(sqrt(dx * dx + dy * dy), vec2<f32>(1e-8));
+    let coords = uv / pixel;
+    let center = round(coords) - 0.5;
+    let offset = clamp((coords - center - 0.5) * pixel / texel_screen + 0.5, vec2<f32>(0.0), vec2<f32>(1.0));
+    return textureSampleGrad(t, blocks_sampler, (center + offset) * pixel, l, dx, dy);
+}
+
+// Vanilla's rotated-grid supersampling, blended in as texels shrink below a pixel.
+fn sample_rgss(t: texture_2d_array<f32>, uv: vec2<f32>, l: i32, dx: vec2<f32>, dy: vec2<f32>, pixel: vec2<f32>) -> vec4<f32> {
+    let texel_screen = sqrt(dx * dx + dy * dy);
+    let min_pixel = min(pixel.x, pixel.y);
+    let blend = smoothstep(min_pixel, min_pixel * 2.0, max(texel_screen.x, texel_screen.y));
+    let sharp = sample_sharp(t, uv, l, dx, dy, pixel);
+    if blend <= 0.0 {
+        return sharp;
+    }
+    let du = length(dx);
+    let dv = length(dy);
+    let lod = max(0.0, log2(sqrt(min(du, dv) * max(du, dv)) / min_pixel));
+    let low = floor(lod);
+    var offsets = array<vec2<f32>, 4>(vec2<f32>(0.125, 0.375), vec2<f32>(-0.125, -0.375), vec2<f32>(0.375, -0.125), vec2<f32>(-0.375, 0.125));
+    var a = vec4<f32>(0.0);
+    var b = vec4<f32>(0.0);
+    for (var i = 0u; i < 4u; i++) {
+        let p = uv + offsets[i] * pixel;
+        a += textureSampleLevel(t, blocks_sampler, p, l, low);
+        b += textureSampleLevel(t, blocks_sampler, p, l, low + 1.0);
+    }
+    return mix(sharp, mix(a, b, fract(lod)) * 0.25, blend);
+}
+
+// `FilterMode`, specialised per pipeline so the nearest path carries no filtering code.
+override FILTER_MODE: u32 = 0u;
+
+fn sample_group(t: texture_2d_array<f32>, uv: vec2<f32>, l: i32, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
+    let mode = FILTER_MODE;
+    if mode == 0u {
+        return textureSampleGrad(t, blocks_sampler, uv, l, dx, dy);
+    }
+    let pixel = 1.0 / vec2<f32>(textureDimensions(t));
+    if mode == 1u {
+        return sample_rgss(t, uv, l, dx, dy, pixel);
+    }
+    return sample_sharp(t, uv, l, dx, dy, pixel);
 }
 
 fn sample_blocks(uv: vec2<f32>, layer: u32, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
     let l = i32(layer & 0x3fffu);
     switch layer >> 14u {
         case 1u: {
-            return textureSampleGrad(blocks1, blocks_sampler, uv, l, dx, dy);
+            return sample_group(blocks1, uv, l, dx, dy);
         }
         case 2u: {
-            return textureSampleGrad(blocks2, blocks_sampler, uv, l, dx, dy);
+            return sample_group(blocks2, uv, l, dx, dy);
         }
         case 3u: {
-            return textureSampleGrad(blocks3, blocks_sampler, uv, l, dx, dy);
+            return sample_group(blocks3, uv, l, dx, dy);
         }
         default: {
-            return textureSampleGrad(blocks0, blocks_sampler, uv, l, dx, dy);
+            return sample_group(blocks0, uv, l, dx, dy);
         }
     }
 }
@@ -250,12 +331,18 @@ fn apply_fog(color: vec3<f32>, d: vec2<f32>) -> vec3<f32> {
     return mix(color, g.fog_color.rgb, f * g.fog_color.a);
 }
 
+// Vanilla fades a section in toward the fog colour (`d.z` is its visibility), then fogs it; one blend.
+fn apply_faded_fog(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    let f = max(linear_fog(d.x, g.fog.x, g.fog.y), linear_fog(d.y, g.fog.z, g.fog.w)) * g.fog_color.a;
+    return mix(color, g.fog_color.rgb, 1.0 - d.z * (1.0 - f));
+}
+
 // Texture times tint; cutout below half alpha.
 fn opaque_texel(uv: vec2<f32>, layer: u32, tint: vec2<u32>, cell: vec3<f32>) -> vec3<f32> {
     let dx = dpdx(uv);
     let dy = dpdy(uv);
     let t = sample_animated(uv, layer, dx, dy);
-    if t.a < 0.5 {
+    if t.a < 0.5 && (tint.x & TINT_OPAQUE) == 0u {
         discard;
     }
     return t.rgb * tint_color(tint.x, tint.y, cell);
@@ -274,13 +361,13 @@ fn translucent_texel(uv: vec2<f32>, layer: u32, tint: vec2<u32>, cell: vec3<f32>
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let c = opaque_texel(in.uv, in.layer, in.tint, in.cell) * in.color;
-    return vec4<f32>(apply_fog(c, in.fog_distance), 1.0);
+    return vec4<f32>(apply_faded_fog(c, in.fog_distance), 1.0);
 }
 
 @fragment
 fn fs_translucent(in: VsOut) -> @location(0) vec4<f32> {
     let t = translucent_texel(in.uv, in.layer, in.tint, in.cell);
-    return vec4<f32>(apply_fog(t.rgb * in.color, in.fog_distance), t.a);
+    return vec4<f32>(apply_faded_fog(t.rgb * in.color, in.fog_distance), t.a);
 }
 
 struct SkyOut {

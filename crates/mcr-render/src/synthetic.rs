@@ -185,6 +185,7 @@ pub fn mesh_section(terrain: &Terrain, sx: i32, sy: i32, sz: i32) -> SectionMesh
                 light: [light; 4],
                 tint: 0,
                 rotation: 0,
+                opaque: false,
             };
             mesh.push_cube(PackedQuad::encode(&q).expect("quad fields in range"));
         };

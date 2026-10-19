@@ -134,6 +134,7 @@ fn plane(face: Face, at: u8) -> SectionMesh {
             light: [LIGHT_FULL_SKY; 4],
             tint: 0,
             rotation: 0,
+            opaque: false,
         })
         .unwrap(),
     );

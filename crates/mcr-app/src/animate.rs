@@ -58,7 +58,7 @@ pub struct BlockAnimation {
     biome_count: usize,
     dimension: Visual,
     biomes: Vec<Visual>,
-    precipitation: Vec<(bool, f32)>,
+    precipitation: Vec<crate::effects::Climate>,
     colors: Option<Arc<BiomeColors>>,
     creaking_dimension: bool,
     any_ambient: bool,

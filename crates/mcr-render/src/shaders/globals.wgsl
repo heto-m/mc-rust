@@ -18,6 +18,8 @@ struct Globals {
     shade_b: vec4<f32>,
     // viewport width, height, depth pyramid levels, near plane
     cull: vec4<f32>,
+    // seconds since start, section fade-in seconds
+    fade: vec4<f32>,
 }
 
 struct SectionMeta {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use mcr_block_entity::{
     BeaconData, BeamBlock, BlockEntityData, BlockEntityFrame, BlockEntityKind, BlockEntityScene,
-    DyeColor, PistonData, beam_sections,
+    DyeColor, PistonData, beacon_levels, beam_sections,
 };
 use mcr_client::{ClientEvent, ClientState};
 use mcr_entity_model::glam::Quat;
@@ -20,6 +20,14 @@ const MAX_PER_CHUNK: usize = 4096;
 const MAX_TOTAL: usize = 1 << 16;
 const BEACON_INTERVAL: u64 = 20;
 const CONDUIT_INTERVAL: u64 = 40;
+/// Vanilla's `#beacon_base_blocks`, for a server that sent no block tags.
+const BEACON_BASE: [&str; 5] = [
+    "netherite_block",
+    "emerald_block",
+    "diamond_block",
+    "gold_block",
+    "iron_block",
+];
 const CONDUIT_FRAME: [&str; 4] = [
     "prismarine",
     "prismarine_bricks",
@@ -219,7 +227,7 @@ impl BlockEntities {
             return;
         };
         match (kind, &mut data) {
-            (BlockEntityKind::Beacon, d) => *d = Self::beacon_data(&state.chunks, pos),
+            (BlockEntityKind::Beacon, d) => *d = Self::beacon_data(state, pos),
             (BlockEntityKind::Conduit, BlockEntityData::Conduit(c)) => {
                 let frame = conduit_frame(&state.chunks, pos);
                 c.active = frame.len() >= 16;
@@ -231,11 +239,30 @@ impl BlockEntities {
         self.entries.insert(pos, (kind, data));
     }
 
-    fn beacon_data(chunks: &ChunkStore, pos: Pos) -> BlockEntityData {
+    /// Vanilla draws no beam while the beacon has no pyramid (`getBeamSections` with zero levels).
+    fn beacon_data(state: &ClientState, pos: Pos) -> BlockEntityData {
+        let chunks = &state.chunks;
         let top = top_y(chunks.config().min_y(), chunks.config().height());
-        let sections = beam_sections(pos[1], top, |y| {
+        let mut sections = beam_sections(pos[1], top, |y| {
             state_at(chunks, [pos[0], y, pos[2]]).map_or(BeamBlock::Open, beam_block)
         });
+        if !sections.is_empty() {
+            let data = mcr_data::v26_3();
+            let tag = state
+                .registries
+                .tag("minecraft:block", "minecraft:beacon_base_blocks");
+            let levels = beacon_levels(pos, chunks.config().min_y(), |x, y, z| {
+                state_at(chunks, [x, y, z]).is_some_and(|s| match tag {
+                    Some(ids) => data
+                        .block_state(s)
+                        .is_some_and(|b| ids.contains(&(b.block as i32))),
+                    None => BEACON_BASE.contains(&block_name(s)),
+                })
+            });
+            if levels == 0 {
+                sections.clear();
+            }
+        }
         BlockEntityData::Beacon(BeaconData { sections })
     }
 

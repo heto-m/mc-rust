@@ -28,8 +28,8 @@ pub const PALETTE_LEN: usize = 28;
 pub const DEFAULT_BLEND_RADIUS: usize = 2;
 pub const MAX_BLEND_RADIUS: usize = 7;
 
-/// Marks a column without tinted quads.
-pub const NO_Y: u8 = 255;
+/// Tint tables one section keeps at most, for biomes that change with height.
+pub const MAX_TINT_SLOTS: usize = 4;
 
 const fn rgb(r: u32, g: u32, b: u32) -> u32 {
     r | g << 8 | b << 16
@@ -419,9 +419,11 @@ impl BiomeColors {
         self.color(TINT_GRASS, biome)
     }
 
-    /// Per-column tint table for a section: each column's biome is resolved with vanilla's seeded zoom at
-    /// the height in `ys` (section-local, `NO_Y` for untinted columns), then blended over the radius.
-    pub fn fill_table_zoomed(&self, input: &MeshInput, ys: &[u8; 256], table: &mut TintTable) {
+    /// The tint tables of a section, like vanilla's `calculateBlockTint` at each tinted block's own height:
+    /// one [`TintTable`] per distinct biome window among the y levels set in `levels` (bit `y` of each
+    /// column, section-local), at most [`MAX_TINT_SLOTS`]. The top byte of word `y` of the first table
+    /// holds the table index for level `y`.
+    pub fn fill_tables(&self, input: &MeshInput, levels: &[u16; 256]) -> Box<[u32]> {
         let radius = input.blend_radius;
         let side = 16 + 2 * radius;
         let uniform = input.biomes.iter().all(|&b| b == input.biomes[0]);
@@ -430,21 +432,19 @@ impl BiomeColors {
             .iter()
             .any(|&b| self.swamp.get(usize::from(b)).copied().unwrap_or(false));
         if uniform && !swamp_any {
+            let mut table = vec![0u32; TINT_TABLE_WORDS];
             for kind in TINT_GRASS..=TINT_WATER {
                 table[(kind as usize - 1) * 256..][..256].fill(self.color(kind, input.biomes[0]));
             }
-            return;
+            return table.into_boxed_slice();
         }
         let origin = [input.pos.x * 16, input.pos.y * 16, input.pos.z * 16];
-        let mut levels: Vec<u8> = ys.iter().copied().filter(|&y| y != NO_Y).collect();
-        levels.sort_unstable();
-        levels.dedup();
-        if levels.is_empty() {
-            levels.push(8);
-        }
+        let used = levels.iter().fold(0u16, |a, &m| a | m);
+        let used = if used == 0 { 1 << 8 } else { used };
         let mut windows: Vec<Vec<u16>> = Vec::new();
-        let mut slot_of_level = [0usize; 16];
-        for &y in &levels {
+        let mut slot_of_level = [0u8; 16];
+        let mut last = 0u8;
+        for y in (0..16).filter(|y| used >> y & 1 != 0) {
             let ids: Vec<u16> = (0..side * side)
                 .map(|i| {
                     if uniform {
@@ -455,7 +455,7 @@ impl BiomeColors {
                     zoom_biome(
                         input.biome_seed,
                         origin[0] + wx,
-                        origin[1] + i32::from(y),
+                        origin[1] + y,
                         origin[2] + wz,
                         |qx, qy, qz| {
                             input.biomes[quart_index(
@@ -467,48 +467,40 @@ impl BiomeColors {
                     )
                 })
                 .collect();
-            let slot = match windows.iter().position(|w| *w == ids) {
-                Some(s) => s,
-                None => {
+            last = match windows.iter().position(|w| *w == ids) {
+                Some(s) => s as u8,
+                None if windows.len() < MAX_TINT_SLOTS => {
                     windows.push(ids);
-                    windows.len() - 1
+                    (windows.len() - 1) as u8
                 }
+                None => last,
             };
-            slot_of_level[usize::from(y)] = slot;
+            slot_of_level[y as usize] = last;
         }
-        for kind in TINT_GRASS..=TINT_WATER {
-            let blurred: Vec<[u32; 256]> = windows
-                .iter()
-                .map(|ids| {
-                    let colors: Vec<u32> = ids
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &b)| {
-                            if kind == TINT_GRASS {
-                                let wx = origin[0] + (i % side) as i32 - radius as i32;
-                                let wz = origin[2] + (i / side) as i32 - radius as i32;
-                                self.grass_at(b, wx, wz)
-                            } else {
-                                self.color(kind, b)
-                            }
-                        })
-                        .collect();
-                    let mut out = [0u32; 256];
-                    Self::blur(&colors, radius, &mut out);
-                    out
-                })
-                .collect();
-            let dst = &mut table[(kind as usize - 1) * 256..][..256];
-            for (col, d) in dst.iter_mut().enumerate() {
-                let y = ys[col];
-                let slot = if y == NO_Y {
-                    0
-                } else {
-                    slot_of_level[usize::from(y)]
-                };
-                *d = blurred[slot][col];
+        let mut tables = vec![0u32; windows.len() * TINT_TABLE_WORDS];
+        for (slot, ids) in windows.iter().enumerate() {
+            for kind in TINT_GRASS..=TINT_WATER {
+                let colors: Vec<u32> = ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &b)| {
+                        if kind == TINT_GRASS {
+                            let wx = origin[0] + (i % side) as i32 - radius as i32;
+                            let wz = origin[2] + (i / side) as i32 - radius as i32;
+                            self.grass_at(b, wx, wz)
+                        } else {
+                            self.color(kind, b)
+                        }
+                    })
+                    .collect();
+                let at = slot * TINT_TABLE_WORDS + (kind as usize - 1) * 256;
+                Self::blur(&colors, radius, &mut tables[at..at + 256]);
             }
         }
+        for (y, &slot) in slot_of_level.iter().enumerate() {
+            tables[y] |= u32::from(slot) << 24;
+        }
+        tables.into_boxed_slice()
     }
 
     pub fn new_table(&self) -> Box<TintTable> {
@@ -619,11 +611,9 @@ mod tests {
     fn zoomed_columns_follow_the_seeded_biome_border() {
         let colors = two_biomes();
         let input = split_input(0);
-        let ys = [8u8; 256];
-        let mut a = colors.new_table();
-        colors.fill_table_zoomed(&input, &ys, &mut a);
-        let mut b = colors.new_table();
-        colors.fill_table_zoomed(&input, &ys, &mut b);
+        let ys = [1u16 << 8; 256];
+        let a = colors.fill_tables(&input, &ys);
+        let b = colors.fill_tables(&input, &ys);
         assert_eq!(a[..256], b[..256]);
         assert_eq!(a[0], rgb(255, 0, 0));
         assert_eq!(a[15], rgb(0, 0, 255));
@@ -635,6 +625,34 @@ mod tests {
     }
 
     #[test]
+    fn tint_follows_each_blocks_height() {
+        let colors = two_biomes();
+        let mut input = MeshInput::blank(mcr_world::SectionPos::new(0, 4, 0), 0);
+        let qy0 = -crate::input::QUART_ORIGIN_Y;
+        for qy in 0..crate::input::QUART_SPAN_Y as i32 {
+            for q in 0..crate::input::QUART_SPAN * crate::input::QUART_SPAN {
+                input.biomes
+                    [qy as usize * crate::input::QUART_SPAN * crate::input::QUART_SPAN + q] =
+                    u16::from(qy >= qy0 + 2);
+            }
+        }
+        let t = colors.fill_tables(&input, &[1 << 1 | 1 << 14; 256]);
+        assert_eq!(t.len(), 2 * TINT_TABLE_WORDS);
+        let at = |y: usize, col: usize| {
+            let slot = (t[y] >> 24) as usize;
+            t[slot * TINT_TABLE_WORDS + col] & 0xff_ffff
+        };
+        assert_eq!(at(1, 37), rgb(255, 0, 0), "low grass takes the lower biome");
+        assert_eq!(
+            at(14, 37),
+            rgb(0, 0, 255),
+            "high grass takes the upper biome"
+        );
+        let flat = colors.fill_tables(&input, &[1 << 1; 256]);
+        assert_eq!(flat.len(), TINT_TABLE_WORDS);
+    }
+
+    #[test]
     fn swamp_grass_uses_position_noise() {
         let swamp = BiomeClimate {
             modifier: GrassModifier::Swamp,
@@ -643,9 +661,9 @@ mod tests {
         let colors = BiomeColors::from_climates(&[swamp], &ColorMaps::flat(1, 2, 3));
         let mut input = MeshInput::blank(mcr_world::SectionPos::new(7, 4, -3), 0);
         input.biome_seed = 1;
-        let mut t = colors.new_table();
-        colors.fill_table_zoomed(&input, &[8; 256], &mut t);
-        let distinct: std::collections::HashSet<u32> = t[..256].iter().copied().collect();
+        let t = colors.fill_tables(&input, &[1 << 8; 256]);
+        let distinct: std::collections::HashSet<u32> =
+            t[..256].iter().map(|c| c & 0xff_ffff).collect();
         assert!(
             distinct
                 .iter()

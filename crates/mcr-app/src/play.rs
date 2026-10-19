@@ -680,7 +680,8 @@ impl Play {
         let overlay_assets = assets.clone();
         let animate_assets = assets.clone();
         let skin_assets = assets.clone();
-        let render = RenderSystem::new(renderer, assets, &world);
+        let mut render = RenderSystem::new(renderer, assets, &world);
+        render.apply_options(&options, &world);
         let now = Instant::now();
         Self {
             world,
@@ -2538,6 +2539,7 @@ impl Play {
             self.sync_map(id);
         }
         self.render.reload_assets(assets.clone(), &self.world);
+        self.effects.set_model_cache(assets.cache.clone());
         self.assets = assets;
         Ok(())
     }
@@ -3019,6 +3021,7 @@ impl Play {
         if self.options.enable_vsync != old.enable_vsync {
             self.render.renderer.set_vsync(self.options.enable_vsync);
         }
+        self.render.apply_options(&self.options, &self.world);
         if let Some(audio) = &mut self.audio {
             audio.apply_volumes(&self.options);
             audio.sync_device(&self.options);

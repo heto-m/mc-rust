@@ -6,7 +6,7 @@ use crate::cache::{
     ATTR_AIR, ATTR_FULL_COLLISION, ATTR_HALF_TRANSPARENT, ATTR_LEAVES, ATTR_LIGHT_OPAQUE,
     ATTR_SOLID, ATTR_SOLID_RENDER, Alt, CubeFace, FaceMask, FluidInfo, FluidKind, LAYER_NONE,
     MASK_EMPTY, MASK_FULL, ModelCache, PartSpan, QuadDef, RandomModel, RenderLayer, Shape,
-    StateModel,
+    SkipRule, StateModel,
 };
 use crate::input::MeshInput;
 use crate::tint::{TINT_GRASS, TINT_NONE};
@@ -72,7 +72,11 @@ pub fn test_cache() -> ModelCache {
     }
     attrs[GLASS as usize] = ATTR_FULL_COLLISION | ATTR_HALF_TRANSPARENT | ATTR_SOLID;
     attrs[STAINED_GLASS as usize] = ATTR_FULL_COLLISION | ATTR_HALF_TRANSPARENT | ATTR_SOLID;
-    attrs[LEAVES as usize] = ATTR_FULL_COLLISION | ATTR_LEAVES | ATTR_HALF_TRANSPARENT | ATTR_SOLID;
+    attrs[LEAVES as usize] = ATTR_FULL_COLLISION | ATTR_LEAVES | ATTR_SOLID;
+    for id in [GLASS, STAINED_GLASS] {
+        states[id as usize].skip = SkipRule::SameBlock;
+    }
+    states[LEAVES as usize].skip = SkipRule::Leaves;
 
     states[WATER as usize].fluid = FluidInfo {
         kind: FluidKind::Water,
@@ -92,6 +96,7 @@ pub fn test_cache() -> ModelCache {
         translucent: false,
         boundary: cull,
         flat: true,
+        emission: 0,
     };
     let slab_quads = |y0: f32, y1: f32, top: bool| {
         let rect = |face: u8, cull: bool, p: [[f32; 3]; 4]| slab_quad(face, cull, p);

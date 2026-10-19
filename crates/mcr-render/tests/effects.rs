@@ -228,7 +228,7 @@ fn destroy_stage_screenshot() {
         .map(|i| DestroyDecal {
             pos: [i * 2 - 9, 90, -4],
             stage: i as u8,
-            boxes: Vec::new(),
+            ..DestroyDecal::default()
         })
         .collect();
     let with = shoot(&mut r, &s);
@@ -281,6 +281,7 @@ fn hostile_environment_renders_without_panic() {
             pos: [i32::MAX, 0, i32::MIN],
             stage: 255,
             boxes: vec![[f32::NAN; 6]; 5000],
+            quads: vec![[[f32::NAN; 3]; 4]; 5000],
         };
         5000
     ]);

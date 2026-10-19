@@ -572,7 +572,7 @@ impl Vision {
         self.precipitation = biomes.map_or_else(Vec::new, |r| {
             crate::effects::precipitation_table(r)
                 .into_iter()
-                .map(|(p, _)| p)
+                .map(|c| c.precipitation)
                 .collect()
         });
         self.plains = biomes

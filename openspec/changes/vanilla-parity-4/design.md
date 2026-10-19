@@ -1091,6 +1091,53 @@ in mod mode, where Java plays them, but not in native mode. Effects (`update_mob
 `game_test_highlight_pos`, the demo intro popup and game event 13 stay deferred as recorded in
 `parity-followups-1`.
 
+## Batch 21 notes: block rendering fidelity
+
+- **Translucent sort (R9).** Quads are sorted farthest first by centroid distance, stable, like
+  `VertexSorting.byDistance`. The mesher sorts on the worker against the camera position in the snapshot,
+  so a fresh mesh arrives sorted. Later resorts follow vanilla's `TranslucencyPointOfView`: a section is
+  re-sorted when the camera's section relative to it (clamped to -1..1 per axis) changes, and also on any
+  camera block change while that point of view is axis-aligned or the section is within one section of
+  the camera. The renderer keeps each section's translucent quads (40 B each) in an `Arc`, hands stale
+  sections to one background sort thread, at most `max(n/8, 15)` per frame, and re-uploads the sorted
+  quads into the same arena slots as one atomic batch. Sorting is a `u64` key sort, about 5 ns a quad.
+  The render thread never sorts. Rejected: sorting every frame (cost grows with view distance) and an
+  index buffer per section (a second arena and indirect index ranges for one gain).
+- **Leaves (R17).** Vanilla keeps every leaf face while `cutoutLeaves` is on, which is the default, so
+  the enclosed-leaf culling is gone. Forests mesh about 4% more quads.
+  With `cutoutLeaves` off, leaves draw opaque and cull against each other, as in vanilla.
+- **Tint per height (R22).** A section carries up to `MAX_TINT_SLOTS = 4` blended tint tables, one per
+  distinct tinted y window, and a slot map in the top byte of table 0. Sections with more distinct
+  windows reuse the slot of the tinted level below. The tables are computed only for y levels that hold
+  tinted blocks.
+- **Rendering options (R15).** `ao`, `biomeBlendRadius` and `cutoutLeaves` rebuild the mesh pool and
+  remesh. `chunkSectionFadeInTime` drives the terrain fade. `textureFiltering`, `maxAnisotropyBit` and
+  `mipmapLevels` rebuild the block sampler. `hideLightningFlashes` and `darknessEffectScale` were
+  already applied. Filtering `NONE` keeps hardware nearest sampling instead of vanilla's linear
+  sampler with the `sampleNearest` shader trick. The two match except at mip seams. `improvedTransparency`
+  (vanilla's Fabulous layered translucency) is not implemented. It stays a stored option and is left for
+  the owner to schedule.
+- **Fade-in (R16).** Each section records the time it was first drawn. The renderer default is no fade.
+  The play state sets it from the options.
+- **Beacon (R13).** Levels are recomputed with the beam every 20 ticks, where vanilla does it every 80
+  ticks. The beam is empty at level 0.
+- **Break cracks (R20).** Cracks are drawn on the block model's quads, with offset and variant. Block
+  entities with no baked model fall back to their outline boxes.
+- **Hostile input.** Snow line, beacon base, resort and seed arithmetic use i64, checked or wrapping
+  integers, so a hostile sea level, `min_y` or position cannot overflow.
+- **End portal (R24).** Only the up and down planes are drawn, and only the one facing the camera, since
+  vanilla's portal pipeline culls back faces and the flat pipeline does not.
+- **Shader cost.** The filter mode is a pipeline override constant. Terrain pipelines are rebuilt when
+  it changes, so the default nearest path carries no filtering code (a uniform branch cost 3% GPU). The
+  per-height tint lookup runs only in sections flagged with more than one table. The fade visibility
+  rides in the fog varying, and the fade and the fog blend fold into one `mix`.
+- **Measured** (release, 1920x1080, render distance 16, 600 frames, median GPU time, interleaved runs):
+  over a forest and beach, 0.158 ms before and 0.172 ms after. Leaf faces that vanilla keeps account for
+  about 0.005 ms of that, and the fade-in for about 0.003 ms. The rest is spread over small per-fragment
+  additions: the opaque-cutout flag, the tint kind mask and the fluid up shade. The mesher is 2.0% slower per section,
+  with 4% more quads. The translucent sort takes 2.9 µs for 15 water sections and 145 µs for a
+  12288-quad glass checkerboard, on the sort thread.
+
 ## Severity totals
 
 | Subsystem | G | V | M | Total |
