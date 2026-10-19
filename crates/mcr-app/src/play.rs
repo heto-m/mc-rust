@@ -145,6 +145,12 @@ fn music_volume(options: &Options) -> f32 {
     volume("master") * volume("music")
 }
 
+/// Reads through `assets`' resources only, so a closure does not keep a replaced model cache alive.
+fn resource_reader(assets: &Assets) -> crate::skins::AssetReader {
+    let resources = assets.resources.clone();
+    Box::new(move |path| resources.read(path).ok().flatten())
+}
+
 #[derive(Debug, Clone)]
 pub struct PlayConfig {
     pub render_distance: Option<i32>,
@@ -645,10 +651,7 @@ impl Play {
             .render_distance
             .unwrap_or(options.render_distance)
             .clamp(2, 64);
-        let hud = Hud::new(&gui.ui, data).with_style_reader(Box::new({
-            let assets = assets.clone();
-            move |path| assets.read(path)
-        }));
+        let hud = Hud::new(&gui.ui, data).with_style_reader(resource_reader(&assets));
         let command_history_path = cfg.game_dir.join(COMMAND_HISTORY_FILE);
         if let Ok(text) = std::fs::read_to_string(&command_history_path) {
             hud.chat.borrow_mut().load_command_history(&text);
@@ -679,7 +682,7 @@ impl Play {
         };
         let overlay_assets = assets.clone();
         let animate_assets = assets.clone();
-        let skin_assets = assets.clone();
+        let skin_reader = resource_reader(&assets);
         let mut render = RenderSystem::new(renderer, assets, &world);
         render.apply_options(&options, &world);
         let now = Instant::now();
@@ -807,7 +810,7 @@ impl Play {
             frame_history: Vec::new(),
             tick_history: Vec::new(),
             ping_history: Vec::new(),
-            skins: crate::skins::SkinStore::new(Box::new(move |path| skin_assets.read(path))),
+            skins: crate::skins::SkinStore::new(skin_reader),
             movement: MovementSounds::new(data),
             placed_seen: false,
             started: now,

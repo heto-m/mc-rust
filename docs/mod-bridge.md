@@ -35,7 +35,8 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
   (`MCR_JAVA_HOME`, `.cache/tools/jdk25`, `JAVA_HOME`) and calls `JNI_CreateJavaVM` on a dedicated 16 MiB-stack
   thread (never the primordial thread). JNI is used only to boot: `FindClass` + `CallStaticVoidMethod` on
   `McrBoot.main(long table, String[] args)`. Flags: `-Djava.class.path=<boot jar + loader + libs>` (Knot loads `client.jar` from `fabric.gameJarPath`),
-  `--enable-native-access=ALL-UNNAMED`, `-Xrs`, `-XX:+UseZGC`, `-XX:+UseCompactObjectHeaders`, `-Xmx` from
+  `--enable-native-access=ALL-UNNAMED`, `-Xrs`, `-XX:+UseZGC` with `-XX:SoftMaxHeapSize` at two thirds of the heap and
+  `-XX:ZUncommitDelay=5` (ZGC otherwise keeps the whole heap a load grew), `-XX:+UseCompactObjectHeaders`, `-Xmx` from
   settings (default 2G), `-Dfabric.gameJarPath`, `-Dfabric.addMods`, `-Dorg.lwjgl.librarypath`, plus `exit`/`abort`
   hooks so `System.exit` from a mod becomes an orderly mcr shutdown. `MCR_JVM_EXTRA` appends whitespace-separated
   options; one that picks a collector (`-XX:+Use…GC`) replaces ZGC. `SIGTERM` quits mcr the normal way, so the
@@ -62,9 +63,11 @@ Scan data and the decision: `.cache/modscan/ANALYSIS.md` (gitignored). Changes: 
   the next Play boots Java again. Without a JVM in the process the native title's Launcher button stays in-process.
 - **Warm-up (AOT cache).** Java starts from a JDK 25 AOT cache per mod set (`mcr_jvm::aot`), stored in
   `<game dir>/cache/jvm-aot/<key>.aot`. The key hashes the JDK, the JVM options other than `-D`, the class path
-  (size and modification time) and every mod jar's content, plus `BRIDGE_VERSION`. The first session of a mod set
+  (size and modification time) and every mod jar's content (hashed on up to eight threads, as the mod folder is
+  scanned), plus `BRIDGE_VERSION`. The first session of a mod set
   records (`-XX:AOTMode=record`; about 1 s slower to the title, and 4–5 s more at quit while `DestroyJavaVM`
-  writes the recording). After a clean quit mcr starts itself as a detached helper (`mcr --jvm-aot-create <dir>
+  writes the recording). After a clean quit mcr starts itself as a detached helper (gamescope kills it with the
+  game, so under gamescope the cache is not built) (`mcr --jvm-aot-create <dir>
   <key>`, nice 10, 3–4 s for 29 mods) that runs `java -XX:AOTMode=create` and renames the result into place.
   A session that starts while the helper runs, or before a recording is built, runs without the cache. HotSpot
   validates the cache and ignores a mismatched one. On Linux mcr also checks `/proc/self/maps` and deletes a
@@ -194,7 +197,9 @@ the shell flow also prints when Java's title screen appeared, and the mean, p50,
 time over the last 31 seconds. With `MCR_MOD_PROFILE` set, Java frames over twice the running mean (after the first
 100) are profiled apart, and the summary prints their count and phase means (`slow java frames N of M`). The
 windowed stats line shows the swapchain acquire and present inside mcr's CPU time; under gamescope's Xwayland the
-present blocks about 0.15 ms per frame, and MangoHud adds about 0.07 ms more.
+present blocks about 0.15 ms per frame, and MangoHud adds about 0.07 ms more. mcr forces no X11: winit takes
+native Wayland whenever `WAYLAND_DISPLAY` is set, and under gamescope's `--expose-wayland` (`hl-wl.sh`) the present
+took 0.135 ms against 0.21 ms through Xwayland (Echoes, 1772–1816 fps against 1512–1522).
 
 Java's camera FOV over vanilla's (zoom mods, FOV effects mods add) reaches Rust as `FSTATE_FOV_SCALE`, clamped to
 0.02–4, and scales mcr's projection and mouse sensitivity while Java draws the world. The other way, `FrameBegin`
@@ -470,6 +475,18 @@ What Rust cannot read comes from Java (ABI 22):
 - **Prebake.** At the title Rust bakes the model cache for Java's title registries in the background and, at the
   join, re-indexes it for the server's (`ModelCache::remap`, Fabric's registry sync only renumbers), so the join
   does not bake. Java's later answers rebake in the background.
+
+Java counts as loaded once its reload finished, while vanilla's loading overlay still fades out for two seconds
+(`McrFrame.resourcesLoaded`), so `--connect` connects when vanilla's quick play would. Pack zips are listed through
+a per-zip index sorted by name (`ZipIndex`): vanilla's `FilePackResources.listResources` walks every entry of the
+zip for each directory, which made Java's first reload in Medieval Immersed (16 zip packs, one of 27,518 entries)
+take 15 s instead of 6.
+
+**Memory.** After the title assets, at Java's title and whenever section meshing stopped for 2 s (at most every
+20 s), mcr calls glibc's `malloc_trim` on a short-lived thread (`heap_trim`): glibc keeps freed memory in its
+per-thread arenas, about 600 MB in Medieval after the join. `--features heap-profile` builds a sampling heap profiler
+(`MCR_HEAP_PROFILE=<secs>:<file>` writes live Rust allocations by call stack, glibc's arena totals, and the effect
+of a trim).
 
 Frames Java draws under loading screens are flagged (`FSTATE_WAITING`): a long one (JEI starts in one 2 s frame on
 join) keeps the last composite instead of detaching. Identical quad runs share storage in the model cache, and

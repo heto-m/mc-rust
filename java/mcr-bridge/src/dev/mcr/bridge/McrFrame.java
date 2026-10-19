@@ -3,6 +3,7 @@ package dev.mcr.bridge;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.platform.Window;
 import dev.mcr.bridge.gpu.FrameSlots;
+import dev.mcr.bridge.mixin.LoadingOverlayAccessor;
 import dev.mcr.bridge.mixin.WindowAccessor;
 import dev.mcr.bridge.net.McrNet;
 import java.lang.foreign.MemorySegment;
@@ -11,6 +12,8 @@ import java.lang.invoke.VarHandle;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.ConnectScreen;
 import net.minecraft.client.gui.screens.GenericMessageScreen;
+import net.minecraft.client.gui.screens.LoadingOverlay;
+import net.minecraft.client.gui.screens.Overlay;
 import net.minecraft.client.gui.screens.LevelLoadingScreen;
 import net.minecraft.client.gui.screens.ProgressScreen;
 import net.minecraft.client.gui.screens.Screen;
@@ -204,7 +207,7 @@ public final class McrFrame {
             return;
         }
         FrameSlots.runDeferred();
-        boolean loaded = minecraft.isGameLoadFinished() && minecraft.gui.overlay() == null;
+        boolean loaded = resourcesLoaded(minecraft);
         int waiting = waitingScreen(minecraft.gui.screen()) ? BridgeAbi.FSTATE_WAITING : 0;
         McrInput.publish(minecraft);
         int weather = McrWeather.takeReplaced() ? BridgeAbi.FSTATE_WEATHER : 0;
@@ -213,6 +216,15 @@ public final class McrFrame {
         McrDynamicLights.publish(minecraft);
         McrRenderExport.frame(minecraft);
         publish(Bridge.get(), minecraft, BridgeAbi.FSTATE_READY | (loaded ? BridgeAbi.FSTATE_LOADED : 0) | waiting | weather | steps | turn);
+    }
+
+    /** Loading finished and no reload runs; a loading overlay may still be fading out, as vanilla's quick play connects then. */
+    public static boolean resourcesLoaded(Minecraft minecraft) {
+        if (!minecraft.isGameLoadFinished()) {
+            return false;
+        }
+        Overlay overlay = minecraft.gui.overlay();
+        return overlay == null || overlay instanceof LoadingOverlay loading && ((LoadingOverlayAccessor) loading).mcr$fadeOutStart() != -1L;
     }
 
     private static boolean waitingScreen(Screen screen) {

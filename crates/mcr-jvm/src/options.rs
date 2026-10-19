@@ -44,6 +44,11 @@ impl JvmOptions {
         ];
         if !gc_chosen {
             out.push("-XX:+UseZGC".into());
+            // ZGC otherwise keeps the whole -Xmx committed for good once a load touched it.
+            if let Some(mib) = heap_mib(&self.max_heap) {
+                out.push(format!("-XX:SoftMaxHeapSize={}m", mib * 2 / 3));
+                out.push("-XX:ZUncommitDelay=5".into());
+            }
         }
         out.extend([
             "-XX:+UseCompactObjectHeaders".into(),
@@ -56,6 +61,19 @@ impl JvmOptions {
             return Err(JvmError::InvalidOption(bad.clone()));
         }
         Ok(out)
+    }
+}
+
+/// `-Xmx`'s value in MiB.
+fn heap_mib(s: &str) -> Option<u64> {
+    let digits = s.trim_end_matches(['k', 'K', 'm', 'M', 'g', 'G']);
+    let n: u64 = digits.parse().ok()?;
+    match &s[digits.len()..] {
+        "" => Some(n >> 20),
+        "k" | "K" => Some(n >> 10),
+        "m" | "M" => Some(n),
+        "g" | "G" => Some(n << 10),
+        _ => None,
     }
 }
 
@@ -84,6 +102,8 @@ mod tests {
                 "--enable-native-access=ALL-UNNAMED".into(),
                 "-Xrs".into(),
                 "-XX:+UseZGC".into(),
+                "-XX:SoftMaxHeapSize=170m".into(),
+                "-XX:ZUncommitDelay=5".into(),
                 "-XX:+UseCompactObjectHeaders".into(),
                 "-XX:-UsePerfData".into(),
                 "-Xmx256m".into(),
@@ -100,8 +120,18 @@ mod tests {
         assert!(plain.ends_with(&["-Xlog:gc".to_owned(), "-Dx=1".to_owned()]));
         let g1 = opts.with_dev_options("-XX:+UseG1GC").unwrap();
         assert!(!g1.iter().any(|o| o == "-XX:+UseZGC"));
+        assert!(!g1.iter().any(|o| o.starts_with("-XX:SoftMaxHeapSize")));
         assert_eq!(g1.last().map(String::as_str), Some("-XX:+UseG1GC"));
         assert!(opts.with_dev_options("-Dx=\0").is_err());
+    }
+
+    #[test]
+    fn soft_max_is_two_thirds_of_the_heap() {
+        assert_eq!(heap_mib("2304m"), Some(2304));
+        assert_eq!(heap_mib("2G"), Some(2048));
+        assert_eq!(heap_mib("1048576k"), Some(1024));
+        let opts = JvmOptions::default().to_strings().unwrap();
+        assert!(opts.contains(&"-XX:SoftMaxHeapSize=1365m".to_owned()));
     }
 
     #[test]

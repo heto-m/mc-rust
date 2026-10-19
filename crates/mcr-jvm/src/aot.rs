@@ -371,9 +371,9 @@ fn key(inputs: &KeyInputs<'_>) -> io::Result<String> {
         field(path.as_os_str().as_encoded_bytes());
         field(stamp(path).as_bytes());
     }
-    for path in inputs.jars {
+    for (path, hash) in inputs.jars.iter().zip(content_hashes(inputs.jars)) {
         field(path.as_os_str().as_encoded_bytes());
-        field(&content_hash(path)?);
+        field(&hash?);
     }
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
@@ -390,6 +390,27 @@ fn stamp(path: &Path) -> String {
         }
         Err(_) => "missing".into(),
     }
+}
+
+/// [`content_hash`] of every jar, on up to eight threads.
+fn content_hashes(jars: &[PathBuf]) -> Vec<io::Result<[u8; 20]>> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(8);
+    if threads < 2 || jars.len() < 4 {
+        return jars.iter().map(|p| content_hash(p)).collect();
+    }
+    let chunk = jars.len().div_ceil(threads);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = jars
+            .chunks(chunk)
+            .map(|part| s.spawn(|| part.iter().map(|p| content_hash(p)).collect::<Vec<_>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
+            .collect()
+    })
 }
 
 fn content_hash(path: &Path) -> io::Result<[u8; 20]> {

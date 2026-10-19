@@ -71,7 +71,7 @@ public final class McrRenderExport {
 
     /** Once per frame: answers what is pending when the models are loaded. */
     public static void frame(Minecraft minecraft) {
-        if (!titleSeen || !minecraft.isGameLoadFinished() || minecraft.gui.overlay() != null) {
+        if (!titleSeen || !McrFrame.resourcesLoaded(minecraft)) {
             return;
         }
         boolean due = !pending.isEmpty() || fluidsPending;

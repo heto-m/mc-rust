@@ -66,3 +66,20 @@ Idle pooled memory SHALL be bounded in bytes: network buffer pools (8 MiB each),
 #### Scenario: Many distinct sounds
 - **WHEN** thousands of different 1 MiB sounds are decoded
 - **THEN** the sound cache holds at most 64 MiB and keeps the most recently played
+
+### Requirement: The C heap is trimmed after loads
+On Linux with glibc, mcr SHALL return free C heap memory to the system (`malloc_trim`) off the render thread once
+the title assets loaded, once Java's title screen appears, and when section meshing stopped for two seconds after
+it ran, at most once every twenty seconds for the latter.
+
+#### Scenario: After the join
+- **WHEN** the join's chunks are meshed and meshing stops
+- **THEN** glibc's free arena memory (about 600 MB in Medieval Immersed) is returned within a few seconds
+
+### Requirement: Replaced models are released
+Readers that only need resource files (the HUD's waypoint styles, default skins) SHALL hold the resource manager,
+not the baked assets, so a replaced model cache is freed.
+
+#### Scenario: Rebake after Java's models
+- **WHEN** the model cache is rebaked in game
+- **THEN** only one model cache stays alive

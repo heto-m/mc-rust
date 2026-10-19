@@ -174,7 +174,28 @@ pub fn scan_dir(dir: &Path) -> Vec<ModInfo> {
         );
         paths.truncate(MAX_JARS);
     }
-    paths.iter().map(|p| scan_jar(p)).collect()
+    parallel_map(&paths, |p| scan_jar(p))
+}
+
+/// `f` over `items` on up to eight threads, in order.
+fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(8);
+    if threads < 2 || items.len() < 4 {
+        return items.iter().map(&f).collect();
+    }
+    let chunk = items.len().div_ceil(threads);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = items
+            .chunks(chunk)
+            .map(|part| s.spawn(|| part.iter().map(&f).collect::<Vec<R>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
+            .collect()
+    })
 }
 
 pub fn scan_jar(path: &Path) -> ModInfo {

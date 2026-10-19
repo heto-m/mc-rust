@@ -135,6 +135,8 @@ pub struct Shell {
     /// F2 asked for the next frame as shown.
     screenshot_requested: bool,
     screenshots: crate::grab::Screenshots,
+    heap_trim: crate::heap_trim::HeapTrim,
+    java_title_seen: bool,
     builtin: mcr_client::BuiltinData,
     text_renderer: mcr_client::TextRenderer,
 }
@@ -285,8 +287,11 @@ impl Shell {
             java_render: Default::default(),
             screenshot_requested: false,
             screenshots: crate::grab::Screenshots::new(&cfg.game_dir),
+            heap_trim: Default::default(),
+            java_title_seen: false,
             cfg,
         };
+        shell.heap_trim.milestone(Instant::now());
         shell.show_title();
         if let Some(prompt) = shell.cfg.mods.take_crash_prompt() {
             shell.push(prompt);
@@ -1317,6 +1322,12 @@ impl Shell {
             frames.lock().add_ticks(ran, partial);
         }
         self.check_session();
+        if !self.java_title_seen && self.mod_frames().is_some() && self.mods_settled() {
+            self.java_title_seen = true;
+            self.heap_trim.milestone(now);
+        }
+        let activity = self.play.as_ref().map_or(0, |p| p.render.stats().meshed);
+        self.heap_trim.poll(activity, now);
     }
 
     /// Java's vanilla key rebinds become mcr's (and are saved); mcr's bindings go to Java when they change.
@@ -1427,8 +1438,8 @@ impl Shell {
             .poll_rebake(&resources, assets.data, &assets.cache)
         {
             crate::assets::report_bake(&cache);
-            let assets = Arc::new(assets.with_cache(assets.data, cache));
-            if let Err(e) = play.reload_resources(assets) {
+            let new = Arc::new(assets.with_cache(assets.data, cache));
+            if let Err(e) = play.reload_resources(new) {
                 eprintln!("assets: applying Java's models failed: {e:#}");
             }
         }

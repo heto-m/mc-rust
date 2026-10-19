@@ -22,6 +22,9 @@ mod gizmos;
 mod grab;
 mod gui;
 mod hand;
+#[cfg(feature = "heap-profile")]
+mod heap_profile;
+mod heap_trim;
 mod hud;
 mod input;
 mod java_models;
@@ -69,6 +72,10 @@ mod vision;
 mod world_setup;
 
 use std::sync::Arc;
+
+#[cfg(feature = "heap-profile")]
+#[global_allocator]
+static HEAP: heap_profile::Sampler = heap_profile::Sampler;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -801,6 +808,8 @@ fn main() -> Result<()> {
         pin_mmap_threshold();
         quit_on_sigterm();
     }
+    #[cfg(feature = "heap-profile")]
+    heap_profile::start();
     launcher::remember_start_dir();
     let launched = Instant::now();
     let mut opts = match cli::parse(std::env::args().skip(1)) {

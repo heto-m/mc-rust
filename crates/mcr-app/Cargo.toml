@@ -9,6 +9,9 @@ publish.workspace = true
 name = "mcr"
 path = "src/main.rs"
 
+[features]
+heap-profile = []
+
 [dependencies]
 mcr-anvil = { path = "../mcr-anvil" }
 mcr-animate = { path = "../mcr-animate" }
