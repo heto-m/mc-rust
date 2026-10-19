@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use mcr_block_entity::{Align, layout_display};
 use mcr_client::MapData;
-use mcr_entity_model::mcr_protocol::play::clientbound::ui::MapDecoration as ProtoDecoration;
+pub use mcr_entity_model::mcr_protocol::play::clientbound::ui::MapDecoration as ProtoDecoration;
 use mcr_entity_model::{ImageRgba, LABEL_SCALE, MapDecoration, MapLabels};
 use mcr_ui::Ui;
 
@@ -68,6 +68,16 @@ pub fn decorations(map: &MapData) -> Vec<MapDecoration> {
 const MAX_LABELS: usize = 32;
 const MAX_LABEL_CELLS: usize = 64;
 const LABEL_BACKGROUND: [u8; 4] = [0, 0, 0, 128];
+
+/// The decorations [`labels`] reads, to skip rebaking when only the map's pixels change.
+pub fn named_decorations(map: &MapData) -> Vec<ProtoDecoration> {
+    map.decorations
+        .iter()
+        .filter(|d| d.name.is_some())
+        .take(MAX_LABELS)
+        .cloned()
+        .collect()
+}
 
 /// The names of `map`'s decorations as `MapRenderer` writes them under each icon.
 pub fn labels(ui: &mut Ui, map: &MapData) -> MapLabels {

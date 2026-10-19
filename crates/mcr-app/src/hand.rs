@@ -1089,9 +1089,13 @@ impl Hand {
         id: i32,
         image: mcr_entity_model::ImageRgba,
         deco: Vec<mcr_entity_model::MapDecoration>,
-        labels: mcr_entity_model::MapLabels,
+        labels: Option<mcr_entity_model::MapLabels>,
     ) {
         self.scene.set_map(id, image, deco, labels);
+    }
+
+    pub fn has_map(&self, id: i32) -> bool {
+        self.scene.has_map(id)
     }
 
     /// Uploads the instances; call after [`Self::prepare`].

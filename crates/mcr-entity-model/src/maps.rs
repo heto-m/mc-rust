@@ -8,6 +8,7 @@ use crate::scene::EntityScene;
 
 const MAX_MAPS: usize = 256;
 const MAX_DECORATIONS: usize = 256;
+const MAX_LABELED_MAPS: usize = 16;
 const LAYER: f32 = 0.25 / 128.0;
 
 /// A marker drawn over a map; `x`/`y` are the wire bytes (half-pixels from the centre).
@@ -51,23 +52,46 @@ pub fn stack_map_id(stack: &ItemStack) -> Option<i32> {
 pub(crate) type MapTable = FxHashMap<i32, MapEntry>;
 
 impl EntityScene {
-    /// Registers or replaces the 128x128 image, markers and name labels of map `id`.
+    /// Registers or replaces the 128x128 image, markers and name labels of map `id`; `None` labels
+    /// keep the ones already uploaded.
     pub fn set_map(
         &mut self,
         id: i32,
         image: ImageRgba,
         mut decorations: Vec<MapDecoration>,
-        labels: MapLabels,
+        labels: Option<MapLabels>,
     ) {
         if !self.maps.contains_key(&id) && self.maps.len() >= MAX_MAPS && !self.evict_oldest_map() {
             return;
         }
         decorations.truncate(MAX_DECORATIONS);
-        let held_labels = labels.held.is_some();
-        let frame_labels = if labels.frame_same {
-            held_labels.then_some("held")
-        } else {
-            labels.frame.is_some().then_some("frame")
+        let previous = self.maps.get(&id).map(|e| (e.held_labels, e.frame_labels));
+        let (held_labels, frame_labels) = match labels {
+            None => previous.unwrap_or((false, None)),
+            Some(mut labels) => {
+                let labeled = self
+                    .maps
+                    .iter()
+                    .filter(|&(&other, e)| other != id && e.held_labels)
+                    .count();
+                if labeled >= MAX_LABELED_MAPS {
+                    labels = MapLabels::default();
+                }
+                let held_labels = labels.held.is_some();
+                let frame_labels = if labels.frame_same {
+                    held_labels.then_some("held")
+                } else {
+                    labels.frame.is_some().then_some("frame")
+                };
+                for (kind, image) in [("held", labels.held), ("frame", labels.frame)] {
+                    let key = format!("dyn:map_labels/{kind}/{id}");
+                    match image {
+                        Some(image) => self.set_dynamic_texture(&key, image),
+                        None => self.textures.remove(&key, &mut self.gpu),
+                    }
+                }
+                (held_labels, frame_labels)
+            }
         };
         self.maps.insert(
             id,
@@ -78,13 +102,6 @@ impl EntityScene {
             },
         );
         self.set_dynamic_texture(&format!("dyn:map/{id}"), image);
-        for (kind, image) in [("held", labels.held), ("frame", labels.frame)] {
-            let key = format!("dyn:map_labels/{kind}/{id}");
-            match image {
-                Some(image) => self.set_dynamic_texture(&key, image),
-                None => self.textures.remove(&key, &mut self.gpu),
-            }
-        }
         self.flush_textures();
     }
 

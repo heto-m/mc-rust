@@ -52,6 +52,7 @@ use crate::view::{StateView, SuggestEngine, ViewCache};
 use mcr_modbridge::frame::JavaCamera;
 use mcr_modbridge::sound::{SoundOwner, event_owner};
 
+const MAX_MAP_LABEL_KEYS: usize = 512;
 pub const TICK_SECONDS: f32 = 0.05;
 const LOW_DISK_SPACE_TOAST: u32 = 0x4c44_5321;
 const INSECURE_SERVER_TOAST: u32 = 0x5553_4357;
@@ -420,6 +421,7 @@ pub struct Play {
     overlays: Overlays,
     camera_fx: crate::camera_fx::CameraFx,
     nausea_id: Option<i32>,
+    map_label_keys: rustc_hash::FxHashMap<i32, Vec<crate::map::ProtoDecoration>>,
     vision: crate::vision::Vision,
     end_flash_sound: Option<u32>,
     assets: Arc<Assets>,
@@ -620,6 +622,7 @@ impl Play {
                 .registry("minecraft:mob_effect")
                 .and_then(|r| r.id_of("minecraft:nausea"))
                 .map(|id| id as i32),
+            map_label_keys: rustc_hash::FxHashMap::default(),
             vision: crate::vision::Vision::default(),
             end_flash_sound: None,
             assets: overlay_assets,
@@ -1391,7 +1394,19 @@ impl Play {
             return;
         };
         let (image, deco) = (crate::map::image(&map.colors), crate::map::decorations(map));
-        let labels = crate::map::labels(&mut self.gui.ui, map);
+        let named = crate::map::named_decorations(map);
+        let present = self.entities.as_ref().is_none_or(|e| e.scene.has_map(id))
+            && self.hand.as_ref().is_none_or(|h| h.has_map(id));
+        let labels = if present && self.map_label_keys.get(&id) == Some(&named) {
+            None
+        } else {
+            if self.map_label_keys.len() >= MAX_MAP_LABEL_KEYS {
+                self.map_label_keys.clear();
+            }
+            let labels = crate::map::labels(&mut self.gui.ui, map);
+            self.map_label_keys.insert(id, named);
+            Some(labels)
+        };
         if let Some(entities) = &mut self.entities {
             entities
                 .scene
@@ -2323,6 +2338,7 @@ impl Play {
             .keys()
             .copied()
             .collect();
+        self.map_label_keys.clear();
         for id in maps {
             self.sync_map(id);
         }

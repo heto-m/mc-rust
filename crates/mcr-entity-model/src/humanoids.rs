@@ -734,7 +734,7 @@ fn player(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     let _ = hitbox;
 }
 
-const MAX_STUCK: i32 = 64;
+const MAX_STUCK: i32 = 16;
 
 /// The cubes `PlayerModel.getRandomBodyPart` picks from: bone, min and max corner in sixteenths.
 fn body_cubes(slim: bool) -> [(&'static str, Vec3, Vec3); 6] {
