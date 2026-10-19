@@ -26,7 +26,7 @@ pub use attributes::{
 pub use block_sounds::SoundType;
 pub use category::SoundSource;
 pub use decode::{Pcm, PcmProducer, StreamSource, decode_ogg, open_stream, pushed_stream};
-pub use engine::AudioEngine;
+pub use engine::{AudioEngine, output_devices};
 pub use error::AudioError;
 pub use events::{JavaRandom, ResolvedSound, SoundEvents};
 pub use loops::{ElytraLoop, GuardianBeam, LoopLevel, bee_level, is_angry, nearest, reconcile};

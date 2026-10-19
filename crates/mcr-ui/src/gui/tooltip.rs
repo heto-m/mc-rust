@@ -14,6 +14,7 @@ const MAX_LINES: usize = 64;
 const MAX_LINE_CHARS: usize = 512;
 const MAX_LINE_CELLS: usize = 1024;
 const BUNDLE_WIDTH: i32 = 96;
+const WRAP_WIDTH: i32 = 170;
 const BUNDLE_SLOT: i32 = 24;
 const BUNDLE_BAR_HEIGHT: i32 = 13;
 const BUNDLE_BAR_FILL: u64 = 94;
@@ -45,6 +46,28 @@ impl TooltipLines {
     pub fn text(text: impl Into<String>) -> Self {
         let mut lines = Self::default();
         lines.push_text(text);
+        lines
+    }
+
+    /// `Tooltip.create`: `text` split into lines of at most 170 GUI pixels.
+    pub fn wrapped(cx: &mut RenderCx<'_, '_>, text: &str) -> Self {
+        let mut lines = Self::default();
+        for paragraph in text.split('\n') {
+            let mut line = String::new();
+            for word in paragraph.split(' ') {
+                let candidate = if line.is_empty() {
+                    word.to_owned()
+                } else {
+                    format!("{line} {word}")
+                };
+                if !line.is_empty() && cx.text_width(&candidate) > WRAP_WIDTH {
+                    lines.push_text(std::mem::replace(&mut line, word.to_owned()));
+                } else {
+                    line = candidate;
+                }
+            }
+            lines.push_text(line);
+        }
         lines
     }
 

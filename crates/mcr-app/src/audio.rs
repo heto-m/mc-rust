@@ -209,6 +209,8 @@ pub struct Audio {
     log: Option<std::fs::File>,
     tick: u64,
     java: Option<JavaSound>,
+    /// The `soundDevice` the engine was opened for.
+    device: String,
 }
 
 /// Mod mode: Java's sound engine plays through this mixer and its sliders set every volume.
@@ -248,7 +250,7 @@ impl Audio {
             .or_else(|_| AssetStore::open_latest(assets_dir))
             .map_err(|e| tracing::warn!("sound assets unavailable: {e}"))
             .ok()?;
-        let (engine, handle) = AudioEngine::start()
+        let (engine, handle) = AudioEngine::start(Some(&options.sound_device.0))
             .map_err(|e| tracing::warn!("audio unavailable: {e}"))
             .ok()?;
         let mut manager = SoundManager::new(store, handle)
@@ -285,6 +287,7 @@ impl Audio {
             log,
             tick: 0,
             java: None,
+            device: options.sound_device.0.clone(),
         })
     }
 
@@ -369,6 +372,33 @@ impl Audio {
                     .set_category_volume(category, options.sound_volumes[i] as f32);
             }
         }
+    }
+
+    /// Like `SoundManager#reload` after `soundDevice` changes: every sound stops and the new
+    /// device takes over. Java's sounds stay on the old mixer, so mod mode keeps its device.
+    pub fn sync_device(&mut self, options: &Options) {
+        let wanted = &options.sound_device.0;
+        if *wanted == self.device || self.java.is_some() {
+            return;
+        }
+        self.device = wanted.clone();
+        let (engine, handle) = match AudioEngine::start(Some(wanted)) {
+            Ok(started) => started,
+            Err(e) => {
+                tracing::warn!("audio device {wanted:?} unavailable: {e}");
+                return;
+            }
+        };
+        *self.manager.handle() = handle;
+        self._engine = engine;
+        self.book = VoiceBook::default();
+        self.moves.clear();
+        self.subtitle_cues.clear();
+        self.music_voice = None;
+        self.records.clear();
+        self.ended.clear();
+        self.apply_volumes(options);
+        self.click();
     }
 
     pub fn click(&mut self) {

@@ -227,6 +227,9 @@ impl LocalPlayer {
     }
 
     pub fn apply_game_mode(&mut self, mode: GameType) {
+        if mode != self.game_mode {
+            self.previous_game_mode = Some(self.game_mode);
+        }
         self.game_mode = mode;
         self.physics.spectator = mode == GameType::Spectator;
         let a = &mut self.physics.abilities;

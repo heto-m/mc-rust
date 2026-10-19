@@ -166,6 +166,14 @@ impl RenderSystem {
         self.requeue_all(world);
     }
 
+    /// F3+A: remeshes every loaded section with the current assets.
+    pub fn remesh_all(&mut self, world: &dyn MeshWorld) {
+        self.ready.clear();
+        self.urgent.clear();
+        self.urgent_inflight.clear();
+        self.requeue_all(world);
+    }
+
     fn requeue_all(&mut self, world: &dyn MeshWorld) {
         let all = all_sections((world.store().config().height() >> 4) as i32);
         let (here, distance) = view_of(world);

@@ -15,7 +15,6 @@ use crate::sprites::SpriteId;
 use crate::ui::UiFrame;
 
 const GLINT_TEXTURE: &str = "assets/minecraft/textures/misc/enchanted_glint_item.png";
-const GLINT_STRENGTH: f32 = 0.75;
 const GLINT_STEP_MS: u64 = 16;
 const SLOT: i32 = 16;
 
@@ -63,6 +62,8 @@ pub struct ItemIcons {
     icons: FxHashMap<u64, Icon>,
     icon_scale: u32,
     millis: u64,
+    glint_speed: f32,
+    glint_strength: f32,
     context: ItemContext,
     stats: IconStats,
 }
@@ -116,6 +117,8 @@ impl ItemIcons {
             icons: FxHashMap::default(),
             icon_scale: 0,
             millis: 0,
+            glint_speed: 0.5,
+            glint_strength: 0.75,
             context: ItemContext::default(),
             stats: IconStats::default(),
         })
@@ -136,6 +139,17 @@ impl ItemIcons {
     /// Wall-clock milliseconds driving the glint animation.
     pub fn set_time(&mut self, millis: u64) {
         self.millis = millis;
+    }
+
+    /// The `glintSpeed` and `glintStrength` accessibility options.
+    pub fn set_glint(&mut self, speed: f32, strength: f32) {
+        if (speed, strength) != (self.glint_speed, self.glint_strength) {
+            self.glint_speed = speed;
+            self.glint_strength = strength;
+            for icon in self.icons.values_mut() {
+                icon.glint_step = u64::MAX;
+            }
+        }
     }
 
     pub fn stats(&self) -> IconStats {
@@ -192,7 +206,8 @@ impl ItemIcons {
         let glint = glint.then(|| Glint {
             texture: self.glint.clone(),
             millis: self.millis,
-            strength: GLINT_STRENGTH,
+            speed: self.glint_speed,
+            strength: self.glint_strength,
         });
         Raster {
             size,

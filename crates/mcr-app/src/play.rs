@@ -8,9 +8,12 @@ use mcr_client::{
     ChatKind, Client, ClientError, ClientEvent, CombatKeys, PlayerInput, UseTarget,
     sanitize_for_log,
 };
+use mcr_nbt::Value;
 use mcr_particles::ParticleEngine;
 use mcr_physics::Pose;
 use mcr_protocol::types::ItemStack;
+use mcr_protocol::types::game::GameType;
+use mcr_protocol::types::text::{Color, Component, NamedColor, Style};
 use mcr_render::glam::{DVec3, Mat4};
 use mcr_render::{Camera, Environment, FrameStats, Overlay, OverlayCtx, Renderer, wgpu};
 use mcr_settings::bindings::mapping_index;
@@ -31,6 +34,7 @@ use crate::animate::BlockAnimation;
 use crate::audio::{Audio, BlockSound, MusicEvent, wire_category, world_audio};
 use crate::block_entities::BlockEntities;
 use crate::debug::{self, DebugInput};
+use crate::debug_keys::DebugAction;
 use crate::effects::{self, WorldEffects};
 use crate::entities::{Cull, EntityLayer, FrameCtx, LocalSample};
 use crate::entity_loops::EntityLoops;
@@ -42,11 +46,12 @@ use crate::mesh_world::MeshWorld;
 use crate::movement_sounds::MovementSounds;
 use crate::nametags::{self, TagParams};
 use crate::net_world::NetworkWorld;
+use crate::options_pages::{OptionsHost, OptionsScreen};
 use crate::outline::{OutlineRenderer, WorldBox};
 use crate::overlays::Overlays;
 use crate::preview::Preview;
 use crate::render_system::{PipelineStats, RenderSystem};
-use crate::settings::{OptionsScreen, SharedSettings};
+use crate::settings::SharedSettings;
 use crate::target::{EntityPicker, Target, pick, third_person_distance};
 use crate::view::{StateView, SuggestEngine, ViewCache};
 use mcr_modbridge::frame::JavaCamera;
@@ -146,6 +151,42 @@ pub struct PlayConfig {
     pub game_dir: std::path::PathBuf,
     /// Singleplayer: the pause screen pauses and offers Save and Quit.
     pub local_server: bool,
+    pub server_name: String,
+}
+
+/// The texts the credits screen scrolls, read from the current resources.
+pub fn credits_source(assets: &Assets) -> CreditsSource {
+    let text = |path: &str| {
+        assets
+            .read(path)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    };
+    CreditsSource {
+        poem: text(POEM_PATH),
+        credits: text(CREDITS_PATH),
+        postcredits: text(POSTCREDITS_PATH),
+    }
+}
+
+/// Everything the options screens need from the running client.
+pub fn options_host(
+    settings: &SharedSettings,
+    languages: Vec<mcr_ui::LanguageInfo>,
+    window: (u32, u32),
+    assets: &Arc<Assets>,
+    player: &str,
+    minecart_improvements: bool,
+) -> OptionsHost {
+    let assets = assets.clone();
+    OptionsHost {
+        settings: settings.clone(),
+        languages,
+        max_gui_scale: mcr_ui::gui_scale(window.0, window.1, 0) as i32,
+        credits: std::rc::Rc::new(move || credits_source(&assets)),
+        player: player.to_owned(),
+        minecart_improvements,
+        packs: settings.borrow().packs.clone(),
+    }
 }
 
 /// What the shell lends to a session.
@@ -184,6 +225,10 @@ struct Keys {
     spectator_effect: usize,
     spectator_outlines: usize,
     spectator_hotbar: usize,
+    smooth_camera: usize,
+    social: usize,
+    quick_actions: usize,
+    switch_game_mode: usize,
     hotbar: [usize; 9],
 }
 
@@ -216,6 +261,10 @@ impl Keys {
             spectator_effect: i("key.toggleSpectatorShaderEffects"),
             spectator_outlines: i("key.spectatorOutlines"),
             spectator_hotbar: i("key.spectatorHotbar"),
+            smooth_camera: i("key.smoothCamera"),
+            social: i("key.socialInteractions"),
+            quick_actions: i("key.quickActions"),
+            switch_game_mode: i("key.debug.switchGameMode"),
             hotbar: std::array::from_fn(|n| i(&format!("key.hotbar.{}", n + 1))),
         }
     }
@@ -383,10 +432,10 @@ fn lerp3(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
 }
 
-/// Vanilla's cubic mouse sensitivity curve, in degrees per pixel.
-pub fn degrees_per_pixel(sensitivity: f64) -> f32 {
+/// Vanilla's cubic mouse sensitivity curve; times 8 is a normal turn, alone a spyglass turn.
+fn sensitivity_mod(sensitivity: f64) -> f64 {
     let s = sensitivity * 0.6 + 0.2;
-    (s * s * s * 8.0 * 0.15) as f32
+    s * s * s
 }
 
 /// `ScrollWheelHandler`: the accumulator restarts on a direction change and a whole notch moves
@@ -512,6 +561,23 @@ pub struct Play {
     /// A native overlay asked for the Mods screen.
     pub open_mods: bool,
     debug_on: bool,
+    debug_keys: crate::debug_keys::DebugKeys,
+    show_hitboxes: bool,
+    chunk_borders: bool,
+    fps_charts: bool,
+    network_charts: bool,
+    /// F3+T asked the shell to reload the resource packs.
+    pub reload_packs: bool,
+    /// `Options#smoothCamera`: the cinematic camera, toggled by its key.
+    smooth_camera: bool,
+    smooth_turn: [crate::camera_fx::SmoothDouble; 2],
+    pending_turn: (f64, f64),
+    /// Players whose chat is hidden this session (`PlayerSocialManager#hidePlayer`).
+    hidden_players: crate::social::HiddenPlayers,
+    social_faces: crate::social::SharedFaces,
+    /// The server list entry's name, for Social Interactions.
+    server_name: String,
+    game_mode_choice: crate::game_mode_switcher::Choice,
     tab_held: bool,
     /// Left and right Ctrl: vanilla `hasControlDown` accepts either.
     ctrl_held: [bool; 2],
@@ -698,6 +764,19 @@ impl Play {
             gui_scale_override: None,
             open_mods: false,
             debug_on: false,
+            debug_keys: Default::default(),
+            show_hitboxes: false,
+            chunk_borders: false,
+            fps_charts: false,
+            network_charts: false,
+            reload_packs: false,
+            smooth_camera: false,
+            smooth_turn: Default::default(),
+            pending_turn: (0.0, 0.0),
+            hidden_players: Default::default(),
+            social_faces: Default::default(),
+            server_name: cfg.server_name.clone(),
+            game_mode_choice: Default::default(),
             tab_held: false,
             ctrl_held: [false; 2],
             closed: None,
@@ -864,6 +943,8 @@ impl Play {
                 k.advancements,
                 k.playerlist,
                 k.debug,
+                k.social,
+                k.quick_actions,
             ]
             .contains(&i)
     }
@@ -1563,6 +1644,12 @@ impl Play {
             }
             ClientEvent::Chat {
                 kind,
+                sender,
+                message,
+                ..
+            } if self.chat_hidden(kind, sender, &message) => {}
+            ClientEvent::Chat {
+                kind,
                 message,
                 tag,
                 signature,
@@ -2014,6 +2101,7 @@ impl Play {
             self.held.update(i, false, &self.options);
         }
         self.tab_held = false;
+        self.debug_keys.reset();
     }
 
     /// Keys still physically down when a Java screen closed, as if freshly pressed (vanilla
@@ -2038,7 +2126,35 @@ impl Play {
         if self.busy() || self.closed.is_some() || self.input_captured() || self.java_turn {
             return;
         }
-        let k = degrees_per_pixel(self.options.mouse_sensitivity) * self.java_fov_scale.min(1.0);
+        self.pending_turn.0 += dx;
+        self.pending_turn.1 += dy;
+        if !self.smooth_camera {
+            self.turn_player(0.0);
+        }
+    }
+
+    /// `MouseHandler#turnPlayer`: the cinematic camera eases the turn over `seconds`, a spyglass
+    /// slows it eightfold.
+    fn turn_player(&mut self, seconds: f64) {
+        let (dx, dy) = std::mem::take(&mut self.pending_turn);
+        let slow = sensitivity_mod(self.options.mouse_sensitivity);
+        let sens = slow * 8.0;
+        let (x, y) = if self.smooth_camera {
+            let [sx, sy] = &mut self.smooth_turn;
+            (
+                sx.next(dx * sens, seconds * sens),
+                sy.next(dy * sens, seconds * sens),
+            )
+        } else {
+            self.smooth_turn.iter_mut().for_each(|s| s.reset());
+            let k = if self.perspective == Perspective::First && self.scoping() {
+                slow
+            } else {
+                sens
+            };
+            (dx * k, dy * k)
+        };
+        let scale = 0.15 * f64::from(self.java_fov_scale.min(1.0));
         let sx = if self.options.invert_x_mouse {
             -1.0
         } else {
@@ -2049,7 +2165,9 @@ impl Play {
         } else {
             1.0
         };
-        self.look(dx as f32 * k * sx, dy as f32 * k * sy);
+        if x != 0.0 || y != 0.0 {
+            self.look((x * scale * sx) as f32, (y * scale * sy) as f32);
+        }
     }
 
     fn is_spectator(&self) -> bool {
@@ -2098,6 +2216,11 @@ impl Play {
         if !lines.is_finite() {
             return;
         }
+        let lines = if self.options.discrete_mouse_scroll && lines != 0.0 {
+            lines.signum()
+        } else {
+            lines
+        } * self.options.mouse_wheel_sensitivity as f32;
         if self.busy() {
             let (x, y) = self.mouse;
             self.ui_input(UiInput::Scroll {
@@ -2109,10 +2232,7 @@ impl Play {
             });
             return;
         }
-        let Some(step) = scroll_wheel(
-            &mut self.scroll,
-            lines * self.options.mouse_wheel_sensitivity as f32,
-        ) else {
+        let Some(step) = scroll_wheel(&mut self.scroll, lines) else {
             return;
         };
         if self.is_spectator() {
@@ -2131,6 +2251,31 @@ impl Play {
             return;
         }
         track_modifiers(&mut self.mods, key, pressed);
+        let native = !self.java_gui && !self.stack.top_captures_keys();
+        if !pressed {
+            self.debug_key_released(key, native);
+        } else {
+            let press = if native {
+                self.debug_keys.press(&self.bindings, key, !self.busy())
+            } else {
+                crate::debug_keys::DebugPress::default()
+            };
+            if press.toggle_overlay {
+                self.debug_on = !self.debug_on;
+            }
+            if !self.busy() {
+                if press.pause_without_menu {
+                    self.open_pause_menu(false);
+                    return;
+                }
+                if press.consumed() {
+                    for action in press.actions {
+                        self.debug_action(action);
+                    }
+                    return;
+                }
+            }
+        }
         if self.busy() {
             self.screen_key(key, pressed, text);
             return;
@@ -2152,6 +2297,34 @@ impl Play {
                 self.binding(i, pressed);
             }
         }
+    }
+
+    /// A screen may take the release (the game mode switcher on F3); otherwise F3 toggles the overlay.
+    fn debug_key_released(&mut self, key: InputKey, native: bool) {
+        if self.busy() && matches!(key, InputKey::Keyboard(_)) {
+            let mut actions = Vec::new();
+            if self
+                .stack
+                .key_released(crate::input::ui_key_from_input(key), &mut actions)
+            {
+                self.debug_keys.release_consumed(&self.bindings, key);
+                self.handle_actions(actions);
+                self.apply_game_mode_choice();
+                return;
+            }
+        }
+        if native && self.debug_keys.release(&self.bindings, key) {
+            self.debug_on = !self.debug_on;
+        }
+    }
+
+    /// Whether F3 is held as a chord modifier, which turns off F2 and F11.
+    pub fn debug_modifier_down(&self) -> bool {
+        self.debug_keys.modifier_down()
+    }
+
+    pub fn captures_keys(&self) -> bool {
+        self.stack.top_captures_keys()
     }
 
     fn screen_keys(&self) -> mcr_ui::ScreenKeys {
@@ -2369,20 +2542,25 @@ impl Play {
         Ok(())
     }
 
+    pub fn options_screen(&self) -> OptionsScreen {
+        let features = &self.world.client.state.registries.enabled_features;
+        OptionsScreen::new(options_host(
+            &self.settings,
+            self.languages(),
+            self.render.renderer.size(),
+            &self.assets,
+            &self.world.client.config.name,
+            features
+                .iter()
+                .any(|f| f == "minecraft:minecart_improvements"),
+        ))
+    }
+
     fn show_credits(&mut self) {
         if self.stack.credits_music() {
             return;
         }
-        let text = |path: &str| {
-            self.assets
-                .read(path)
-                .map(|b| String::from_utf8_lossy(&b).into_owned())
-        };
-        let source = CreditsSource {
-            poem: text(POEM_PATH),
-            credits: text(CREDITS_PATH),
-            postcredits: text(POSTCREDITS_PATH),
-        };
+        let source = credits_source(&self.assets);
         let player = self.world.client.config.name.clone();
         self.push_screen(Box::new(CreditsScreen::new(&source, true, &player)));
     }
@@ -2400,11 +2578,332 @@ impl Play {
     }
 
     pub fn open_pause(&mut self) {
+        self.open_pause_menu(true);
+    }
+
+    /// `Minecraft#pauseGame`; F3+Esc pauses without the menu.
+    fn open_pause_menu(&mut self, menu: bool) {
         if !self.busy() && self.closed.is_none() {
             let local = self.local_server;
             let lan = local && !self.lan_open;
-            self.push_screen(Box::new(PauseScreen::new(lan, local).with_lan(lan)));
+            let screen = PauseScreen::new(lan, local)
+                .with_lan(lan)
+                .with_addition(self.pause_addition());
+            let screen = if menu { screen } else { screen.without_menu() };
+            self.push_screen(Box::new(screen));
             self.pause_opened = true;
+        }
+    }
+
+    /// `PauseScreen#getCustomAdditions`: one `pause_screen_additions` dialog, `custom_options` for
+    /// several, else `server_links` when the server sent links.
+    fn pause_addition(&self) -> Option<mcr_ui::PauseAddition> {
+        let state = &self.world.client.state;
+        let reference = match dialog_tag(state, "minecraft:pause_screen_additions") {
+            Some(members) if members.len() == 1 => Value::Compound(
+                mcr_client::registry_dialog_by_index(&state.registries, members[0])?,
+            ),
+            Some(members) if !members.is_empty() => {
+                Value::String("minecraft:custom_options".into())
+            }
+            _ if !state.server.links.is_empty() => Value::String("minecraft:server_links".into()),
+            _ => return None,
+        };
+        let dialog = mcr_client::resolve_dialog(&state.registries, &reference)?;
+        let label = mcr_ui::Dialog::from_nbt(&Value::Compound(dialog.clone()))?
+            .list_title()
+            .clone();
+        Some(mcr_ui::PauseAddition {
+            label,
+            dialog: Value::Compound(dialog),
+        })
+    }
+
+    /// `Minecraft#getQuickActionsDialog`: the tag's only dialog, or `quick_actions` for several.
+    fn open_quick_actions(&mut self) {
+        let state = &self.world.client.state;
+        let dialog = match dialog_tag(state, "minecraft:quick_actions") {
+            Some([one]) => mcr_client::registry_dialog_by_index(&state.registries, *one),
+            Some(members) if !members.is_empty() => mcr_client::resolve_dialog(
+                &state.registries,
+                &Value::String("minecraft:quick_actions".into()),
+            ),
+            _ => None,
+        };
+        if let Some(dialog) = dialog.and_then(|d| mcr_ui::Dialog::from_nbt(&Value::Compound(d))) {
+            self.show_dialog(dialog);
+        }
+    }
+
+    /// `Gui#handleKeybinds`: P opens Social Interactions on a multiplayer server.
+    fn open_social_interactions(&mut self) {
+        if self.local_server {
+            let message =
+                Component::translatable("multiplayer.socialInteractions.not_available", Vec::new());
+            self.world.client.state.titles.set_overlay(message, false);
+            return;
+        }
+        if self.busy() {
+            return;
+        }
+        let screen = self.social_screen();
+        self.push_screen(Box::new(screen));
+    }
+
+    fn social_screen(&self) -> crate::social::SocialInteractionsScreen {
+        let state = &self.world.client.state;
+        let players = state
+            .players
+            .iter()
+            .map(|p| crate::social::SocialPlayer {
+                id: p.uuid,
+                name: p.name.clone(),
+            })
+            .collect();
+        let toggle = match self.bindings.input(self.keys.social) {
+            key @ InputKey::Keyboard(_) => Some(crate::input::ui_key_from_input(key)),
+            _ => None,
+        };
+        let server = if self.server_name.is_empty() {
+            let lang = self.gui.ui.lang();
+            lang.get("selectServer.defaultName")
+                .unwrap_or("Minecraft Server")
+                .to_owned()
+        } else {
+            self.server_name.clone()
+        };
+        crate::social::SocialInteractionsScreen::new(
+            players,
+            state.uuid,
+            server,
+            self.hidden_players.clone(),
+            self.social_faces.clone(),
+            toggle,
+        )
+    }
+
+    /// `Minecraft#showDebugChat` with `KeyboardHandler`'s yellow `[Debug]:` prefix.
+    fn debug_feedback(&mut self, message: Component) {
+        let prefix = Component::translatable("debug.prefix", Vec::new()).styled(Style {
+            color: Some(Color::Named(NamedColor::Yellow)),
+            bold: Some(true),
+            ..Style::default()
+        });
+        let line = Component::text("")
+            .with(prefix)
+            .with(Component::text(" "))
+            .with(message);
+        self.local_chat(&line);
+    }
+
+    fn debug_feedback_key(&mut self, key: &str) {
+        self.debug_feedback(Component::translatable(key, Vec::new()));
+    }
+
+    fn debug_toggle_feedback(&mut self, on: bool, key_on: &str, key_off: &str) {
+        self.debug_feedback_key(if on { key_on } else { key_off });
+    }
+
+    fn reduced_debug_info(&self) -> bool {
+        self.options.reduced_debug_info || self.world.client.state.server.reduced_debug_info
+    }
+
+    /// `KeyboardHandler#handleDebugKeys`.
+    fn debug_action(&mut self, action: DebugAction) {
+        let reduced = self.reduced_debug_info();
+        match action {
+            DebugAction::ReloadChunks => {
+                self.render.remesh_all(&self.world);
+                self.debug_feedback_key("debug.reload_chunks.message");
+            }
+            DebugAction::ShowHitboxes if !reduced => {
+                self.show_hitboxes = !self.show_hitboxes;
+                let on = self.show_hitboxes;
+                self.debug_toggle_feedback(on, "debug.show_hitboxes.on", "debug.show_hitboxes.off");
+            }
+            DebugAction::ClearChat => self.hud.chat.borrow_mut().clear_messages(),
+            DebugAction::ShowChunkBorders if !reduced => {
+                self.chunk_borders = !self.chunk_borders;
+                let on = self.chunk_borders;
+                self.debug_toggle_feedback(
+                    on,
+                    "debug.chunk_boundaries.on",
+                    "debug.chunk_boundaries.off",
+                );
+            }
+            DebugAction::AdvancedTooltips => {
+                let on = !self.options.advanced_item_tooltips;
+                self.settings
+                    .borrow_mut()
+                    .edit(|f| f.options.advanced_item_tooltips = on);
+                self.debug_toggle_feedback(
+                    on,
+                    "debug.advanced_tooltips.on",
+                    "debug.advanced_tooltips.off",
+                );
+            }
+            DebugAction::CopyRecreateCommand if !reduced => self.copy_recreate_command(),
+            DebugAction::Spectate => {
+                let player = &self.world.client.state.player;
+                if player.permission_level < 2 {
+                    self.debug_feedback_key("debug.creative_spectator.error");
+                } else {
+                    let mode = if player.game_mode == GameType::Spectator {
+                        player.previous_game_mode.unwrap_or(GameType::Creative)
+                    } else {
+                        GameType::Spectator
+                    };
+                    self.net(|c| c.change_game_mode(mode));
+                }
+            }
+            DebugAction::SwitchGameMode => {
+                let player = &self.world.client.state.player;
+                if player.permission_level >= 2 {
+                    let next = self.bindings.input(self.keys.switch_game_mode);
+                    let modifier = self
+                        .bindings
+                        .input(mapping_index("key.debug.modifier").expect("vanilla mapping"));
+                    let label = {
+                        let lang = self.gui.ui.lang();
+                        lang.get(next.name()).unwrap_or(next.name()).to_owned()
+                    };
+                    let screen = crate::game_mode_switcher::GameModeSwitcher::new(
+                        player.game_mode,
+                        player.previous_game_mode,
+                        (Some(crate::input::ui_key_from_input(next)), label),
+                        Some(crate::input::ui_key_from_input(modifier)),
+                        self.game_mode_choice.clone(),
+                    );
+                    self.push_screen(Box::new(screen));
+                } else {
+                    self.debug_feedback_key("debug.gamemodes.error");
+                }
+            }
+            DebugAction::FocusPause => {
+                let on = !self.options.pause_on_lost_focus;
+                self.settings
+                    .borrow_mut()
+                    .edit(|f| f.options.pause_on_lost_focus = on);
+                self.debug_toggle_feedback(on, "debug.pause_focus.on", "debug.pause_focus.off");
+            }
+            DebugAction::ReloadResourcePacks => {
+                self.debug_feedback_key("debug.reload_resourcepacks.message");
+                self.reload_packs = true;
+            }
+            DebugAction::CopyLocation if !reduced => {
+                self.debug_feedback_key("debug.copy_location.message");
+                let state = &self.world.client.state;
+                let [x, y, z] = state.player.pos();
+                let text = format!(
+                    "/execute in {} run tp @s {x:.2} {y:.2} {z:.2} {:.2} {:.2}",
+                    state.dimension.name, self.yaw, self.pitch
+                );
+                use mcr_ui::Clipboard;
+                self.gui.clipboard.set(&text);
+            }
+            DebugAction::DumpVersion => {
+                self.debug_feedback_key("debug.version.header");
+                use mcr_protocol::types::text::Arg;
+                let (name, protocol) = (self.data.name().to_owned(), self.data.protocol());
+                let lines = [
+                    ("commands.version.id", vec![Arg::Str(name.clone())]),
+                    ("commands.version.name", vec![Arg::Str(name)]),
+                    (
+                        "commands.version.protocol",
+                        vec![
+                            Arg::Str(protocol.to_string()),
+                            Arg::Str(format!("0x{protocol:x}")),
+                        ],
+                    ),
+                    ("commands.version.stable.yes", Vec::new()),
+                ];
+                for (key, args) in lines {
+                    self.local_chat(&Component::translatable(key, args));
+                }
+            }
+            DebugAction::FpsCharts => self.fps_charts = !self.fps_charts,
+            DebugAction::NetworkCharts => self.network_charts = !self.network_charts,
+            DebugAction::ImprovedTransparency => {
+                let on = !self.options.improved_transparency;
+                self.settings
+                    .borrow_mut()
+                    .edit(|f| f.options.improved_transparency = on);
+                self.debug_toggle_feedback(
+                    on,
+                    "debug.improvedTransparency.on",
+                    "debug.improvedTransparency.off",
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// `KeyboardHandler#copyRecreateCommand` without the server's NBT.
+    fn copy_recreate_command(&mut self) {
+        let state = &self.world.client.state;
+        let text = match self.target {
+            Some(Target::Block(hit)) => {
+                let name = self
+                    .data
+                    .state_block_name(hit.state)
+                    .unwrap_or("minecraft:air");
+                let props: Vec<String> = self
+                    .data
+                    .state_properties(hit.state)
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect();
+                let state = if props.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{name}[{}]", props.join(","))
+                };
+                let p = hit.pos;
+                self.debug_feedback_key("debug.inspect.client.block");
+                format!("/setblock {} {} {} {state}", p.x, p.y, p.z)
+            }
+            Some(Target::Entity { id, .. }) => {
+                let Some(e) = state.entities.get(id) else {
+                    return;
+                };
+                let kind = u32::try_from(e.kind)
+                    .ok()
+                    .and_then(|k| self.data.entity_type_name(k))
+                    .unwrap_or("minecraft:pig");
+                let [x, y, z] = e.pos;
+                let text = format!("/summon {kind} {x:.2} {y:.2} {z:.2}");
+                self.debug_feedback_key("debug.inspect.client.entity");
+                text
+            }
+            None => return,
+        };
+        use mcr_ui::Clipboard;
+        self.gui.clipboard.set(&text);
+    }
+
+    /// The game mode the F3+F4 switcher chose, sent once it closed.
+    fn apply_game_mode_choice(&mut self) {
+        if let Some(mode) = self.game_mode_choice.take() {
+            self.net(|c| c.change_game_mode(mode));
+        }
+    }
+
+    /// Chat from a player hidden in Social Interactions, or a system line naming one, is dropped.
+    fn chat_hidden(&self, kind: ChatKind, sender: Option<uuid::Uuid>, message: &Component) -> bool {
+        let state = &self.world.client.state;
+        let hidden = self.hidden_players.borrow();
+        if hidden.is_empty() {
+            return false;
+        }
+        let own = state.uuid;
+        match kind {
+            ChatKind::Player => sender.is_some_and(|id| id != own && hidden.contains(&id)),
+            ChatKind::System if self.options.hide_matched_names => {
+                let plain: String = self.gui.ui.flatten(message).iter().map(|c| c.ch).collect();
+                crate::social::guessed_sender(&plain)
+                    .and_then(|name| state.players.iter().find(|p| p.name == name))
+                    .is_some_and(|p| p.uuid != own && hidden.contains(&p.uuid))
+            }
+            _ => false,
         }
     }
 
@@ -2509,15 +3008,20 @@ impl Play {
         let old = std::mem::replace(&mut self.options, options);
         self.bindings = bindings;
         let rd = self.options.render_distance;
-        if rd != old.render_distance {
+        let view_distance = if rd != old.render_distance {
             self.world.set_render_distance(rd);
-            self.net(|c| c.set_view_distance(rd.clamp(2, 32) as i8));
-        }
+            rd
+        } else {
+            i32::from(self.world.client.config.view_distance)
+        };
+        let info = crate::settings::client_information(&self.options, view_distance);
+        self.net(|c| c.set_client_information(info));
         if self.options.enable_vsync != old.enable_vsync {
             self.render.renderer.set_vsync(self.options.enable_vsync);
         }
         if let Some(audio) = &mut self.audio {
             audio.apply_volumes(&self.options);
+            audio.sync_device(&self.options);
         }
         if self.options.music_toast != old.music_toast
             && self.options.music_toast == MusicToastState::PauseAndToast
@@ -2607,6 +3111,7 @@ impl Play {
         }
         self.death_check();
         self.bed_check();
+        self.apply_game_mode_choice();
         if self.stack.is_empty() {
             return;
         }
@@ -2768,7 +3273,7 @@ impl Play {
                     self.stack.clear();
                 }
                 ScreenAction::OpenOptions => {
-                    let screen = OptionsScreen::new(self.settings.clone(), self.languages());
+                    let screen = self.options_screen();
                     self.update_gui_size();
                     self.stack.push(Box::new(screen));
                 }
@@ -2821,6 +3326,11 @@ impl Play {
                     }
                 }
                 ScreenAction::OpenUrl(url) => gui::open_url(&url),
+                ScreenAction::OpenSocialInteractions => {
+                    let screen = self.social_screen();
+                    self.update_gui_size();
+                    self.stack.push(Box::new(screen));
+                }
                 ScreenAction::CopyToClipboard(text) => {
                     use mcr_ui::Clipboard;
                     self.gui.clipboard.set(&text);
@@ -2975,8 +3485,12 @@ impl Play {
             }
         } else if i == k.gui {
             self.hud_hidden = !self.hud_hidden;
-        } else if i == k.debug {
-            self.debug_on = !self.debug_on;
+        } else if i == k.smooth_camera {
+            self.smooth_camera = !self.smooth_camera;
+        } else if i == k.social {
+            self.open_social_interactions();
+        } else if i == k.quick_actions {
+            self.open_quick_actions();
         } else if i == k.perspective {
             if !self.java_perspective {
                 self.set_perspective(self.perspective.next());
@@ -3108,11 +3622,29 @@ impl Play {
             warn,
             bad,
         };
-        vec![
-            chart("Frame time", "ms", &self.frame_history, 50.0, 16.7, 33.4),
-            chart("Tick time", "ms", &self.tick_history, 50.0, 25.0, 50.0),
-            chart("Ping", "ms", &self.ping_history, 500.0, 150.0, 300.0),
-        ]
+        let mut charts = Vec::new();
+        if self.fps_charts {
+            charts.push(chart(
+                "Frame time",
+                "ms",
+                &self.frame_history,
+                50.0,
+                16.7,
+                33.4,
+            ));
+            charts.push(chart(
+                "Tick time",
+                "ms",
+                &self.tick_history,
+                50.0,
+                25.0,
+                50.0,
+            ));
+        }
+        if self.network_charts {
+            charts.push(chart("Ping", "ms", &self.ping_history, 500.0, 150.0, 300.0));
+        }
+        charts
     }
 
     pub fn frame(&mut self) -> Option<FrameStats> {
@@ -3122,6 +3654,14 @@ impl Play {
         self.fps += (1.0 / dt - self.fps) * 0.05;
         self.frame_ms += (dt * 1000.0 - self.frame_ms) * 0.05;
         push_sample(&mut self.frame_history, dt * 1000.0);
+        if self.smooth_camera
+            && !self.busy()
+            && self.closed.is_none()
+            && !self.input_captured()
+            && !self.java_turn
+        {
+            self.turn_player(f64::from(dt));
+        }
 
         self.world.camera = self.camera(self.partial());
         self.world.camera.fov_y = self.world.camera.fov_y.max(0.1);
@@ -3136,7 +3676,8 @@ impl Play {
         ));
         let size = self.render.renderer.size();
         let boxes = self.outline_boxes();
-        self.outline.build(&boxes, &camera, size);
+        let lines = self.debug_lines(camera.position);
+        self.outline.build(&boxes, &lines, &camera, size);
 
         let partial = self.partial();
         let aspect = size.0 as f32 / size.1.max(1) as f32;
@@ -3310,6 +3851,19 @@ impl Play {
                     self.options.notification_display_time,
                 );
                 crate::subtitles::draw(&mut frame, &lines, &self.options);
+            }
+            if Rc::strong_count(&self.social_faces) > 1 {
+                let mut faces = self.social_faces.borrow_mut();
+                let wanted = std::mem::take(&mut faces.wanted);
+                faces.sprites.clear();
+                for id in wanted {
+                    if let Some(sprite) =
+                        self.hud
+                            .face_sprite(&mut frame, &self.skins, &self.world.client.state, id)
+                    {
+                        faces.sprites.insert(id, sprite);
+                    }
+                }
             }
             if !self.stack.is_empty() {
                 let mut cx =
@@ -3626,6 +4180,25 @@ impl Play {
         self.effects.particles.set_camera(camera.position);
     }
 
+    /// F3+B hitboxes and F3+G chunk borders.
+    fn debug_lines(&self, camera: DVec3) -> Vec<crate::outline::WorldLine> {
+        let mut lines = Vec::new();
+        if self.reduced_debug_info() {
+            return lines;
+        }
+        let state = &self.world.client.state;
+        if self.show_hitboxes {
+            let first_person = self.perspective == Perspective::First;
+            crate::gizmos::hitboxes(state, camera, first_person, &mut lines);
+        }
+        if self.chunk_borders {
+            let min_y = state.dimension.min_y;
+            let max_y = min_y + state.dimension.height - 1;
+            crate::gizmos::chunk_borders(camera, min_y, max_y, &mut lines);
+        }
+        lines
+    }
+
     fn outline_boxes(&self) -> Vec<WorldBox> {
         let Some(Target::Block(hit)) = self.target else {
             return Vec::new();
@@ -3647,6 +4220,11 @@ impl Play {
 }
 
 /// Where an entity-bound sound plays; `None` once the entity is gone or silent, which stops it.
+/// Members of a dialog tag, by registry index.
+fn dialog_tag<'a>(state: &'a mcr_client::ClientState, tag: &str) -> Option<&'a [i32]> {
+    state.registries.tag(mcr_client::DIALOG_REGISTRY, tag)
+}
+
 fn sound_entity_pos(state: &mcr_client::ClientState, id: i32) -> Option<[f64; 3]> {
     if id == state.player.entity_id {
         return Some(state.player.pos());
@@ -3719,9 +4297,9 @@ mod tests {
 
     #[test]
     fn sensitivity_matches_vanilla_default() {
-        let k = degrees_per_pixel(0.5);
+        let k = sensitivity_mod(0.5) * 8.0 * 0.15;
         assert!((k - 0.15).abs() < 1e-4);
-        assert!(degrees_per_pixel(1.0) > degrees_per_pixel(0.0));
+        assert!(sensitivity_mod(1.0) > sensitivity_mod(0.0));
     }
 
     #[test]

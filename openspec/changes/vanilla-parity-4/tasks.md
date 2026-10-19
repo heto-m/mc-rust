@@ -289,18 +289,18 @@ Scope: mcr-ui chat_screen, clicks and edit_box, mcr-client commands, mcr-app vie
 
 Scope: mcr-app settings, play and shell, mcr-settings, mcr-client client info.
 
-- [ ] 20.1 S9 (V) Options screens mostly missing
-- [ ] 20.2 S10 (V) Key binds screen
-- [ ] 20.3 S11 (V) Client information ignores options
-- [ ] 20.4 S12 (V) Options nothing reads
-- [ ] 20.5 S13 (V) No F3 key combos; F3 toggles on press
-- [ ] 20.6 S14 (V) F2 screenshot and F11 fullscreen do nothing
-- [ ] 20.7 S15 (V) Social Interactions, Quick Actions and pause screen additions missing
-- [ ] 20.8 S22 (M) Credits controls
-- [ ] 20.9 S23 (M) Smooth camera key
-- [ ] 20.10 E19 (M) Glint speed and strength options ignored
-- [ ] 20.11 Unit tests: client information from options, F3 combo handling and release toggle, key binds conflicts
-- [ ] 20.12 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 20.1 S9 (V) Options screens mostly missing
+- [x] 20.2 S10 (V) Key binds screen
+- [x] 20.3 S11 (V) Client information ignores options
+- [x] 20.4 S12 (V) Options nothing reads
+- [x] 20.5 S13 (V) No F3 key combos; F3 toggles on press
+- [x] 20.6 S14 (V) F2 screenshot and F11 fullscreen do nothing
+- [x] 20.7 S15 (V) Social Interactions, Quick Actions and pause screen additions missing
+- [x] 20.8 S22 (M) Credits controls
+- [x] 20.9 S23 (M) Smooth camera key
+- [x] 20.10 E19 (M) Glint speed and strength options ignored
+- [x] 20.11 Unit tests: client information from options, F3 combo handling and release toggle, key binds conflicts
+- [x] 20.12 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 21. Block rendering fidelity
 

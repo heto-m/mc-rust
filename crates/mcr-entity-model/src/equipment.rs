@@ -132,11 +132,8 @@ pub fn add_layers(
             .pipeline(Pipeline::Additive)
             .no_hurt()
             .not_body();
-        glint.tint = [160, 100, 255, 150];
-        glint.uv_offset = [
-            (plan.anim.age * 0.01).fract(),
-            (plan.anim.age * 0.007).fract(),
-        ];
+        glint.tint = crate::glint::tint();
+        glint.uv_offset = crate::glint::scroll();
         plan.push(glint);
     }
     if matches!(layer_type, "humanoid" | "humanoid_leggings")

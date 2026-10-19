@@ -349,14 +349,14 @@ fn pause_buttons_and_escape() {
         send(&mut screen, &NoView, &[UiInput::key(Key::Escape)]).as_slice(),
         [ScreenAction::Pop]
     ));
-    let top = (H - 142) / 4;
-    let options = send(&mut screen, &NoView, &click(213.0, (top + 98 + 10) as f32));
+    let top = (H - 166) / 4;
+    let options = send(&mut screen, &NoView, &click(213.0, (top + 122 + 10) as f32));
     assert!(
         options
             .iter()
             .any(|a| matches!(a, ScreenAction::OpenOptions))
     );
-    let disconnect = send(&mut screen, &NoView, &click(213.0, (top + 122 + 10) as f32));
+    let disconnect = send(&mut screen, &NoView, &click(213.0, (top + 146 + 10) as f32));
     assert!(
         disconnect
             .iter()

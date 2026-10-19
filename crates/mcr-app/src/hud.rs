@@ -600,6 +600,9 @@ impl Hud {
 
     pub fn draw(&mut self, frame: &mut UiFrame<'_>, icons: &mut ItemIcons, input: &HudInput<'_>) {
         icons.set_time(input.millis);
+        let o = input.options;
+        icons.set_glint(o.glint_speed as f32, o.glint_strength as f32);
+        mcr_entity_model::glint::set_options(o.glint_speed as f32, o.glint_strength as f32);
         if !input.hidden {
             self.draw_gameplay(frame, icons, input);
         }
@@ -1202,6 +1205,18 @@ impl Hud {
                 );
             }
         }
+    }
+
+    /// A listed player's face for screens such as Social Interactions.
+    pub fn face_sprite(
+        &self,
+        frame: &mut UiFrame<'_>,
+        skins: &SkinStore,
+        state: &ClientState,
+        uuid: uuid::Uuid,
+    ) -> Option<SpriteId> {
+        let info = state.players.get(uuid)?;
+        self.head_sprite(frame, skins, info)
     }
 
     fn head_sprite(

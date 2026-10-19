@@ -8,6 +8,7 @@ mod effects;
 mod equipment;
 mod extras;
 mod first_person;
+pub mod glint;
 mod gpu;
 mod hands;
 mod humanoids;

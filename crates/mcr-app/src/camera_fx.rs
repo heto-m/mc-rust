@@ -22,6 +22,33 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 }
 
 /// `MobEffectInstance.BlendState`: a 0..1 factor that eases in and out with an effect.
+/// `SmoothDouble`: the cinematic camera's eased mouse turning.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SmoothDouble {
+    target: f64,
+    remaining: f64,
+    last: f64,
+}
+
+impl SmoothDouble {
+    pub fn next(&mut self, target_delta: f64, time: f64) -> f64 {
+        self.target += target_delta;
+        let mut delta = self.target - self.remaining;
+        let eased = self.last + (delta - self.last) * 0.5;
+        let sign = delta.signum();
+        if sign * delta > sign * self.last {
+            delta = eased;
+        }
+        self.last = eased;
+        self.remaining += delta * time;
+        delta * time
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct EffectBlend {
     prev: f32,
@@ -410,6 +437,28 @@ pub fn near_plane_box(eye: [f64; 3], forward: Vec3, up: Vec3, fov_y: f32, aspect
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smooth_turning_eases_in_and_keeps_coasting() {
+        let mut s = SmoothDouble::default();
+        let first = s.next(10.0, 0.05);
+        assert!(first > 0.0 && first < 10.0 * 0.05);
+        let coast = s.next(0.0, 0.05);
+        assert!(
+            coast > 0.0,
+            "the camera keeps turning after the mouse stops"
+        );
+        let mut total = first + coast;
+        for _ in 0..400 {
+            total += s.next(0.0, 0.05);
+        }
+        assert!(
+            (total - 10.0).abs() < 0.1,
+            "it settles on the full turn: {total}"
+        );
+        s.reset();
+        assert_eq!(s.next(0.0, 0.05), 0.0);
+    }
 
     fn input() -> FovInput {
         FovInput {

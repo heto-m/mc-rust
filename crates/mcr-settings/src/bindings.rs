@@ -15,6 +15,37 @@ pub enum Category {
     Debug,
 }
 
+impl Category {
+    /// `KeyMapping.Category` registration order, which the key binds screen sorts by.
+    pub const SORTED: [Self; 8] = [
+        Self::Movement,
+        Self::Misc,
+        Self::Multiplayer,
+        Self::Gameplay,
+        Self::Inventory,
+        Self::Creative,
+        Self::Spectator,
+        Self::Debug,
+    ];
+
+    pub fn rank(self) -> usize {
+        Self::SORTED.iter().position(|c| *c == self).unwrap_or(0)
+    }
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Self::Movement => "key.category.minecraft.movement",
+            Self::Inventory => "key.category.minecraft.inventory",
+            Self::Gameplay => "key.category.minecraft.gameplay",
+            Self::Multiplayer => "key.category.minecraft.multiplayer",
+            Self::Misc => "key.category.minecraft.misc",
+            Self::Creative => "key.category.minecraft.creative",
+            Self::Spectator => "key.category.minecraft.spectator",
+            Self::Debug => "key.category.minecraft.debug",
+        }
+    }
+}
+
 /// Which `options.txt` flag switches a key from hold to toggle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Toggle {
@@ -43,6 +74,21 @@ pub struct KeyMapping {
     pub default: InputKey,
     pub category: Category,
     pub toggle: Toggle,
+}
+
+impl KeyMapping {
+    /// The explicit order within a category, compared before the translated name.
+    pub fn order(&self) -> i32 {
+        match self.name {
+            "key.debug.overlay" => -2,
+            "key.debug.modifier" => -1,
+            "key.debug.profilingChart" => 1,
+            "key.debug.fpsCharts" => 2,
+            "key.debug.networkCharts" => 3,
+            "key.debug.lightmapTexture" => 4,
+            _ => 0,
+        }
+    }
 }
 
 const fn km(name: &'static str, default: InputKey, category: Category) -> KeyMapping {
@@ -201,6 +247,32 @@ impl KeyBindings {
         }
     }
 
+    pub fn is_default(&self, index: usize) -> bool {
+        self.inputs[index] == MAPPINGS[index].default
+    }
+
+    pub fn all_default(&self) -> bool {
+        (0..MAPPINGS.len()).all(|i| self.is_default(i))
+    }
+
+    pub fn reset_all(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Other mappings on the same input, unless both still have their default: vanilla's
+    /// defaults share keys on purpose (F3 chords), so only a player's own change collides.
+    pub fn collisions(&self, index: usize) -> Vec<usize> {
+        let key = self.inputs[index];
+        if key == InputKey::Unbound {
+            return Vec::new();
+        }
+        self.lookup(key)
+            .iter()
+            .copied()
+            .filter(|&o| o != index && (!self.is_default(o) || !self.is_default(index)))
+            .collect()
+    }
+
     /// Indices into [`MAPPINGS`] of every mapping bound to `key`.
     pub fn lookup(&self, key: InputKey) -> &[usize] {
         self.lookup.get(&key).map_or(&[], Vec::as_slice)
@@ -276,5 +348,46 @@ impl HeldState {
 
     pub fn is_active(&self, index: usize) -> bool {
         self.logical[index]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn index(name: &str) -> usize {
+        mapping_index(name).unwrap()
+    }
+
+    #[test]
+    fn default_shared_keys_do_not_collide() {
+        let b = KeyBindings::default();
+        assert!(b.collisions(index("key.debug.copyLocation")).is_empty());
+        assert!(b.collisions(index("key.saveToolbarActivator")).is_empty());
+        assert!(b.all_default());
+    }
+
+    #[test]
+    fn a_rebound_key_collides_both_ways() {
+        let mut b = KeyBindings::default();
+        let jump = index("key.jump");
+        let forward = index("key.forward");
+        b.set(jump, MAPPINGS[forward].default);
+        assert_eq!(b.collisions(jump), vec![forward]);
+        assert_eq!(b.collisions(forward), vec![jump]);
+        assert!(!b.is_default(jump) && !b.all_default());
+        b.set(jump, InputKey::Unbound);
+        assert!(b.collisions(jump).is_empty());
+        assert!(b.collisions(forward).is_empty());
+        b.reset_all();
+        assert!(b.all_default());
+    }
+
+    #[test]
+    fn categories_sort_like_vanilla() {
+        assert!(Category::Movement.rank() < Category::Misc.rank());
+        assert!(Category::Gameplay.rank() < Category::Inventory.rank());
+        assert_eq!(Category::Debug.rank(), 7);
+        assert_eq!(MAPPINGS[index("key.debug.overlay")].order(), -2);
     }
 }

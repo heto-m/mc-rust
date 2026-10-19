@@ -9,7 +9,6 @@ use mcr_ui::{ConfirmScreen, Key, MouseButton, ScreenAction};
 use super::Shell;
 use crate::input::input_key_from_ui;
 use crate::mod_input::sdl_button;
-use crate::settings::OptionsScreen;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Authority {
@@ -200,8 +199,9 @@ impl Shell {
                 self.show_native(Box::new(menu));
             }
             NativeKind::Settings => {
-                let screen = OptionsScreen::new(self.settings.clone(), self.languages());
-                self.show_native(Box::new(screen));
+                if let Some(screen) = self.options_screen() {
+                    self.show_native(Box::new(screen));
+                }
             }
         }
     }

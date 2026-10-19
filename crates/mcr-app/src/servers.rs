@@ -105,6 +105,14 @@ impl FileServers {
         }
     }
 
+    pub fn name_for(&self, address: &str) -> Option<String> {
+        self.list
+            .servers
+            .iter()
+            .find(|s| s.ip == address)
+            .map(|s| s.name.clone())
+    }
+
     pub fn accepted_conduct_for(&self, address: &str) -> Option<i32> {
         self.list
             .servers

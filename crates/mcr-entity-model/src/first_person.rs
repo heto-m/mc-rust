@@ -118,7 +118,6 @@ impl EntityScene {
             matrix,
             light,
             [0.0; 3],
-            0.0,
             crate::equipment::has_glint(stack),
         );
         true

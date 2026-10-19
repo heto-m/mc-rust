@@ -880,9 +880,9 @@ fn trident(_cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         let mut glint = Part::new("minecraft:trident#main", "misc/enchanted_glint_item")
             .pipeline(Pipeline::Additive)
             .no_hurt();
-        glint.tint = [160, 100, 255, 150];
+        glint.tint = crate::glint::tint();
         glint.fullbright = true;
-        glint.uv_offset = crate::scene::glint_scroll(v.age_ticks);
+        glint.uv_offset = crate::glint::scroll();
         plan.push(glint);
     }
 }

@@ -1,5 +1,5 @@
 use super::env::{Env, RenderCx};
-use super::input::{DoubleClickTracker, UiInput};
+use super::input::{DoubleClickTracker, Key, UiInput};
 
 /// Server-opened screens nest at most a few deep; anything past this is spam.
 pub const MAX_SCREENS: usize = 16;
@@ -141,6 +141,8 @@ pub enum ScreenAction {
     ChatQueueNext,
     DialogDisconnect,
     PlaySound(&'static str),
+    /// The pause menu's Player Reporting button: `SocialInteractionsScreen`.
+    OpenSocialInteractions,
 }
 
 impl std::fmt::Debug for ScreenAction {
@@ -239,6 +241,7 @@ impl std::fmt::Debug for ScreenAction {
             Self::ChatQueueNext => f.write_str("ChatQueueNext"),
             Self::DialogDisconnect => f.write_str("DialogDisconnect"),
             Self::PlaySound(s) => f.debug_tuple("PlaySound").field(s).finish(),
+            Self::OpenSocialInteractions => f.write_str("OpenSocialInteractions"),
         }
     }
 }
@@ -310,6 +313,16 @@ pub trait Screen {
     /// Center in GUI pixels of container slot `index`, for scripted clicks.
     fn slot_center(&self, _index: usize) -> Option<(i32, i32)> {
         None
+    }
+
+    /// `Screen#keyReleased`; true when the screen used the release.
+    fn key_released(&mut self, _key: Key, _out: &mut Vec<ScreenAction>) -> bool {
+        false
+    }
+
+    /// The screen is waiting for a key to bind, so global keys such as F2 go to it.
+    fn captures_keys(&self) -> bool {
+        false
     }
 }
 
@@ -389,6 +402,20 @@ impl ScreenStack {
 
     pub fn top_is_dialog(&self) -> bool {
         self.top().is_some_and(Screen::is_dialog)
+    }
+
+    pub fn top_captures_keys(&self) -> bool {
+        self.top().is_some_and(Screen::captures_keys)
+    }
+
+    pub fn key_released(&mut self, key: Key, out: &mut Vec<ScreenAction>) -> bool {
+        let mut local = Vec::new();
+        let used = match self.screens.last_mut() {
+            Some(screen) => screen.key_released(key, &mut local),
+            None => false,
+        };
+        self.apply(local, out);
+        used
     }
 
     pub fn resize(&mut self, width: i32, height: i32) {

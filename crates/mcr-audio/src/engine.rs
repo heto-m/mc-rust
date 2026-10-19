@@ -29,11 +29,30 @@ fn device_err(e: impl std::fmt::Display) -> AudioError {
     AudioError::Device(e.to_string())
 }
 
+/// Output device names, as `soundDevice` in `options.txt` stores them.
+pub fn output_devices() -> Vec<String> {
+    cpal::default_host()
+        .output_devices()
+        .map(|devices| devices.map(|d| d.to_string()).take(64).collect())
+        .unwrap_or_default()
+}
+
+fn pick_device(name: Option<&str>) -> Option<Device> {
+    let host = cpal::default_host();
+    if let Some(name) = name.filter(|n| !n.is_empty())
+        && let Ok(mut devices) = host.output_devices()
+        && let Some(device) = devices.find(|d| d.to_string() == name)
+    {
+        return Some(device);
+    }
+    host.default_output_device()
+}
+
 impl AudioEngine {
-    pub fn start() -> Result<(Self, AudioHandle), AudioError> {
-        let device = cpal::default_host()
-            .default_output_device()
-            .ok_or_else(|| AudioError::Device("no output device".into()))?;
+    /// Opens `device` by name, or the system default when it is unset or gone.
+    pub fn start(device: Option<&str>) -> Result<(Self, AudioHandle), AudioError> {
+        let device =
+            pick_device(device).ok_or_else(|| AudioError::Device("no output device".into()))?;
         let supported = device.default_output_config().map_err(device_err)?;
         let format = supported.sample_format();
         let base: StreamConfig = supported.into();

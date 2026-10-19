@@ -600,17 +600,32 @@ impl Client {
     /// Updates the render distance the server streams and re-announces client information.
     pub fn set_view_distance(&mut self, distance: i8) -> Result<()> {
         self.config.view_distance = distance.clamp(2, 32);
-        self.send_play(&S::ClientInformation(c::ClientInformation {
-            language: self.config.language.clone(),
-            view_distance: self.config.view_distance,
-            chat_visibility: self.config.chat_visibility,
-            chat_colors: true,
-            model_customisation: 0x7f,
-            main_hand: self.config.main_hand,
-            text_filtering_enabled: false,
-            allows_listing: true,
-            particle_status: self.config.particle_status,
-        }))
+        self.send_play(&S::ClientInformation(self.client_information()))
+    }
+
+    /// F3+N and the F3+F4 switcher: the server checks the permission.
+    pub fn change_game_mode(&mut self, mode: mcr_protocol::types::game::GameType) -> Result<()> {
+        self.send_play(&S::ChangeGameMode(sb::ChangeGameMode { mode }))
+    }
+
+    /// `Options#broadcastOptions`: adopts `info` and re-announces it in play when anything changed.
+    pub fn set_client_information(&mut self, info: c::ClientInformation) -> Result<()> {
+        if info == self.client_information() {
+            return Ok(());
+        }
+        let cfg = &mut self.config;
+        cfg.language = info.language;
+        cfg.view_distance = info.view_distance.clamp(2, 32);
+        cfg.chat_visibility = info.chat_visibility;
+        cfg.chat_colors = info.chat_colors;
+        cfg.model_customisation = info.model_customisation;
+        cfg.main_hand = info.main_hand;
+        cfg.allows_listing = info.allows_listing;
+        cfg.particle_status = info.particle_status;
+        if self.phase() == crate::client::Phase::Play {
+            self.send_play(&S::ClientInformation(self.client_information()))?;
+        }
+        Ok(())
     }
 
     pub fn click_container_button(&mut self, button: i32) -> Result<()> {

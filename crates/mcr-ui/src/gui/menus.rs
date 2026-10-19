@@ -8,7 +8,8 @@ use super::env::{Env, RenderCx};
 use super::input::{Key, UiInput};
 use super::screen::{Screen, ScreenAction};
 use super::server_list::{ServerListScreen, SharedServers};
-use super::widgets::{Button, WidgetEvent, WidgetEventKind, WidgetSet};
+use super::tooltip::TooltipLines;
+use super::widgets::{Button, Widget, WidgetEvent, WidgetEventKind, WidgetSet};
 use super::world_list::{SelectWorldScreen, SharedWorlds};
 
 pub(super) const WHITE: u32 = 0xFFFF_FFFF;
@@ -371,6 +372,34 @@ const PAUSE_STATS: u32 = 3;
 const PAUSE_OPTIONS: u32 = 4;
 const PAUSE_DISCONNECT: u32 = 5;
 const PAUSE_LAN: u32 = 6;
+const PAUSE_BUGS: u32 = 7;
+const PAUSE_FEEDBACK: u32 = 8;
+const PAUSE_FRIENDS: u32 = 9;
+const PAUSE_REPORTING: u32 = 10;
+const PAUSE_ADDITIONS: u32 = 11;
+const BUGS_URL: &str = "https://aka.ms/snapshotbugs?ref=game";
+const FEEDBACK_URL: &str = "https://aka.ms/javafeedback?ref=game";
+const ICONS: [(u32, &str, &str); 4] = [
+    (PAUSE_BUGS, "pause_menu/bug", "menu.reportBugs"),
+    (
+        PAUSE_FEEDBACK,
+        "pause_menu/social_interactions",
+        "menu.sendFeedback",
+    ),
+    (PAUSE_FRIENDS, "friends/friends", ""),
+    (
+        PAUSE_REPORTING,
+        "pause_menu/player_reporting",
+        "menu.playerReporting",
+    ),
+];
+
+/// A server's `pause_screen_additions` dialog (or its server links), offered as a button.
+#[derive(Debug, Clone)]
+pub struct PauseAddition {
+    pub label: Component,
+    pub dialog: mcr_nbt::Value,
+}
 
 #[derive(Debug)]
 pub struct PauseScreen {
@@ -379,6 +408,9 @@ pub struct PauseScreen {
     pauses: bool,
     local_server: bool,
     lan: bool,
+    /// F3+Esc pauses with only the title.
+    menu: bool,
+    addition: Option<PauseAddition>,
 }
 
 impl PauseScreen {
@@ -389,6 +421,8 @@ impl PauseScreen {
             pauses: pauses_game,
             local_server,
             lan: false,
+            menu: true,
+            addition: None,
         }
     }
 
@@ -397,56 +431,103 @@ impl PauseScreen {
         self.lan = offered;
         self
     }
+
+    /// `PauseScreen(false)`: the game pauses but no menu is shown.
+    pub fn without_menu(mut self) -> Self {
+        self.menu = false;
+        self
+    }
+
+    pub fn with_addition(mut self, addition: Option<PauseAddition>) -> Self {
+        self.addition = addition;
+        self
+    }
 }
 
 impl Screen for PauseScreen {
     fn shows_music_toast(&self) -> bool {
-        true
+        self.menu
     }
 
     fn init(&mut self, width: i32, height: i32) {
         self.gui = (width, height);
         self.widgets.clear();
-        let top = (height - 142) / 4;
+        if !self.menu {
+            return;
+        }
+        let rows = 5 + i32::from(self.addition.is_some());
+        let top = (height - (rows * 24 + 46)) / 4;
         let left = width / 2 - 102;
         let w = &mut self.widgets;
+        let mut y = top + 50;
         w.add(Button::new(
             PAUSE_RETURN,
-            [left, top + 50, 204, 20],
+            [left, y, 204, 20],
             "lang:menu.returnToGame",
         ));
+        y += 24;
         w.add(Button::new(
             PAUSE_ADVANCEMENTS,
-            [left, top + 74, 98, 20],
+            [left, y, 98, 20],
             "lang:gui.advancements",
         ));
         w.add(Button::new(
             PAUSE_STATS,
-            [left + 106, top + 74, 98, 20],
+            [left + 106, y, 98, 20],
             "lang:gui.stats",
         ));
+        y += 24;
+        let icons_left = width / 2 - (ICONS.len() as i32 * 24 - 4) / 2;
+        for (i, (id, _, key)) in ICONS.iter().enumerate() {
+            let mut b = Button::new(*id, [icons_left + i as i32 * 24, y, 20, 20], "");
+            if !key.is_empty() {
+                let mut tip = TooltipLines::default();
+                tip.push_component(Component::translatable(*key, Vec::new()));
+                b.tooltip = Some(tip);
+            }
+            b.active = *id != PAUSE_FRIENDS;
+            w.add(b);
+        }
+        y += 24;
+        if self.addition.is_some() {
+            let mut b = Button::new(PAUSE_ADDITIONS, [left, y, 204, 20], "");
+            let mut tip = TooltipLines::default();
+            tip.push_component(Component::translatable(
+                "menu.custom_options.tooltip",
+                Vec::new(),
+            ));
+            b.tooltip = Some(tip);
+            w.add(b);
+            y += 24;
+        }
         let options_width = if self.lan { 98 } else { 204 };
         w.add(Button::new(
             PAUSE_OPTIONS,
-            [left, top + 98, options_width, 20],
+            [left, y, options_width, 20],
             "lang:menu.options",
         ));
         if self.lan {
             w.add(Button::new(
                 PAUSE_LAN,
-                [left + 106, top + 98, 98, 20],
+                [left + 106, y, 98, 20],
                 "lang:menu.multiplayerOptions.button",
             ));
         }
+        y += 24;
         w.add(Button::new(
             PAUSE_DISCONNECT,
-            [left, top + 122, 204, 20],
+            [left, y, 204, 20],
             "lang:menu.disconnect",
         ));
         w.set_focus(Some(PAUSE_RETURN), 0);
     }
 
     fn render(&mut self, cx: &mut RenderCx<'_, '_>) {
+        if !self.menu {
+            let title = cx.lang("menu.paused");
+            cx.centered_text(&title, self.gui.0 / 2, 10, WHITE, true);
+            return;
+        }
         draw_dim_background(cx);
         let title = cx.lang("menu.game");
         cx.centered_text(&title, self.gui.0 / 2, 40, WHITE, true);
@@ -455,7 +536,23 @@ impl Screen for PauseScreen {
         {
             b.label = "lang:menu.returnToMenu".into();
         }
+        if let Some(addition) = &self.addition {
+            let label: String = crate::text::flatten(cx.frame.ui().lang(), &addition.label)
+                .iter()
+                .map(|c| c.ch)
+                .collect();
+            if let Some(b) = self.widgets.button_mut(PAUSE_ADDITIONS) {
+                b.label = label;
+            }
+        }
         self.widgets.render(cx);
+        for (id, sprite, _) in ICONS {
+            if let Some(Widget::Button(b)) = self.widgets.find(id) {
+                let [x, y, _, _] = b.rect;
+                let sprite = sprite.to_owned();
+                cx.sprite(&sprite, x + 2, y + 2, 15, 15);
+            }
+        }
     }
 
     fn input(&mut self, env: &mut Env<'_>, input: &UiInput, out: &mut Vec<ScreenAction>) -> bool {
@@ -480,6 +577,22 @@ impl Screen for PauseScreen {
                 PAUSE_OPTIONS => out.push(ScreenAction::OpenOptions),
                 PAUSE_LAN => out.push(ScreenAction::OpenLan),
                 PAUSE_DISCONNECT => out.push(ScreenAction::Disconnect),
+                PAUSE_BUGS | PAUSE_FEEDBACK => {
+                    let url = if id == PAUSE_BUGS {
+                        BUGS_URL
+                    } else {
+                        FEEDBACK_URL
+                    };
+                    if let Some(confirm) = ConfirmScreen::link(url.to_owned()) {
+                        out.push(ScreenAction::Push(Box::new(confirm)));
+                    }
+                }
+                PAUSE_REPORTING => out.push(ScreenAction::OpenSocialInteractions),
+                PAUSE_ADDITIONS => {
+                    if let Some(addition) = &self.addition {
+                        out.push(ScreenAction::ShowDialog(addition.dialog.clone()));
+                    }
+                }
                 _ => {}
             }
         }

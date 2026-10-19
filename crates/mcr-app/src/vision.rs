@@ -778,7 +778,8 @@ impl Vision {
             0
         };
         let mut env = Environment::from_look(time, w.rain_level, w.thunder_level, &look);
-        env = env.with_lightning_flash(f.lightning && look.weather);
+        env = env
+            .with_lightning_flash(f.lightning && look.weather && !f.options.hide_lightning_flashes);
         env.set_render_distance_chunks(f.render_distance.max(2) as u32);
         env.boss_darkening = f.boss_darkening;
         env.block_factor = 1.4 + self.flicker;

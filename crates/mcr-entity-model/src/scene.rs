@@ -613,7 +613,7 @@ impl EntityScene {
                 .is_some_and(crate::equipment::has_glint),
                 AttachKind::Block { .. } => false,
             };
-            self.push_geo(&geo, frame, v.light, v.pos, v.age_ticks, glint);
+            self.push_geo(&geo, frame, v.light, v.pos, glint);
         }
     }
 
@@ -623,7 +623,6 @@ impl EntityScene {
         matrix: Mat4,
         light: [u8; 2],
         origin: [f64; 3],
-        age_ticks: f32,
         glint: bool,
     ) {
         for part in &geo.parts {
@@ -665,13 +664,13 @@ impl EntityScene {
                     texture: tex,
                     pipeline: crate::gpu::Pipeline::Additive,
                     bone_base: base,
-                    tint: [160, 100, 255, 150],
+                    tint: crate::glint::tint(),
                     hurt: false,
                     flash: false,
                     fullbright: true,
                     block_light: light[0],
                     sky_light: light[1],
-                    uv_offset: glint_scroll(age_ticks),
+                    uv_offset: crate::glint::scroll(),
                     origin,
                     outline: self.outline,
                     hidden: false,
@@ -709,14 +708,7 @@ impl EntityScene {
             if item.billboard {
                 m = m * self.billboard * item.post;
             }
-            self.push_geo(
-                &geo,
-                m,
-                v.light,
-                v.pos,
-                v.age_ticks,
-                crate::equipment::has_glint(stack),
-            );
+            self.push_geo(&geo, m, v.light, v.pos, crate::equipment::has_glint(stack));
         }
         if let Some((start, end)) = v.leash {
             let outline = self.outline.take();
@@ -727,12 +719,12 @@ impl EntityScene {
             match g {
                 crate::plan::FreeGeo::Block { state, local } => {
                     if let Some(geo) = self.items.block(*state) {
-                        self.push_geo(&geo, *local, v.light, v.pos, v.age_ticks, false);
+                        self.push_geo(&geo, *local, v.light, v.pos, false);
                     }
                 }
                 crate::plan::FreeGeo::Model { id, local } => {
                     if let Some(geo) = self.items.model(id) {
-                        self.push_geo(&geo, *local, v.light, v.pos, v.age_ticks, false);
+                        self.push_geo(&geo, *local, v.light, v.pos, false);
                     }
                 }
                 crate::plan::FreeGeo::Sprite {
@@ -1369,8 +1361,4 @@ fn fire_grid(strip: &crate::assets::ImageRgba) -> Option<crate::assets::ImageRgb
         height: gh,
         rgba,
     })
-}
-
-pub(crate) fn glint_scroll(age: f32) -> [f32; 2] {
-    [(age * 0.01).fract(), (age * 0.007).fract()]
 }

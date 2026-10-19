@@ -21,6 +21,7 @@ use mcr_nbt::Value;
 use mcr_protocol::types::text::Component;
 use mcr_render::{Camera, FrameInputs, FrameStats, Renderer};
 use mcr_settings::InputKey;
+use mcr_settings::bindings::mapping_index;
 use mcr_ui::{
     Clipboard, ConductScreen, ConfirmScreen, ConnectingScreen, Dialog, DialogScreen,
     DisconnectedScreen, Env, Modifiers, NoView, RenderCx, Screen, ScreenAction, ScreenStack,
@@ -34,10 +35,11 @@ use crate::autopilot::Autopilot;
 use crate::gui::{self, Gui, UiOverlay};
 use crate::input::{track_modifiers, ui_inputs};
 use crate::mod_sync;
+use crate::options_pages::OptionsScreen;
 use crate::play::{Parts, Play, PlayConfig, TICK_SECONDS};
 use crate::respacks::{PackAction, ResourceStack, ServerPacks, downloads_dir};
 use crate::servers::FileServers;
-use crate::settings::{OptionsScreen, Settings, SharedSettings};
+use crate::settings::{Settings, SharedSettings};
 use crate::singleplayer::{EULA_URL, FileWorlds, Launch, LaunchInput, Session, Update};
 use mcr_modbridge::world::{WorldEvent, WorldRequest};
 use mcr_singleplayer::level::Difficulty;
@@ -116,6 +118,8 @@ pub struct Shell {
     conduct: Option<ConductEnd>,
     route: route::Route,
     java_settings_seen: u64,
+    packs_seen: u64,
+    title_audio_seen: u64,
     worlds: Rc<RefCell<FileWorlds>>,
     sp: Option<Session>,
     sp_status: Option<StatusHandle>,
@@ -128,6 +132,9 @@ pub struct Shell {
     /// The local world was pausing last frame (a capture for its icon is taken when it starts).
     sp_was_paused: bool,
     java_render: crate::java_models::JavaRender,
+    /// F2 asked for the next frame as shown.
+    screenshot_requested: bool,
+    screenshots: crate::grab::Screenshots,
     builtin: mcr_client::BuiltinData,
     text_renderer: mcr_client::TextRenderer,
 }
@@ -164,6 +171,8 @@ impl Shell {
             .map(|n| n.jars.clone())
             .unwrap_or_default();
         let index = asset_index_id(&cfg.jar);
+        settings.borrow_mut().packs =
+            crate::packs::PackHost::new(&cfg.game_dir, &cfg.assets_dir, index.as_deref());
         let mut resource_stack = ResourceStack {
             jar: cfg.jar.clone(),
             assets_dir: cfg.assets_dir.clone(),
@@ -264,6 +273,8 @@ impl Shell {
             conduct: None,
             route: route::Route::new(cfg.mod_net.as_ref().and_then(|n| n.input.clone())),
             java_settings_seen: 0,
+            packs_seen: 0,
+            title_audio_seen: 0,
             worlds,
             sp: None,
             sp_status: None,
@@ -272,6 +283,8 @@ impl Shell {
             sp_java_failure: None,
             sp_was_paused: false,
             java_render: Default::default(),
+            screenshot_requested: false,
+            screenshots: crate::grab::Screenshots::new(&cfg.game_dir),
             cfg,
         };
         shell.show_title();
@@ -565,6 +578,22 @@ impl Shell {
 
     pub fn script_finished(&self) -> bool {
         self.autopilot.as_ref().is_none_or(|a| a.finished)
+    }
+
+    /// The options screen for whichever of the title or a session currently holds the renderer.
+    fn options_screen(&self) -> Option<OptionsScreen> {
+        if let Some(play) = &self.play {
+            return Some(play.options_screen());
+        }
+        let parts = self.parts.as_ref()?;
+        Some(OptionsScreen::new(crate::play::options_host(
+            &self.settings,
+            self.languages(),
+            parts.renderer.size(),
+            &parts.assets,
+            &self.cfg.name,
+            false,
+        )))
     }
 
     fn languages(&self) -> Vec<mcr_ui::LanguageInfo> {
@@ -1047,11 +1076,18 @@ impl Shell {
                 _ => WireChoice::Auto,
             }
         };
-        config.view_distance = self
-            .cfg
-            .render_distance
-            .unwrap_or(options.render_distance)
-            .clamp(2, 32) as i8;
+        let info = crate::settings::client_information(
+            &options,
+            self.cfg.render_distance.unwrap_or(options.render_distance),
+        );
+        config.language = info.language;
+        config.view_distance = info.view_distance;
+        config.chat_visibility = info.chat_visibility;
+        config.chat_colors = info.chat_colors;
+        config.model_customisation = info.model_customisation;
+        config.main_hand = info.main_hand;
+        config.allows_listing = info.allows_listing;
+        config.particle_status = info.particle_status;
         config.pack_link = Some(
             self.packs
                 .begin(self.servers.borrow().pack_setting_for(address)),
@@ -1146,6 +1182,11 @@ impl Shell {
                     render_distance: self.cfg.render_distance,
                     game_dir: self.cfg.game_dir.clone(),
                     local_server: client.config.local_server,
+                    server_name: self
+                        .servers
+                        .borrow()
+                        .name_for(&self.current_address)
+                        .unwrap_or_default(),
                 };
                 self.sp_status = None;
                 self.play = Some(Play::new(parts, &cfg, client));
@@ -1542,8 +1583,9 @@ impl Shell {
                     }
                 }
                 ScreenAction::OpenOptions => {
-                    let screen = OptionsScreen::new(self.settings.clone(), self.languages());
-                    self.push(Box::new(screen));
+                    if let Some(screen) = self.options_screen() {
+                        self.push(Box::new(screen));
+                    }
                 }
                 ScreenAction::OpenMods => self.open_mods(),
                 ScreenAction::OpenUrl(url) => gui::open_url(&url),
@@ -1609,6 +1651,9 @@ impl Shell {
         repeat: bool,
         text: Option<&str>,
     ) {
+        if pressed && !repeat && self.global_key(key) {
+            return;
+        }
         if self.route_key(key, printable, pressed, repeat, text) || repeat && !self.accepts_repeat()
         {
             return;
@@ -1621,6 +1666,40 @@ impl Shell {
         for input in ui_inputs(key, pressed, text, self.mods, self.mouse) {
             self.menu_input(input);
         }
+    }
+
+    /// `Minecraft#handleGlobalKeyPress`: fullscreen and screenshots over any screen, unless F3 is
+    /// held or a key is being bound. In mod mode Java takes its own screenshots.
+    fn global_key(&mut self, key: InputKey) -> bool {
+        let busy = match &self.play {
+            Some(play) => play.debug_modifier_down() || play.captures_keys(),
+            None => self.stack.top_captures_keys(),
+        };
+        if busy {
+            return false;
+        }
+        let (fullscreen, screenshot) = {
+            let bindings = &self.settings.borrow().file.bindings;
+            let input = |name| bindings.input(mapping_index(name).expect("vanilla mapping"));
+            (input("key.fullscreen"), input("key.screenshot"))
+        };
+        if key == fullscreen {
+            self.settings
+                .borrow_mut()
+                .edit(|f| f.options.fullscreen = !f.options.fullscreen);
+            return true;
+        }
+        if key == screenshot && self.mod_frames().is_none() {
+            self.screenshot_requested = true;
+            return true;
+        }
+        false
+    }
+
+    /// Whether the window should be fullscreen, and exclusively so.
+    pub fn fullscreen(&self) -> (bool, bool) {
+        let o = &self.settings.borrow().file.options;
+        (o.fullscreen, o.exclusive_fullscreen)
     }
 
     pub fn cursor_moved(&mut self, px: f64, py: f64) {
@@ -1741,7 +1820,69 @@ impl Shell {
         }
     }
 
+    /// Native mode: the packs `options.txt` selects sit under the server's; Java picks its own.
+    fn sync_user_packs(&mut self) {
+        if self.cfg.mod_net.is_some() || self.parts.is_none() && self.play.is_none() {
+            return;
+        }
+        let user = {
+            let s = self.settings.borrow();
+            if s.version == self.packs_seen {
+                return;
+            }
+            self.packs_seen = s.version;
+            s.packs.resolve(&s.file.options.resource_packs.0)
+        };
+        if user != self.resource_stack.user {
+            println!("resource packs: {} pack(s) selected", user.len());
+            self.resource_stack.user = user;
+            let server = self.packs.applied();
+            self.reload_resources(&server);
+        }
+    }
+
+    /// Title screen: the sound options apply at once, as they do in game.
+    fn sync_title_audio(&mut self) {
+        let Some(audio) = self.parts.as_mut().and_then(|p| p.audio.as_mut()) else {
+            return;
+        };
+        let s = self.settings.borrow();
+        if s.version != self.title_audio_seen {
+            self.title_audio_seen = s.version;
+            audio.apply_volumes(&s.file.options);
+            audio.sync_device(&s.file.options);
+        }
+    }
+
     pub fn frame(&mut self) -> Option<FrameStats> {
+        self.sync_user_packs();
+        self.sync_title_audio();
+        if std::mem::take(&mut self.screenshot_requested)
+            && let Some(renderer) = self.renderer_mut()
+        {
+            renderer.request_screenshot();
+        }
+        if self
+            .play
+            .as_mut()
+            .is_some_and(|p| std::mem::take(&mut p.reload_packs))
+        {
+            let server = self.packs.applied();
+            self.reload_resources(&server);
+        }
+        let stats = self.draw_frame();
+        if let Some(capture) = self.renderer_mut().and_then(Renderer::take_screenshot) {
+            self.screenshots.save(capture);
+        }
+        while let Some(message) = self.screenshots.poll() {
+            if let Some(play) = &mut self.play {
+                play.local_chat(&message);
+            }
+        }
+        stats
+    }
+
+    fn draw_frame(&mut self) -> Option<FrameStats> {
         let java_gui = self.java_gui();
         let java_perspective = self.mod_frames().and_then(|f| f.lock().java_perspective());
         if let Some(play) = &mut self.play {

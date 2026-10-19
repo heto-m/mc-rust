@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => None,
     };
 
-    let (engine, handle) = AudioEngine::start()?;
+    let (engine, handle) = AudioEngine::start(None)?;
     println!(
         "{engine:?}, buffer latency {:?} ms",
         engine.buffer_latency_ms()

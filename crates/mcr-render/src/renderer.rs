@@ -370,6 +370,8 @@ pub struct Renderer {
     capture_requested: bool,
     capture_pending: Option<PendingCapture>,
     captured: Option<Capture>,
+    screenshot_requested: bool,
+    screenshot: Option<Capture>,
 }
 
 /// Terrain pipelines with the dynamic light term, its uniform and this frame's sources.
@@ -1204,6 +1206,8 @@ impl Renderer {
             capture_requested: false,
             capture_pending: None,
             captured: None,
+            screenshot_requested: false,
+            screenshot: None,
         })
     }
 
@@ -2045,7 +2049,10 @@ impl Renderer {
                     ..Default::default()
                 });
                 surface_tex = Some(tex);
-                if self.post_chains.is_empty() && !self.capture_requested {
+                if self.post_chains.is_empty()
+                    && !self.capture_requested
+                    && !self.screenshot_requested
+                {
                     self.post_window = None;
                     view
                 } else {
@@ -2352,6 +2359,11 @@ impl Renderer {
                 camera: frame.camera,
             });
         }
+        let screenshot = if std::mem::take(&mut self.screenshot_requested) {
+            self.record_capture(&mut encoder)
+        } else {
+            None
+        };
         if let (Some((_, blit)), Some(dst)) = (
             self.scene.as_ref().or(self.post_window.as_ref()),
             &surface_view,
@@ -2412,6 +2424,9 @@ impl Renderer {
         }
         if let Some(pending) = self.capture_pending.take() {
             self.captured = self.finish_capture(&pending);
+        }
+        if let Some(pending) = screenshot {
+            self.screenshot = self.finish_capture(&pending);
         }
         let present_start = Instant::now();
         if let Some(t) = surface_tex {
@@ -2514,6 +2529,15 @@ impl Renderer {
     /// The image of the last frame a capture was requested for, once.
     pub fn take_capture(&mut self) -> Option<Capture> {
         self.captured.take()
+    }
+
+    /// Copies the next frame as shown, UI included, for [`Renderer::take_screenshot`].
+    pub fn request_screenshot(&mut self) {
+        self.screenshot_requested = true;
+    }
+
+    pub fn take_screenshot(&mut self) -> Option<Capture> {
+        self.screenshot.take()
     }
 
     fn record_capture(&self, encoder: &mut wgpu::CommandEncoder) -> Option<PendingCapture> {

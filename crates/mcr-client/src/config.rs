@@ -75,7 +75,11 @@ pub struct ClientConfig {
     pub join_timeout: Duration,
     pub chat_history: usize,
     pub chat_visibility: ChatVisibility,
+    pub chat_colors: bool,
+    /// Skin layer bits in `PlayerModelPart` order (cape is bit 0).
+    pub model_customisation: u8,
     pub main_hand: MainHand,
+    pub allows_listing: bool,
     pub particle_status: ParticleStatus,
     /// Vanilla's Only Show Secure Chat option.
     pub only_show_secure_chat: bool,
@@ -110,7 +114,10 @@ impl Default for ClientConfig {
             join_timeout: Duration::from_secs(60),
             chat_history: 256,
             chat_visibility: ChatVisibility::Full,
+            chat_colors: true,
+            model_customisation: 0x7f,
             main_hand: MainHand::Right,
+            allows_listing: true,
             particle_status: ParticleStatus::All,
             only_show_secure_chat: false,
             local_server: false,

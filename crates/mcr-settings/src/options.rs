@@ -186,6 +186,83 @@ options! {
 }
 
 impl Options {
+    /// `GraphicsPreset#apply`: the quality options each preset stands for; Custom keeps them.
+    pub fn apply_graphics_preset(&mut self, preset: GraphicsPreset) {
+        let (blend, distance, prioritize, simulation, ao, clouds, particles, mipmaps, shadows) =
+            match preset {
+                GraphicsPreset::Fast => (
+                    1,
+                    8,
+                    PrioritizeChunkUpdates::None,
+                    6,
+                    false,
+                    CloudStatus::Fast,
+                    ParticleStatus::Decreased,
+                    2,
+                    false,
+                ),
+                GraphicsPreset::Fancy => (
+                    2,
+                    16,
+                    PrioritizeChunkUpdates::PlayerAffected,
+                    12,
+                    true,
+                    CloudStatus::Fancy,
+                    ParticleStatus::All,
+                    4,
+                    true,
+                ),
+                GraphicsPreset::Fabulous => (
+                    2,
+                    32,
+                    PrioritizeChunkUpdates::PlayerAffected,
+                    12,
+                    true,
+                    CloudStatus::Fancy,
+                    ParticleStatus::All,
+                    4,
+                    true,
+                ),
+                GraphicsPreset::Custom => {
+                    self.graphics_preset = preset;
+                    return;
+                }
+            };
+        let (scaling, blur, cloud_range, cutout, transparency, weather, anisotropy, filtering) =
+            match preset {
+                GraphicsPreset::Fast => (0.75, 2, 32, false, false, 5, 1, TextureFiltering::None),
+                GraphicsPreset::Fancy => (1.0, 5, 64, true, false, 10, 1, TextureFiltering::Rgss),
+                _ => (
+                    1.25,
+                    5,
+                    128,
+                    true,
+                    true,
+                    10,
+                    2,
+                    TextureFiltering::Anisotropic,
+                ),
+            };
+        self.graphics_preset = preset;
+        self.biome_blend_radius = blend;
+        self.render_distance = distance;
+        self.prioritize_chunk_updates = prioritize;
+        self.simulation_distance = simulation;
+        self.ambient_occlusion = ao;
+        self.render_clouds = clouds;
+        self.particles = particles;
+        self.mipmap_levels = mipmaps;
+        self.entity_shadows = shadows;
+        self.entity_distance_scaling = scaling;
+        self.menu_background_blurriness = blur;
+        self.cloud_range = cloud_range;
+        self.cutout_leaves = cutout;
+        self.improved_transparency = transparency;
+        self.weather_radius = weather;
+        self.max_anisotropy_bit = anisotropy;
+        self.texture_filtering = filtering;
+    }
+
     pub fn sound_volume(&self, category: &str) -> Option<f64> {
         SOUND_CATEGORIES
             .iter()
@@ -219,5 +296,27 @@ impl Options {
             return true;
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presets_set_the_quality_options() {
+        let mut o = Options::default();
+        o.apply_graphics_preset(GraphicsPreset::Fast);
+        assert_eq!(
+            (o.render_distance, o.simulation_distance, o.mipmap_levels),
+            (8, 6, 2)
+        );
+        assert_eq!(o.graphics_preset, GraphicsPreset::Fast);
+        o.apply_graphics_preset(GraphicsPreset::Fabulous);
+        assert!(o.improved_transparency);
+        assert_eq!(o.texture_filtering, TextureFiltering::Anisotropic);
+        o.render_distance = 5;
+        o.apply_graphics_preset(GraphicsPreset::Custom);
+        assert_eq!(o.render_distance, 5);
     }
 }

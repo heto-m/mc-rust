@@ -239,6 +239,16 @@ impl ChatHud {
         self.lines.is_empty()
     }
 
+    /// `ChatComponent#clearMessages(false)` (F3+D): drops the lines, delayed messages and pending deletions.
+    pub fn clear_messages(&mut self) {
+        self.lines.clear();
+        self.signed.clear();
+        self.pending_deletions.clear();
+        self.queue.clear();
+        self.scroll = 0;
+        self.new_since_scroll = false;
+    }
+
     pub fn add(&mut self, ui: &mut Ui, message: &Component, tick: u32, options: &ChatOptions) {
         self.add_tagged(ui, message, tick, options, None, None);
     }

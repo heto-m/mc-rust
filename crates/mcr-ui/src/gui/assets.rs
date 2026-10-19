@@ -7,6 +7,8 @@ use crate::ui::Ui;
 
 const GUI_ROOT: &str = "assets/minecraft/textures/gui/";
 const EFFECT_ROOT: &str = "assets/minecraft/textures/mob_effect/";
+const TEXTURE_ROOT: &str = "assets/minecraft/textures/";
+const EXTRA: [&str; 1] = ["assets/minecraft/textures/misc/unknown_pack.png"];
 const DIRS: [&str; 7] = [
     "container/",
     "container/creative_inventory/",
@@ -52,6 +54,7 @@ impl ScreenAssets {
                 .list_prefix(EFFECT_ROOT)
                 .filter(|p| p.ends_with(".png")),
         );
+        paths.extend(EXTRA);
         for path in paths {
             let Some(png) = resources.read(path)? else {
                 continue;
@@ -70,7 +73,7 @@ impl ScreenAssets {
             };
             let name = match path.strip_prefix(GUI_ROOT) {
                 Some(rel) => rel[..rel.len() - 4].to_owned(),
-                None => format!("mob_effect/{}", &path[EFFECT_ROOT.len()..path.len() - 4]),
+                None => path[TEXTURE_ROOT.len()..path.len() - 4].to_owned(),
             };
             textures.insert(name, (id, width, height));
         }

@@ -390,11 +390,11 @@ fn superflat_layers_only_for_superflat() {
 fn pause_offers_open_to_lan_in_local_worlds() {
     let mut pause = mcr_ui::PauseScreen::new(true, true).with_lan(true);
     pause.init(W, H);
-    let top = (H - 142) / 4;
+    let top = (H - 166) / 4;
     let out = send(
         &mut pause,
         &NoView,
-        &click((213 - 102 + 106 + 49) as f32, (top + 98 + 10) as f32),
+        &click((213 - 102 + 106 + 49) as f32, (top + 122 + 10) as f32),
     );
     assert!(out.iter().any(|a| matches!(a, ScreenAction::OpenLan)));
     let mut remote = mcr_ui::PauseScreen::new(false, false);
@@ -402,7 +402,7 @@ fn pause_offers_open_to_lan_in_local_worlds() {
     let out = send(
         &mut remote,
         &NoView,
-        &click((213 - 102 + 106 + 49) as f32, (top + 98 + 10) as f32),
+        &click((213 - 102 + 106 + 49) as f32, (top + 122 + 10) as f32),
     );
     assert!(out.iter().any(|a| matches!(a, ScreenAction::OpenOptions)));
 }

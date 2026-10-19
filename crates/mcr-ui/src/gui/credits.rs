@@ -15,6 +15,9 @@ const COLUMN_WIDTH: f32 = 256.0;
 const POEM_SPEED: f32 = 0.5;
 const CREDITS_SPEED: f32 = 0.75;
 const SPEEDUP: f32 = 5.0;
+const SPEEDUP_PER_CTRL: f32 = 15.0;
+const LEFT_CTRL: Key = Key::Other(224);
+const RIGHT_CTRL: Key = Key::Other(228);
 const MAX_LINES: usize = 20_000;
 const TRAILING_BLANKS: usize = 8;
 const OBFUSCATE_TOKEN: &str = "§f§k§a§b";
@@ -145,8 +148,12 @@ pub fn build_lines(source: &CreditsSource, poem: bool, player: &str) -> Vec<Cred
 pub struct Scroll {
     pub offset: f32,
     base_speed: f32,
+    /// Up is held.
     reverse: bool,
+    /// Space is held.
     fast: bool,
+    /// Left and right Ctrl held, each adding to the speed-up.
+    ctrl: [bool; 2],
 }
 
 impl Scroll {
@@ -156,12 +163,31 @@ impl Scroll {
             base_speed: if poem { POEM_SPEED } else { CREDITS_SPEED },
             reverse: false,
             fast: false,
+            ctrl: [false; 2],
         }
     }
 
+    /// `WinScreen#calculateScrollSpeed`.
     pub fn speed(&self) -> f32 {
-        let factor = if self.fast { SPEEDUP } else { 1.0 };
+        let ctrl = self.ctrl.iter().filter(|&&c| c).count() as f32;
+        let factor = if self.fast {
+            SPEEDUP + ctrl * SPEEDUP_PER_CTRL
+        } else {
+            1.0
+        };
         self.base_speed * factor * if self.reverse { -1.0 } else { 1.0 }
+    }
+
+    /// A key went down (`true`) or up; whether it was a scroll key.
+    pub fn key(&mut self, key: Key, down: bool) -> bool {
+        match key {
+            Key::Up => self.reverse = down,
+            Key::Space => self.fast = down,
+            LEFT_CTRL => self.ctrl[0] = down,
+            RIGHT_CTRL => self.ctrl[1] = down,
+            _ => return false,
+        }
+        true
     }
 
     pub fn tick(&mut self) {
@@ -200,6 +226,15 @@ impl CreditsScreen {
             scroll: Scroll::new(poem),
             gui: (0, 0),
             last_tick_ms: None,
+        }
+    }
+
+    /// The end poem respawns the player; credits opened from the options just close.
+    fn finish(&self) -> ScreenAction {
+        if self.poem {
+            ScreenAction::Respawn
+        } else {
+            ScreenAction::Pop
         }
     }
 
@@ -275,21 +310,22 @@ impl Screen for CreditsScreen {
         let UiInput::Key { key, .. } = input else {
             return false;
         };
-        match key {
-            Key::Escape => out.push(ScreenAction::Respawn),
-            Key::Up => self.scroll.reverse = true,
-            Key::Down => self.scroll.reverse = false,
-            Key::Space => self.scroll.fast = !self.scroll.fast,
-            _ => return false,
+        if *key == Key::Escape {
+            out.push(self.finish());
+            return true;
         }
-        true
+        self.scroll.key(*key, true)
+    }
+
+    fn key_released(&mut self, key: Key, _out: &mut Vec<ScreenAction>) -> bool {
+        self.scroll.key(key, false)
     }
 
     fn tick(&mut self, env: &mut Env<'_>, out: &mut Vec<ScreenAction>) {
         self.last_tick_ms = Some(env.now_ms);
         self.scroll.tick();
         if self.scroll.finished(self.text_height(), self.gui.1) {
-            out.push(ScreenAction::Respawn);
+            out.push(self.finish());
         }
     }
 
@@ -389,6 +425,23 @@ mod tests {
         credits.fast = true;
         credits.tick();
         assert_eq!(credits.offset, 3.75);
+    }
+
+    #[test]
+    fn held_keys_steer_the_scroll_like_win_screen() {
+        let mut s = Scroll::new(false);
+        assert!(s.key(Key::Space, true));
+        assert_eq!(s.speed(), 0.75 * 5.0);
+        s.key(LEFT_CTRL, true);
+        s.key(RIGHT_CTRL, true);
+        assert_eq!(s.speed(), 0.75 * 35.0);
+        s.key(Key::Up, true);
+        assert_eq!(s.speed(), -0.75 * 35.0);
+        s.key(Key::Space, false);
+        assert_eq!(s.speed(), -0.75, "Ctrl only counts while Space is held");
+        s.key(Key::Up, false);
+        assert_eq!(s.speed(), 0.75);
+        assert!(!s.key(Key::Down, true));
     }
 
     #[test]

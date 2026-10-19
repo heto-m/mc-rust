@@ -96,6 +96,7 @@ fn display_matrix(rotation: Vec3, translation: Vec3, scale: Vec3) -> Mat4 {
 pub struct Glint {
     pub texture: Arc<Sprite>,
     pub millis: u64,
+    pub speed: f32,
     pub strength: f32,
 }
 
@@ -104,7 +105,7 @@ const GLINT_UV_SPAN: f32 = 16.0 / 512.0 * 8.0;
 
 impl Glint {
     fn sample(&self, u: f32, v: f32) -> [f32; 3] {
-        let ms = (self.millis as f64 * 0.5 * 8.0) as u64;
+        let ms = (self.millis as f64 * f64::from(self.speed) * 8.0) as u64;
         let o0 = (ms % 110_000) as f32 / 110_000.0;
         let o1 = (ms % 30_000) as f32 / 30_000.0;
         let (su, sv) = (u * GLINT_UV_SPAN, v * GLINT_UV_SPAN);

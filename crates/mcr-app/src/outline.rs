@@ -8,7 +8,7 @@ struct Out { @builtin(position) pos: vec4<f32>, @location(0) color: vec4<f32> };
 @vertex fn vs(v: In) -> Out { var o: Out; o.pos = v.pos; o.color = v.color; return o; }
 @fragment fn fs(i: Out) -> @location(0) vec4<f32> { return i.color; }
 ";
-const MAX_VERTICES: usize = 1 << 14;
+const MAX_VERTICES: usize = 1 << 16;
 const NEAR_W: f32 = 0.06;
 const DEPTH_BIAS: f32 = 1.003;
 const LINE_PX: f32 = 2.0;
@@ -42,7 +42,35 @@ pub struct WorldBox {
     pub max: DVec3,
 }
 
-/// Black wireframe boxes with depth test, drawn as thin camera-facing quads.
+/// A coloured debug line, `width` in pixels.
+#[derive(Debug, Clone, Copy)]
+pub struct WorldLine {
+    pub a: DVec3,
+    pub b: DVec3,
+    pub color: [f32; 4],
+    pub width: f32,
+}
+
+impl WorldLine {
+    /// The twelve edges of a box.
+    pub fn cuboid(min: DVec3, max: DVec3, color: [f32; 4], width: f32, out: &mut Vec<Self>) {
+        let corner = |i: usize| {
+            DVec3::new(
+                if i & 1 == 0 { min.x } else { max.x },
+                if i & 2 == 0 { min.y } else { max.y },
+                if i & 4 == 0 { min.z } else { max.z },
+            )
+        };
+        out.extend(EDGES.iter().map(|&(a, b)| Self {
+            a: corner(a),
+            b: corner(b),
+            color,
+            width,
+        }));
+    }
+}
+
+/// Wireframe boxes and debug lines with depth test, drawn as thin camera-facing quads.
 #[derive(Debug)]
 pub struct OutlineRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -108,27 +136,42 @@ impl OutlineRenderer {
         }
     }
 
-    pub fn build(&mut self, boxes: &[WorldBox], camera: &Camera, size: (u32, u32)) {
+    pub fn build(
+        &mut self,
+        boxes: &[WorldBox],
+        lines: &[WorldLine],
+        camera: &Camera,
+        size: (u32, u32),
+    ) {
         self.vertices.clear();
         let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
         let view_proj = camera.view_proj(w / h);
+        let clip = |p: DVec3| view_proj * (p - camera.position).as_vec3().extend(1.0);
         for b in boxes {
             let corners: [Vec4; 8] = std::array::from_fn(|i| {
-                let p = DVec3::new(
+                clip(DVec3::new(
                     if i & 1 == 0 { b.min.x } else { b.max.x },
                     if i & 2 == 0 { b.min.y } else { b.max.y },
                     if i & 4 == 0 { b.min.z } else { b.max.z },
-                );
-                let rel = (p - camera.position).as_vec3();
-                view_proj * rel.extend(1.0)
+                ))
             });
             for (a, c) in EDGES {
-                self.push_edge(corners[a], corners[c], (w, h));
+                self.push_edge(corners[a], corners[c], (w, h), COLOR, LINE_PX);
             }
+        }
+        for l in lines {
+            self.push_edge(clip(l.a), clip(l.b), (w, h), l.color, l.width);
         }
     }
 
-    fn push_edge(&mut self, mut a: Vec4, mut b: Vec4, (w, h): (f32, f32)) {
+    fn push_edge(
+        &mut self,
+        mut a: Vec4,
+        mut b: Vec4,
+        (w, h): (f32, f32),
+        color: [f32; 4],
+        width: f32,
+    ) {
         if a.w < NEAR_W && b.w < NEAR_W {
             return;
         }
@@ -146,13 +189,13 @@ impl OutlineRenderer {
         if len < 1.0e-4 || self.vertices.len() + 6 > MAX_VERTICES {
             return;
         }
-        let (nx, ny) = (-dy / len * LINE_PX * 0.5, dx / len * LINE_PX * 0.5);
+        let (nx, ny) = (-dy / len * width * 0.5, dx / len * width * 0.5);
         let off = |s: f32| (nx * s / (w * 0.5), ny * s / (h * 0.5));
         let corner = |p: Vec3, s: f32| {
             let (ox, oy) = off(s);
             Vertex {
                 pos: [p.x + ox, p.y + oy, (p.z * DEPTH_BIAS).min(1.0), 1.0],
-                color: COLOR,
+                color,
             }
         };
         let quad = [

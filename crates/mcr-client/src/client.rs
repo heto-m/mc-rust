@@ -447,18 +447,23 @@ impl Client {
         self.wire
     }
 
-    fn send_client_information(&mut self) -> Result<()> {
-        let info = c::ClientInformation {
+    /// `Options#buildPlayerInformation` from the configured options.
+    pub fn client_information(&self) -> c::ClientInformation {
+        c::ClientInformation {
             language: self.config.language.clone(),
             view_distance: self.config.view_distance,
             chat_visibility: self.config.chat_visibility,
-            chat_colors: true,
-            model_customisation: 0x7f,
+            chat_colors: self.config.chat_colors,
+            model_customisation: self.config.model_customisation,
             main_hand: self.config.main_hand,
             text_filtering_enabled: false,
-            allows_listing: true,
+            allows_listing: self.config.allows_listing,
             particle_status: self.config.particle_status,
-        };
+        }
+    }
+
+    fn send_client_information(&mut self) -> Result<()> {
+        let info = self.client_information();
         let mut brand = Vec::new();
         mcr_buf::Encode::encode(&self.config.brand, &mut brand);
         self.send_config(&ConfigServerbound::CustomPayload(

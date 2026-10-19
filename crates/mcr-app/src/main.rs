@@ -7,6 +7,7 @@ mod block_entities;
 mod camera_fx;
 mod cli;
 mod debug;
+mod debug_keys;
 mod editors;
 mod effects;
 mod engine;
@@ -16,11 +17,15 @@ mod entity_events;
 mod entity_loops;
 mod fly;
 mod game;
+mod game_mode_switcher;
+mod gizmos;
+mod grab;
 mod gui;
 mod hand;
 mod hud;
 mod input;
 mod java_models;
+mod key_binds;
 mod language;
 mod latency;
 mod launcher;
@@ -35,8 +40,11 @@ mod movement_sounds;
 mod nametags;
 mod needles;
 mod net_world;
+mod options_list;
+mod options_pages;
 mod outline;
 mod overlays;
+mod packs;
 mod play;
 mod post_effects;
 mod preview;
@@ -49,6 +57,7 @@ mod shell;
 mod singleplayer;
 mod skins;
 mod soak;
+mod social;
 mod source;
 mod stats;
 mod status;
@@ -76,7 +85,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{DeviceEvent, DeviceId, ElementState, Ime, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{CursorGrabMode, CursorIcon, Window, WindowId};
+use winit::window::{CursorGrabMode, CursorIcon, Fullscreen, Window, WindowId};
 
 struct SyntheticScene {
     renderer: Renderer,
@@ -145,6 +154,8 @@ struct App {
     mods_app: Option<mods_ui::ModsApp>,
     /// The script's steps left over after the launcher's Play.
     autopilot: Option<autopilot::Autopilot>,
+    /// The `fullscreen` and `exclusiveFullscreen` options last applied to the window.
+    fullscreen: (bool, bool),
 }
 
 impl App {
@@ -173,7 +184,31 @@ impl App {
             boot,
             mods_app,
             autopilot: None,
+            fullscreen: (false, false),
         }
+    }
+
+    /// `Window#setFullscreen`: borderless, or the monitor's own video mode when exclusive.
+    fn apply_fullscreen(&mut self, (on, exclusive): (bool, bool)) {
+        self.fullscreen = (on, exclusive);
+        let Some(window) = &self.window else { return };
+        let monitor = window.current_monitor();
+        let mode = on.then(|| {
+            let video = exclusive
+                .then(|| {
+                    let m = monitor.as_ref()?;
+                    let size = m.size();
+                    m.video_modes()
+                        .filter(|v| v.size() == size)
+                        .max_by_key(|v| v.refresh_rate_millihertz())
+                })
+                .flatten();
+            match video {
+                Some(v) => Fullscreen::Exclusive(v),
+                None => Fullscreen::Borderless(monitor.clone()),
+            }
+        });
+        window.set_fullscreen(mode);
     }
 
     fn init(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
@@ -463,6 +498,13 @@ impl App {
                 }
             }
             let want = shell.wants_grab();
+            let fullscreen = shell.fullscreen();
+            if fullscreen != self.fullscreen {
+                self.apply_fullscreen(fullscreen);
+            }
+            let Some(Scene::Shell(shell)) = &mut self.scene else {
+                return;
+            };
             let cap = shell.max_fps();
             let vsync = shell.sync_vsync(self.opts.vsync);
             shell.set_mod_uncapped(!vsync && !(10..260).contains(&cap));

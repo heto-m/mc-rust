@@ -89,7 +89,7 @@ pub use conduct::{
 pub use config::{ClientConfig, OnlineAuth, ResourcePackPolicy, TransferTarget, WireChoice};
 pub use dialogs::{
     DIALOG_REGISTRY, DialogEnd, DialogLink, DialogReply, DialogRequest, dialog_channel,
-    resolve_dialog,
+    registry_dialog_by_index, resolve_dialog,
 };
 pub use entity::{
     AttributeState, Entities, Entity, FlightHistory, MobEffect, SimShape, attribute_range,

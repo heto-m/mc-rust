@@ -6,6 +6,7 @@ use mcr_ui::{
 use crate::settings::SharedSettings;
 
 const DONE: u32 = 1;
+const FONT: u32 = 2;
 const ROW: i32 = 18;
 const ROW_WIDTH: i32 = 300;
 
@@ -16,6 +17,7 @@ pub struct LanguageScreen {
     list: ScrollList,
     widgets: WidgetSet,
     gui: (i32, i32),
+    font: Option<Box<dyn Fn() -> Box<dyn Screen>>>,
 }
 
 impl std::fmt::Debug for LanguageScreen {
@@ -40,7 +42,14 @@ impl LanguageScreen {
             list: ScrollList::new([0, 32, 0, 0], ROW),
             widgets: WidgetSet::default(),
             gui: (0, 0),
+            font: None,
         }
+    }
+
+    /// Adds the footer's Font Settings button.
+    pub fn with_font_settings(mut self, open: impl Fn() -> Box<dyn Screen> + 'static) -> Self {
+        self.font = Some(Box::new(open));
+        self
     }
 
     fn apply(&self) {
@@ -74,11 +83,24 @@ impl Screen for LanguageScreen {
         self.list.set_count(self.languages.len());
         self.list.ensure_visible(self.selected);
         self.widgets.clear();
-        self.widgets.add(Button::new(
-            DONE,
-            [width / 2 - 100, height - 27, 200, 20],
-            "lang:gui.done",
-        ));
+        if self.font.is_some() {
+            self.widgets.add(Button::new(
+                FONT,
+                [width / 2 - 154, height - 27, 150, 20],
+                "lang:options.font",
+            ));
+            self.widgets.add(Button::new(
+                DONE,
+                [width / 2 + 4, height - 27, 150, 20],
+                "lang:gui.done",
+            ));
+        } else {
+            self.widgets.add(Button::new(
+                DONE,
+                [width / 2 - 100, height - 27, 200, 20],
+                "lang:gui.done",
+            ));
+        }
     }
 
     fn render(&mut self, cx: &mut RenderCx<'_, '_>) {
@@ -165,6 +187,14 @@ impl Screen for LanguageScreen {
         }
         let mut events = Vec::new();
         let used = self.widgets.input(env, input, &mut events);
+        if events
+            .iter()
+            .any(|e| e.id == FONT && e.kind == WidgetEventKind::Pressed)
+            && let Some(open) = &self.font
+        {
+            out.push(ScreenAction::ClickSound);
+            out.push(ScreenAction::Push(open()));
+        }
         if events
             .iter()
             .any(|e| e.id == DONE && e.kind == WidgetEventKind::Pressed)
