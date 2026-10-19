@@ -1,7 +1,7 @@
 mod common;
 
 use mcr_protocol::types::text::Component;
-use mcr_ui::{ChatHud, ChatLineTag, ChatOptions};
+use mcr_ui::{ChatClick, ChatHud, ChatLineTag, ChatOptions};
 
 fn modified() -> ChatLineTag {
     ChatLineTag::Modified {
@@ -111,4 +111,140 @@ fn hovering_the_bar_shows_the_tag_text() {
         ChatLineTag::NotSecure.tooltip().first_plain(),
         "chat.tag.not_secure"
     );
+}
+
+fn link(text: &str) -> Component {
+    Component::text(text).styled(mcr_protocol::types::text::Style {
+        click_event: Some(Box::new(mcr_protocol::types::text::ClickEvent::RunCommand(
+            "/trigger menu".into(),
+        ))),
+        insertion: Some("Alex".into()),
+        ..Default::default()
+    })
+}
+
+#[test]
+fn scale_and_spacing_move_lines_like_vanilla() {
+    assert_eq!(ChatOptions::lines_for_height(180, 0.0), 20);
+    assert_eq!(ChatOptions::lines_for_height(180, 1.0), 10);
+    assert_eq!(
+        ChatOptions {
+            line_spacing: 0.5,
+            ..ChatOptions::default()
+        }
+        .line_height(),
+        13
+    );
+    let Some(mut ui) = common::ui() else {
+        return;
+    };
+    let wide = ui.text_width("clickable text here");
+    let plain = ChatOptions {
+        focused: true,
+        ..ChatOptions::default()
+    };
+    let scaled = ChatOptions {
+        scale: 0.5,
+        line_spacing: 1.0,
+        ..plain
+    };
+    let mut chat = ChatHud::default();
+    chat.add(&mut ui, &link("clickable text here"), 0, &plain);
+    let far_x = 4.0 + wide * 0.75;
+    assert!(chat.click_event_at(far_x, 196.0, 240, &plain).is_some());
+    assert!(chat.click_event_at(far_x, 196.0, 240, &scaled).is_none());
+    // Scaled chat space: bottom 400, line 18 high, text from 388 to 397, so GUI y 194..198.5.
+    assert!(chat.click_event_at(5.0, 196.0, 240, &scaled).is_some());
+    assert!(chat.click_event_at(5.0, 199.0, 240, &scaled).is_none());
+    assert!(chat.click_event_at(5.0, 192.5, 240, &scaled).is_none());
+    let hidden = ChatOptions {
+        scale: 0.0,
+        ..plain
+    };
+    assert!(chat.click_event_at(5.0, 196.0, 240, &hidden).is_none());
+}
+
+#[test]
+fn shift_click_inserts_and_plain_click_runs() {
+    let Some(mut ui) = common::ui() else {
+        return;
+    };
+    let options = ChatOptions {
+        focused: true,
+        ..ChatOptions::default()
+    };
+    let mut chat = ChatHud::default();
+    chat.add(&mut ui, &link("name"), 0, &options);
+    assert_eq!(
+        chat.click_at((6.0, 196.0), 240, &options, true, 0.0),
+        Some(ChatClick::Insert("Alex".into()))
+    );
+    assert!(matches!(
+        chat.click_at((6.0, 196.0), 240, &options, false, 0.0),
+        Some(ChatClick::Event(_))
+    ));
+}
+
+#[test]
+fn delayed_messages_wait_for_the_interval_or_a_click() {
+    let Some(mut ui) = common::ui() else {
+        return;
+    };
+    let options = ChatOptions::default();
+    let mut chat = ChatHud::default();
+    let msg = Component::text("<Alex> hi");
+    chat.add_delayed(&mut ui, &msg, 0, &options, None, Some([3; 256]), (0, 2000));
+    chat.add_delayed(&mut ui, &msg, 0, &options, None, None, (0, 2000));
+    assert_eq!((chat.len(), chat.queue_len()), (0, 2));
+    chat.tick_queue(&mut ui, 1, &options, (1500, 2000));
+    assert_eq!((chat.len(), chat.queue_len()), (0, 2));
+    chat.tick_queue(&mut ui, 2, &options, (2000, 2000));
+    assert_eq!((chat.len(), chat.queue_len()), (1, 1));
+    chat.tick_queue(&mut ui, 3, &options, (3000, 2000));
+    assert_eq!(chat.queue_len(), 1);
+    chat.accept_next(&mut ui, 4, &options, 3000);
+    assert_eq!((chat.len(), chat.queue_len()), (2, 0));
+    chat.add_delayed(
+        &mut ui,
+        &msg,
+        5,
+        &options,
+        None,
+        Some([4; 256]),
+        (3000, 2000),
+    );
+    assert!(chat.remove_queued(&[4; 256]));
+    assert!(!chat.remove_queued(&[4; 256]));
+    chat.add_delayed(&mut ui, &msg, 5, &options, None, None, (3000, 2000));
+    chat.tick_queue(&mut ui, 6, &options, (3001, 0));
+    assert_eq!((chat.len(), chat.queue_len()), (3, 0));
+    let queued = ChatOptions {
+        focused: true,
+        ..options
+    };
+    chat.add_delayed(&mut ui, &msg, 7, &options, None, None, (4000, 2000));
+    let width = chat.queue_width(&mut ui);
+    assert!(width > 0.0);
+    assert_eq!(
+        chat.click_at((6.0, 202.0), 240, &queued, false, width),
+        Some(ChatClick::ExpandQueue)
+    );
+}
+
+#[test]
+fn commands_persist_in_the_history() {
+    let mut chat = ChatHud::default();
+    chat.load_command_history("/one\n/two\n");
+    assert_eq!(chat.recent(), ["/one", "/two"]);
+    chat.add_recent("hello");
+    assert!(chat.take_command_history().is_none());
+    chat.add_recent("/three");
+    chat.add_recent("/three");
+    assert_eq!(chat.take_command_history().unwrap(), "/one\n/two\n/three\n");
+    for i in 0..60 {
+        chat.add_recent(&format!("/c{i}"));
+    }
+    let saved = chat.take_command_history().unwrap();
+    assert_eq!(saved.lines().count(), 50);
+    assert!(saved.ends_with("/c59\n"));
 }

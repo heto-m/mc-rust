@@ -1,16 +1,18 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mcr_protocol::types::text::ClickEvent;
+use std::ops::Range;
 
+use mcr_protocol::types::text::{ClickEvent, Component};
+
+use super::clicks::click_event_actions;
 use super::edit_box::EditBox;
 use super::env::{Env, RenderCx};
 use super::input::{Key, MouseButton, UiInput, contains};
-use super::menus::ConfirmScreen;
 use super::screen::{Screen, ScreenAction};
 use super::tooltip::TooltipLines;
 use super::widgets::{Button, WidgetEvent, WidgetEventKind};
-use crate::screens::{ChatHud, ChatOptions};
+use crate::screens::{ChatClick, ChatHud, ChatOptions};
 
 const INPUT_ID: u32 = 1;
 const LEAVE_BED_ID: u32 = 2;
@@ -31,16 +33,27 @@ pub struct Suggestion {
     pub tooltip: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The answer to one request: argument colours at once, suggestions and usage when they are known.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SuggestionSet {
+    /// The input this answers; answers for older text are dropped.
+    pub text: String,
     pub suggestions: Vec<Suggestion>,
-    /// Usage hints shown above the input when there is nothing to complete.
-    pub usage: Vec<String>,
+    /// `CommandSuggestions#commandUsage`: errors or argument usage, shown when the popup is closed.
+    pub usage: Vec<Component>,
+    /// Character index the usage lines line up with.
+    pub usage_start: usize,
+    /// Colour runs as (character range, RGB); empty for plain chat.
+    pub highlight: Vec<(Range<usize>, u32)>,
+    pub command: bool,
+    /// Only the colours: the suggestions follow in a later set, or were not asked for.
+    pub pending: bool,
 }
 
 /// Backs the suggestion popup; the app adapts it to the Brigadier tree and `command_suggestions` round trips.
 pub trait CommandSuggester {
-    fn request(&mut self, text: &str, cursor: usize);
+    /// `suggest` false re-parses for colours only, as when a used suggestion keeps the popup.
+    fn request(&mut self, text: &str, cursor: usize, suggest: bool);
 
     /// The result of the latest request once it has arrived; returned once.
     fn poll(&mut self) -> Option<SuggestionSet>;
@@ -50,7 +63,7 @@ pub trait CommandSuggester {
 pub struct NoSuggestions;
 
 impl CommandSuggester for NoSuggestions {
-    fn request(&mut self, _text: &str, _cursor: usize) {}
+    fn request(&mut self, _text: &str, _cursor: usize, _suggest: bool) {}
 
     fn poll(&mut self) -> Option<SuggestionSet> {
         None
@@ -69,6 +82,7 @@ fn apply(original: &str, s: &Suggestion) -> String {
     out
 }
 
+/// `getLastWordIndex`: just past the last run of whitespace.
 fn last_word_start(text: &str) -> usize {
     let mut result = 0;
     for (i, c) in text.chars().enumerate() {
@@ -98,7 +112,8 @@ pub struct ChatScreen {
     gui: (i32, i32),
     initial: String,
     popup: Option<Popup>,
-    usage: Vec<String>,
+    usage: Vec<Component>,
+    usage_start: usize,
     allow_suggestions: bool,
     keep_suggestions: bool,
     pending: Option<SuggestionSet>,
@@ -107,6 +122,8 @@ pub struct ChatScreen {
     history_draft: String,
     popup_anchor: usize,
     in_bed: bool,
+    shift: bool,
+    queue_width: f32,
 }
 
 impl std::fmt::Debug for ChatScreen {
@@ -129,7 +146,6 @@ impl ChatScreen {
             suggester,
             options: ChatOptions {
                 focused: true,
-                visible_lines: 20,
                 ..options
             },
             widgets: Default::default(),
@@ -137,6 +153,7 @@ impl ChatScreen {
             initial: String::new(),
             popup: None,
             usage: Vec::new(),
+            usage_start: 0,
             allow_suggestions: false,
             keep_suggestions: false,
             pending: None,
@@ -145,6 +162,8 @@ impl ChatScreen {
             history_draft: String::new(),
             popup_anchor: 0,
             in_bed: false,
+            shift: false,
+            queue_width: 0.0,
         }
     }
 
@@ -196,35 +215,53 @@ impl ChatScreen {
         self.update_info();
     }
 
+    /// `CommandSuggestions#updateCommandInfo`.
     fn update_info(&mut self) {
+        let keep = self.keep_suggestions && self.popup.is_some();
         if !self.keep_suggestions {
             self.popup = None;
+            self.edit().set_suggestion(None);
         }
         self.usage.clear();
         let (text, cursor) = {
             let e = self.edit();
+            e.set_colors(Vec::new());
             (e.value().to_owned(), e.cursor())
         };
-        if text.trim().is_empty() {
+        if !keep {
             self.pending = None;
-            return;
         }
-        self.suggester.request(&text, cursor);
+        self.suggester.request(&text, cursor, !keep);
     }
 
     fn take_results(&mut self) {
-        if let Some(set) = self.suggester.poll() {
+        while let Some(set) = self.suggester.poll() {
+            if set.text != self.text() {
+                continue;
+            }
+            self.edit().set_colors(set.highlight.clone());
+            if set.pending {
+                continue;
+            }
+            let command = set.command;
+            self.usage = set.usage.clone();
+            self.usage_start = set.usage_start;
             self.pending = Some(set);
-            self.apply_pending(false);
+            if command {
+                self.popup = None;
+                if self.allow_suggestions && self.options.auto_suggestions {
+                    self.show_suggestions();
+                }
+            }
         }
     }
 
-    fn apply_pending(&mut self, force: bool) {
+    /// `CommandSuggestions#showSuggestions`.
+    fn show_suggestions(&mut self) {
         let Some(set) = self.pending.clone() else {
             return;
         };
-        self.usage = set.usage.clone();
-        if !(self.allow_suggestions || force) || set.suggestions.is_empty() {
+        if set.suggestions.is_empty() {
             return;
         }
         let (text, cursor) = {
@@ -261,19 +298,28 @@ impl ChatScreen {
         self.select(0);
     }
 
+    /// Selects a suggestion and shows the rest of it as ghost text.
     fn select(&mut self, index: i64) {
-        if let Some(p) = &mut self.popup {
-            let n = p.list.len() as i64;
-            p.current = index.rem_euclid(n) as usize;
-        }
+        let Some(p) = &mut self.popup else {
+            return;
+        };
+        let n = p.list.len() as i64;
+        p.current = index.rem_euclid(n) as usize;
+        let applied = apply(&p.original, &p.list[p.current]);
+        let value = self.text().to_owned();
+        let ghost = applied.strip_prefix(value.as_str()).map(str::to_owned);
+        self.edit().set_suggestion(ghost);
     }
 
     fn cycle(&mut self, direction: i64) {
         let Some(p) = &mut self.popup else {
             return;
         };
-        let n = p.list.len() as i64;
-        p.current = (p.current as i64 + direction).rem_euclid(n) as usize;
+        let next = p.current as i64 + direction;
+        self.select(next);
+        let Some(p) = &mut self.popup else {
+            return;
+        };
         let max_offset = p.list.len().saturating_sub(LIST_LIMIT);
         if p.current < p.offset {
             p.offset = p.current.min(max_offset);
@@ -287,15 +333,20 @@ impl ChatScreen {
             return;
         };
         let s = p.list[p.current].clone();
+        let current = p.current as i64;
         let new = apply(&p.original, &s);
         let end = s.start + s.text.chars().count();
-        p.tab_cycles = true;
         self.keep_suggestions = true;
         let e = self.edit();
         e.set_value(&new);
         e.move_cursor_to(end, false);
         e.take_changed();
+        self.edited();
+        self.select(current);
         self.keep_suggestions = false;
+        if let Some(p) = &mut self.popup {
+            p.tab_cycles = true;
+        }
     }
 
     fn history(&mut self, direction: i32) {
@@ -316,11 +367,15 @@ impl ChatScreen {
                 self.history_draft = self.edit().value().to_owned();
             }
             self.edit().set_value(&recent[new]);
+            self.edit().take_changed();
+            self.edited();
             self.allow_suggestions = false;
             self.popup = None;
             self.history_pos = new;
+            return;
         }
         self.edit().take_changed();
+        self.edited();
     }
 
     fn submit(&mut self, out: &mut Vec<ScreenAction>) {
@@ -355,27 +410,28 @@ impl ChatScreen {
         pressed
     }
 
+    /// `ChatScreen#handleComponentClicked` for a click event in the chat.
     pub fn handle_click_event(&mut self, event: ClickEvent, out: &mut Vec<ScreenAction>) {
-        let confirm = match event {
-            ClickEvent::OpenUrl(url) => ConfirmScreen::link(url),
-            ClickEvent::RunCommand(command) => ConfirmScreen::command(&command),
-            ClickEvent::CopyToClipboard(text) => ConfirmScreen::copy(&text),
+        match event {
             ClickEvent::SuggestCommand(text) => {
                 self.edit().set_value(&text);
+                self.edit().take_changed();
                 self.edited();
-                None
             }
-            _ => None,
-        };
-        if let Some(confirm) = confirm {
-            out.push(ScreenAction::Push(Box::new(confirm)));
+            other => click_event_actions(other, out),
         }
+    }
+
+    fn insert(&mut self, text: &str) {
+        self.edit().insert_text(text);
+        self.edit().take_changed();
+        self.edited();
     }
 
     fn popup_key(&mut self, key: Key, mods: super::input::Modifiers) -> bool {
         if self.popup.is_none() {
             if key == Key::Tab {
-                self.apply_pending(true);
+                self.show_suggestions();
                 return true;
             }
             return false;
@@ -400,6 +456,7 @@ impl ChatScreen {
             }
             Key::Escape => {
                 self.popup = None;
+                self.edit().set_suggestion(None);
                 true
             }
             _ => false,
@@ -440,6 +497,7 @@ impl Screen for ChatScreen {
         cx.frame.fill_rect(2, h - 14, w - 2, h - 2, 0x8000_0000);
         {
             let chat = self.chat.borrow();
+            self.queue_width = chat.queue_width(cx.frame.ui());
             chat.draw(cx.frame, (cx.now_ms / 50) as u32, &self.options);
             chat.draw_scrollbar(cx.frame, &self.options);
             if let Some(tooltip) = chat.hover(cx.frame, cx.mouse, &self.options) {
@@ -453,6 +511,7 @@ impl Screen for ChatScreen {
     fn input(&mut self, env: &mut Env<'_>, input: &UiInput, out: &mut Vec<ScreenAction>) -> bool {
         match *input {
             UiInput::Key { key, mods, .. } => {
+                self.shift = mods.shift;
                 if self.popup_key(key, mods) {
                     return true;
                 }
@@ -512,7 +571,10 @@ impl Screen for ChatScreen {
                 }
                 used
             }
-            UiInput::MousePress { x, y, button, .. } => {
+            UiInput::MousePress {
+                x, y, button, mods, ..
+            } => {
+                self.shift = mods.shift;
                 if let Some(p) = &self.popup
                     && contains(p.rect, x, y)
                 {
@@ -524,13 +586,27 @@ impl Screen for ChatScreen {
                     return true;
                 }
                 if button == MouseButton::Left {
-                    let event = self
-                        .chat
-                        .borrow()
-                        .click_event_at(x, y, self.gui.1, &self.options);
-                    if let Some(event) = event {
-                        self.handle_click_event(event, out);
-                        return true;
+                    let click = self.chat.borrow().click_at(
+                        (x, y),
+                        self.gui.1,
+                        &self.options,
+                        mods.shift,
+                        self.queue_width,
+                    );
+                    match click {
+                        Some(ChatClick::Event(event)) => {
+                            self.handle_click_event(event, out);
+                            return true;
+                        }
+                        Some(ChatClick::Insert(text)) => {
+                            self.insert(&text);
+                            return true;
+                        }
+                        Some(ChatClick::ExpandQueue) => {
+                            out.push(ScreenAction::ChatQueueNext);
+                            return true;
+                        }
+                        None => {}
                     }
                 }
                 let mut events = Vec::new();
@@ -538,7 +614,7 @@ impl Screen for ChatScreen {
                 Self::pressed_leave_bed(&events, out);
                 true
             }
-            UiInput::Scroll { x, y, dy, .. } => {
+            UiInput::Scroll { x, y, dy, mods, .. } => {
                 let dy = dy.clamp(-1.0, 1.0);
                 if let Some(p) = &mut self.popup
                     && contains(p.rect, x, y)
@@ -547,9 +623,10 @@ impl Screen for ChatScreen {
                     p.offset = (p.offset as i64 - dy as i64).clamp(0, max) as usize;
                     return true;
                 }
+                let lines = if mods.shift { dy } else { dy * 7.0 };
                 self.chat
                     .borrow_mut()
-                    .scroll_by((dy * 7.0) as i32, self.options.visible_lines);
+                    .scroll_by(lines as i32, self.options.visible_lines);
                 true
             }
             UiInput::MouseMove { x, y } => {
@@ -573,14 +650,22 @@ impl ChatScreen {
         let (w, h) = self.gui;
         let mouse = self.mouse;
         let Some(p) = &mut self.popup else {
+            let lines: Vec<_> = self
+                .usage
+                .iter()
+                .map(|c| cx.frame.ui().flatten(c))
+                .collect();
             let mut width = 0;
-            for line in &self.usage {
-                width = width.max(cx.text_width(line));
+            for cells in &lines {
+                width = width.max(cx.frame.ui().width(cells).ceil() as i32);
             }
-            for (i, line) in self.usage.iter().enumerate() {
+            let prefix: String = self.text().chars().take(self.usage_start).collect();
+            let x = (4 + cx.text_width(&prefix)).clamp(0, (w - width).max(0));
+            for (i, cells) in lines.iter().enumerate() {
                 let y = h - 27 - ROW * i as i32;
-                cx.frame.fill_rect(3, y, 4 + width + 1, y + ROW, FILL);
-                cx.text(line, 4, y + 2, 0xFFFF_FFFF, true);
+                cx.frame.fill_rect(x - 1, y, x + width + 1, y + ROW, FILL);
+                cx.frame
+                    .cells(cells, x as f32, (y + 2) as f32, 0xFFFF_FFFF, true);
             }
             return;
         };

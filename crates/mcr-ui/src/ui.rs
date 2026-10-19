@@ -353,6 +353,13 @@ impl UiFrame<'_> {
         }
     }
 
+    /// `fill_rect` over a fractional GUI rectangle `[x0, y0, x1, y1]`.
+    pub fn fill_rect_f(&mut self, rect: [f32; 4], argb: u32) {
+        if rect[2] > rect[0] && rect[3] > rect[1] && argb >> 24 != 0 {
+            self.fill_f(rect, argb);
+        }
+    }
+
     pub fn sprite(&mut self, id: SpriteId, x: i32, y: i32, w: i32, h: i32) {
         self.sprite_tinted(id, x, y, w, h, 0xFFFF_FFFF);
     }

@@ -322,13 +322,26 @@ pub fn chat_options(options: &Options, focused: bool) -> ChatOptions {
     } else {
         options.chat_height_unfocused
     };
+    let line_spacing = options.chat_line_spacing as f32;
     ChatOptions {
-        width: (options.chat_width * 280.0 + 40.0) as i32,
-        visible_lines: ((height * 160.0 + 20.0) / 9.0) as usize,
+        width: (options.chat_width * 280.0 + 40.0).floor() as i32,
+        visible_lines: ChatOptions::lines_for_height(
+            (height * 160.0 + 20.0).floor() as i32,
+            line_spacing,
+        ),
         background_opacity: options.text_background_opacity as f32,
         text_opacity,
         focused,
+        scale: options.chat_scale as f32,
+        line_spacing,
+        colors: options.chat_colors,
+        auto_suggestions: options.auto_suggestions,
     }
+}
+
+/// `chatDelay` in milliseconds.
+fn chat_delay_ms(options: &Options) -> u64 {
+    (options.chat_delay.clamp(0.0, 6.0) * 1000.0) as u64
 }
 
 impl Hud {
@@ -505,6 +518,30 @@ impl Hud {
         );
     }
 
+    /// A player or disguised message, held back by `chatDelay` like `ChatListener#handleMessage`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_player_chat(
+        &mut self,
+        ui: &mut Ui,
+        message: &Component,
+        tick: u32,
+        options: &Options,
+        tag: Option<mcr_ui::ChatLineTag>,
+        signature: Option<[u8; 256]>,
+        now_ms: u64,
+    ) {
+        self.chat.borrow_mut().add_delayed(
+            ui,
+            message,
+            tick,
+            &chat_options(options, false),
+            tag,
+            signature,
+            (now_ms, chat_delay_ms(options)),
+        );
+    }
+
+    /// `ClientPacketListener#handleDeleteChat`: a still queued message is dropped instead.
     pub fn delete_chat(
         &mut self,
         ui: &mut Ui,
@@ -512,15 +549,23 @@ impl Hud {
         tick: u32,
         options: &Options,
     ) {
-        self.chat
-            .borrow_mut()
-            .delete(ui, signature, tick, &chat_options(options, false));
+        let mut chat = self.chat.borrow_mut();
+        if !chat.remove_queued(signature) {
+            chat.delete(ui, signature, tick, &chat_options(options, false));
+        }
     }
 
-    pub fn tick_chat(&mut self, ui: &mut Ui, tick: u32, options: &Options) {
+    pub fn tick_chat(&mut self, ui: &mut Ui, tick: u32, options: &Options, now_ms: u64) {
+        let opts = chat_options(options, false);
+        let mut chat = self.chat.borrow_mut();
+        chat.process_deletions(ui, tick, &opts);
+        chat.tick_queue(ui, tick, &opts, (now_ms, chat_delay_ms(options)));
+    }
+
+    pub fn accept_next_chat(&mut self, ui: &mut Ui, tick: u32, options: &Options, now_ms: u64) {
         self.chat
             .borrow_mut()
-            .process_deletions(ui, tick, &chat_options(options, false));
+            .accept_next(ui, tick, &chat_options(options, false), now_ms);
     }
 
     pub fn clear_chat(&mut self) {

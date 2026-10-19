@@ -1256,6 +1256,7 @@ mod tests {
                 y: 0.0,
                 dx: 0.0,
                 dy: -1.0,
+                mods: Modifiers::NONE,
             },
             &mut out,
         );
@@ -1269,6 +1270,7 @@ mod tests {
                     y: 0.0,
                     dx: 0.0,
                     dy: -1.0,
+                    mods: Modifiers::NONE,
                 },
                 &mut out,
             );

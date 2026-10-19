@@ -29,16 +29,17 @@ pub use items::{
 pub use lang::{DEFAULT_LANGUAGE, LanguageInfo, available_languages};
 pub use renderer::{UiRenderer, UiStats};
 pub use screens::{
-    AirBubbles, AirState, CHART_SAMPLES, ChatHud, ChatLineTag, ChatOptions, ContextualBar,
-    CrosshairIndicator, DebugChart, DebugOverlay, HeartKind, HudEffect, HudItems, HudSprites,
-    HudState, MAX_VEHICLE_HEARTS, effect_alpha, fade_alpha,
+    AirBubbles, AirState, CHART_SAMPLES, ChatClick, ChatHud, ChatLineTag, ChatOptions,
+    ContextualBar, CrosshairIndicator, DebugChart, DebugOverlay, HeartKind, HudEffect, HudItems,
+    HudSprites, HudState, MAX_VEHICLE_HEARTS, effect_alpha, fade_alpha,
 };
 pub use sprites::{
     OwnedSprites, Scaling, SpriteId, SpriteInfo, SpriteQuad, SpriteReleaser, Sprites,
 };
 pub use style::{Cell, Flags, FontId, Style};
 pub use text::{
-    ClickSpan, Lang, click_at, flatten, flatten_events, parse_legacy, push_legacy, wrap,
+    ClickSpan, InsertSpan, Lang, click_at, flatten, flatten_chat, flatten_events, parse_legacy,
+    push_legacy, wrap,
 };
 pub use toast::{SystemToastId, Toast, ToastFrame, ToastManager, note_color};
 pub use ui::{

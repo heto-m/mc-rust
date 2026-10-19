@@ -71,8 +71,9 @@ pub use launcher::{
 };
 pub use list::ScrollList;
 pub use menus::{
-    ConfirmScreen, ConnectingScreen, DeathScreen, DirectConnectScreen, DisconnectedScreen,
-    PauseScreen, StatusHandle, TitleScreen, draw_dim_background, draw_menu_background,
+    CommandPrompt, ConfirmScreen, ConnectingScreen, DeathScreen, DirectConnectScreen,
+    DisconnectedScreen, PauseScreen, StatusHandle, TitleScreen, draw_dim_background,
+    draw_menu_background,
 };
 pub use mods::{
     IconCache, ModIcon, ModRow, ModTone, ModsModel, ModsScreen, PromptAction, SharedMods,

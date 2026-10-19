@@ -369,7 +369,7 @@ fn system_and_disguised_lines_carry_the_system_tag() {
             overlay: false,
         }),
     );
-    assert_eq!(shown(&out)[0].1, Some(ChatTag::System));
+    assert_eq!(shown(&out)[0].1, Some(ChatTag::SystemSinglePlayer));
 }
 
 #[test]

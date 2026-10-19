@@ -6,6 +6,7 @@ pub mod attach;
 #[cfg(test)]
 mod audit_tests;
 mod batch;
+pub mod brigadier;
 mod chat_in;
 mod client;
 mod collisions;
@@ -78,6 +79,7 @@ mod use_item_tests;
 
 pub use actions::Digging;
 pub use batch::ChunkBatchSizeCalculator;
+pub use brigadier::{CommandCheck, CommandParse, ParseRules, SyntaxError, UsageInfo};
 pub use client::{Client, Phase};
 pub use combat::{CombatKeys, CombatOutcome, MISS_TICKS};
 pub use commands::{CommandTree, Completion, SuggestSource, complete_chat};

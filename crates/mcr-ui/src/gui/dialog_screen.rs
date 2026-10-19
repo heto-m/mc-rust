@@ -349,16 +349,8 @@ impl DialogScreen {
                 WaitingForResponseScreen::default(),
             ))),
         }
-        let Some(event) = event else { return };
-        match event {
-            ClickEvent::RunCommand(command) => out.push(ScreenAction::DialogCommand(
-                command.strip_prefix('/').unwrap_or(&command).to_owned(),
-            )),
-            ClickEvent::ShowDialog(dialog) => out.push(ScreenAction::ShowDialog(dialog)),
-            ClickEvent::Custom { id, payload } => {
-                out.push(ScreenAction::CustomClick { id, payload });
-            }
-            other => click_event_actions(other, out),
+        if let Some(event) = event {
+            click_event_actions(event, out);
         }
     }
 

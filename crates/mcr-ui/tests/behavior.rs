@@ -46,7 +46,7 @@ struct Script {
 struct SharedScript(Rc<RefCell<Script>>);
 
 impl CommandSuggester for SharedScript {
-    fn request(&mut self, text: &str, cursor: usize) {
+    fn request(&mut self, text: &str, cursor: usize, _suggest: bool) {
         self.0.borrow_mut().requests.push((text.to_owned(), cursor));
     }
 
@@ -161,7 +161,9 @@ fn chat_with_suggestions() -> (ChatScreen, SharedScript) {
             .iter()
             .map(|t| suggestion(1, 3, t))
             .collect(),
-        usage: Vec::new(),
+        text: "/ga".into(),
+        command: true,
+        ..SuggestionSet::default()
     });
     tick(&mut screen, &NoView, 1);
     (screen, script)
@@ -214,7 +216,9 @@ fn suggestion_replaces_only_its_range() {
     send(&mut screen, &NoView, &typed("/tp Ste"));
     script.0.borrow_mut().result = Some(SuggestionSet {
         suggestions: vec![suggestion(4, 7, "Steve")],
-        usage: Vec::new(),
+        text: "/tp Ste".into(),
+        command: true,
+        ..SuggestionSet::default()
     });
     tick(&mut screen, &NoView, 1);
     key(&mut screen, Key::Tab);
@@ -227,7 +231,8 @@ fn tab_without_popup_shows_pending_results() {
     screen.init(W, H);
     script.0.borrow_mut().result = Some(SuggestionSet {
         suggestions: vec![suggestion(0, 0, "help")],
-        usage: Vec::new(),
+        command: true,
+        ..SuggestionSet::default()
     });
     tick(&mut screen, &NoView, 1);
     assert_eq!(screen.popup_len(), 0);
@@ -243,7 +248,9 @@ fn history_navigation_does_not_open_the_popup() {
     key(&mut screen, Key::Up);
     script.0.borrow_mut().result = Some(SuggestionSet {
         suggestions: vec![suggestion(0, 1, "x")],
-        usage: Vec::new(),
+        text: "/gamemode creative".into(),
+        command: true,
+        ..SuggestionSet::default()
     });
     tick(&mut screen, &NoView, 1);
     assert_eq!(screen.popup_len(), 0);
@@ -254,7 +261,7 @@ fn chat_click_events_become_actions() {
     let (_, mut screen, _) = chat();
     let mut out = Vec::new();
     screen.handle_click_event(ClickEvent::OpenUrl("https://example.com".into()), &mut out);
-    assert!(matches!(out.as_slice(), [ScreenAction::Push(_)]));
+    assert!(matches!(out.as_slice(), [ScreenAction::OpenLink(u)] if u == "https://example.com"));
     out.clear();
     screen.handle_click_event(ClickEvent::OpenUrl("file:///etc/passwd".into()), &mut out);
     assert!(out.is_empty());
@@ -262,7 +269,7 @@ fn chat_click_events_become_actions() {
     screen.handle_click_event(ClickEvent::CopyToClipboard("abc".into()), &mut out);
     assert!(matches!(
         out.as_slice(),
-        [ScreenAction::Push(_), ScreenAction::Push(_)]
+        [ScreenAction::RunCommand(c), ScreenAction::CopyToClipboard(t)] if c == "home" && t == "abc"
     ));
     screen.handle_click_event(
         ClickEvent::SuggestCommand("/msg Bob ".into()),
@@ -272,10 +279,8 @@ fn chat_click_events_become_actions() {
 }
 
 #[test]
-fn open_url_needs_confirmation_before_the_action() {
-    let (_, mut screen, _) = chat();
-    let mut out = Vec::new();
-    screen.handle_click_event(ClickEvent::OpenUrl("https://example.com".into()), &mut out);
+fn link_confirmation_comes_before_the_action() {
+    let confirm = mcr_ui::ConfirmScreen::link("https://example.com".into()).unwrap();
     let mut stack = ScreenStack::new(W, H);
     stack.push(Box::new(PauseScreen::new(false, false)));
     let mut clip = MemoryClipboard::default();
@@ -285,10 +290,7 @@ fn open_url_needs_confirmation_before_the_action() {
         now_ms: 0,
     };
     let mut forwarded = Vec::new();
-    let Some(ScreenAction::Push(confirm)) = out.pop() else {
-        panic!("expected a confirmation screen");
-    };
-    stack.push(confirm);
+    stack.push(Box::new(confirm));
     assert_eq!(stack.len(), 2);
     stack.input(&mut env, &UiInput::key(Key::Escape), &mut forwarded);
     assert!(forwarded.is_empty());
@@ -416,7 +418,7 @@ fn server_list_double_click_and_enter_join() {
             x,
             y,
             button: MouseButton::Left,
-            mods: Modifiers::NONE,
+            mods: mcr_ui::Modifiers::NONE,
             double: true,
         }],
     );
@@ -851,6 +853,7 @@ fn server_list_scrolls_and_selects_the_visible_row() {
             y: 100.0,
             dx: 0.0,
             dy: -4.0,
+            mods: mcr_ui::Modifiers::NONE,
         }],
     );
     let (x, y) = row_center(0);
@@ -865,6 +868,7 @@ fn server_list_scrolls_and_selects_the_visible_row() {
                 y: 100.0,
                 dx: 0.0,
                 dy: -4.0,
+                mods: mcr_ui::Modifiers::NONE,
             }],
         );
     }
@@ -923,22 +927,38 @@ fn confirm_outcome(mut out: Vec<ScreenAction>, yes: bool) -> Vec<ScreenAction> {
 }
 
 #[test]
-fn server_click_events_never_act_without_confirmation() {
+fn server_click_events_route_like_vanilla() {
     let (_, mut screen, _) = chat();
+    let mut out = Vec::new();
     for event in [
-        ClickEvent::RunCommand("op me".into()),
+        ClickEvent::RunCommand("trigger menu".into()),
         ClickEvent::OpenUrl("https://example.com".into()),
         ClickEvent::CopyToClipboard("x".into()),
+        ClickEvent::ShowDialog(mcr_nbt::Value::String("x".into())),
+        ClickEvent::Custom {
+            id: mcr_buf::Identifier::parse("a:b").unwrap(),
+            payload: None,
+        },
     ] {
-        let mut out = Vec::new();
         screen.handle_click_event(event, &mut out);
-        assert!(matches!(out.as_slice(), [ScreenAction::Push(_)]), "{out:?}");
     }
-    let mut out = Vec::new();
+    assert!(
+        matches!(
+            out.as_slice(),
+            [
+                ScreenAction::RunCommand(_),
+                ScreenAction::OpenLink(_),
+                ScreenAction::CopyToClipboard(_),
+                ScreenAction::ShowDialog(_),
+                ScreenAction::CustomClick { .. },
+            ]
+        ),
+        "{out:?}"
+    );
+    out.clear();
     for event in [
         ClickEvent::OpenFile("/etc/passwd".into()),
         ClickEvent::ChangePage(3),
-        ClickEvent::ShowDialog(mcr_nbt::Value::String("x".into())),
     ] {
         screen.handle_click_event(event, &mut out);
     }
@@ -947,14 +967,39 @@ fn server_click_events_never_act_without_confirmation() {
 
 #[test]
 fn confirmed_command_is_exactly_the_displayed_one() {
-    let (_, mut screen, _) = chat();
-    let mut out = Vec::new();
-    screen.handle_click_event(ClickEvent::RunCommand("/say hi".into()), &mut out);
-    let acts = confirm_outcome(out, true);
+    let prompt = mcr_ui::ConfirmScreen::command_prompt(
+        "say hi",
+        mcr_ui::CommandPrompt::PermissionsRequired,
+        true,
+    );
+    let acts = confirm_outcome(vec![ScreenAction::Push(Box::new(prompt))], true);
     assert!(
         acts.iter()
             .any(|a| matches!(a, ScreenAction::SendCommand(c) if c == "say hi")),
         "{acts:?}"
+    );
+    let prompt = mcr_ui::ConfirmScreen::command_prompt(
+        "say hi",
+        mcr_ui::CommandPrompt::SignatureRequired { suggest: false },
+        true,
+    );
+    let acts = confirm_outcome(vec![ScreenAction::Push(Box::new(prompt))], true);
+    assert!(
+        acts.iter()
+            .any(|a| matches!(a, ScreenAction::CopyToClipboard(c) if c == "/say hi")),
+        "{acts:?}"
+    );
+    let prompt =
+        mcr_ui::ConfirmScreen::command_prompt("op me", mcr_ui::CommandPrompt::ParseErrors, true);
+    let acts = confirm_outcome(vec![ScreenAction::Push(Box::new(prompt))], false);
+    assert!(
+        matches!(acts.as_slice(), [.., ScreenAction::Pop]),
+        "{acts:?}"
+    );
+    assert!(
+        !acts
+            .iter()
+            .any(|a| matches!(a, ScreenAction::SendCommand(_)))
     );
 }
 
@@ -970,7 +1015,8 @@ fn spoofable_targets_are_rejected() {
         ClickEvent::RunCommand("say hi\u{202E}".into()),
         ClickEvent::RunCommand("say \u{a7}ahi".into()),
         ClickEvent::RunCommand("say hi\nop me".into()),
-        ClickEvent::CopyToClipboard("a".repeat(1000)),
+        ClickEvent::RunCommand("/".into()),
+        ClickEvent::CopyToClipboard("a".repeat(40_000)),
         ClickEvent::CopyToClipboard("rm -rf\u{200B}".into()),
     ] {
         let mut out = Vec::new();

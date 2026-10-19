@@ -1651,6 +1651,7 @@ impl Shell {
             y,
             dx: 0.0,
             dy: lines,
+            mods: mcr_ui::Modifiers::NONE,
         });
     }
 
@@ -1675,7 +1676,7 @@ impl Shell {
         if self.route_ui_key(key) {
             return;
         }
-        let mods = self.mods;
+        let mods = self.play.as_ref().map_or(self.mods, |p| p.modifiers());
         self.ui_input(UiInput::Key {
             key,
             mods,
@@ -1702,7 +1703,7 @@ impl Shell {
         if self.route_click(x, y, button) {
             return;
         }
-        let mods = self.mods;
+        let mods = self.play.as_ref().map_or(self.mods, |p| p.modifiers());
         self.ui_input(UiInput::MouseMove { x, y });
         self.ui_input(UiInput::MousePress {
             x,
@@ -1719,7 +1720,7 @@ impl Shell {
         if self.route_button(x, y, button, pressed) {
             return;
         }
-        let mods = self.mods;
+        let mods = self.play.as_ref().map_or(self.mods, |p| p.modifiers());
         self.ui_input(UiInput::MouseMove { x, y });
         self.ui_input(if pressed {
             UiInput::MousePress {

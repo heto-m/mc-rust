@@ -274,16 +274,16 @@ Scope: mcr-entity-model humanoids, misc and maps, mcr-app nametags, skins and ma
 
 Scope: mcr-ui chat_screen, clicks and edit_box, mcr-client commands, mcr-app view.
 
-- [ ] 19.1 S5 (V) Chat click events handled differently
-- [ ] 19.2 S6 (V) No Brigadier feedback in the command box
-- [ ] 19.3 S7 (V) Suggestion popup ignores autoSuggestions; no player names in chat
-- [ ] 19.4 S8 (V) Chat colour and link options ignored
-- [ ] 19.5 S21 (M) Small chat differences
-- [ ] 19.6 H16 (M) Chat scale, spacing, delay and focused height ignored
-- [ ] 19.7 H18 (M) System message tag key
-- [ ] 19.8 H19 (M) Tab heads follow the account, not the server's online mode
-- [ ] 19.9 Unit tests: click event routing, argument colouring and usage, Tab player names, chat scale and spacing layout
-- [ ] 19.10 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 19.1 S5 (V) Chat click events handled differently
+- [x] 19.2 S6 (V) No Brigadier feedback in the command box
+- [x] 19.3 S7 (V) Suggestion popup ignores autoSuggestions; no player names in chat
+- [x] 19.4 S8 (V) Chat colour and link options ignored
+- [x] 19.5 S21 (M) Small chat differences
+- [x] 19.6 H16 (M) Chat scale, spacing, delay and focused height ignored
+- [x] 19.7 H18 (M) System message tag key
+- [x] 19.8 H19 (M) Tab heads follow the account, not the server's online mode
+- [x] 19.9 Unit tests: click event routing, argument colouring and usage, Tab player names, chat scale and spacing layout
+- [x] 19.10 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 20. Options, keys and screens
 

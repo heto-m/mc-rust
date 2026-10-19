@@ -189,7 +189,13 @@ mod tests {
         let (cx, cy) = screen.slot_center(10).unwrap();
         let (x, y) = (cx as f32, cy as f32);
         assert!(selections(&actions(&mut screen, &view, UiInput::MouseMove { x, y })).is_empty());
-        let scroll = |dy| UiInput::Scroll { x, y, dx: 0.0, dy };
+        let scroll = |dy| UiInput::Scroll {
+            x,
+            y,
+            dx: 0.0,
+            dy,
+            mods: crate::gui::input::Modifiers::NONE,
+        };
         assert_eq!(
             selections(&actions(&mut screen, &view, scroll(-1.0))),
             [(10, 0)]

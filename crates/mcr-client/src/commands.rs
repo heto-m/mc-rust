@@ -4,9 +4,10 @@ use mcr_protocol::play::clientbound::ui::{
     ArgumentParser, CommandNode, Commands, NodeKind, StringKind,
 };
 
+use crate::brigadier::{CommandParse, ParseRules};
+
 const MAX_NODES: usize = 1 << 16;
 const MAX_STATES: usize = 256;
-const MAX_TOKENS: usize = 256;
 const MAX_REDIRECTS: usize = 16;
 pub const MAX_LOCAL_SUGGESTIONS: usize = 1024;
 const ASK_SERVER: &str = "minecraft:ask_server";
@@ -22,8 +23,8 @@ const VANILLA_POST_EFFECTS: [&str; 5] = [
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CommandTree {
-    nodes: Vec<CommandNode>,
-    root: usize,
+    pub(crate) nodes: Vec<CommandNode>,
+    pub(crate) root: usize,
 }
 
 /// What the tree knows about the word being completed.
@@ -32,31 +33,54 @@ pub struct Completion {
     /// Character index in the input where the completed word starts.
     pub start: usize,
     pub local: Vec<String>,
-    pub usage: Vec<String>,
     /// Some candidate argument takes its suggestions from the server.
     pub ask_server: bool,
 }
 
-/// Plain-chat completions: the server's custom entries that continue the word before the cursor
-/// (character indices), with the index where that word starts.
+/// Plain-chat Tab completions (`ClientSuggestionProvider#getCustomTabSuggestions`): online names and
+/// the server's custom entries matching the word before the cursor (character indices) at its start
+/// or after an underscore, with the index where that word starts.
 pub fn complete_chat(entries: &[String], text: &str, cursor: usize) -> (usize, Vec<String>) {
     let before: Vec<char> = text.chars().take(cursor).collect();
-    let start = before.iter().rposition(|c| *c == ' ').map_or(0, |i| i + 1);
+    let start = before
+        .iter()
+        .rposition(|c| c.is_whitespace())
+        .map_or(0, |i| i + 1);
     let prefix: String = before[start..].iter().collect::<String>().to_lowercase();
     let mut out: Vec<String> = entries
         .iter()
-        .filter(|e| e.to_lowercase().starts_with(&prefix))
+        .filter(|e| matches_sub_str(&prefix, &e.to_lowercase()))
         .take(256)
         .cloned()
         .collect();
-    out.sort_by_key(|e| e.to_lowercase());
+    out.sort_by_cached_key(|e| e.to_lowercase());
+    out.dedup();
     (start, out)
+}
+
+/// `SharedSuggestionProvider#matchesSubStr`: `pattern` starts `input` or one of its `_` parts.
+pub fn matches_sub_str(pattern: &str, input: &str) -> bool {
+    let mut index = 0;
+    loop {
+        if input[index..].starts_with(pattern) {
+            return true;
+        }
+        match input[index..].find('_') {
+            Some(i) => index += i + 1,
+            None => return false,
+        }
+    }
 }
 
 /// Names the tree cannot know by itself.
 pub trait SuggestSource {
     fn players(&self) -> Vec<String>;
     fn registry(&self, id: &str) -> Vec<String>;
+
+    /// The player may use entity selectors (permission level 2).
+    fn selectors(&self) -> bool {
+        true
+    }
 }
 
 impl CommandTree {
@@ -101,124 +125,75 @@ impl CommandTree {
 
     /// Completes the word ending at `cursor` (a character index) in `input`, which may start with `/`.
     pub fn complete(&self, input: &str, cursor: usize, source: &dyn SuggestSource) -> Completion {
-        let chars: Vec<char> = input.chars().take(cursor).collect();
-        let skip = usize::from(chars.first() == Some(&'/'));
-        let body = &chars[skip..];
-        let word_start = body
-            .iter()
-            .rposition(|c| c.is_whitespace())
-            .map_or(0, |i| i + 1);
-        let mut out = Completion {
-            start: skip + word_start,
-            ..Completion::default()
+        let rules = ParseRules {
+            restricted: true,
+            selectors: source.selectors(),
         };
+        self.complete_parsed(&self.parse(input, rules), cursor, source)
+    }
+
+    /// `CommandDispatcher#getCompletionSuggestions`: the children of the node before the cursor that
+    /// continue the word the cursor ends.
+    pub fn complete_parsed(
+        &self,
+        parse: &CommandParse,
+        cursor: usize,
+        source: &dyn SuggestSource,
+    ) -> Completion {
+        let input = parse.input.as_str();
+        let byte_cursor = input
+            .char_indices()
+            .nth(cursor)
+            .map_or(input.len(), |(i, _)| i);
+        let mut out = Completion::default();
+        let (parent, start) = parse.context.suggestion_context(byte_cursor);
+        let start = start.min(byte_cursor);
+        out.start = input[..start].chars().count();
         if self.nodes.is_empty() {
             return out;
         }
-        let words: Vec<String> = body[..word_start]
-            .iter()
-            .collect::<String>()
-            .split_whitespace()
-            .take(MAX_TOKENS)
-            .map(str::to_owned)
-            .collect();
-        let partial: String = body[word_start..].iter().collect();
-
-        let mut states: Vec<(usize, usize)> = vec![(self.root, 0)];
-        let mut i = 0;
-        while i < words.len() {
-            let mut next: Vec<(usize, usize)> = Vec::new();
-            for &(node, skip_words) in &states {
-                if skip_words > 0 {
-                    next.push((node, skip_words - 1));
-                    continue;
+        let lower = input[start..byte_cursor].to_lowercase();
+        let mut found: Vec<String> = Vec::new();
+        for child in self.own_children(parent) {
+            match &self.nodes[child].kind {
+                NodeKind::Root => {}
+                NodeKind::Literal(l) => {
+                    if l.to_lowercase().starts_with(&lower) {
+                        found.push(l.clone());
+                    }
                 }
-                for child in self.children(node, 0) {
-                    let Some(c) = self.nodes.get(child) else {
-                        continue;
+                NodeKind::Argument {
+                    parser,
+                    suggestions,
+                    ..
+                } => {
+                    let values = match suggestions.as_ref().map(|s| s.as_str()) {
+                        Some(ASK_SERVER) => {
+                            out.ask_server = true;
+                            Vec::new()
+                        }
+                        Some(POST_EFFECTS) => VANILLA_POST_EFFECTS.map(str::to_owned).to_vec(),
+                        Some(_) => Vec::new(),
+                        None => parser_values(parser, source),
                     };
-                    match &c.kind {
-                        NodeKind::Root => {}
-                        NodeKind::Literal(l) => {
-                            if *l == words[i] {
-                                next.push((child, 0));
-                            }
-                        }
-                        NodeKind::Argument { parser, .. } => match consumes(parser, &words[i..]) {
-                            Consume::Words(k) if k >= 1 => next.push((child, k - 1)),
-                            Consume::Rest => next.push((child, usize::MAX)),
-                            _ => {}
-                        },
-                    }
-                }
-            }
-            next.sort_unstable();
-            next.dedup();
-            next.truncate(MAX_STATES);
-            states = next;
-            if states.is_empty() {
-                return out;
-            }
-            i += 1;
-        }
-
-        let lower = partial.to_lowercase();
-        let mut seen = std::collections::BTreeSet::new();
-        for &(node, skip_words) in &states {
-            if skip_words == usize::MAX {
-                continue;
-            }
-            if skip_words > 0 {
-                if let Some(NodeKind::Argument { parser, .. }) =
-                    self.nodes.get(node).map(|n| &n.kind)
-                {
-                    out.usage.push(usage_of(parser));
-                }
-                continue;
-            }
-            for child in self.children(node, 0) {
-                let Some(c) = self.nodes.get(child) else {
-                    continue;
-                };
-                match &c.kind {
-                    NodeKind::Root => {}
-                    NodeKind::Literal(l) => {
-                        if l.to_lowercase().starts_with(&lower) {
-                            seen.insert(l.clone());
-                        }
-                        out.usage.push(l.clone());
-                    }
-                    NodeKind::Argument {
-                        name,
-                        parser,
-                        suggestions,
-                    } => {
-                        out.usage.push(format!("<{name}>"));
-                        let values = match suggestions.as_ref().map(|s| s.as_str()) {
-                            Some(ASK_SERVER) => {
-                                out.ask_server = true;
-                                Vec::new()
-                            }
-                            Some(POST_EFFECTS) => VANILLA_POST_EFFECTS.map(str::to_owned).to_vec(),
-                            Some(_) => Vec::new(),
-                            None => parser_values(parser, source),
-                        };
-                        for s in values {
-                            if s.to_lowercase().starts_with(&lower)
-                                || s.strip_prefix("minecraft:")
-                                    .is_some_and(|r| r.to_lowercase().starts_with(&lower))
-                            {
-                                seen.insert(s);
-                            }
+                    for s in values {
+                        if s.to_lowercase().starts_with(&lower)
+                            || s.strip_prefix("minecraft:")
+                                .is_some_and(|r| r.to_lowercase().starts_with(&lower))
+                        {
+                            found.push(s);
                         }
                     }
                 }
+            }
+            if found.len() >= MAX_LOCAL_SUGGESTIONS * 4 {
+                break;
             }
         }
-        out.local = seen.into_iter().take(MAX_LOCAL_SUGGESTIONS).collect();
-        out.usage.sort();
-        out.usage.dedup();
-        out.usage.truncate(32);
+        found.sort_by_cached_key(|s| s.to_lowercase());
+        found.dedup();
+        found.truncate(MAX_LOCAL_SUGGESTIONS);
+        out.local = found;
         out
     }
 }
@@ -379,59 +354,6 @@ fn node_end(kind: &NodeKind, command: &str, pos: usize) -> Option<usize> {
         P::Vec3 | P::BlockPos => tokens_end(command, pos, 3),
         P::Vec2 | P::ColumnPos | P::Rotation => tokens_end(command, pos, 2),
         _ => Some(token_end(command, pos)),
-    }
-}
-
-enum Consume {
-    Words(usize),
-    Rest,
-    Invalid,
-}
-
-fn consumes(parser: &ArgumentParser, words: &[String]) -> Consume {
-    use ArgumentParser as P;
-    let w = &words[0];
-    let numeric = |ok: bool| {
-        if ok {
-            Consume::Words(1)
-        } else {
-            Consume::Invalid
-        }
-    };
-    let multi = |n: usize| {
-        if words.len() >= n {
-            Consume::Words(n)
-        } else {
-            Consume::Words(words.len())
-        }
-    };
-    match parser {
-        P::Bool => numeric(w == "true" || w == "false"),
-        P::Integer { .. } | P::Long { .. } => numeric(w.parse::<i64>().is_ok()),
-        P::Float { .. } | P::Double { .. } => numeric(w.parse::<f64>().is_ok()),
-        P::String(StringKind::GreedyPhrase)
-        | P::Message
-        | P::Component
-        | P::Style
-        | P::NbtCompoundTag
-        | P::NbtTag
-        | P::Dialog => Consume::Rest,
-        P::Vec3 | P::BlockPos => multi(3),
-        P::Vec2 | P::ColumnPos | P::Rotation => multi(2),
-        P::Gamemode => numeric(matches!(
-            w.as_str(),
-            "survival" | "creative" | "adventure" | "spectator"
-        )),
-        _ => Consume::Words(1),
-    }
-}
-
-fn usage_of(parser: &ArgumentParser) -> String {
-    use ArgumentParser as P;
-    match parser {
-        P::Vec3 | P::BlockPos => "<x> <y> <z>".into(),
-        P::Vec2 | P::ColumnPos | P::Rotation => "<x> <z>".into(),
-        _ => "...".into(),
     }
 }
 
@@ -743,6 +665,21 @@ mod tests {
         assert!(tree.signable_arguments(&vec!["x"; 50].join(" ")).is_empty());
         assert!(signed("msg @a[unclosed hi").is_empty());
         assert!(signed("say é ü 😀").len() == 1);
+    }
+
+    #[test]
+    fn chat_tab_completes_names_at_word_or_underscore_starts() {
+        let names: Vec<String> = ["Alex", "Steve", "big_alpha", "Alex"]
+            .map(str::to_owned)
+            .to_vec();
+        let (start, found) = complete_chat(&names, "hi al", 5);
+        assert_eq!(start, 3);
+        assert_eq!(found, ["Alex", "big_alpha"]);
+        let (start, found) = complete_chat(&names, "hi  ", 4);
+        assert_eq!(start, 4);
+        assert_eq!(found.len(), 3);
+        assert!(matches_sub_str("al", "big_alpha"));
+        assert!(!matches_sub_str("lp", "big_alpha"));
     }
 
     #[test]

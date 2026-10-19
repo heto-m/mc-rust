@@ -242,6 +242,7 @@ mod tests {
             y: 60.0,
             dx: 0.0,
             dy: -1.0,
+            mods: crate::gui::input::Modifiers::NONE,
         };
         assert!(l.input(&wheel, 310));
         assert_eq!(l.scroll(), 18.0);
@@ -250,6 +251,7 @@ mod tests {
             y: 200.0,
             dx: 0.0,
             dy: -1.0,
+            mods: crate::gui::input::Modifiers::NONE,
         };
         assert!(!l.input(&outside, 310));
         assert!(l.input(&UiInput::press(312.0, 130.0, MouseButton::Left), 310));

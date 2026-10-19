@@ -8,11 +8,19 @@ use crate::style::{Cell, Flags, FontId, Style};
 
 /// Decomposes `§` formatting codes; a reset restores `base`.
 pub fn push_legacy(out: &mut Vec<Cell>, text: &str, base: Style) {
+    push_formatted(out, text, base, false);
+}
+
+/// `push_legacy`, or with `strip` the `chatColors` off path that drops the codes without applying them.
+fn push_formatted(out: &mut Vec<Cell>, text: &str, base: Style, strip: bool) {
     let mut style = base;
     let mut chars = text.chars();
     while let Some(ch) = chars.next() {
         if ch == '§' {
             let Some(code) = chars.next() else { break };
+            if strip {
+                continue;
+            }
             if code.eq_ignore_ascii_case(&'r') {
                 style = base;
             } else if let Some(next) = style.apply_legacy(code) {
@@ -68,20 +76,43 @@ pub struct ClickSpan {
     pub event: ClickEvent,
 }
 
+/// Cells covered by a component with a Shift-click insertion.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InsertSpan {
+    pub range: Range<usize>,
+    pub text: String,
+}
+
 const MAX_SPANS: usize = 256;
+const MAX_INSERTION: usize = 256;
 
 pub fn flatten_events(lang: &Lang, component: &Component) -> (Vec<Cell>, Vec<ClickSpan>) {
+    let (cells, spans, _) = flatten_chat(lang, component, true);
+    (cells, spans)
+}
+
+/// A chat message's cells, click spans and insertion spans; `colors` false strips `§` codes like
+/// vanilla's `chatColors` option.
+pub fn flatten_chat(
+    lang: &Lang,
+    component: &Component,
+    colors: bool,
+) -> (Vec<Cell>, Vec<ClickSpan>, Vec<InsertSpan>) {
     let mut out = Vec::new();
     let mut budget = Budget {
         steps: MAX_STEPS,
         depth: 0,
         spans: Some(Vec::new()),
+        inserts: Some(Vec::new()),
+        strip: !colors,
     };
     flatten_bounded(lang, component, Style::default(), &mut out, &mut budget);
     out.truncate(MAX_CELLS);
     let mut spans = budget.spans.unwrap_or_default();
     spans.retain(|s| s.range.start < out.len());
-    (out, spans)
+    let mut inserts = budget.inserts.unwrap_or_default();
+    inserts.retain(|s| s.range.start < out.len());
+    (out, spans, inserts)
 }
 
 /// The innermost click event covering `index`.
@@ -102,6 +133,8 @@ struct Budget {
     steps: usize,
     depth: usize,
     spans: Option<Vec<ClickSpan>>,
+    inserts: Option<Vec<InsertSpan>>,
+    strip: bool,
 }
 
 impl Budget {
@@ -129,6 +162,8 @@ pub fn flatten_into(lang: &Lang, component: &Component, parent: Style, out: &mut
         steps: MAX_STEPS,
         depth: 0,
         spans: None,
+        inserts: None,
+        strip: false,
     };
     flatten_bounded(lang, component, parent, out, &mut budget);
     out.truncate(MAX_CELLS);
@@ -149,7 +184,7 @@ fn flatten_bounded(
     match &component.content {
         Content::Text(text) => {
             if budget.charge(text.len(), out) {
-                push_legacy(out, text, style);
+                push_formatted(out, text, style, budget.strip);
             }
         }
         Content::Translatable {
@@ -163,10 +198,12 @@ fn flatten_bounded(
                 .unwrap_or(key.as_str());
             expand_template(lang, template, args, style, out, budget);
         }
-        Content::Keybind(key) => push_legacy(out, key, style),
-        Content::Score { name, .. } => push_legacy(out, name, style),
-        Content::Selector { selector, .. } => push_legacy(out, selector, style),
-        Content::Nbt(nbt) => push_legacy(out, &nbt.path, style),
+        Content::Keybind(key) => push_formatted(out, key, style, budget.strip),
+        Content::Score { name, .. } => push_formatted(out, name, style, budget.strip),
+        Content::Selector { selector, .. } => {
+            push_formatted(out, selector, style, budget.strip);
+        }
+        Content::Nbt(nbt) => push_formatted(out, &nbt.path, style, budget.strip),
         Content::Object { fallback, .. } => {
             if let Some(fallback) = fallback {
                 flatten_bounded(lang, fallback, style, out, budget);
@@ -183,6 +220,16 @@ fn flatten_bounded(
         spans.push(ClickSpan {
             range: start..out.len(),
             event: (**event).clone(),
+        });
+    }
+    if let (Some(inserts), Some(text)) = (&mut budget.inserts, &component.style.insertion)
+        && inserts.len() < MAX_SPANS
+        && out.len() > start
+        && text.chars().count() <= MAX_INSERTION
+    {
+        inserts.push(InsertSpan {
+            range: start..out.len(),
+            text: text.clone(),
         });
     }
     budget.depth -= 1;
@@ -217,7 +264,7 @@ fn expand_template(
                 rest = &after[1..];
             }
             Some(c @ ('s' | 'd')) => {
-                push_legacy(out, &std::mem::take(&mut literal), style);
+                push_formatted(out, &std::mem::take(&mut literal), style, budget.strip);
                 let slot = match index {
                     Some(n) => n.saturating_sub(1),
                     None => {
@@ -241,17 +288,17 @@ fn expand_template(
         }
     }
     literal.push_str(rest);
-    push_legacy(out, &literal, style);
+    push_formatted(out, &literal, style, budget.strip);
 }
 
 fn push_arg(lang: &Lang, arg: &Arg, style: Style, out: &mut Vec<Cell>, budget: &mut Budget) {
     match arg {
         Arg::Str(s) => {
             if budget.charge(s.len(), out) {
-                push_legacy(out, s, style);
+                push_formatted(out, s, style, budget.strip);
             }
         }
-        Arg::Number(n) => push_legacy(out, &number_text(n), style),
+        Arg::Number(n) => push_formatted(out, &number_text(n), style, budget.strip),
         Arg::Component(c) => flatten_bounded(lang, c, style, out, budget),
     }
 }
@@ -523,5 +570,33 @@ mod tests {
         }
         let (_, spans) = flatten_events(&Lang::default(), &root);
         assert!(spans.len() <= 256);
+    }
+
+    #[test]
+    fn chat_colors_off_strips_legacy_codes_but_keeps_styles() {
+        let message = Component::text("§cred").with(Component::text("blue").styled(
+            mcr_protocol::types::text::Style {
+                color: Some(mcr_protocol::types::text::Color::Named(
+                    mcr_protocol::types::text::NamedColor::Blue,
+                )),
+                insertion: Some("ins".into()),
+                ..Default::default()
+            },
+        ));
+        let (on, _, inserts) = flatten_chat(&Lang::default(), &message, true);
+        let (off, _, _) = flatten_chat(&Lang::default(), &message, false);
+        let text = |cells: &[Cell]| cells.iter().map(|c| c.ch).collect::<String>();
+        assert_eq!(text(&on), "redblue");
+        assert_eq!(text(&off), "redblue");
+        assert_eq!(on[0].style.color, Some(0xFF_5555));
+        assert_eq!(off[0].style.color, None);
+        assert_eq!(off[3].style.color, Some(0x55_55FF));
+        assert_eq!(
+            inserts,
+            [InsertSpan {
+                range: 3..7,
+                text: "ins".into()
+            }]
+        );
     }
 }

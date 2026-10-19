@@ -476,6 +476,10 @@ impl SuggestSource for Source<'_> {
         self.0.players.iter().map(|p| p.name.clone()).collect()
     }
 
+    fn selectors(&self) -> bool {
+        self.0.player.permission_level >= 2
+    }
+
     fn registry(&self, id: &str) -> Vec<String> {
         const LIMIT: usize = 4096;
         if let Some(r) = self.0.registries.get(id) {
@@ -498,7 +502,7 @@ impl SuggestSource for Source<'_> {
 
 #[derive(Debug, Default)]
 pub struct Bridge {
-    request: Option<(String, usize)>,
+    request: Option<(String, usize, bool)>,
     result: Option<SuggestionSet>,
 }
 
@@ -506,8 +510,8 @@ pub struct Bridge {
 pub struct BridgeSuggester(pub Rc<RefCell<Bridge>>);
 
 impl CommandSuggester for BridgeSuggester {
-    fn request(&mut self, text: &str, cursor: usize) {
-        self.0.borrow_mut().request = Some((text.to_owned(), cursor));
+    fn request(&mut self, text: &str, cursor: usize, suggest: bool) {
+        self.0.borrow_mut().request = Some((text.to_owned(), cursor, suggest));
     }
 
     fn poll(&mut self) -> Option<SuggestionSet> {
@@ -517,9 +521,10 @@ impl CommandSuggester for BridgeSuggester {
 
 struct Waiting {
     id: i32,
-    start: usize,
     cursor: usize,
-    local: Vec<String>,
+    parse: mcr_client::CommandParse,
+    completion: mcr_client::Completion,
+    highlight: Vec<(std::ops::Range<usize>, u32)>,
 }
 
 #[derive(Default)]
@@ -529,6 +534,45 @@ pub struct SuggestEngine {
     waiting: Option<Waiting>,
 }
 
+/// Byte ranges of `text` as character ranges.
+fn char_ranges(
+    text: &str,
+    ranges: Vec<(std::ops::Range<usize>, u32)>,
+) -> Vec<(std::ops::Range<usize>, u32)> {
+    let index = |b: usize| text[..b.min(text.len())].chars().count();
+    ranges
+        .into_iter()
+        .map(|(r, c)| (index(r.start)..index(r.end), c))
+        .collect()
+}
+
+/// `CommandSuggestions#updateUsageInfo` once the suggestions are known.
+fn finish(
+    tree: &mcr_client::CommandTree,
+    parse: &mcr_client::CommandParse,
+    cursor: usize,
+    mut suggestions: Vec<Suggestion>,
+    highlight: Vec<(std::ops::Range<usize>, u32)>,
+) -> SuggestionSet {
+    let text = parse.input.clone();
+    suggestions.sort_by_cached_key(|s| s.text.to_lowercase());
+    let byte_cursor = text
+        .char_indices()
+        .nth(cursor)
+        .map_or(text.len(), |(i, _)| i);
+    let usage = tree.usage_info(parse, byte_cursor, suggestions.is_empty());
+    let usage_start = text[..usage.start.min(text.len())].chars().count();
+    SuggestionSet {
+        text,
+        suggestions,
+        usage: usage.lines,
+        usage_start,
+        highlight,
+        command: true,
+        pending: false,
+    }
+}
+
 impl SuggestEngine {
     pub fn suggester(&self) -> Box<dyn CommandSuggester> {
         Box::new(BridgeSuggester(self.bridge.clone()))
@@ -536,7 +580,13 @@ impl SuggestEngine {
 
     pub fn pump(&mut self, client: &mut Client) {
         if let Some(w) = &self.waiting
-            && let Some(reply) = client.state.command_reply.as_ref().filter(|r| r.id == w.id)
+            && client
+                .state
+                .command_reply
+                .as_ref()
+                .is_some_and(|r| r.id == w.id)
+            && let Some(w) = self.waiting.take()
+            && let Some(reply) = client.state.command_reply.as_ref()
         {
             let mut suggestions: Vec<Suggestion> = reply
                 .items
@@ -548,48 +598,76 @@ impl SuggestEngine {
                     tooltip: tooltip.clone(),
                 })
                 .collect();
-            for text in &w.local {
+            for text in &w.completion.local {
                 if !suggestions.iter().any(|s| s.text == *text) {
                     suggestions.push(Suggestion {
-                        start: w.start,
+                        start: w.completion.start,
                         end: w.cursor,
                         text: text.clone(),
                         tooltip: None,
                     });
                 }
             }
-            self.bridge.borrow_mut().result = Some(SuggestionSet {
+            let set = finish(
+                &client.state.commands,
+                &w.parse,
+                w.cursor,
                 suggestions,
-                usage: Vec::new(),
-            });
-            self.waiting = None;
+                w.highlight,
+            );
+            self.bridge.borrow_mut().result = Some(set);
         }
-        let Some((text, cursor)) = self.bridge.borrow_mut().request.take() else {
+        let Some((text, cursor, suggest)) = self.bridge.borrow_mut().request.take() else {
             return;
         };
         self.waiting = None;
         if !text.starts_with('/') {
-            let (start, matches) =
-                mcr_client::complete_chat(&client.state.chat_completions, &text, cursor);
-            let suggestions = matches
-                .into_iter()
-                .map(|text| Suggestion {
-                    start,
-                    end: cursor,
-                    text,
-                    tooltip: None,
-                })
-                .collect();
+            if !suggest {
+                return;
+            }
+            let source = Source(&client.state);
+            let mut names = source.players();
+            names.extend(client.state.chat_completions.iter().cloned());
+            let (start, matches) = mcr_client::complete_chat(&names, &text, cursor);
+            let suggestions = if text.trim().is_empty() {
+                Vec::new()
+            } else {
+                matches
+                    .into_iter()
+                    .map(|t| Suggestion {
+                        start,
+                        end: cursor,
+                        text: t,
+                        tooltip: None,
+                    })
+                    .collect()
+            };
             self.bridge.borrow_mut().result = Some(SuggestionSet {
+                text,
                 suggestions,
-                usage: Vec::new(),
+                ..SuggestionSet::default()
             });
             return;
         }
-        let completion = client
-            .state
-            .commands
-            .complete(&text, cursor, &Source(&client.state));
+        let source = Source(&client.state);
+        let tree = &client.state.commands;
+        let rules = mcr_client::ParseRules {
+            restricted: true,
+            selectors: mcr_client::SuggestSource::selectors(&source),
+        };
+        let parse = tree.parse(&text, rules);
+        let highlight = char_ranges(&text, parse.highlight());
+        if !suggest {
+            self.bridge.borrow_mut().result = Some(SuggestionSet {
+                text,
+                highlight,
+                command: true,
+                pending: true,
+                ..SuggestionSet::default()
+            });
+            return;
+        }
+        let completion = tree.complete_parsed(&parse, cursor, &source);
         if completion.ask_server {
             self.next_id = self.next_id.wrapping_add(1);
             let sent: String = text.chars().take(cursor).collect();
@@ -597,31 +675,41 @@ impl SuggestEngine {
                 .request_command_suggestions(self.next_id, &sent)
                 .is_ok()
             {
+                self.bridge.borrow_mut().result = Some(SuggestionSet {
+                    text,
+                    highlight: highlight.clone(),
+                    command: true,
+                    pending: true,
+                    ..SuggestionSet::default()
+                });
                 self.waiting = Some(Waiting {
                     id: self.next_id,
-                    start: completion.start,
                     cursor,
-                    local: completion.local,
+                    parse,
+                    completion,
+                    highlight,
                 });
                 return;
             }
         }
         let suggestions: Vec<Suggestion> = completion
             .local
-            .into_iter()
-            .map(|text| Suggestion {
+            .iter()
+            .map(|t| Suggestion {
                 start: completion.start,
                 end: cursor,
-                text,
+                text: t.clone(),
                 tooltip: None,
             })
             .collect();
-        let usage = if suggestions.is_empty() {
-            completion.usage
-        } else {
-            Vec::new()
-        };
-        self.bridge.borrow_mut().result = Some(SuggestionSet { suggestions, usage });
+        let set = finish(
+            &client.state.commands,
+            &parse,
+            cursor,
+            suggestions,
+            highlight,
+        );
+        self.bridge.borrow_mut().result = Some(set);
     }
 }
 

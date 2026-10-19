@@ -31,6 +31,10 @@ pub struct EditBox {
     focus_ms: u64,
     changed: bool,
     widths: Vec<f32>,
+    /// Colour runs over the value as (character range, RGB), like vanilla's text formatters.
+    colors: Vec<(std::ops::Range<usize>, u32)>,
+    /// Grey ghost text drawn after the value while the cursor is at its end.
+    suggestion: Option<String>,
 }
 
 impl EditBox {
@@ -55,7 +59,29 @@ impl EditBox {
             focus_ms: 0,
             changed: false,
             widths: Vec::new(),
+            colors: Vec::new(),
+            suggestion: None,
         }
+    }
+
+    pub fn set_colors(&mut self, colors: Vec<(std::ops::Range<usize>, u32)>) {
+        self.colors = colors;
+    }
+
+    pub fn set_suggestion(&mut self, suggestion: Option<String>) {
+        self.suggestion = suggestion.filter(|s| !s.is_empty());
+    }
+
+    pub fn suggestion(&self) -> Option<&str> {
+        self.suggestion.as_deref()
+    }
+
+    /// The colour of the character at `index`, or `base`.
+    fn color_at(&self, index: usize, base: u32) -> u32 {
+        self.colors
+            .iter()
+            .find(|(r, _)| r.contains(&index))
+            .map_or(base, |&(_, rgb)| (base & 0xFF00_0000) | rgb)
     }
 
     pub fn with_max_length(mut self, max: usize) -> Self {
@@ -403,7 +429,28 @@ impl EditBox {
         {
             cx.text(&hint, tx, ty, 0xFF80_8080, true);
         }
-        cx.text(&displayed, tx, ty, color, true);
+        if self.colors.is_empty() {
+            cx.text(&displayed, tx, ty, color, true);
+        } else {
+            let mut x = tx as f32;
+            let mut run = String::new();
+            let mut run_color = None;
+            for (i, ch) in displayed.chars().enumerate() {
+                let c = self.color_at(self.display_pos + i, color);
+                if run_color.is_some_and(|r| r != c) {
+                    x += cx
+                        .frame
+                        .text(&run, x, ty as f32, run_color.unwrap_or(color), true);
+                    run.clear();
+                }
+                run_color = Some(c);
+                run.push(ch);
+            }
+            if !run.is_empty() {
+                cx.frame
+                    .text(&run, x, ty as f32, run_color.unwrap_or(color), true);
+            }
+        }
         let rel_cursor = self.cursor.saturating_sub(self.display_pos).min(shown);
         let prefix: String = displayed.chars().take(rel_cursor).collect();
         let cursor_x = tx + cx.text_width(&prefix);
@@ -415,6 +462,10 @@ impl EditBox {
             let x1 = tx + cx.text_width(&pre(rel(b)));
             cx.frame
                 .fill_rect(x0, ty - 1, x1.min(x + w), ty + 10, SELECTION);
+        }
+        let insert = self.cursor < self.len() || self.len() >= self.max_length;
+        if !insert && let Some(ghost) = self.suggestion.clone() {
+            cx.text(&ghost, cursor_x, ty, 0xFF80_8080, true);
         }
         let blink = (cx.now_ms.saturating_sub(self.focus_ms) / BLINK_MS).is_multiple_of(2);
         if focused && blink && self.editable {

@@ -18,6 +18,8 @@ pub enum DisconnectReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatTag {
     System,
+    /// `GuiMessageTag.systemSinglePlayer`: vanilla tags every system message with it.
+    SystemSinglePlayer,
     NotSecure,
     /// The server changed a signed message; `original` is the signed text.
     Modified {

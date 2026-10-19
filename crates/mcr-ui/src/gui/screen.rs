@@ -131,7 +131,14 @@ pub enum ScreenAction {
         id: mcr_buf::Identifier,
         payload: Option<mcr_nbt::Value>,
     },
-    DialogCommand(String),
+    /// A clicked `run_command`: the app checks it like `sendUnattendedCommand` and prompts if needed.
+    RunCommand(String),
+    /// A clicked `open_url` that passed the URL checks; the app applies `chatLinks` and the prompt.
+    OpenLink(String),
+    /// Open chat with this text (`Copy to Chat Screen`).
+    OpenChat(String),
+    /// Show the next delayed chat message.
+    ChatQueueNext,
     DialogDisconnect,
     PlaySound(&'static str),
 }
@@ -226,7 +233,10 @@ impl std::fmt::Debug for ScreenAction {
             Self::Editor(packet) => f.debug_tuple("Editor").field(packet).finish(),
             Self::ShowDialog(_) => f.write_str("ShowDialog(..)"),
             Self::CustomClick { id, .. } => f.debug_tuple("CustomClick").field(id).finish(),
-            Self::DialogCommand(c) => f.debug_tuple("DialogCommand").field(c).finish(),
+            Self::RunCommand(c) => f.debug_tuple("RunCommand").field(c).finish(),
+            Self::OpenLink(u) => f.debug_tuple("OpenLink").field(u).finish(),
+            Self::OpenChat(t) => f.debug_tuple("OpenChat").field(t).finish(),
+            Self::ChatQueueNext => f.write_str("ChatQueueNext"),
             Self::DialogDisconnect => f.write_str("DialogDisconnect"),
             Self::PlaySound(s) => f.debug_tuple("PlaySound").field(s).finish(),
         }

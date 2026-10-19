@@ -1391,6 +1391,12 @@ impl ContainerScreen {
                     let page = n.saturating_sub(1).max(0);
                     out.push(ScreenAction::ContainerButton(100 + page));
                 }
+                ClickEvent::RunCommand(command) => {
+                    if let Some(command) = crate::gui::clicks::clicked_command(&command) {
+                        out.push(ScreenAction::CloseContainer);
+                        out.push(ScreenAction::RunCommand(command));
+                    }
+                }
                 other => click_event_actions(other, out),
             }
             return true;

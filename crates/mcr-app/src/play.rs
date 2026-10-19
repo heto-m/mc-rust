@@ -94,6 +94,7 @@ fn container_menu(
 fn line_tag(tag: mcr_client::ChatTag) -> mcr_ui::ChatLineTag {
     match tag {
         mcr_client::ChatTag::System => mcr_ui::ChatLineTag::System,
+        mcr_client::ChatTag::SystemSinglePlayer => mcr_ui::ChatLineTag::SystemSinglePlayer,
         mcr_client::ChatTag::NotSecure => mcr_ui::ChatLineTag::NotSecure,
         mcr_client::ChatTag::Modified { original } => mcr_ui::ChatLineTag::Modified { original },
         mcr_client::ChatTag::Error => mcr_ui::ChatLineTag::Error,
@@ -101,9 +102,11 @@ fn line_tag(tag: mcr_client::ChatTag) -> mcr_ui::ChatLineTag {
 }
 
 /// Vanilla's chat log tags.
+const COMMAND_HISTORY_FILE: &str = "command_history.txt";
+
 fn tag_label(tag: &mcr_client::ChatTag) -> &'static str {
     match tag {
-        mcr_client::ChatTag::System => "System",
+        mcr_client::ChatTag::System | mcr_client::ChatTag::SystemSinglePlayer => "System",
         mcr_client::ChatTag::NotSecure => "Not Secure",
         mcr_client::ChatTag::Modified { .. } => "Modified",
         mcr_client::ChatTag::Error => "Chat Error",
@@ -441,6 +444,7 @@ pub struct Play {
     hotbars: Rc<RefCell<HotbarStore>>,
     view_cache: ViewCache,
     hotbar_path: std::path::PathBuf,
+    command_history_path: std::path::PathBuf,
     death_shown: bool,
     death_message: Option<mcr_protocol::types::text::Component>,
     pub leave: bool,
@@ -579,6 +583,10 @@ impl Play {
             let assets = assets.clone();
             move |path| assets.read(path)
         }));
+        let command_history_path = cfg.game_dir.join(COMMAND_HISTORY_FILE);
+        if let Ok(text) = std::fs::read_to_string(&command_history_path) {
+            hud.chat.borrow_mut().load_command_history(&text);
+        }
         let hotbar_path = cfg.game_dir.join("hotbar.txt");
         let hotbars = Rc::new(RefCell::new(
             std::fs::read_to_string(&hotbar_path)
@@ -642,6 +650,7 @@ impl Play {
             hotbars,
             view_cache: ViewCache::default(),
             hotbar_path,
+            command_history_path,
             death_shown: false,
             death_message: None,
             leave: false,
@@ -1566,7 +1575,18 @@ impl Play {
                     }
                     _ => println!("chat: {}", sanitize_for_log(&text)),
                 }
-                if kind != ChatKind::ActionBar {
+                if matches!(kind, ChatKind::Player | ChatKind::Disguised) {
+                    let now = self.started.elapsed().as_millis() as u64;
+                    self.hud.add_player_chat(
+                        &mut self.gui.ui,
+                        &message,
+                        self.ticks as u32,
+                        &self.options,
+                        tag.map(line_tag),
+                        signature.map(|s| s.0),
+                        now,
+                    );
+                } else if kind != ChatKind::ActionBar {
                     self.hud.add_chat(
                         &mut self.gui.ui,
                         &message,
@@ -2085,6 +2105,7 @@ impl Play {
                 y,
                 dx: 0.0,
                 dy: lines,
+                mods: self.mods,
             });
             return;
         }
@@ -2173,6 +2194,7 @@ impl Play {
             self.stack.input(&mut env, &input, &mut actions);
         }
         self.handle_actions(actions);
+        self.suggest.pump(&mut self.world.client);
     }
 
     pub fn cursor_moved(&mut self, px: f64, py: f64) {
@@ -2231,7 +2253,7 @@ impl Play {
             message,
             self.ticks as u32,
             &self.options,
-            Some(mcr_ui::ChatLineTag::System),
+            Some(mcr_ui::ChatLineTag::SystemSinglePlayer),
             None,
         );
     }
@@ -2407,6 +2429,29 @@ impl Play {
         self.chat_depth = Some(self.stack.len());
     }
 
+    /// `ClientPacketListener#sendUnattendedCommand`: a clicked command runs at once when it parses
+    /// with no permissions and sends no signed chat, otherwise the player confirms it.
+    fn run_clicked_command(&mut self, command: String) {
+        use mcr_client::CommandCheck;
+        use mcr_ui::CommandPrompt;
+        let state = &self.world.client.state;
+        let check = state
+            .commands
+            .check(&command, state.player.permission_level >= 2);
+        let back = !self.stack.is_empty();
+        let prompt = match check {
+            CommandCheck::NoIssues => {
+                self.net(|c| c.send_command(&command));
+                return;
+            }
+            CommandCheck::ParseErrors => CommandPrompt::ParseErrors,
+            CommandCheck::PermissionsRequired => CommandPrompt::PermissionsRequired,
+            CommandCheck::SignatureRequired => CommandPrompt::SignatureRequired { suggest: !back },
+        };
+        let screen = mcr_ui::ConfirmScreen::command_prompt(&command, prompt, back);
+        self.push_screen(Box::new(screen));
+    }
+
     pub fn open_inventory(&mut self) {
         if self.busy() {
             return;
@@ -2554,6 +2599,12 @@ impl Play {
 
     fn screens_tick(&mut self) {
         self.suggest.pump(&mut self.world.client);
+        let history = self.hud.chat.borrow_mut().take_command_history();
+        if let Some(text) = history
+            && let Err(e) = std::fs::write(&self.command_history_path, text)
+        {
+            tracing::warn!("saving {COMMAND_HISTORY_FILE}: {e}");
+        }
         self.death_check();
         self.bed_check();
         if self.stack.is_empty() {
@@ -2737,8 +2788,31 @@ impl Play {
                     self.dialog_replies
                         .push(mcr_client::DialogReply::Custom { id, payload });
                 }
-                ScreenAction::DialogCommand(command) => {
-                    self.net(|c| c.send_command(&command));
+                ScreenAction::RunCommand(command) => self.run_clicked_command(command),
+                ScreenAction::OpenLink(url) => {
+                    if self.options.chat_links {
+                        if self.options.chat_links_prompt {
+                            if let Some(confirm) = mcr_ui::ConfirmScreen::link(url) {
+                                self.push_screen(Box::new(confirm));
+                            }
+                        } else {
+                            gui::open_url(&url);
+                        }
+                    }
+                }
+                ScreenAction::OpenChat(text) => {
+                    self.stack.clear();
+                    self.chat_depth = None;
+                    self.open_chat(&text);
+                }
+                ScreenAction::ChatQueueNext => {
+                    let now = self.started.elapsed().as_millis() as u64;
+                    self.hud.accept_next_chat(
+                        &mut self.gui.ui,
+                        self.ticks as u32,
+                        &self.options,
+                        now,
+                    );
                 }
                 ScreenAction::DialogDisconnect => self.leave = true,
                 ScreenAction::PlaySound(name) => {
@@ -2830,6 +2904,10 @@ impl Play {
         };
         self.ui_click(x as f32, y as f32, button);
         true
+    }
+
+    pub fn modifiers(&self) -> Modifiers {
+        self.mods
     }
 
     pub fn submit_chat(&mut self, line: &str) {
@@ -3091,8 +3169,12 @@ impl Play {
 
         self.update_gui_size();
         self.tick_toasts();
-        self.hud
-            .tick_chat(&mut self.gui.ui, self.ticks as u32, &self.options);
+        self.hud.tick_chat(
+            &mut self.gui.ui,
+            self.ticks as u32,
+            &self.options,
+            self.started.elapsed().as_millis() as u64,
+        );
         let hidden = self.hud_hidden || self.java_gui;
         let spectator_alpha = self.spectator_menu_alpha();
         let hotbar_keys = self.keys.hotbar.map(|i| self.bindings.input(i));
@@ -3138,7 +3220,7 @@ impl Play {
                     fov_y_degrees: camera.fov_y.to_degrees(),
                 },
                 eye_of: &|e| crate::entities::eye_position(self.data, e),
-                show_heads: self.world.client.config.online.is_some(),
+                show_heads: self.world.client.state.server.online_mode,
                 millis: self.started.elapsed().as_millis() as u64,
                 spectator: self.world.client.spectator_menu().map(|menu| {
                     crate::hud::SpectatorHud {

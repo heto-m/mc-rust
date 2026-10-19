@@ -534,6 +534,12 @@ impl BookViewScreen {
                 let target = usize::try_from(n.saturating_sub(1)).unwrap_or(0);
                 self.set_page(target, out);
             }
+            ClickEvent::RunCommand(command) => {
+                if let Some(command) = super::clicks::clicked_command(&command) {
+                    out.push(ScreenAction::Pop);
+                    out.push(ScreenAction::RunCommand(command));
+                }
+            }
             other => click_event_actions(other, out),
         }
     }

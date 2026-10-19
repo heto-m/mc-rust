@@ -13,8 +13,6 @@ use super::world_list::{SelectWorldScreen, SharedWorlds};
 
 pub(super) const WHITE: u32 = 0xFFFF_FFFF;
 const MAX_LINES: usize = 40;
-const MAX_COMMAND: usize = 256;
-const MAX_COPY: usize = 256;
 const MAX_URL: usize = 512;
 
 /// Printable text only: no controls, `§`, bidi overrides, zero-width or other format characters.
@@ -112,6 +110,17 @@ type Choice = (String, Box<dyn Fn() -> Vec<ScreenAction>>);
 const PANEL_BACKDROP: u32 = 0xF010_1010;
 
 /// A title, a message and a row of buttons whose outcomes are produced by closures.
+/// Why a clicked command needs the player's confirmation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandPrompt {
+    ParseErrors,
+    PermissionsRequired,
+    /// It sends chat as the player; `suggest` offers to open chat with it instead of copying it.
+    SignatureRequired {
+        suggest: bool,
+    },
+}
+
 pub struct ConfirmScreen {
     title: String,
     message: String,
@@ -173,50 +182,56 @@ impl ConfirmScreen {
         ))
     }
 
-    /// `None` unless the command is printable text, so the prompt shows exactly what is sent.
-    pub fn command(command: &str) -> Option<Self> {
-        let command = command.strip_prefix('/').unwrap_or(command);
-        if command.is_empty() || command.chars().count() > MAX_COMMAND || !is_plain(command) {
-            return None;
-        }
+    /// `ClientPacketListener#openSendConfirmationWindow` for a clicked command that failed the check;
+    /// `back` when a screen stays open under the prompt.
+    pub fn command_prompt(command: &str, prompt: CommandPrompt, back: bool) -> Self {
         let run = command.to_owned();
-        Some(Self::new(
-            "lang:chat.link.confirm",
-            &format!("/{command}"),
-            vec![
+        let (key, accept): (&str, Choice) = match prompt {
+            CommandPrompt::ParseErrors | CommandPrompt::PermissionsRequired => (
+                if prompt == CommandPrompt::ParseErrors {
+                    "multiplayer.confirm_command.parse_errors"
+                } else {
+                    "multiplayer.confirm_command.permissions_required"
+                },
                 (
-                    "lang:gui.yes".into(),
+                    "lang:multiplayer.confirm_command.run_command".into(),
                     Box::new(move || {
                         vec![ScreenAction::SendCommand(run.clone()), ScreenAction::Pop]
                     }),
                 ),
-                ("lang:gui.no".into(), Box::new(|| vec![ScreenAction::Pop])),
-            ],
-        ))
-    }
-
-    /// `None` unless the text is short and printable.
-    pub fn copy(text: &str) -> Option<Self> {
-        if text.is_empty() || text.chars().count() > MAX_COPY || !is_plain(text) {
-            return None;
-        }
-        let copy = text.to_owned();
-        Some(Self::new(
-            "lang:chat.copy",
-            text,
-            vec![
+            ),
+            CommandPrompt::SignatureRequired { suggest: true } => (
+                "multiplayer.confirm_command.signature_required",
                 (
-                    "lang:gui.yes".into(),
+                    "lang:multiplayer.confirm_command.suggest_command".into(),
+                    Box::new(move || {
+                        vec![ScreenAction::Pop, ScreenAction::OpenChat(format!("/{run}"))]
+                    }),
+                ),
+            ),
+            CommandPrompt::SignatureRequired { suggest: false } => (
+                "multiplayer.confirm_command.signature_required",
+                (
+                    "lang:chat.copy".into(),
                     Box::new(move || {
                         vec![
-                            ScreenAction::CopyToClipboard(copy.clone()),
+                            ScreenAction::CopyToClipboard(format!("/{run}")),
                             ScreenAction::Pop,
                         ]
                     }),
                 ),
-                ("lang:gui.no".into(), Box::new(|| vec![ScreenAction::Pop])),
-            ],
-        ))
+            ),
+        };
+        let no = if back {
+            "lang:gui.back"
+        } else {
+            "lang:gui.cancel"
+        };
+        Self::new(
+            "lang:multiplayer.confirm_command.title",
+            &format!("lang:{key}|§e{command}§r"),
+            vec![accept, (no.into(), Box::new(|| vec![ScreenAction::Pop]))],
+        )
     }
 
     pub fn with_delay(mut self, ticks: u32) -> Self {

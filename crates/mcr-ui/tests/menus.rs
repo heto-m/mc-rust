@@ -15,7 +15,7 @@ use mcr_ui::{
 struct Canned(Option<SuggestionSet>);
 
 impl CommandSuggester for Canned {
-    fn request(&mut self, _text: &str, _cursor: usize) {}
+    fn request(&mut self, _text: &str, _cursor: usize, _suggest: bool) {}
 
     fn poll(&mut self) -> Option<SuggestionSet> {
         self.0.take()
@@ -68,7 +68,9 @@ fn chat_suggestions_shot() {
             .iter()
             .map(|t| suggestion(1, 3, t))
             .collect(),
-        usage: Vec::new(),
+        text: "/ga".into(),
+        command: true,
+        ..SuggestionSet::default()
     };
     let mut screen = ChatScreen::new(chat, Box::new(Canned(Some(set))), ChatOptions::default());
     screen.init(427, 240);
@@ -250,7 +252,10 @@ fn chat_hud_resolves_clicks_on_wrapped_components() {
 fn chat_scrolls_and_clamps() {
     let Some(mut h) = Harness::new() else { return };
     let chat: SharedChat = Rc::new(RefCell::new(ChatHud::default()));
-    let options = ChatOptions::default();
+    let options = ChatOptions {
+        visible_lines: 20,
+        ..ChatOptions::default()
+    };
     for i in 0..30 {
         chat.borrow_mut()
             .add_text(&mut h.ui, &format!("line {i}"), 0, &options);
@@ -278,6 +283,7 @@ fn chat_scrolls_and_clamps() {
             y: 10.0,
             dx: 0.0,
             dy: 1.0,
+            mods: mcr_ui::Modifiers::NONE,
         }],
     );
     assert_eq!(chat.borrow().scroll(), 7);

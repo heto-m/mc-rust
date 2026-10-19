@@ -90,6 +90,7 @@ pub enum UiInput {
         y: f32,
         dx: f32,
         dy: f32,
+        mods: Modifiers,
     },
     Key {
         key: Key,

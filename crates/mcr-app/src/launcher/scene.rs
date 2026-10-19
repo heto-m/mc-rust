@@ -176,6 +176,7 @@ impl Launcher {
             y,
             dx: 0.0,
             dy: lines,
+            mods: mcr_ui::Modifiers::NONE,
         });
     }
 

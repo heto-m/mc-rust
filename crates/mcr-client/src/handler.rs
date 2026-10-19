@@ -1660,7 +1660,11 @@ impl ClientState {
         timestamp_millis: Option<i64>,
         out: &mut Outbox,
     ) {
-        let tag = matches!(kind, ChatKind::System | ChatKind::Disguised).then_some(ChatTag::System);
+        let tag = match kind {
+            ChatKind::System => Some(ChatTag::SystemSinglePlayer),
+            ChatKind::Disguised => Some(ChatTag::System),
+            ChatKind::Player | ChatKind::ActionBar => None,
+        };
         self.push_chat_tagged(kind, sender, content, signature, timestamp_millis, tag, out);
     }
 
