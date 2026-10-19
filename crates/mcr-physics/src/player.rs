@@ -15,9 +15,18 @@ pub(crate) struct FluidState {
     pub eye_in_water: bool,
 }
 
+/// What the body stands for: the local player, a mob the player rides, or a boat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimKind {
+    Player,
+    Mob,
+    Boat,
+}
+
 #[derive(Debug, Clone)]
 pub struct PlayerPhysics {
     pub(crate) data: &'static PhysicsData,
+    pub kind: SimKind,
     pub pos: [f64; 3],
     pub vel: [f64; 3],
     pub yaw: f32,
@@ -54,6 +63,14 @@ pub struct PlayerPhysics {
     /// Boxes of nearby entities the player collides with (boats, shulkers), refreshed by the caller.
     pub entity_colliders: Vec<Aabb>,
     pub border: Option<BorderBounds>,
+    /// `EntityTypeTags.CAN_FLOAT_WHILE_RIDDEN`: rises in deep water while carrying a rider.
+    pub floats_while_ridden: bool,
+    /// `isPushedByFluid`; the nautilus ignores currents.
+    pub pushed_by_fluid: bool,
+    /// The nautilus swims without gravity or water drag rules of other mobs.
+    pub free_swimmer: bool,
+    /// The camera follows another entity: vanilla sends no movement packets then.
+    pub detached_camera: bool,
     pub(crate) fall_flying_started: bool,
     pub(crate) abilities_changed: bool,
     pub(crate) fluid: FluidState,
@@ -97,6 +114,7 @@ impl PlayerPhysics {
     pub fn with_data(data: &'static PhysicsData, pos: [f64; 3]) -> Self {
         Self {
             data,
+            kind: SimKind::Player,
             pos,
             vel: [0.0; 3],
             yaw: 0.0,
@@ -128,6 +146,10 @@ impl PlayerPhysics {
             sleeping: false,
             entity_colliders: Vec::new(),
             border: None,
+            floats_while_ridden: false,
+            pushed_by_fluid: true,
+            free_swimmer: false,
+            detached_camera: false,
             fall_flying_started: false,
             abilities_changed: false,
             fluid: FluidState::default(),
@@ -301,7 +323,9 @@ impl PlayerPhysics {
     }
 
     pub(crate) fn flying_speed(&self) -> f32 {
-        if self.abilities.flying {
+        if self.kind == SimKind::Mob {
+            self.speed() * 0.1
+        } else if self.abilities.flying {
             if self.sprinting {
                 self.abilities.flying_speed * 2.0
             } else {
@@ -360,6 +384,20 @@ impl PlayerPhysics {
         if self.sprinting != s.sprinting {
             sprint_command = Some(self.sprinting);
             s.sprinting = self.sprinting;
+        }
+        if self.detached_camera {
+            return MovementOutput {
+                kind: MoveKind::None,
+                pos: self.pos,
+                yaw: self.yaw,
+                pitch: self.pitch,
+                on_ground: self.on_ground,
+                horizontal_collision: self.horizontal_collision,
+                input: out_input,
+                sprint_command,
+                start_fall_flying: std::mem::take(&mut self.fall_flying_started),
+                abilities_changed: std::mem::take(&mut self.abilities_changed),
+            };
         }
         let d = [
             self.pos[0] - s.pos[0],

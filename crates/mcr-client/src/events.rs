@@ -278,6 +278,10 @@ pub enum ClientEvent {
         id: i32,
     },
     PlayerRotated,
+    /// The client turned the view by `yaw` degrees (a boat turning under its rider).
+    ViewTurned {
+        yaw: f32,
+    },
     HealthChanged,
     ExperienceChanged,
     /// The elder guardian curse: its ghost swims across the screen.

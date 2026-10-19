@@ -2,7 +2,7 @@
 
 use crate::aabb::Aabb;
 use crate::data::{FLUID_WATER, flag};
-use crate::player::PlayerPhysics;
+use crate::player::{PlayerPhysics, SimKind};
 use crate::trig;
 use crate::types::{Attributes, PlayerInput};
 use crate::world::CollisionWorld;
@@ -41,6 +41,7 @@ pub struct Boat {
 impl Boat {
     pub fn new(pos: [f64; 3], yaw: f32, width: f32, height: f32) -> Self {
         let mut body = PlayerPhysics::new(pos);
+        body.kind = SimKind::Boat;
         body.dims = Some((width, height));
         body.yaw = yaw;
         body.attributes = Attributes {
@@ -72,6 +73,15 @@ impl Boat {
     pub fn snap_to(&mut self, pos: [f64; 3], yaw: f32) {
         self.body.pos = pos;
         self.body.yaw = yaw;
+    }
+
+    /// `AbstractBoat#handleBubbleColumnEffect` for entity events 71 (down) and 72 (up).
+    pub fn bubble_column_effect(&mut self, drag_down: bool) {
+        if drag_down {
+            self.body.vel[1] -= 0.7;
+        } else {
+            self.body.vel[1] = 0.6;
+        }
     }
 
     fn state_fluid_height<W: CollisionWorld + ?Sized>(
@@ -310,6 +320,9 @@ impl Boat {
         self.last_yd = self.body.vel[1];
         let v = self.body.vel;
         self.body.do_move(world, v);
+        // Vanilla applies block effects twice per boat tick.
+        self.body.apply_effects_from_blocks(world);
+        self.body.apply_effects_from_blocks(world);
     }
 }
 
@@ -320,9 +333,20 @@ pub enum MountMode {
     Strider,
     Camel,
     HappyGhast,
+    Nautilus,
 }
 
 const CAMEL_DASH_COOLDOWN: i32 = 55;
+const NAUTILUS_DASH_COOLDOWN: i32 = 40;
+
+/// `Entity#calculateViewVector` in degrees.
+fn view_vector(pitch: f32, yaw: f32) -> [f64; 3] {
+    let p = f64::from(pitch * DEG_TO_RAD);
+    let y = f64::from(-yaw * DEG_TO_RAD);
+    let (cy, sy) = (trig::cos(y), trig::sin(y));
+    let (cp, sp) = (trig::cos(p), trig::sin(p));
+    [f64::from(sy * cp), f64::from(-sp), f64::from(cy * cp)]
+}
 
 fn wrap_degrees(v: f32) -> f32 {
     let mut d = v % 360.0;
@@ -349,6 +373,7 @@ pub struct Mount {
 impl Mount {
     pub fn new(pos: [f64; 3], yaw: f32, width: f32, height: f32, attributes: Attributes) -> Self {
         let mut body = PlayerPhysics::new(pos);
+        body.kind = SimKind::Mob;
         body.dims = Some((width, height));
         body.yaw = yaw;
         body.attributes = attributes;
@@ -364,7 +389,17 @@ impl Mount {
     pub fn with_mode(mut self, mode: MountMode) -> Self {
         self.mode = mode;
         self.body.stand_on_lava = mode == MountMode::Strider;
+        self.body.free_swimmer = mode == MountMode::Nautilus;
+        self.body.pushed_by_fluid = mode != MountMode::Nautilus;
         self
+    }
+
+    /// `PlayerRideableJumping#getJumpCooldown`: the jump bar does not charge while it runs.
+    pub fn jump_cooldown(&self) -> i32 {
+        match self.mode {
+            MountMode::Camel | MountMode::Nautilus => self.dash_cooldown,
+            _ => 0,
+        }
     }
 
     pub fn set_attributes(&mut self, attributes: Attributes) {
@@ -378,6 +413,9 @@ impl Mount {
     /// Queues a rider jump (`jump_amount` is the 0-100 charge the client reports).
     pub fn rider_jump(&mut self, jump_amount: i32) {
         if self.mode == MountMode::Camel && (self.dash_cooldown > 0 || !self.body.on_ground) {
+            return;
+        }
+        if self.mode == MountMode::Nautilus && self.dash_cooldown > 0 {
             return;
         }
         self.jump_pending = if jump_amount < 0 {
@@ -446,8 +484,10 @@ impl Mount {
         attr_speed: f32,
         ridden_speed: f32,
     ) -> f32 {
-        if self.mode == MountMode::HappyGhast {
-            return self.tick_ghast(world, rider, ridden_speed);
+        match self.mode {
+            MountMode::HappyGhast => return self.tick_ghast(world, rider, ridden_speed),
+            MountMode::Nautilus => return self.tick_nautilus(world, rider, attr_speed),
+            _ => {}
         }
         let axes = PlayerPhysics::rider_axes(rider);
         let mut input = match self.mode {
@@ -507,6 +547,53 @@ impl Mount {
         } else {
             b.vel = [b.vel[0] * 0.5, b.vel[1] * 0.5 + 0.05, b.vel[2] * 0.5];
         }
+    }
+
+    /// `AbstractNautilus#tickRidden` and its water travel; `attr_speed` is the movement attribute.
+    fn tick_nautilus<W: CollisionWorld + ?Sized>(
+        &mut self,
+        world: &W,
+        rider: &PlayerInput,
+        attr_speed: f32,
+    ) -> f32 {
+        let axes = PlayerPhysics::rider_axes(rider);
+        let pitch = rider.pitch * DEG_TO_RAD;
+        let (mut forward, mut up) = (0.0f32, 0.0f32);
+        if axes[1] != 0.0 {
+            forward = trig::cos(f64::from(pitch));
+            up = -trig::sin(f64::from(pitch));
+            if axes[1] < 0.0 {
+                forward *= -0.5;
+                up *= -0.5;
+            }
+        }
+        let input = [f64::from(axes[0]), f64::from(up), f64::from(forward)];
+        let b = &mut self.body;
+        b.move_from = None;
+        b.was_eye_in_water = b.fluid.eye_in_water;
+        b.update_fluid_interaction(world);
+        b.yaw += wrap_degrees(rider.yaw - b.yaw) * 0.5;
+        b.pitch = rider.pitch * 0.5;
+        let amount = std::mem::take(&mut self.jump_pending);
+        if amount > 0.0 {
+            let momentum = if b.is_in_water() { 1.2f32 } else { 0.5f32 };
+            let scale = f64::from(momentum * amount)
+                * f64::from(attr_speed)
+                * f64::from(b.block_speed_factor(world));
+            let look = view_vector(rider.pitch, rider.yaw);
+            for (v, l) in b.vel.iter_mut().zip(look) {
+                *v += l * scale;
+            }
+            self.dash_cooldown = NAUTILUS_DASH_COOLDOWN;
+        }
+        let b = &mut self.body;
+        let factor = if b.is_in_water() { 0.0325f32 } else { 0.02f32 };
+        b.attributes.movement_speed = f64::from(factor * attr_speed);
+        b.ridden_travel(world, input);
+        if self.dash_cooldown > 0 {
+            self.dash_cooldown -= 1;
+        }
+        self.body.yaw
     }
 
     fn tick_ghast<W: CollisionWorld + ?Sized>(

@@ -117,27 +117,27 @@ Scope: mcr-render environment, mcr-app effects.
 
 Scope: mcr-client riding and handler, mcr-physics vehicle.
 
-- [ ] 8.1 P11 (V) Ridden pigs and striders step only 0.6 blocks
-- [ ] 8.2 P12 (V) Ridden horses and camels sink in deep water
-- [ ] 8.3 P13 (G) Saddled nautilus cannot be steered
-- [ ] 8.4 P14 (V) Turning a boat does not turn the camera
-- [ ] 8.5 P15 (M) Ridden mob air steering speed
-- [ ] 8.6 P23 (M) Boats skip block effects
-- [ ] 8.7 P24 (M) Camel dash during cooldown and camel sprint
-- [ ] 8.8 P25 (M) Vehicle fluid current and moves while the camera is detached
-- [ ] 8.9 N7 (V) Own vehicle rubber-bands on position sync
-- [ ] 8.10 N8 (M) Controlled vehicle ignores server velocity and bubble-column events
-- [ ] 8.11 Unit tests: nautilus steering sends MoveVehicle, pig step 1.0, boat yaw follows delta rotation, position sync ignored for the driven vehicle
-- [ ] 8.12 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 8.1 P11 (V) Ridden pigs and striders step only 0.6 blocks
+- [x] 8.2 P12 (V) Ridden horses and camels sink in deep water
+- [x] 8.3 P13 (G) Saddled nautilus cannot be steered
+- [x] 8.4 P14 (V) Turning a boat does not turn the camera
+- [x] 8.5 P15 (M) Ridden mob air steering speed
+- [x] 8.6 P23 (M) Boats skip block effects
+- [x] 8.7 P24 (M) Camel dash during cooldown and camel sprint
+- [x] 8.8 P25 (M) Vehicle fluid current and moves while the camera is detached
+- [x] 8.9 N7 (V) Own vehicle rubber-bands on position sync
+- [x] 8.10 N8 (M) Controlled vehicle ignores server velocity and bubble-column events
+- [x] 8.11 Unit tests: nautilus steering sends MoveVehicle, pig step 1.0, boat yaw follows delta rotation, position sync ignored for the driven vehicle
+- [x] 8.12 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 9. Spectator
 
 Scope: mcr-app play and hud, mcr-client actions.
 
-- [ ] 9.1 S16 (G) Spectator hotbar menu missing
-- [ ] 9.2 I12 (V) Spectator interaction missing
-- [ ] 9.3 Unit tests: spectator menu pages and teleport packet, spectate action on left-click, scroll changes fly speed
-- [ ] 9.4 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 9.1 S16 (G) Spectator hotbar menu missing
+- [x] 9.2 I12 (V) Spectator interaction missing
+- [x] 9.3 Unit tests: spectator menu pages and teleport packet, spectate action on left-click, scroll changes fly speed
+- [x] 9.4 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 10. Level events and client sounds
 

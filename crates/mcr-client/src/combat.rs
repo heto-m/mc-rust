@@ -196,7 +196,12 @@ impl Client {
             return Ok(false);
         }
         if self.state.player.game_mode == GameType::Spectator {
-            return Ok(false);
+            let target = match hit {
+                UseTarget::Entity { id, .. } => Some(id),
+                _ => None,
+            };
+            self.spectate(target)?;
+            return Ok(true);
         }
         let held = self.state.held_stack().clone();
         if self.cannot_attack_with(&held) {

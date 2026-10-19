@@ -10,6 +10,8 @@ pub const EVENT_FULL_DEBUG_INFO: i8 = 23;
 pub const EVENT_SWAP_HANDS: i8 = 55;
 pub const EVENT_RAVAGER_ROARED: i8 = 69;
 pub const EVENT_TNT_PRIME: i8 = 70;
+pub const EVENT_BUBBLE_DOWN: i8 = 71;
+pub const EVENT_BUBBLE_UP: i8 = 72;
 
 const HOOKED_ENTITY: u8 = 8;
 const MAINHAND: usize = 0;
@@ -31,6 +33,9 @@ impl ClientState {
             EVENT_RAVAGER_ROARED => self.ravager_roar(entity_id),
             EVENT_TNT_PRIME => self.prime_minecart(entity_id),
             EVENT_FISHING_ROD_REEL_IN => self.fishing_pull(entity_id),
+            EVENT_BUBBLE_DOWN | EVENT_BUBBLE_UP if self.controlled_vehicle == Some(entity_id) => {
+                self.vehicle_impulse.bubble_down = Some(event == EVENT_BUBBLE_DOWN);
+            }
             _ => {}
         }
     }

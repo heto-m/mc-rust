@@ -23,7 +23,7 @@ pub use collide::BorderBounds;
 pub use data::{PhysicsData, StateInfo, flag};
 pub use fluid::{camera_in_lava, camera_in_water};
 pub use fly::RIPTIDE_SPIN_TICKS;
-pub use player::PlayerPhysics;
+pub use player::{PlayerPhysics, SimKind};
 pub use types::{
     Abilities, Attributes, Effects, ItemUse, MoveKind, MovementOutput, PlayerInput, Pose,
 };
@@ -36,3 +36,5 @@ mod collision_tests;
 mod fly_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod vehicle_tests;

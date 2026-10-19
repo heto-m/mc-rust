@@ -505,10 +505,18 @@ impl PlayerPhysics {
             let is_falling = self.vel[1] <= 0.0;
             let old_y = self.pos[1];
             let g = self.effective_gravity();
-            if self.is_in_water() {
+            if self.is_in_water() && self.free_swimmer {
+                self.move_relative(self.speed(), input);
+                let v = self.vel;
+                self.do_move(w, v);
+                self.vel = [self.vel[0] * 0.9, self.vel[1] * 0.9, self.vel[2] * 0.9];
+            } else if self.is_in_water() {
                 self.travel_in_water(w, input, g, is_falling, old_y);
             } else {
                 self.travel_in_lava(w, input, g, is_falling, old_y);
+            }
+            if self.floats_while_ridden && self.fluid.water_height > self.fluid_jump_threshold() {
+                self.vel[1] += f64::from(0.04f32);
             }
         } else if self.fall_flying {
             self.travel_fall_flying(w, input);

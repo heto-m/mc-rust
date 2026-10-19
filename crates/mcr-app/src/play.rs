@@ -177,6 +177,8 @@ struct Keys {
     debug: usize,
     spectator_effect: usize,
     spectator_outlines: usize,
+    spectator_hotbar: usize,
+    hotbar: [usize; 9],
 }
 
 impl Keys {
@@ -207,6 +209,8 @@ impl Keys {
             debug: i("key.debug.overlay"),
             spectator_effect: i("key.toggleSpectatorShaderEffects"),
             spectator_outlines: i("key.spectatorOutlines"),
+            spectator_hotbar: i("key.spectatorHotbar"),
+            hotbar: std::array::from_fn(|n| i(&format!("key.hotbar.{}", n + 1))),
         }
     }
 }
@@ -504,6 +508,8 @@ pub struct Play {
     movement: MovementSounds,
     placed_seen: bool,
     started: Instant,
+    /// When a spectator menu key was last used, for `SpectatorGui`'s fade.
+    spectator_menu_at: u64,
     last_frame: Instant,
     fps: f32,
     frame_ms: f32,
@@ -675,6 +681,7 @@ impl Play {
             movement: MovementSounds::new(data),
             placed_seen: false,
             started: now,
+            spectator_menu_at: 0,
             last_frame: now,
             fps: 0.0,
             frame_ms: 0.0,
@@ -1356,6 +1363,9 @@ impl Play {
                 self.yaw = p.physics.yaw;
                 self.pitch = p.physics.pitch;
             }
+            ClientEvent::ViewTurned { yaw } => {
+                self.yaw = (self.yaw + yaw).rem_euclid(360.0);
+            }
             ClientEvent::PlayerTeleported { .. } => {
                 let p = &self.world.client.state.player;
                 self.yaw = p.physics.yaw;
@@ -1629,8 +1639,31 @@ impl Play {
         self.look(dx as f32 * k * sx, dy as f32 * k * sy);
     }
 
+    fn is_spectator(&self) -> bool {
+        self.world.client.state.player.game_mode == mcr_protocol::types::game::GameType::Spectator
+    }
+
+    fn millis(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+
+    /// `SpectatorGui#getHotbarAlpha`: full for five seconds after a key, then a two second fade.
+    fn spectator_menu_alpha(&mut self) -> f32 {
+        let alpha = (self.spectator_menu_at as f32 + 5000.0 - self.millis() as f32) / 2000.0;
+        let alpha = alpha.clamp(0.0, 1.0);
+        if self.world.client.spectator_menu().is_some() && (alpha <= 0.0 || !self.is_spectator()) {
+            self.world.client.close_spectator_menu();
+        }
+        alpha
+    }
+
     pub fn look(&mut self, dyaw: f32, dpitch: f32) {
-        self.yaw = (self.yaw + dyaw).rem_euclid(360.0);
+        let mut yaw = self.yaw + dyaw;
+        if let Some((bow, limit)) = self.world.client.boat_view_clamp() {
+            let delta = (yaw - bow + 180.0).rem_euclid(360.0) - 180.0;
+            yaw += delta.clamp(-limit, limit) - delta;
+        }
+        self.yaw = yaw.rem_euclid(360.0);
         self.pitch = (self.pitch + dpitch).clamp(-90.0, 90.0);
         self.turn_latency.look(Instant::now(), self.yaw, self.pitch);
     }
@@ -1668,6 +1701,12 @@ impl Play {
         ) else {
             return;
         };
+        if self.is_spectator() {
+            if self.world.client.spectator_scroll(step) {
+                self.spectator_menu_at = self.millis();
+            }
+            return;
+        }
         let held = i32::from(self.world.client.state.player.held_slot);
         let slot = (held - step).rem_euclid(9);
         self.net(|c| c.select_hotbar(slot as u8));
@@ -2449,6 +2488,18 @@ impl Play {
             }
         } else if i == k.spectator_effect {
             self.spectator_effect.toggle();
+        } else if i == k.spectator_hotbar {
+            if self.is_spectator() && !self.world.client.is_using_item() {
+                self.spectator_menu_at = self.millis();
+                self.net(Client::spectator_hotbar_action);
+            }
+        } else if let Some(n) = name.strip_prefix("key.hotbar.")
+            && let Ok(n) = n.parse::<u8>()
+            && (1..=9).contains(&n)
+            && self.is_spectator()
+        {
+            self.spectator_menu_at = self.millis();
+            self.net(|c| c.spectator_hotbar_key(n - 1));
         } else if let Some(n) = name.strip_prefix("key.hotbar.")
             && let Ok(n) = n.parse::<u8>()
         {
@@ -2627,6 +2678,8 @@ impl Play {
         self.hud
             .tick_chat(&mut self.gui.ui, self.ticks as u32, &self.options);
         let hidden = self.hud_hidden || self.java_gui;
+        let spectator_alpha = self.spectator_menu_alpha();
+        let hotbar_keys = self.keys.hotbar.map(|i| self.bindings.input(i));
         let chat_open = self.chat_open();
         let debug = self.debug_on.then(|| {
             let mut overlay = debug::build(&DebugInput {
@@ -2648,27 +2701,35 @@ impl Play {
             overlay.charts = self.debug_charts();
             overlay
         });
-        let input = HudInput {
-            state: &self.world.client.state,
-            options: &self.options,
-            tick: self.ticks as u32,
-            partial: self.partial(),
-            hidden,
-            sleep_overlay: !self.java_gui,
-            tab_held: self.tab_held,
-            chat_open,
-            debug: debug.as_ref(),
-            skins: &self.skins,
-            camera: mcr_client::locator::Camera {
-                pos: camera.position.to_array(),
-                yaw: self.yaw,
-                pitch: self.pitch,
-                fov_y_degrees: camera.fov_y.to_degrees(),
-            },
-            eye_of: &|e| crate::entities::eye_position(self.data, e),
-            show_heads: self.world.client.config.online.is_some(),
-            millis: self.started.elapsed().as_millis() as u64,
-        };
+        let input =
+            HudInput {
+                state: &self.world.client.state,
+                options: &self.options,
+                tick: self.ticks as u32,
+                partial: self.partial(),
+                hidden,
+                sleep_overlay: !self.java_gui,
+                tab_held: self.tab_held,
+                chat_open,
+                debug: debug.as_ref(),
+                skins: &self.skins,
+                camera: mcr_client::locator::Camera {
+                    pos: camera.position.to_array(),
+                    yaw: self.yaw,
+                    pitch: self.pitch,
+                    fov_y_degrees: camera.fov_y.to_degrees(),
+                },
+                eye_of: &|e| crate::entities::eye_position(self.data, e),
+                show_heads: self.world.client.config.online.is_some(),
+                millis: self.started.elapsed().as_millis() as u64,
+                spectator: self.world.client.spectator_menu().map(|menu| {
+                    crate::hud::SpectatorHud {
+                        menu,
+                        alpha: spectator_alpha,
+                        keys: hotbar_keys,
+                    }
+                }),
+            };
         {
             self.view_cache.refresh(&self.world.client.state);
             let view = StateView {

@@ -201,8 +201,11 @@ impl Client {
 
     /// Vanilla right-click: block use, then item use, main hand before off hand.
     pub fn start_use(&mut self, target: UseTarget) -> Result<UseResult> {
-        if self.digging.is_some() || self.state.player.game_mode == GameType::Spectator {
+        if self.digging.is_some() {
             return Ok(UseResult::Pass);
+        }
+        if self.state.player.game_mode == GameType::Spectator {
+            return self.spectator_use(target);
         }
         for hand in [Hand::Main, Hand::Off] {
             if let Some(result) = self.use_hand(hand, target)? {
@@ -216,6 +219,29 @@ impl Client {
             }
         }
         Ok(UseResult::Pass)
+    }
+
+    /// A spectator's right-click: entity interactions pass through both hands, a block is looked
+    /// into (chests and other containers) without being used, and items do nothing.
+    fn spectator_use(&mut self, target: UseTarget) -> Result<UseResult> {
+        match target {
+            UseTarget::Entity { id, location } => {
+                for hand in [Hand::Main, Hand::Off] {
+                    self.send_interact(id, hand, location)?;
+                }
+                Ok(UseResult::Pass)
+            }
+            UseTarget::Block {
+                pos,
+                face,
+                cursor,
+                inside,
+            } => {
+                self.use_item_on(Hand::Main, pos, face, cursor, inside)?;
+                Ok(UseResult::Consume)
+            }
+            UseTarget::Air => Ok(UseResult::Pass),
+        }
     }
 
     /// One hand's turn of [`Self::start_use`]; `None` passes to the next hand.

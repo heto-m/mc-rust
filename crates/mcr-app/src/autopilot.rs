@@ -482,6 +482,17 @@ impl Autopilot {
                             play.target,
                             state.player.physics.eye_height(),
                         );
+                        let vehicle = state.player.vehicle.and_then(|id| state.entities.get(id));
+                        println!(
+                            "report-vehicle: vehicle {:?} pos {:?} yaw {:?} controlled {:?} fly_speed {:.3} camera {:?} vehicle_corrections {}",
+                            state.player.vehicle,
+                            vehicle.map(|e| e.pos),
+                            vehicle.map(|e| e.yaw),
+                            state.controlled_vehicle,
+                            state.player.physics.abilities.flying_speed,
+                            state.camera_entity,
+                            state.vehicle_corrections,
+                        );
                     }
                 }
                 Step::Quit => {

@@ -1,5 +1,5 @@
 use crate::data::{FLUID_LAVA, FLUID_NONE, FLUID_WATER, PhysicsData, StateInfo, flag};
-use crate::player::{FluidState, PlayerPhysics};
+use crate::player::{FluidState, PlayerPhysics, SimKind};
 use crate::world::CollisionWorld;
 
 const HORIZONTAL: [(i32, i32, u8); 4] = [(0, -1, 2), (1, 0, 5), (0, 1, 3), (-1, 0, 4)];
@@ -162,7 +162,7 @@ impl PlayerPhysics {
 
     pub(crate) fn update_fluid_interaction<W: CollisionWorld + ?Sized>(&mut self, w: &W) {
         self.fluid = FluidState::default();
-        let ignore_current = self.abilities.flying;
+        let ignore_current = self.abilities.flying || !self.pushed_by_fluid;
         let bb = self.bounding_box().inflate(-0.001);
         let lo = [
             bb.min[0].floor() as i32,
@@ -251,12 +251,13 @@ impl PlayerPhysics {
         if c.count == 0 || lsq < f64::from(1.0e-5f32) {
             return;
         }
-        let k = 1.0 / f64::from(c.count);
-        let mut imp = [
-            c.acc[0] * k * scale,
-            c.acc[1] * k * scale,
-            c.acc[2] * k * scale,
-        ];
+        let base = if self.kind == SimKind::Player {
+            let k = 1.0 / f64::from(c.count);
+            [c.acc[0] * k, c.acc[1] * k, c.acc[2] * k]
+        } else {
+            normalize(c.acc)
+        };
+        let mut imp = [base[0] * scale, base[1] * scale, base[2] * scale];
         let len = (imp[0] * imp[0] + imp[1] * imp[1] + imp[2] * imp[2]).sqrt();
         if self.vel[0].abs() < 0.003 && self.vel[2].abs() < 0.003 && len < 0.0045000000000000005 {
             let n = normalize(imp);

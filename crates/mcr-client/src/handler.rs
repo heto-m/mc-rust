@@ -447,6 +447,8 @@ impl ClientState {
                 if sane3(vel) {
                     if p.entity_id == self.player.entity_id {
                         self.player.physics.vel = vel;
+                    } else if self.controlled_vehicle == Some(p.entity_id) {
+                        self.vehicle_impulse.motion = Some(vel);
                     } else if let Some(e) = self.entities.get_mut(p.entity_id) {
                         e.velocity = clamp_motion(vel);
                     }
@@ -1456,6 +1458,9 @@ impl ClientState {
     }
 
     fn position_sync(&mut self, p: &EntityPositionSync, out: &mut Outbox) {
+        if self.controlled_vehicle == Some(p.entity_id) {
+            return;
+        }
         let Some(e) = self.entities.get_mut(p.entity_id) else {
             return;
         };

@@ -81,6 +81,7 @@ pub struct Client {
     pub(crate) destroy_delay: u8,
     pub(crate) using: Option<crate::use_item::UsingItem>,
     pub(crate) ride: Option<crate::riding::Ride>,
+    pub(crate) spectator_menu: Option<crate::spectator::SpectatorMenu>,
     pub(crate) combat: crate::combat::Combat,
     relay: Option<Box<dyn Relay>>,
     #[cfg(test)]
@@ -201,6 +202,7 @@ impl Client {
             destroy_delay: 0,
             using: None,
             ride: None,
+            spectator_menu: None,
             combat: crate::combat::Combat::default(),
             relay,
             #[cfg(test)]
@@ -395,6 +397,7 @@ impl Client {
             destroy_delay: 0,
             using: None,
             ride: None,
+            spectator_menu: None,
             combat: crate::combat::Combat::default(),
             relay: None,
             sent: Vec::new(),
@@ -1114,6 +1117,7 @@ impl Client {
             self.state.player.physics.passenger = false;
         }
         self.state.player.physics.glider_equipped = self.glider_equipped();
+        self.state.player.physics.detached_camera = self.state.camera_entity.is_some();
         let mut pushers = std::mem::take(&mut self.pusher_scratch);
         self.state.refresh_collision_env(&mut pushers);
         for &from in &pushers {

@@ -54,12 +54,17 @@ mod probe;
 mod registry;
 mod relay;
 mod riding;
+#[cfg(test)]
+mod riding_tests;
 mod screens;
 pub mod script;
 pub mod secure_chat;
 mod sleep;
 mod slot_display;
 mod social;
+pub mod spectator;
+#[cfg(test)]
+mod spectator_tests;
 mod state;
 #[cfg(test)]
 mod targeting_tests;

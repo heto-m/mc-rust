@@ -30,17 +30,25 @@ pub struct Ride {
     pub sim: Sim,
     written: [f64; 3],
     sent_input: Option<PlayerInput>,
-    jump_ticks: i32,
-    jump_scale: f32,
-    was_jumping: bool,
+    jump: JumpBar,
     boost: Boost,
     sprint_sent: bool,
+    pub(crate) sprinting: bool,
+    sprint_trigger: i32,
+    was_forward: bool,
 }
 
 const BOOST_INDEX: u8 = 18;
 const STRIDER_SUFFOCATING_INDEX: u8 = 19;
 const CAMEL_POSE_TICK_INDEX: u8 = 20;
+/// The tame flags byte of `AbstractHorse` and `TamableAnimal`, after `AgeableMob`'s two flags.
+const TAME_FLAGS_INDEX: u8 = 18;
+const HORSE_TAME_FLAG: i8 = 2;
+const TAMABLE_TAME_FLAG: i8 = 4;
 const MAX_BOOST_TICKS: i32 = 10_000;
+const SPRINT_WINDOW: i32 = 7;
+/// `AbstractBoat#clampRotation`: how far a rider may look away from the bow.
+const BOAT_VIEW_LIMIT: f32 = 105.0;
 
 /// `ItemBasedSteering`: a carrot or fungus boost whose length the server syncs.
 #[derive(Debug, Clone, Copy, Default)]
@@ -95,6 +103,7 @@ enum VehicleKind {
     Strider,
     Camel,
     HappyGhast,
+    Nautilus,
     Other,
 }
 
@@ -126,6 +135,8 @@ impl Client {
             VehicleKind::Camel
         } else if n == "happy_ghast" {
             VehicleKind::HappyGhast
+        } else if matches!(n, "nautilus" | "zombie_nautilus") {
+            VehicleKind::Nautilus
         } else {
             VehicleKind::Other
         }
@@ -164,6 +175,26 @@ impl Client {
         [e.pos[0] + o[0], e.pos[1] + o[1], e.pos[2] + o[2]]
     }
 
+    /// `EntityTypeTags.CAN_FLOAT_WHILE_RIDDEN`, from the server's tags when it sent them.
+    fn floats_while_ridden(&self, e: &Entity) -> bool {
+        if let Some(ids) = self
+            .state
+            .registries
+            .tag("minecraft:entity_type", "minecraft:can_float_while_ridden")
+        {
+            return ids.contains(&e.kind);
+        }
+        u32::try_from(e.kind)
+            .ok()
+            .and_then(|k| self.state.data.entity_type_name(k))
+            .is_some_and(|n| {
+                matches!(
+                    short(n),
+                    "horse" | "zombie_horse" | "mule" | "donkey" | "camel" | "camel_husk"
+                )
+            })
+    }
+
     fn int_data(&self, e: &Entity, index: u8) -> i32 {
         match e.data.get(&index) {
             Some(EntityDataValue::Int(v)) => *v,
@@ -177,18 +208,39 @@ impl Client {
             .any(|&h| self.state.is_item(&self.state.hand_stack(h), name))
     }
 
+    /// `Mob#isSaddled`: a saddle counts only where the mob's `canUseSlot` accepts it.
+    fn saddled(&self, e: &Entity) -> bool {
+        if e.equipment_slot(EquipmentSlot::Saddle).is_empty() {
+            return false;
+        }
+        let name = u32::try_from(e.kind)
+            .ok()
+            .and_then(|k| self.state.data.entity_type_name(k))
+            .map_or("", short);
+        let tame_flag = match name {
+            "horse" | "skeleton_horse" | "zombie_horse" => return true,
+            "donkey" | "mule" | "camel" | "camel_husk" => Some(HORSE_TAME_FLAG),
+            "nautilus" | "zombie_nautilus" => Some(TAMABLE_TAME_FLAG),
+            _ => None,
+        };
+        let tame = tame_flag.is_none_or(|bit| {
+            matches!(e.data.get(&TAME_FLAGS_INDEX), Some(EntityDataValue::Byte(f)) if f & bit != 0)
+        });
+        tame && self.state.entity_alive(e) && !self.state.entity_is_baby(e)
+    }
+
     /// Whether the local player steers the entity (vanilla `getControllingPassenger`).
     fn controls(&self, e: &Entity, kind: VehicleKind) -> bool {
         if e.passengers.first() != Some(&self.state.player.entity_id) {
             return false;
         }
-        let saddled = !e.equipment_slot(EquipmentSlot::Saddle).is_empty();
+        let saddled = self.saddled(e);
         match kind {
             VehicleKind::Boat => true,
             VehicleKind::Horse => saddled,
             VehicleKind::Pig => saddled && self.holds("carrot_on_a_stick"),
             VehicleKind::Strider => saddled && self.holds("warped_fungus_on_a_stick"),
-            VehicleKind::Camel => saddled,
+            VehicleKind::Camel | VehicleKind::Nautilus => saddled,
             VehicleKind::HappyGhast => !e.equipment_slot(EquipmentSlot::Body).is_empty(),
             VehicleKind::Other => false,
         }
@@ -207,13 +259,18 @@ impl Client {
             | VehicleKind::Pig
             | VehicleKind::Strider
             | VehicleKind::Camel
-            | VehicleKind::HappyGhast => {
+            | VehicleKind::HappyGhast
+            | VehicleKind::Nautilus => {
                 let defaults = Attributes::default();
                 let attrs = Attributes {
                     jump_strength: self
                         .entity_attribute(e, "jump_strength")
                         .unwrap_or(defaults.jump_strength),
-                    step_height: self.entity_attribute(e, "step_height").unwrap_or(1.0),
+                    // `LivingEntity#maxUpStep`: at least a block while a player steers.
+                    step_height: self
+                        .entity_attribute(e, "step_height")
+                        .unwrap_or(1.0)
+                        .max(1.0),
                     gravity: if kind == VehicleKind::HappyGhast {
                         0.0
                     } else {
@@ -227,11 +284,13 @@ impl Client {
                     VehicleKind::Strider => MountMode::Strider,
                     VehicleKind::Camel => MountMode::Camel,
                     VehicleKind::HappyGhast => MountMode::HappyGhast,
+                    VehicleKind::Nautilus => MountMode::Nautilus,
                     _ => MountMode::Horse,
                 };
-                Sim::Mount(
-                    Mount::new(e.target_pos, e.target_yaw, dims.0, dims.1, attrs).with_mode(mode),
-                )
+                let mut mount =
+                    Mount::new(e.target_pos, e.target_yaw, dims.0, dims.1, attrs).with_mode(mode);
+                mount.body.floats_while_ridden = self.floats_while_ridden(e);
+                Sim::Mount(mount)
             }
             VehicleKind::Other => Sim::Passive,
         }
@@ -261,12 +320,13 @@ impl Client {
         self.ride.as_ref()
     }
 
-    pub(crate) fn ride_tick(&mut self, keys: &PlayerInput, vehicle: i32) -> Result<()> {
+    pub(crate) fn ride_tick(&mut self, input: &PlayerInput, vehicle: i32) -> Result<()> {
         self.combat.hands_busy = false;
+        let impulse = std::mem::take(&mut self.state.vehicle_impulse);
         let Some(entity) = self.state.entities.get(vehicle).cloned() else {
             self.ride = None;
             self.state.controlled_vehicle = None;
-            return self.send_ride_packets(keys, None);
+            return self.send_ride_packets(input, None);
         };
         let kind = self.vehicle_kind(&entity);
         let controlled = self.controls(&entity, kind);
@@ -281,10 +341,11 @@ impl Client {
                 },
                 written: entity.target_pos,
                 sent_input: None,
-                jump_ticks: 0,
-                jump_scale: 0.0,
-                was_jumping: false,
+                jump: JumpBar::default(),
                 sprint_sent: false,
+                sprinting: false,
+                sprint_trigger: 0,
+                was_forward: false,
                 boost: Boost {
                     seen: self.int_data(&entity, BOOST_INDEX),
                     ..Boost::default()
@@ -306,6 +367,7 @@ impl Client {
         let mut paddle = None;
         let mut on_ground = false;
         let mut jump_data = None;
+        let mut keys = *input;
         self.combat.hands_busy = matches!(ride.sim, Sim::Boat(_))
             && (keys.forward || keys.backward || keys.left || keys.right);
         match &mut ride.sim {
@@ -313,13 +375,23 @@ impl Client {
                 if teleported {
                     boat.snap_to(entity.target_pos, entity.target_yaw);
                 }
-                boat.tick(&self.state.chunks, keys);
+                if let Some(v) = impulse.motion {
+                    boat.body.vel = v;
+                }
+                if let Some(down) = impulse.bubble_down {
+                    boat.bubble_column_effect(down);
+                }
+                boat.tick(&self.state.chunks, &keys);
                 paddle = Some(boat.paddle);
                 vehicle_pose = (boat.body.pos, boat.yaw(), 0.0);
+                keys.yaw += boat.delta_rotation();
             }
             Sim::Mount(mount) => {
                 if teleported {
                     mount.snap_to(entity.target_pos, entity.target_yaw, entity.target_pitch);
+                }
+                if let Some(v) = impulse.motion {
+                    mount.body.vel = v;
                 }
                 let attr_speed = self
                     .entity_attribute(&entity, "movement_speed")
@@ -330,32 +402,23 @@ impl Client {
                     ride.boost.observe(self.int_data(&entity, BOOST_INDEX));
                     ride.boost.tick();
                 }
-                if !steered && mode != MountMode::HappyGhast {
-                    let jump = keys.jump;
-                    if ride.jump_ticks < 0 {
-                        ride.jump_ticks += 1;
-                        if ride.jump_ticks == 0 {
-                            ride.jump_scale = 0.0;
-                        }
-                    }
-                    if ride.was_jumping && !jump {
-                        ride.jump_ticks = -10;
-                        let amount = (ride.jump_scale * 100.0).floor() as i32;
-                        mount.rider_jump(amount);
-                        jump_data = Some(amount);
-                    } else if !ride.was_jumping && jump {
-                        ride.jump_ticks = 0;
-                        ride.jump_scale = 0.0;
-                    } else if ride.was_jumping {
-                        ride.jump_ticks = ride.jump_ticks.saturating_add(1);
-                        ride.jump_scale = if ride.jump_ticks < 10 {
-                            ride.jump_ticks as f32 * 0.1
-                        } else {
-                            0.8 + 2.0 / (ride.jump_ticks - 9) as f32 * 0.1
-                        };
-                    }
-                    ride.was_jumping = jump;
+                if mode == MountMode::Camel {
+                    mount.refuse_to_move =
+                        camel_refuses_to_move(&entity, self.state.world.game_time);
                 }
+                let jumpable = matches!(
+                    mode,
+                    MountMode::Horse | MountMode::Camel | MountMode::Nautilus
+                ) && !(mode == MountMode::Camel && mount.refuse_to_move);
+                if jumpable && mount.jump_cooldown() == 0 {
+                    jump_data = ride.jump.charge(keys.jump);
+                    if let Some(amount) = jump_data {
+                        mount.rider_jump(amount);
+                    }
+                } else {
+                    ride.jump.scale = 0.0;
+                }
+                ride.jump.was_jumping = keys.jump;
                 let ridden_speed = match mode {
                     MountMode::Pig => {
                         (f64::from(attr_speed) * 0.225 * f64::from(ride.boost.factor())) as f32
@@ -370,9 +433,8 @@ impl Client {
                             as f32
                     }
                     MountMode::Camel => {
-                        let sprint = keys.sprint && keys.forward;
                         attr_speed
-                            + if sprint && mount.dash_cooldown() == 0 {
+                            + if ride.sprinting && mount.jump_cooldown() == 0 {
                                 0.1
                             } else {
                                 0.0
@@ -381,18 +443,24 @@ impl Client {
                     MountMode::HappyGhast => self
                         .entity_attribute(&entity, "flying_speed")
                         .unwrap_or(0.05) as f32,
-                    MountMode::Horse => attr_speed,
+                    MountMode::Horse | MountMode::Nautilus => attr_speed,
                 };
-                if mode == MountMode::Camel {
-                    mount.refuse_to_move =
-                        camel_refuses_to_move(&entity, self.state.world.game_time);
-                }
-                mount.tick(&self.state.chunks, keys, attr_speed, ridden_speed);
+                mount.tick(&self.state.chunks, &keys, attr_speed, ridden_speed);
                 on_ground = mount.body.on_ground;
                 vehicle_pose = (mount.body.pos, mount.body.yaw, mount.body.pitch);
             }
             Sim::Passive => {}
         }
+        if kind == VehicleKind::Boat {
+            keys.yaw = clamp_boat_view(keys.yaw, vehicle_pose.1);
+        }
+        let turned = keys.yaw - input.yaw;
+        if turned != 0.0 && turned.is_finite() {
+            self.view.0 = keys.yaw;
+            self.push_event(crate::events::ClientEvent::ViewTurned { yaw: turned });
+        }
+        let camel = matches!(&ride.sim, Sim::Mount(m) if m.mode == MountMode::Camel);
+        ride.update_sprint(&keys, camel);
         if !matches!(ride.sim, Sim::Passive)
             && let Some(e) = self.state.entities.get_mut(vehicle)
         {
@@ -420,10 +488,8 @@ impl Client {
         if let Some([left, right]) = paddle {
             self.send_play(&S::PaddleBoat(sb::PaddleBoat { left, right }))?;
         }
-        let sprinting = matches!(&ride.sim, Sim::Mount(m) if m.mode == MountMode::Camel)
-            && keys.sprint
-            && keys.forward;
-        if sprinting != ride.sprint_sent {
+        let sprinting = ride.sprinting;
+        if controlled_now && sprinting != ride.sprint_sent {
             ride.sprint_sent = sprinting;
             let entity_id = self.state.player.entity_id;
             self.send_play(&S::PlayerCommand(sb::PlayerCommand {
@@ -437,14 +503,21 @@ impl Client {
             }))?;
         }
         let sent = ride.sent_input;
-        let changed = sent.is_none_or(|s| !s.keys_equal(keys));
-        ride.sent_input = Some(*keys);
+        let changed = sent.is_none_or(|s| !s.keys_equal(&keys));
+        ride.sent_input = Some(keys);
         self.ride = Some(ride);
         if changed {
-            self.send_player_input(keys)?;
+            self.send_player_input(&keys)?;
         }
-        self.send_ride_packets(keys, pose)?;
+        self.send_ride_packets(&keys, pose)?;
         Ok(())
+    }
+
+    /// The yaw range the rider may look in while seated in a boat, as (bow yaw, limit).
+    pub fn boat_view_clamp(&self) -> Option<(f32, f32)> {
+        let ride = self.ride.as_ref()?;
+        let e = self.state.entities.get(ride.vehicle)?;
+        (self.vehicle_kind(e) == VehicleKind::Boat).then_some((e.yaw, BOAT_VIEW_LIMIT))
     }
 
     fn send_player_input(&mut self, keys: &PlayerInput) -> Result<()> {
@@ -482,6 +555,90 @@ impl Client {
         }
         Ok(())
     }
+}
+
+/// `LocalPlayer#aiStep`'s riding jump bar.
+#[derive(Debug, Clone, Copy, Default)]
+struct JumpBar {
+    ticks: i32,
+    scale: f32,
+    was_jumping: bool,
+}
+
+impl JumpBar {
+    /// Charges while jump is held; on release returns the 0-100 charge to jump with.
+    fn charge(&mut self, jump: bool) -> Option<i32> {
+        if self.ticks < 0 {
+            self.ticks += 1;
+            if self.ticks == 0 {
+                self.scale = 0.0;
+            }
+        }
+        if self.was_jumping && !jump {
+            self.ticks = -10;
+            return Some((self.scale * 100.0).floor() as i32);
+        }
+        if !self.was_jumping && jump {
+            self.ticks = 0;
+            self.scale = 0.0;
+        } else if self.was_jumping {
+            self.ticks = self.ticks.saturating_add(1);
+            self.scale = if self.ticks < 10 {
+                self.ticks as f32 * 0.1
+            } else {
+                0.8 + 2.0 / (self.ticks - 9) as f32 * 0.1
+            };
+        }
+        None
+    }
+}
+
+impl Ride {
+    /// The rider's own sprint state, which only a camel accepts: double-tap or the sprint key
+    /// starts it and it lasts while moving forward.
+    fn update_sprint(&mut self, keys: &PlayerInput, can_sprint: bool) {
+        let forward = keys.forward && !keys.backward;
+        if self.sprint_trigger > 0 {
+            self.sprint_trigger -= 1;
+        }
+        if keys.sneak || keys.backward {
+            self.sprint_trigger = 0;
+        }
+        if !self.sprinting && forward && can_sprint {
+            if !self.was_forward {
+                if self.sprint_trigger > 0 {
+                    self.sprinting = true;
+                } else {
+                    self.sprint_trigger = SPRINT_WINDOW;
+                }
+            }
+            if keys.sprint {
+                self.sprinting = true;
+            }
+        }
+        if self.sprinting && (!forward || !can_sprint) {
+            self.sprinting = false;
+        }
+        self.was_forward = forward;
+    }
+}
+
+/// `AbstractBoat#clampRotation`: keeps the rider's yaw within the limit of the bow.
+fn clamp_boat_view(yaw: f32, boat_yaw: f32) -> f32 {
+    let delta = wrap_degrees(yaw - boat_yaw);
+    let target = delta.clamp(-BOAT_VIEW_LIMIT, BOAT_VIEW_LIMIT);
+    yaw + target - delta
+}
+
+fn wrap_degrees(v: f32) -> f32 {
+    let mut d = v % 360.0;
+    if d >= 180.0 {
+        d -= 360.0;
+    }
+    if d < -180.0 {
+        d += 360.0;
+    }
+    d
 }
 
 /// `Camel#refuseToMove`: sitting, or still changing pose (40 ticks down, 52 up).

@@ -440,6 +440,8 @@ pub struct ClientState {
     pub gameplay: crate::gamestate::GameplayState,
     pub game_ticks: u64,
     pub controlled_vehicle: Option<i32>,
+    /// Server pushes for the vehicle the client simulates, applied on its next tick.
+    pub(crate) vehicle_impulse: VehicleImpulse,
     /// The entity the view follows after `set_camera`; `None` when the player's own eyes are used.
     pub camera_entity: Option<i32>,
     /// The server's `post_effects` ids, in order; cleared with the player on login and respawn.
@@ -547,6 +549,7 @@ impl ClientState {
             gameplay: crate::gamestate::GameplayState::default(),
             game_ticks: 0,
             controlled_vehicle: None,
+            vehicle_impulse: VehicleImpulse::default(),
             camera_entity: None,
             post_effects: Vec::new(),
             vehicle_corrections: 0,
@@ -587,6 +590,7 @@ impl ClientState {
         self.world.clocks.clear();
         self.predictions = Default::default();
         self.controlled_vehicle = None;
+        self.vehicle_impulse = VehicleImpulse::default();
         self.dimension = Dimension {
             min_y,
             height: height as i32,
@@ -771,5 +775,13 @@ impl ClientState {
         self.cooldowns.clear();
         self.camera_entity = None;
         self.controlled_vehicle = None;
+        self.vehicle_impulse = VehicleImpulse::default();
     }
+}
+
+/// `lerpMotion` and the boat's bubble column events (71 down, 72 up) for the driven vehicle.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct VehicleImpulse {
+    pub motion: Option<[f64; 3]>,
+    pub bubble_down: Option<bool>,
 }

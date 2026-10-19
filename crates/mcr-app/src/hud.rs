@@ -1,13 +1,14 @@
 use std::cell::RefCell;
 use std::time::Instant;
 
+use mcr_client::spectator::{MenuItem, SpectatorMenu};
 use mcr_client::{ClientState, ScoreStyle, boss_bars_ordered, tab_name};
 use mcr_data::Version;
 use mcr_protocol::play::clientbound::ui::{BossBarColor, BossBarOverlay, ObjectiveRenderType};
 use mcr_protocol::types::entity_data::EntityDataValue;
 use mcr_protocol::types::game::GameType;
 use mcr_protocol::types::text::Component;
-use mcr_settings::Options;
+use mcr_settings::{InputKey, Options};
 use mcr_ui::{
     ChatOptions, DebugOverlay, HeartKind, HudItems, HudSprites, HudState, ItemIcons, SharedChat,
     SpriteId, StackView, Ui, UiFrame,
@@ -85,6 +86,23 @@ struct Sprites {
     locator_bg: Option<SpriteId>,
     arrow_up: Option<SpriteId>,
     arrow_down: Option<SpriteId>,
+    spectator: SpectatorSprites,
+}
+
+#[derive(Debug)]
+struct SpectatorSprites {
+    teleport_to_player: Option<SpriteId>,
+    teleport_to_team: Option<SpriteId>,
+    scroll_left: Option<SpriteId>,
+    scroll_right: Option<SpriteId>,
+    close: Option<SpriteId>,
+}
+
+/// The spectator hotbar menu as `SpectatorGui` draws it, fading out after the last key press.
+pub struct SpectatorHud<'a> {
+    pub menu: &'a SpectatorMenu,
+    pub alpha: f32,
+    pub keys: [InputKey; 9],
 }
 
 pub struct HudInput<'a> {
@@ -103,6 +121,7 @@ pub struct HudInput<'a> {
     pub eye_of: &'a dyn Fn(&mcr_client::Entity) -> [f64; 3],
     pub show_heads: bool,
     pub millis: u64,
+    pub spectator: Option<SpectatorHud<'a>>,
 }
 
 pub struct Hud {
@@ -288,6 +307,13 @@ impl Hud {
                 locator_bg: id("hud/locator_bar_background"),
                 arrow_up: id("hud/locator_bar_arrow_up"),
                 arrow_down: id("hud/locator_bar_arrow_down"),
+                spectator: SpectatorSprites {
+                    teleport_to_player: id("spectator/teleport_to_player"),
+                    teleport_to_team: id("spectator/teleport_to_team"),
+                    scroll_left: id("spectator/scroll_left"),
+                    scroll_right: id("spectator/scroll_right"),
+                    close: id("spectator/close"),
+                },
                 ping: [
                     id("icon/ping_unknown"),
                     id("icon/ping_1"),
@@ -494,10 +520,14 @@ impl Hud {
             };
             self.sprites.draw(frame, &hud);
             self.draw_air(frame, player.data.get(&AIR_DATA_INDEX));
+        } else if player.game_mode == GameType::Spectator {
+            self.draw_spectator_menu(frame, input);
         } else {
             self.draw_hotbar(frame, player.held_slot, offhand.is_some());
         }
-        self.sprites.draw_items(frame, icons, &items);
+        if player.game_mode != GameType::Spectator {
+            self.sprites.draw_items(frame, icons, &items);
+        }
         if locator {
             self.draw_locator(frame, input);
         }
@@ -514,6 +544,119 @@ impl Hud {
         }
         if let (true, Some(s)) = (offhand, self.own.offhand) {
             frame.sprite(s, left - 29, gui_h - 23, 29, 24);
+        }
+    }
+
+    fn draw_spectator_menu(&self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
+        let Some(hud) = &input.spectator else {
+            return;
+        };
+        let alpha = hud.alpha.clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            return;
+        }
+        let tint = |b: f32| {
+            let c = (b * 255.0) as u32;
+            ((alpha * 255.0) as u32) << 24 | c << 16 | c << 8 | c
+        };
+        let white = tint(1.0);
+        let (gui_w, gui_h) = frame.gui_size();
+        let left = gui_w / 2 - 91;
+        let y = (gui_h as f32 - 22.0 * alpha).floor() as i32;
+        let menu = hud.menu;
+        if let Some(s) = self.own.hotbar {
+            frame.sprite_tinted(s, left, y, 182, 22, white);
+        }
+        let selected = menu.selected_slot();
+        if let (true, Some(s)) = ((0..9).contains(&selected), self.own.selection) {
+            frame.sprite_tinted(s, left - 1 + selected * 20, y - 1, 24, 23, white);
+        }
+        let sprites = &self.own.spectator;
+        for slot in 0..9 {
+            let item = menu.item(slot);
+            if item == MenuItem::Empty {
+                continue;
+            }
+            let (x, iy) = (gui_w / 2 - 90 + slot * 20 + 2, y + 3);
+            let enabled = item.enabled();
+            let color = tint(if enabled { 1.0 } else { 0.25 });
+            let icon = match item {
+                MenuItem::TeleportToPlayer { .. } => sprites.teleport_to_player,
+                MenuItem::TeleportToTeam { .. } => sprites.teleport_to_team,
+                MenuItem::ScrollLeft => sprites.scroll_left,
+                MenuItem::ScrollRight { .. } => sprites.scroll_right,
+                MenuItem::Close => sprites.close,
+                MenuItem::Player(p) => {
+                    self.draw_face(frame, input, p.uuid, x + 2, iy + 2, white);
+                    None
+                }
+                MenuItem::Team(t) => {
+                    if let Some(rgb) = t.color {
+                        let scale = |shift: u32| {
+                            ((((rgb >> shift) & 0xFF) as f32 * if enabled { 1.0 } else { 0.25 })
+                                as u32)
+                                << shift
+                        };
+                        frame.fill_rect(
+                            x + 1,
+                            iy + 1,
+                            x + 15,
+                            iy + 15,
+                            0xFF00_0000 | scale(16) | scale(8) | scale(0),
+                        );
+                    }
+                    if let Some(p) = t.players.first() {
+                        self.draw_face(frame, input, p.uuid, x + 2, iy + 2, color);
+                    }
+                    None
+                }
+                MenuItem::Empty => None,
+            };
+            if let Some(icon) = icon {
+                frame.sprite_tinted(icon, x, iy, 16, 16, color);
+            }
+            if enabled {
+                let name = hud.keys[slot as usize].name();
+                let label = frame.ui().lang().get(name).map_or_else(
+                    || name.rsplit('.').next().unwrap_or(name).to_uppercase(),
+                    str::to_owned,
+                );
+                let w = frame.ui().text_width(&label);
+                frame.text(&label, (x + 17) as f32 - w, (iy + 9) as f32, white, true);
+            }
+        }
+        let action = frame.ui().flatten(&menu.action_text());
+        let w = frame.ui().width(&action);
+        let x = (gui_w as f32 - w) / 2.0;
+        let ty = gui_h - 35;
+        if !input.options.background_for_chat_only {
+            let bg = (input.options.text_background_opacity.clamp(0.0, 1.0)
+                * f64::from(alpha)
+                * 255.0) as u32;
+            frame.fill_rect(
+                x as i32 - 2,
+                ty - 2,
+                (x + w) as i32 + 2,
+                ty + 9 + 2,
+                bg << 24,
+            );
+        }
+        frame.cells(&action, x.floor(), ty as f32, white, true);
+    }
+
+    fn draw_face(
+        &self,
+        frame: &mut UiFrame<'_>,
+        input: &HudInput<'_>,
+        uuid: uuid::Uuid,
+        x: i32,
+        y: i32,
+        argb: u32,
+    ) {
+        if let Some(info) = input.state.players.get(uuid)
+            && let Some(head) = self.head_sprite(frame, input.skins, info)
+        {
+            frame.sprite_tinted(head, x, y, 12, 12, argb);
         }
     }
 

@@ -1,6 +1,6 @@
 use crate::aabb::Aabb;
 use crate::data::{FLUID_NONE, flag};
-use crate::player::PlayerPhysics;
+use crate::player::{PlayerPhysics, SimKind};
 use crate::world::CollisionWorld;
 
 const F_1E5: f64 = 1.0e-5_f32 as f64;
@@ -113,10 +113,13 @@ impl PlayerPhysics {
                     if st.has(flag::WEB) {
                         self.make_stuck([0.25, f64::from(0.05f32), 0.25]);
                     } else if st.has(flag::SWEET_BERRY) {
-                        let k = f64::from(0.8f32);
-                        self.make_stuck([k, 0.75, k]);
+                        if self.kind != SimKind::Boat {
+                            let k = f64::from(0.8f32);
+                            self.make_stuck([k, 0.75, k]);
+                        }
                     } else if st.has(flag::POWDER_SNOW) {
-                        if self.state_at(w, self.block_pos()).has(flag::POWDER_SNOW) {
+                        let boat = self.kind == SimKind::Boat;
+                        if boat || self.state_at(w, self.block_pos()).has(flag::POWDER_SNOW) {
                             let k = f64::from(0.9f32);
                             self.make_stuck([k, 1.5, k]);
                             self.in_powder_snow = true;
@@ -134,6 +137,9 @@ impl PlayerPhysics {
                     {
                         let above = self.state_at(w, [x, y + 1, z]);
                         let nothing_above = !above.has_collision() && above.fluid == FLUID_NONE;
+                        if nothing_above && self.kind == SimKind::Boat {
+                            continue;
+                        }
                         let drag = st.has(flag::DRAG_DOWN);
                         let vy = self.vel[1];
                         self.vel[1] = match (nothing_above, drag) {
