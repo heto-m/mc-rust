@@ -977,6 +977,7 @@ impl Entities {
                 self.anchors.push((e.id, at));
             }
         }
+        self.anchors.sort_unstable_by_key(|&(id, _)| id);
     }
 
     pub(crate) fn tick<W: CollisionWorld + ?Sized>(&mut self, cx: &mut SimContext<'_, W>) {
@@ -1000,9 +1001,9 @@ impl Entities {
                 Some(shape) => {
                     simulated += 1;
                     let anchor = anchors
-                        .iter()
-                        .find(|(id, _)| *id == entity.id)
-                        .map(|(_, at)| *at);
+                        .binary_search_by_key(&entity.id, |&(id, _)| id)
+                        .ok()
+                        .map(|i| anchors[i].1);
                     entity.tick_sim(shape, cx, anchor);
                 }
                 None => {
