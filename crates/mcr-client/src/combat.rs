@@ -33,6 +33,8 @@ pub(crate) struct Combat {
     pub(crate) placed: Option<(BlockPos, u32)>,
     /// The hand whose eating or drinking ran out locally, and when, until the server confirms it.
     pub(crate) finished_consume: Option<(Hand, u64)>,
+    /// The hand the last [`Client::start_use`] acted with, and whether `Player#itemUsed` applies.
+    pub(crate) last_use: Option<(Hand, bool)>,
 }
 
 /// One tick of the attack and use keys: presses since the last tick and whether each is held.
@@ -49,6 +51,11 @@ pub struct CombatKeys {
 pub struct CombatOutcome {
     /// The main hand swung (attack, miss, stab, dig) or a use asked for a swing.
     pub swing: bool,
+    /// The last swing's hand and whether it was an attack (`getAttackAnimation`) rather than a use
+    /// (`getInteractAnimation`).
+    pub swing_hand: Option<(Hand, bool)>,
+    /// `Minecraft#startUseItem` called `itemUsed` for this hand: the first-person item dips.
+    pub item_used: Option<Hand>,
     /// A predicted block placement: where, and the placed state.
     pub placed: Option<(BlockPos, u32)>,
     /// A piercing weapon stabbed; its swing sound is the client's to play.
@@ -115,6 +122,11 @@ impl Client {
     pub fn item_swap_scale(&self, partial: f32) -> f32 {
         let delay = self.state.attack_strength_delay();
         ((self.combat.swap_ticker as f32 + partial) / delay).clamp(0.0, 1.0)
+    }
+
+    /// `LocalPlayer#isHandsBusy`: paddling a boat.
+    pub fn hands_busy(&self) -> bool {
+        self.combat.hands_busy
     }
 
     /// Ticks the miss lockout still blocks attacks.
@@ -210,6 +222,7 @@ impl Client {
         if self.state.has_component(&held, "minecraft:piercing_weapon") {
             self.piercing_attack()?;
             out.swing = true;
+            out.swing_hand = Some((Hand::Main, true));
             out.stab = true;
             return Ok(true);
         }
@@ -233,6 +246,7 @@ impl Client {
         }
         self.attack_swing()?;
         out.swing = true;
+        out.swing_hand = Some((Hand::Main, true));
         Ok(broke)
     }
 
@@ -261,6 +275,7 @@ impl Client {
                 if self.continue_destroy(pos, face)? {
                     self.attack_swing()?;
                     out.swing = true;
+                    out.swing_hand = Some((Hand::Main, true));
                 }
             }
             _ => self.stop_destroy()?,
@@ -279,9 +294,14 @@ impl Client {
         }
         self.combat.placed = None;
         let result = self.start_use(hit)?;
+        let last = self.combat.last_use.take();
         if result == UseResult::Success {
             out.swing = true;
+            out.swing_hand = last.map(|(hand, _)| (hand, false)).or(out.swing_hand);
             out.placed = out.placed.or(self.combat.placed.take());
+        }
+        if let Some((hand, true)) = last {
+            out.item_used = Some(hand);
         }
         Ok(())
     }

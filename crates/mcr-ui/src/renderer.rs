@@ -41,6 +41,7 @@ pub struct UiStats {
 pub struct UiRenderer {
     pipeline: wgpu::RenderPipeline,
     invert_pipeline: wgpu::RenderPipeline,
+    additive_pipeline: wgpu::RenderPipeline,
     page_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     globals: wgpu::Buffer,
@@ -163,6 +164,14 @@ impl UiRenderer {
                 operation: wgpu::BlendOperation::Add,
             },
         );
+        let additive_pipeline = make_pipeline(
+            "ui additive",
+            wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        );
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ui globals"),
             size: std::mem::size_of::<Globals>() as u64,
@@ -194,6 +203,7 @@ impl UiRenderer {
         Self {
             pipeline,
             invert_pipeline,
+            additive_pipeline,
             page_layout,
             sampler,
             globals,
@@ -427,6 +437,7 @@ impl UiRenderer {
                 pass.set_pipeline(match d.blend {
                     Blend::Normal => &self.pipeline,
                     Blend::Invert => &self.invert_pipeline,
+                    Blend::Additive => &self.additive_pipeline,
                 });
                 bound = Some(d.blend);
             }

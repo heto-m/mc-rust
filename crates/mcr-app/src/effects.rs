@@ -105,6 +105,50 @@ pub fn effect_assets(assets: &Assets) -> EffectAssets {
     EffectAssets::load(&|path| assets.read(path))
 }
 
+/// A block state's particle sprite as the baked texture arrays hold it (first frame, top mip).
+pub struct BlockParticle<'a> {
+    /// The texture layer, which identifies the sprite.
+    pub layer: u16,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: &'a [u8],
+    pub tinted: bool,
+}
+
+pub fn block_particle(assets: &Assets, state: u32) -> Option<BlockParticle<'_>> {
+    let cache = &assets.cache;
+    let model = cache.state(state);
+    let quads = cache.quads(model);
+    let (face_layer, tinted) = match model.cube.iter().find(|f| f.layer != mcr_mesh::LAYER_NONE) {
+        Some(face) => (face.layer, face.tint != mcr_mesh::TINT_NONE),
+        None => match quads.iter().find(|q| q.normal == 0).or(quads.first()) {
+            Some(q) => (q.layer, q.tint != 0),
+            None => (mcr_mesh::LAYER_NONE, false),
+        },
+    };
+    let layer = if model.particle == mcr_mesh::LAYER_NONE {
+        face_layer
+    } else {
+        model.particle
+    };
+    if layer == mcr_mesh::LAYER_NONE {
+        return None;
+    }
+    let block = mcr_data::v26_3().state_block_name(state);
+    let tinted = tinted && block != Some("minecraft:grass_block");
+    let group = cache.textures.groups.get(usize::from(layer >> 14))?;
+    let size = (group.width * group.height * 4) as usize;
+    let start = usize::from(layer & 0x3FFF) * size;
+    let rgba = group.mips.first()?.get(start..start + size)?;
+    Some(BlockParticle {
+        layer,
+        width: group.width,
+        height: group.height,
+        rgba,
+        tinted,
+    })
+}
+
 pub struct AppParticleAssets {
     assets: Arc<Assets>,
 }
@@ -124,37 +168,17 @@ impl AppParticleAssets {
 
 impl ParticleAssets for AppParticleAssets {
     fn block_texture(&self, state: i32) -> Option<(EffectImage, [f32; 3])> {
-        let cache = &self.assets.cache;
-        let model = cache.state(u32::try_from(state).ok()?);
-        let quads = cache.quads(model);
-        let (face_layer, tinted) = match model.cube.iter().find(|f| f.layer != mcr_mesh::LAYER_NONE)
-        {
-            Some(face) => (face.layer, face.tint != mcr_mesh::TINT_NONE),
-            None => match quads.iter().find(|q| q.normal == 0).or(quads.first()) {
-                Some(q) => (q.layer, q.tint != 0),
-                None => (mcr_mesh::LAYER_NONE, false),
-            },
-        };
-        let layer = if model.particle == mcr_mesh::LAYER_NONE {
-            face_layer
+        let particle = block_particle(&self.assets, u32::try_from(state).ok()?)?;
+        let tint = if particle.tinted {
+            [0.47, 0.75, 0.35]
         } else {
-            model.particle
+            [1.0; 3]
         };
-        if layer == mcr_mesh::LAYER_NONE {
-            return None;
-        }
-        let block = mcr_data::v26_3().state_block_name(u32::try_from(state).ok()?);
-        let tinted = tinted && block != Some("minecraft:grass_block");
-        let group = cache.textures.groups.get(usize::from(layer >> 14))?;
-        let size = (group.width * group.height * 4) as usize;
-        let start = usize::from(layer & 0x3FFF) * size;
-        let rgba = group.mips.first()?.get(start..start + size)?.to_vec();
-        let tint = if tinted { [0.47, 0.75, 0.35] } else { [1.0; 3] };
         Some((
             EffectImage {
-                width: group.width,
-                height: group.height,
-                rgba,
+                width: particle.width,
+                height: particle.height,
+                rgba: particle.rgba.to_vec(),
             },
             tint,
         ))

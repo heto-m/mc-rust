@@ -186,6 +186,26 @@ fn display_context(c: ItemContext) -> DisplayContext {
     }
 }
 
+/// `CrossbowPull`: ticks used over the charge time, which is the use duration less 3 ticks; a
+/// holder whose duration is unknown charges for vanilla's default 25 ticks.
+fn crossbow_pull(ticks: f32, remaining: f32) -> f32 {
+    let charge = ticks + remaining - 3.0;
+    let charge = if charge > 0.0 && charge < 1000.0 {
+        charge
+    } else {
+        25.0
+    };
+    (ticks / charge).clamp(0.0, 1.0)
+}
+
+/// The display transform of an entity-model special: like a baked model's, ending in the
+/// block-centring `T(-0.5)` that the shield and trident display offsets are authored against.
+fn special_base(display: Option<&mcr_assets::ItemTransform>, left: bool) -> Mat4 {
+    display.map_or(Mat4::from_translation(Vec3::splat(-0.5)), |t| {
+        display_matrix(t, left)
+    })
+}
+
 fn mat_from_rows(m: &[[f32; 4]; 4]) -> Mat4 {
     Mat4::from_cols_array_2d(&std::array::from_fn(|c| std::array::from_fn(|r| m[r][c])))
 }
@@ -393,6 +413,7 @@ impl ItemGeometry {
             using_item: using.is_some(),
             ticks_using_item: using.map_or(0.0, |u| u.0),
             use_remaining_ticks: using.map_or(0.0, |u| u.1),
+            crossbow_pull: using.map_or(0.0, |(ticks, remaining)| crossbow_pull(ticks, remaining)),
             ..AssetCtx::default()
         };
         let layers = self
@@ -484,11 +505,7 @@ impl ItemGeometry {
         let display = self
             .baked(base)
             .and_then(|m| m.display(display_context(context)));
-        let centred = match &display {
-            Some(t) => display_matrix(t, left) * Mat4::from_translation(Vec3::splat(0.5)),
-            None => Mat4::IDENTITY,
-        };
-        let local = centred * mat_from_rows(&layer.transform);
+        let local = special_base(display.as_ref(), left) * mat_from_rows(&layer.transform);
         let layers = &self.assets.layers;
         let parts =
             crate::special::parts(kind, |name| layers.get(name).map(Model::from_layer), stack);
@@ -624,6 +641,29 @@ mod tests {
         assert_eq!(clone_count(40), 4);
         assert_eq!(clone_count(i32::MAX), 5);
         assert_eq!(clone_count(i32::MIN), 1);
+    }
+}
+
+#[cfg(test)]
+mod special_tests {
+    use super::*;
+
+    fn shield(translation: [f32; 3]) -> mcr_assets::ItemTransform {
+        mcr_assets::ItemTransform {
+            rotation: [0.0, 180.0, 5.0],
+            translation: translation.map(|c| c / 16.0),
+            scale: [1.25; 3],
+        }
+    }
+
+    #[test]
+    fn first_person_shields_sit_on_their_arm_and_mirror() {
+        let right = special_base(Some(&shield([-10.0, 1.75, -10.0])), false);
+        let left = special_base(Some(&shield([10.0, 0.0, -10.0])), true);
+        let r = right.transform_point3(Vec3::ZERO);
+        let l = left.transform_point3(Vec3::ZERO);
+        assert!(r.x.abs() < 0.1 && (r.x + l.x).abs() < 0.01, "{r} {l}");
+        assert!((r.z - l.z).abs() < 1e-5 && r.y < -0.4 && l.y < -0.4);
     }
 }
 

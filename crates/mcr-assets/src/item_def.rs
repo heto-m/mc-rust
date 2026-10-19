@@ -180,6 +180,10 @@ pub struct ItemNode {
 pub struct ItemModelDef {
     pub root: ItemNode,
     pub oversized_in_gui: bool,
+    /// Whether a changed stack lowers and raises the first-person hand.
+    pub hand_animation_on_swap: bool,
+    /// How far the first-person hand drops while swapping.
+    pub swap_animation_scale: f32,
 }
 
 struct Parser<'a> {
@@ -564,6 +568,8 @@ impl ItemModelDef {
         Ok(Self {
             root: parser.node(root, 0)?,
             oversized_in_gui: Parser::flag(&value, "oversized_in_gui", false),
+            hand_animation_on_swap: Parser::flag(&value, "hand_animation_on_swap", true),
+            swap_animation_scale: Parser::float(&value, "swap_animation_scale", 1.0),
         })
     }
 

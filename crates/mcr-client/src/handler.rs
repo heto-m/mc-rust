@@ -577,6 +577,7 @@ impl ClientState {
             P::SwingAnimation(p) => out.event(ClientEvent::EntitySwing {
                 entity_id: p.entity_id,
                 offhand: p.hand == mcr_protocol::types::game::Hand::Off,
+                animation: p.animation.clone(),
             }),
             P::HurtAnimation(p) => {
                 if p.entity_id == self.player.entity_id && p.yaw.is_finite() {

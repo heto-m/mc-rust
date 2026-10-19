@@ -54,6 +54,8 @@ pub enum Blend {
     Normal,
     /// Vanilla's `CROSSHAIR` pipeline: white inverts what is underneath.
     Invert,
+    /// Vanilla's `ADDITIVE` blend function (the nausea overlay).
+    Additive,
 }
 
 #[derive(Clone, Debug)]
@@ -391,6 +393,29 @@ impl UiFrame<'_> {
             uv_corners(q.uv),
             color_bytes(argb),
         );
+    }
+
+    /// Maps sprite fractions `uv` onto any GUI quad `corners` (top-left, bottom-left, bottom-right,
+    /// top-right), for overlays that are projected rather than axis-aligned.
+    pub fn sprite_quad(
+        &mut self,
+        id: SpriteId,
+        corners: [[f32; 2]; 4],
+        uv: [[f32; 2]; 4],
+        argb: u32,
+    ) {
+        let info = *self.ui.sprites.info(id);
+        let q = info.stretched(self.ui.sprites.atlas().size(), [0.0, 0.0, 1.0, 1.0]);
+        let page = PageRef {
+            kind: PageKind::Sprite,
+            index: info.page,
+        };
+        let scissor = self.scissor_px();
+        let [u0, v0, u1, v1] = q.uv;
+        let atlas_uv = uv.map(|[u, v]| [u0 + (u1 - u0) * u, v0 + (v1 - v0) * v]);
+        self.ui
+            .batch
+            .push(page, scissor, corners, atlas_uv, color_bytes(argb));
     }
 
     /// Draws the `w`x`h` window of a sprite starting at pixel `(tx, ty)`, unscaled.

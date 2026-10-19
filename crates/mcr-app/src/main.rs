@@ -4,6 +4,7 @@ mod assets;
 mod audio;
 mod autopilot;
 mod block_entities;
+mod camera_fx;
 mod cli;
 mod debug;
 mod editors;

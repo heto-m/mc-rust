@@ -182,7 +182,7 @@ impl ClientState {
             .map_or(default, |a| a.value(None))
     }
 
-    fn effect_amplifier(&self, name: &str) -> Option<i32> {
+    pub fn effect_amplifier(&self, name: &str) -> Option<i32> {
         let id = self
             .data
             .registry("minecraft:mob_effect")?

@@ -486,9 +486,9 @@ impl EntityLayer {
 
     pub fn on_event(&mut self, event: &ClientEvent, local_id: i32) {
         let (id, f): (i32, Mutation) = match *event {
-            ClientEvent::EntitySwing { entity_id, offhand } => {
-                (entity_id, Box::new(move |t| t.start_swing(offhand)))
-            }
+            ClientEvent::EntitySwing {
+                entity_id, offhand, ..
+            } => (entity_id, Box::new(move |t| t.start_swing(offhand))),
             ClientEvent::EntityEvent { entity_id, event } => match event {
                 33 | 36 | 37 | 44 | 57 => (entity_id, Box::new(|t| t.hurt = HURT_TICKS)),
                 3 => (entity_id, Box::new(|t| t.death = t.death.max(1))),
@@ -684,7 +684,7 @@ impl EntityLayer {
                 local,
                 cx.partial,
                 local_data,
-                1.0,
+                cx.state.player.physics.attributes.scale.clamp(0.0625, 16.0) as f32,
             );
             v.equipment = Some(&*local_equipment);
             v.bed = bed_of(cx.state, &v);
@@ -1356,10 +1356,11 @@ fn apply_events(v: &mut EntityView<'_>, ev: crate::entity_events::EventView) {
     v.shake = ev.shake;
 }
 
-/// View-projection of the vanilla hand: fixed 70 degrees, no world rotation.
-pub fn hand_view_proj(aspect: f32) -> Mat4 {
+/// View-projection of the vanilla hand: `fov` degrees (70 unless dying or in a fluid), no world
+/// rotation.
+pub fn hand_view_proj(aspect: f32, fov: f32) -> Mat4 {
     mcr_render::glam::camera::rh::proj::directx::perspective_infinite_reverse(
-        70f32.to_radians(),
+        fov.clamp(1.0, 170.0).to_radians(),
         aspect,
         0.05,
     )

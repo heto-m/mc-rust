@@ -452,7 +452,11 @@ fn animate_and_swing_are_separate_events() {
         swing,
         [ClientEvent::EntitySwing {
             entity_id: 3,
-            offhand: true
+            offhand: true,
+            animation: SwingAnimation {
+                kind: SwingAnimationType::Whack,
+                duration: 6,
+            },
         }]
     );
 }

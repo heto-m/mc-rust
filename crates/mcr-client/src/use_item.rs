@@ -214,6 +214,7 @@ impl Client {
 
     /// Vanilla right-click: block use, then item use, main hand before off hand.
     pub fn start_use(&mut self, target: UseTarget) -> Result<UseResult> {
+        self.combat.last_use = None;
         if self.digging.is_some() {
             return Ok(UseResult::Pass);
         }
@@ -221,6 +222,9 @@ impl Client {
             return self.spectator_use(target);
         }
         for hand in [Hand::Main, Hand::Off] {
+            self.combat.last_use = None;
+            let had_item = !self.hand_stack(hand).is_empty();
+            let count = self.hand_stack(hand).count;
             if let Some(result) = self.use_hand(hand, target)? {
                 if result == UseResult::Success {
                     self.local_action(LocalAction::Swing {
@@ -228,6 +232,16 @@ impl Client {
                         attack: false,
                     });
                 }
+                let used = had_item
+                    && match self.combat.last_use {
+                        Some((_, true)) => result != UseResult::Pass,
+                        _ => {
+                            result == UseResult::Success
+                                && (self.state.player.instabuild
+                                    || self.hand_stack(hand).count != count)
+                        }
+                    };
+                self.combat.last_use = Some((hand, used));
                 return Ok(result);
             }
         }
@@ -346,6 +360,7 @@ impl Client {
         }
         if !held.is_empty() {
             let kind = self.use_kind(&held);
+            self.combat.last_use = Some((hand, true));
             self.use_item(hand)?;
             if self.state.is_item(&held, "writable_book") {
                 self.state.gameplay.book_editor = Some(hand);
@@ -771,7 +786,7 @@ impl crate::state::ClientState {
             .is_some_and(|n| short(n).ends_with("bundle"))
     }
 
-    pub(crate) fn is_item(&self, stack: &ItemStack, name: &str) -> bool {
+    pub fn is_item(&self, stack: &ItemStack, name: &str) -> bool {
         u32::try_from(stack.item)
             .ok()
             .and_then(|i| self.data.item_name(i))
@@ -787,6 +802,47 @@ impl crate::state::ClientState {
                         .and_then(|i| self.data.item_name(i))
                         .is_some_and(|n| names.contains(&short(n)))
             })
+    }
+
+    /// `CrossbowItem#getChargeDuration` in ticks: 1.25 s plus the enchantments'
+    /// `crossbow_charge_time` (Quick Charge takes 0.25 s a level).
+    pub fn crossbow_charge_ticks(&self, stack: &ItemStack) -> i32 {
+        let mut seconds = 1.25f64;
+        let enchants = stack.components.added.iter().find_map(|c| match c {
+            DataComponent::Enchantments(e) => Some(e),
+            _ => None,
+        });
+        let registry = self.registries.get("minecraft:enchantment");
+        for level in enchants.iter().flat_map(|e| e.0.iter()) {
+            let Some(entry) = registry.and_then(|r| r.get(level.enchantment)) else {
+                continue;
+            };
+            let lvl = f64::from(level.level.clamp(1, 255));
+            let effect = entry
+                .data
+                .as_ref()
+                .and_then(|d| d.get_compound("effects"))
+                .and_then(|e| e.get_compound("minecraft:crossbow_charge_time"));
+            match effect {
+                Some(effect) => {
+                    let amount = match effect.get_compound("value") {
+                        Some(v) => {
+                            v.get_f64("base").unwrap_or(0.0)
+                                + v.get_f64("per_level_above_first").unwrap_or(0.0) * (lvl - 1.0)
+                        }
+                        None => effect.get_f64("value").unwrap_or(0.0),
+                    };
+                    if amount.is_finite() {
+                        seconds += amount;
+                    }
+                }
+                None if entry.data.is_none() && entry.id.as_str() == "minecraft:quick_charge" => {
+                    seconds -= 0.25 * lvl;
+                }
+                None => {}
+            }
+        }
+        (seconds.max(0.0) * 20.0).min(f64::from(MAX_USE_TICKS)) as i32
     }
 
     pub fn use_kind(&self, stack: &ItemStack) -> Option<(UseKind, i32)> {

@@ -7,7 +7,8 @@ pub struct Camera {
     pub pitch: f32,
     pub fov_y: f32,
     pub near: f32,
-    /// Camera-space rotation applied after the look rotation (damage tilt, death roll).
+    /// Camera-space transform applied after the look rotation (damage tilt, death roll, view
+    /// bobbing, the nausea warp); not necessarily a rotation.
     pub roll: Mat4,
 }
 
@@ -44,7 +45,12 @@ impl Camera {
     }
 
     pub fn view_rotation(&self) -> Mat4 {
-        self.roll * glam::camera::rh::view::look_to_mat4(Vec3::ZERO, self.forward(), self.up())
+        self.roll * self.look_rotation()
+    }
+
+    /// The look rotation alone, without [`Self::roll`]: vanilla's `Camera#rotation` for billboards.
+    pub fn look_rotation(&self) -> Mat4 {
+        glam::camera::rh::view::look_to_mat4(Vec3::ZERO, self.forward(), self.up())
     }
 
     pub fn projection(&self, aspect: f32) -> Mat4 {

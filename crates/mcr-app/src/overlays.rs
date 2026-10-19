@@ -1,10 +1,16 @@
-//! Full-screen effects drawn over the HUD: the vignette and border warning, the spyglass scope and
-//! the totem pop animation.
+//! Full-screen effects drawn under the HUD: vanilla's `ScreenEffectRenderer` (in-block view, water,
+//! fire, totem) and `Hud#extractCameraOverlays` (vignette, scope, pumpkin, powder snow, portal,
+//! nausea).
+
+use std::f32::consts::PI;
 
 use mcr_audio::SoundSource;
 use mcr_client::ClientState;
 use mcr_protocol::types::ItemStack;
+use mcr_protocol::types::component::{DataComponent, EquipmentSlot, component_type_id};
+use mcr_protocol::types::entity_data::EntityDataValue;
 use mcr_protocol::types::game::Hand;
+use mcr_render::glam::{Mat4, Vec3};
 use mcr_ui::{ItemIcons, ItemView, SpriteId, StackView, UiFrame};
 
 use crate::assets::Assets;
@@ -21,6 +27,58 @@ struct Totem {
     stack: ItemStack,
 }
 
+/// Most textures a server's `camera_overlay` components may load before the cache stops growing.
+const MAX_OVERLAY_TEXTURES: usize = 8;
+const FIRE_GRID: usize = 8;
+const UNDERWATER: &str = "minecraft:misc/underwater";
+const POWDER_SNOW: &str = "minecraft:misc/powder_snow_outline";
+const NAUSEA: &str = "minecraft:misc/nausea";
+const PORTAL: &str = "minecraft:block/nether_portal";
+const FIRE: &str = "minecraft:block/fire_1";
+const PUMPKIN_BLUR: &str = "minecraft:misc/pumpkinblur";
+const IN_BLOCK_TINT: u32 = 0xFF19_1919;
+const FIRE_TINT: u32 = 0xE5FF_FFFF;
+const TICKS_TO_FREEZE: f32 = 140.0;
+
+/// What `ScreenEffectRenderer` draws over the hand: the in-block view, water and fire.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ScreenEffects {
+    /// The block state whose particle texture covers the view.
+    pub block: Option<u32>,
+    /// The light brightness at the eye while it is under water (first person only).
+    pub water: Option<f32>,
+    pub fire: bool,
+    /// The hand projection's vertical FOV in degrees.
+    pub hud_fov: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+/// Everything [`Overlays::draw`] needs for one frame.
+#[derive(Debug, Clone, Copy)]
+pub struct OverlayFrame<'a> {
+    pub state: &'a ClientState,
+    pub screen: ScreenEffects,
+    /// The HUD is hidden (F1): only the screen effects draw.
+    pub hidden: bool,
+    pub first_person: bool,
+    pub scoping: bool,
+    pub border_warning: Option<f32>,
+    pub portal: f32,
+    pub nausea: f32,
+    pub screen_effect_scale: f32,
+    pub partial: f32,
+    pub ticks: u64,
+}
+
+#[derive(Debug)]
+struct Texture {
+    key: String,
+    sprite: Option<SpriteId>,
+    /// Animation frames stacked vertically (square frames).
+    frames: u32,
+}
+
 #[derive(Debug, Default)]
 pub struct Overlays {
     scope: Option<SpriteId>,
@@ -31,6 +89,8 @@ pub struct Overlays {
     vignette: Option<SpriteId>,
     vignette_loaded: bool,
     vignette_brightness: f32,
+    textures: Vec<Texture>,
+    block: Option<(u16, Option<SpriteId>)>,
     owned: mcr_ui::OwnedSprites,
 }
 
@@ -51,6 +111,51 @@ pub fn vignette_tint(brightness: f32, warning: f32) -> (f32, f32) {
     } else {
         (brightness, 0.0)
     }
+}
+
+/// `Hud#extractPortalOverlay`'s alpha curve.
+pub fn portal_alpha(intensity: f32) -> f32 {
+    if intensity < 1.0 {
+        let a = intensity * intensity;
+        a * a * 0.8 + 0.2
+    } else {
+        intensity
+    }
+}
+
+/// `Player#getPercentFrozen` from the synced `ticks_frozen` (entity data 7).
+pub fn percent_frozen(state: &ClientState) -> f32 {
+    match state.player.data.get(&7) {
+        Some(EntityDataValue::Int(t)) if *t > 0 => {
+            (*t as f32).min(TICKS_TO_FREEZE) / TICKS_TO_FREEZE
+        }
+        _ => 0.0,
+    }
+}
+
+/// `Equippable#cameraOverlay` of a worn stack: its patch, else the carved pumpkin's default blur.
+pub fn camera_overlay(stack: &ItemStack, slot: EquipmentSlot) -> Option<&str> {
+    if stack.is_empty() {
+        return None;
+    }
+    let patched = stack.components.added.iter().find_map(|c| match c {
+        DataComponent::Equippable(e) => Some(e),
+        _ => None,
+    });
+    if let Some(e) = patched {
+        return e
+            .camera_overlay
+            .as_ref()
+            .filter(|_| e.slot == slot)
+            .map(|id| id.as_str());
+    }
+    let removed =
+        component_type_id("equippable").is_some_and(|id| stack.components.removed.contains(&id));
+    let pumpkin = u32::try_from(stack.item)
+        .ok()
+        .and_then(|i| mcr_data::v26_3().item_name(i))
+        == Some("minecraft:carved_pumpkin");
+    (!removed && pumpkin && slot == EquipmentSlot::Head).then_some(PUMPKIN_BLUR)
 }
 
 fn vignette_alpha(rgba: &[u8]) -> Vec<u8> {
@@ -81,9 +186,108 @@ fn decode_scope(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
             .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
+        png::ColorType::Grayscale => data.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::GrayscaleAlpha => data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|p| [p[0], p[0], p[0], p[1]])
+            .collect(),
         _ => return None,
     };
     (rgba.len() == (w * h * 4) as usize).then_some((w, h, rgba))
+}
+
+/// `ns:path` to the texture file `textures/path.png`; rejects paths that climb out of `textures`.
+fn texture_file(id: &str) -> Option<String> {
+    let (ns, path) = id.split_once(':').unwrap_or(("minecraft", id));
+    (!path.contains("..") && !path.is_empty() && path.len() < 256)
+        .then(|| format!("assets/{ns}/textures/{path}.png"))
+}
+
+/// `t` in 0..1 along a repeating texture coordinate running from `a` to `b`: pieces that each stay
+/// inside one repeat, as `[t0, t1, fraction at t0, fraction at t1]`.
+fn tile_segments(a: f32, b: f32, out: &mut [[f32; 4]; 6]) -> usize {
+    let span = b - a;
+    if !span.is_finite() || span == 0.0 {
+        return 0;
+    }
+    let up = span > 0.0;
+    let (mut t, mut u, mut n) = (0.0f32, a, 0);
+    while n < out.len() && (b - u) * span.signum() > 1.0e-5 {
+        let cell = if up { u.floor() } else { u.ceil() - 1.0 };
+        let next = if up { (cell + 1.0).min(b) } else { cell.max(b) };
+        let t_next = (next - a) / span;
+        out[n] = [t, t_next, u - cell, next - cell];
+        n += 1;
+        t = t_next;
+        u = next;
+    }
+    n
+}
+
+/// Projects camera-space points through the hand projection to GUI pixels.
+#[derive(Debug, Clone, Copy)]
+struct Projector {
+    tan_half: f32,
+    aspect: f32,
+    size: (f32, f32),
+}
+
+impl Projector {
+    fn new(fov_degrees: f32, size: (i32, i32)) -> Self {
+        let size = (size.0.max(1) as f32, size.1.max(1) as f32);
+        Self {
+            tan_half: (fov_degrees.clamp(1.0, 179.0).to_radians() * 0.5).tan(),
+            aspect: size.0 / size.1,
+            size,
+        }
+    }
+
+    fn project(&self, p: Vec3) -> [f32; 2] {
+        let depth = (-p.z).max(1.0e-3);
+        let x = p.x / depth / (self.tan_half * self.aspect);
+        let y = p.y / depth / self.tan_half;
+        [(x + 1.0) * 0.5 * self.size.0, (1.0 - y) * 0.5 * self.size.1]
+    }
+
+    /// Draws the camera-space quad `c` (x0y0, x1y0, x1y1, x0y1) with sprite fractions `uv` at those
+    /// corners, split into a `grid`² mesh so perspective stays close to vanilla's 3D quad.
+    #[allow(clippy::too_many_arguments)]
+    fn quad(
+        &self,
+        frame: &mut UiFrame<'_>,
+        sprite: SpriteId,
+        c: [Vec3; 4],
+        uv: [[f32; 2]; 4],
+        argb: u32,
+        grid: usize,
+    ) {
+        let at = |s: f32, t: f32| -> (Vec3, [f32; 2]) {
+            let bottom = c[0].lerp(c[1], s);
+            let top = c[3].lerp(c[2], s);
+            let lerp2 = |a: [f32; 2], b: [f32; 2], k: f32| {
+                [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k]
+            };
+            let uv_bottom = lerp2(uv[0], uv[1], s);
+            let uv_top = lerp2(uv[3], uv[2], s);
+            (bottom.lerp(top, t), lerp2(uv_bottom, uv_top, t))
+        };
+        let n = grid.max(1);
+        for i in 0..n {
+            for j in 0..n {
+                let (s0, s1) = (i as f32 / n as f32, (i + 1) as f32 / n as f32);
+                let (t0, t1) = (j as f32 / n as f32, (j + 1) as f32 / n as f32);
+                let corners = [at(s0, t1), at(s0, t0), at(s1, t0), at(s1, t1)];
+                frame.sprite_quad(
+                    sprite,
+                    corners.map(|(p, _)| self.project(p)),
+                    corners.map(|(_, uv)| uv),
+                    argb,
+                );
+            }
+        }
+    }
 }
 
 impl Overlays {
@@ -129,22 +333,226 @@ impl Overlays {
         self.scope_scale += (target - self.scope_scale) * 0.5;
     }
 
+    /// The sprite of `id` (`ns:path` under `textures/`), decoded once and kept.
+    fn texture(
+        &mut self,
+        frame: &mut UiFrame<'_>,
+        assets: &Assets,
+        id: &str,
+    ) -> Option<(SpriteId, u32)> {
+        if let Some(t) = self.textures.iter().find(|t| t.key == id) {
+            return t.sprite.map(|s| (s, t.frames));
+        }
+        if self.textures.len() >= MAX_OVERLAY_TEXTURES {
+            return None;
+        }
+        let decoded = texture_file(id)
+            .and_then(|file| assets.read(&file))
+            .and_then(|b| decode_scope(&b));
+        let (sprite, frames) = match decoded {
+            Some((w, h, px)) => (
+                self.owned.add(frame.ui().sprites_mut(), w, h, &px),
+                (h / w).max(1),
+            ),
+            None => (None, 1),
+        };
+        self.textures.push(Texture {
+            key: id.to_owned(),
+            sprite,
+            frames,
+        });
+        sprite.map(|s| (s, frames))
+    }
+
+    fn block_sprite(
+        &mut self,
+        frame: &mut UiFrame<'_>,
+        assets: &Assets,
+        state: u32,
+    ) -> Option<SpriteId> {
+        let particle = crate::effects::block_particle(assets, state)?;
+        if let Some((layer, sprite)) = self.block
+            && layer == particle.layer
+        {
+            return sprite;
+        }
+        if let Some((_, Some(old))) = self.block.take() {
+            self.owned.free(frame.ui().sprites_mut(), old);
+        }
+        let sprite = self.owned.add(
+            frame.ui().sprites_mut(),
+            particle.width,
+            particle.height,
+            particle.rgba,
+        );
+        self.block = Some((particle.layer, sprite));
+        sprite
+    }
+
+    /// Screen effects, the totem, then the HUD's camera overlays, in vanilla's order.
     pub fn draw(
         &mut self,
         frame: &mut UiFrame<'_>,
         icons: &mut ItemIcons,
         assets: &Assets,
-        scoping: bool,
-        partial: f32,
-        border_warning: Option<f32>,
+        f: &OverlayFrame<'_>,
     ) {
-        if let Some(warning) = border_warning {
+        self.draw_screen_effects(frame, assets, f);
+        if f.hidden {
+            return;
+        }
+        self.draw_totem(frame, icons, f.partial);
+        if let Some(warning) = f.border_warning {
             self.draw_vignette(frame, assets, warning);
         }
-        if scoping {
-            self.draw_scope(frame, assets);
+        if f.first_person {
+            if f.scoping {
+                self.draw_scope(frame, assets);
+            } else {
+                self.draw_equipment(frame, assets, f.state);
+            }
         }
-        self.draw_totem(frame, icons, partial);
+        let frozen = percent_frozen(f.state);
+        if frozen > 0.0 {
+            self.full_screen(frame, assets, POWDER_SNOW, white(frozen));
+        }
+        if f.portal > 0.0 {
+            self.draw_portal(frame, assets, f.portal, f.ticks);
+        } else if f.nausea > 0.0 && f.screen_effect_scale < 1.0 {
+            self.draw_nausea(frame, assets, f.nausea * (1.0 - f.screen_effect_scale));
+        }
+    }
+
+    fn draw_screen_effects(
+        &mut self,
+        frame: &mut UiFrame<'_>,
+        assets: &Assets,
+        f: &OverlayFrame<'_>,
+    ) {
+        let s = f.screen;
+        let projector = Projector::new(s.hud_fov, frame.gui_size());
+        let flat = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            [
+                Vec3::new(x0, y0, -0.5),
+                Vec3::new(x1, y0, -0.5),
+                Vec3::new(x1, y1, -0.5),
+                Vec3::new(x0, y1, -0.5),
+            ]
+        };
+        if let Some(state) = s.block
+            && let Some(sprite) = self.block_sprite(frame, assets, state)
+        {
+            let uv = [[1.0, 1.0], [0.0, 1.0], [0.0, 0.0], [1.0, 0.0]];
+            projector.quad(
+                frame,
+                sprite,
+                flat(-1.0, -1.0, 1.0, 1.0),
+                uv,
+                IN_BLOCK_TINT,
+                1,
+            );
+        }
+        if let Some(brightness) = s.water
+            && let Some((sprite, _)) = self.texture(frame, assets, UNDERWATER)
+        {
+            let channel = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u32;
+            let argb = (channel(0.1) << 24) | (channel(brightness) * 0x0001_0101);
+            let u = (-s.yaw / 64.0).rem_euclid(1.0);
+            let v = (s.pitch / 64.0).rem_euclid(1.0);
+            let (mut us, mut vs) = ([[0.0; 4]; 6], [[0.0; 4]; 6]);
+            let nu = tile_segments(u + 4.0, u, &mut us);
+            let nv = tile_segments(v + 4.0, v, &mut vs);
+            for a in &us[..nu] {
+                for b in &vs[..nv] {
+                    let x = |t: f32| -1.0 + 2.0 * t;
+                    let quad = flat(x(a[0]), x(b[0]), x(a[1]), x(b[1]));
+                    let uv = [[a[2], b[2]], [a[3], b[2]], [a[3], b[3]], [a[2], b[3]]];
+                    projector.quad(frame, sprite, quad, uv, argb, 1);
+                }
+            }
+        }
+        if s.fire
+            && let Some((sprite, frames)) = self.texture(frame, assets, FIRE)
+        {
+            let (v0, v1) = frame_rows(f.ticks, frames);
+            for side in [1.0f32, -1.0] {
+                let pose = Mat4::from_translation(Vec3::new(0.24 * side, -0.3, 0.0))
+                    * Mat4::from_rotation_y(-side * PI / 18.0);
+                let quad = flat(-0.5, -0.5, 0.5, 0.5).map(|p| pose.transform_point3(p));
+                let uv = [[1.0, v1], [0.0, v1], [0.0, v0], [1.0, v0]];
+                projector.quad(frame, sprite, quad, uv, FIRE_TINT, FIRE_GRID);
+            }
+        }
+    }
+
+    fn full_screen(&mut self, frame: &mut UiFrame<'_>, assets: &Assets, id: &str, argb: u32) {
+        if argb >> 24 == 0 {
+            return;
+        }
+        let Some((sprite, _)) = self.texture(frame, assets, id) else {
+            return;
+        };
+        let (w, h) = frame.gui_size();
+        frame.sprite_tinted(sprite, 0, 0, w, h, argb);
+    }
+
+    fn draw_equipment(&mut self, frame: &mut UiFrame<'_>, assets: &Assets, state: &ClientState) {
+        const ARMOR: [(i32, EquipmentSlot); 4] = [
+            (36, EquipmentSlot::Feet),
+            (37, EquipmentSlot::Legs),
+            (38, EquipmentSlot::Chest),
+            (39, EquipmentSlot::Head),
+        ];
+        for (index, slot) in ARMOR {
+            let Some(stack) = mcr_client::inventory_index_to_menu_slot(index)
+                .and_then(|i| state.inventory.player.slots.get(i))
+            else {
+                continue;
+            };
+            if let Some(id) = camera_overlay(stack, slot) {
+                self.full_screen(frame, assets, id, 0xFFFF_FFFF);
+            }
+        }
+    }
+
+    fn draw_portal(
+        &mut self,
+        frame: &mut UiFrame<'_>,
+        assets: &Assets,
+        intensity: f32,
+        ticks: u64,
+    ) {
+        let Some((sprite, frames)) = self.texture(frame, assets, PORTAL) else {
+            return;
+        };
+        let (v0, v1) = frame_rows(ticks, frames);
+        let (w, h) = frame.gui_size();
+        let (w, h) = (w as f32, h as f32);
+        frame.sprite_quad(
+            sprite,
+            [[0.0, 0.0], [0.0, h], [w, h], [w, 0.0]],
+            [[0.0, v0], [0.0, v1], [1.0, v1], [1.0, v0]],
+            white(portal_alpha(intensity)),
+        );
+    }
+
+    fn draw_nausea(&mut self, frame: &mut UiFrame<'_>, assets: &Assets, strength: f32) {
+        let Some((sprite, _)) = self.texture(frame, assets, NAUSEA) else {
+            return;
+        };
+        let (w, h) = frame.gui_size();
+        let (w, h) = (w as f32, h as f32);
+        let size = 2.0 + (1.0 - 2.0) * strength.clamp(0.0, 1.0);
+        let (hw, hh) = (w * 0.5 * size, h * 0.5 * size);
+        let (cx, cy) = (w * 0.5, h * 0.5);
+        let channel = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u32;
+        let argb = 0xFF00_0000
+            | channel(0.2 * strength) << 16
+            | channel(0.4 * strength) << 8
+            | channel(0.2 * strength);
+        frame.set_blend(mcr_ui::Blend::Additive);
+        frame.sprite_f(sprite, [cx - hw, cy - hh, cx + hw, cy + hh], argb);
+        frame.set_blend(mcr_ui::Blend::Normal);
     }
 
     fn draw_vignette(&mut self, frame: &mut UiFrame<'_>, assets: &Assets, warning: f32) {
@@ -221,6 +629,17 @@ impl Overlays {
         };
         icons.draw_sized(frame, &item, cx as i32 - w / 2, cy as i32 - h / 2, w, h);
     }
+}
+
+fn white(alpha: f32) -> u32 {
+    ((alpha.clamp(0.0, 1.0) * 255.0) as u32) << 24 | 0x00FF_FFFF
+}
+
+/// The rows of the current frame of a vertical animation strip, one frame a tick.
+fn frame_rows(ticks: u64, frames: u32) -> (f32, f32) {
+    let frames = frames.max(1);
+    let i = (ticks % u64::from(frames)) as f32;
+    (i / frames as f32, (i + 1.0) / frames as f32)
 }
 
 /// Vanilla's `findTotem`: the first hand holding a death-protection item, else a plain totem.
@@ -307,6 +726,126 @@ mod tests {
         let mut o = Overlays::new();
         o.tick_vignette(1.0);
         assert!(o.vignette_brightness < 1.0 && o.vignette_brightness > 0.98);
+    }
+
+    #[test]
+    fn portal_alpha_and_frozen_share() {
+        assert!((portal_alpha(0.5) - (0.0625 * 0.8 + 0.2)).abs() < 1e-6);
+        assert_eq!(portal_alpha(1.0), 1.0);
+        let mut state = ClientState::new(&mcr_client::ClientConfig::default(), uuid::Uuid::nil());
+        assert_eq!(percent_frozen(&state), 0.0);
+        state.player.data.insert(7, EntityDataValue::Int(70));
+        assert_eq!(percent_frozen(&state), 0.5);
+        state.player.data.insert(7, EntityDataValue::Int(i32::MAX));
+        assert_eq!(percent_frozen(&state), 1.0);
+    }
+
+    #[test]
+    fn pumpkin_overlay_only_from_the_head_slot() {
+        let pumpkin = mcr_data::v26_3()
+            .item_by_name("minecraft:carved_pumpkin")
+            .unwrap() as i32;
+        let stack = ItemStack::new(pumpkin, 1);
+        assert_eq!(
+            camera_overlay(&stack, EquipmentSlot::Head),
+            Some(PUMPKIN_BLUR)
+        );
+        assert_eq!(camera_overlay(&stack, EquipmentSlot::Chest), None);
+        assert_eq!(
+            camera_overlay(&ItemStack::default(), EquipmentSlot::Head),
+            None
+        );
+        assert!(texture_file("minecraft:../../secret").is_none());
+        assert_eq!(
+            texture_file("minecraft:misc/pumpkinblur").as_deref(),
+            Some("assets/minecraft/textures/misc/pumpkinblur.png")
+        );
+    }
+
+    #[test]
+    fn water_tiles_split_at_texture_repeats() {
+        let mut out = [[0.0; 4]; 6];
+        let n = tile_segments(4.25, 0.25, &mut out);
+        assert_eq!(n, 5);
+        assert_eq!(out[0], [0.0, 0.0625, 0.25, 0.0]);
+        assert_eq!(out[4][3], 0.25);
+        let total: f32 = out[..n].iter().map(|s| s[1] - s[0]).sum();
+        assert!((total - 1.0).abs() < 1e-5);
+        assert_eq!(tile_segments(1.0, 1.0, &mut out), 0);
+    }
+
+    #[test]
+    fn overlays_draw_in_vanilla_order_with_their_alpha() {
+        let jar = std::path::Path::new("../../.cache/versions/26.3/client.jar");
+        if !jar.exists() {
+            return;
+        }
+        let assets = Assets::load(jar).unwrap();
+        let mut ui = mcr_ui::Ui::load(&assets.resources).unwrap();
+        let mut icons = ItemIcons::load(&assets.resources).unwrap();
+        let data = mcr_data::v26_3();
+        let mut state = ClientState::new(&mcr_client::ClientConfig::default(), uuid::Uuid::nil());
+        let pumpkin = data.item_by_name("minecraft:carved_pumpkin").unwrap() as i32;
+        let head = mcr_client::inventory_index_to_menu_slot(39).unwrap();
+        state.inventory.player.slots[head] = ItemStack::new(pumpkin, 1);
+        state.player.data.insert(7, EntityDataValue::Int(70));
+        let stone = data.block_by_name("minecraft:stone").unwrap();
+        let (stone, _) = data.block_info(stone).unwrap().states;
+        let frame_input = OverlayFrame {
+            state: &state,
+            screen: ScreenEffects {
+                block: Some(stone),
+                water: Some(1.0),
+                fire: true,
+                hud_fov: 70.0,
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+            hidden: false,
+            first_person: true,
+            scoping: false,
+            border_warning: None,
+            portal: 0.5,
+            nausea: 1.0,
+            screen_effect_scale: 0.0,
+            partial: 0.0,
+            ticks: 3,
+        };
+        let mut overlays = Overlays::new();
+        let mut frame = ui.frame(854, 480);
+        overlays.draw(&mut frame, &mut icons, &assets, &frame_input);
+        drop(frame);
+        let mut colors: Vec<[u8; 4]> = ui.batch().vertices.chunks(4).map(|q| q[0].color).collect();
+        colors.dedup();
+        let first = &ui.batch().vertices[..4];
+        let xs = first.iter().map(|v| v.pos[0]);
+        assert!(xs.clone().fold(f32::MAX, f32::min) < 0.0 && xs.fold(f32::MIN, f32::max) > 427.0);
+        assert_eq!(
+            colors,
+            vec![
+                [0x19, 0x19, 0x19, 255],
+                [255, 255, 255, 25],
+                [255, 255, 255, 0xE5],
+                [255, 255, 255, 255],
+                [255, 255, 255, 127],
+                [255, 255, 255, 63],
+            ]
+        );
+        let mut hidden = ui.frame(854, 480);
+        overlays.draw(
+            &mut hidden,
+            &mut icons,
+            &assets,
+            &OverlayFrame {
+                hidden: true,
+                ..frame_input
+            },
+        );
+        drop(hidden);
+        assert_eq!(
+            ui.batch().vertices.chunks(4).last().unwrap()[0].color[3],
+            0xE5
+        );
     }
 
     #[test]

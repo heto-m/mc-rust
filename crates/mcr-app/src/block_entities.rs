@@ -390,7 +390,7 @@ impl BlockEntities {
             params,
             game_time: state.world.game_time,
             partial_ticks: partial,
-            camera_rotation: Quat::from_mat4(&camera.view_rotation().inverse()),
+            camera_rotation: Quat::from_mat4(&camera.look_rotation().inverse()),
             player: Some(state.player.physics.pos),
             render_distance_blocks,
         };

@@ -122,7 +122,9 @@ pub(crate) fn rand_unit() -> f32 {
     })
 }
 const MAX_TICKS_PER_FRAME: u32 = 10;
-const THIRD_PERSON_DISTANCE: f64 = 4.0;
+
+/// `LivingEntity#DATA_HEALTH_ID`, which only living entities carry.
+const LIVING_HEALTH: u8 = 9;
 
 fn music_volume(options: &Options) -> f32 {
     let volume = |name: &str| {
@@ -416,6 +418,8 @@ pub struct Play {
     entities: Option<EntityLayer>,
     block_entities: Option<BlockEntities>,
     overlays: Overlays,
+    camera_fx: crate::camera_fx::CameraFx,
+    nausea_id: Option<i32>,
     vision: crate::vision::Vision,
     end_flash_sound: Option<u32>,
     assets: Arc<Assets>,
@@ -608,6 +612,11 @@ impl Play {
             entities,
             block_entities,
             overlays: Overlays::new(),
+            camera_fx: Default::default(),
+            nausea_id: data
+                .registry("minecraft:mob_effect")
+                .and_then(|r| r.id_of("minecraft:nausea"))
+                .map(|id| id as i32),
             vision: crate::vision::Vision::default(),
             end_flash_sound: None,
             assets: overlay_assets,
@@ -955,6 +964,18 @@ impl Play {
         }
         let scoping = self.scoping();
         self.overlays.tick(scoping);
+        if self.camera_fx.tick(state, self.nausea_id)
+            && let Some(audio) = world_audio(&mut self.audio)
+        {
+            let pitch = rand_unit() * 0.4 + 0.8;
+            audio.play(
+                "minecraft:block.portal.trigger",
+                None,
+                0.25,
+                pitch,
+                SoundSource::Ambient,
+            );
+        }
         self.hud.tick(state, &self.options);
         let [block, sky] = crate::entities::light_at(
             &state.chunks,
@@ -979,17 +1000,29 @@ impl Play {
             }
         }
         if let Some(hand) = &mut self.hand {
-            let server_using = matches!(
-                state.player.data.get(&8),
-                Some(mcr_protocol::types::entity_data::EntityDataValue::Byte(f)) if f & 1 != 0
-            );
+            use mcr_protocol::types::game::Hand as GameHand;
+            let server_using = match state.player.data.get(&8) {
+                Some(mcr_protocol::types::entity_data::EntityDataValue::Byte(f)) if f & 1 != 0 => {
+                    Some(if f & 2 != 0 {
+                        GameHand::Off
+                    } else {
+                        GameHand::Main
+                    })
+                }
+                _ => None,
+            };
             hand.tick(&HandTick {
                 state,
                 yaw: self.yaw,
                 pitch: self.pitch,
-                local_using: self.world.client.is_using_item(),
-                server_using,
+                using: self
+                    .world
+                    .client
+                    .using_item()
+                    .map(|u| u.hand)
+                    .or(server_using),
                 swap_scale: self.world.client.item_swap_scale(1.0),
+                hands_busy: self.world.client.hands_busy(),
             });
         }
         let rain = if running {
@@ -1224,23 +1257,118 @@ impl Play {
     }
 
     fn update_fov(&mut self) {
-        let player = &self.world.client.state.player;
+        let client = &self.world.client;
+        let player = &client.state.player;
         let p = &player.physics;
-        let mut f = 1.0f32;
-        if p.abilities.flying {
-            f *= 1.1;
-        }
         let speed = p.attributes.movement_speed as f32 * if p.sprinting { 1.3 } else { 1.0 };
-        f *= (speed / player.walking_speed.max(1.0e-4) + 1.0) / 2.0;
-        let scale = self.options.fov_effect_scale as f32;
-        let target = if self.scoping() {
-            0.1
-        } else if f.is_finite() {
-            1.0 + (f - 1.0) * scale
-        } else {
-            1.0
+        let walking = player.walking_speed;
+        let bow_ticks = client
+            .using_item()
+            .filter(|u| {
+                client
+                    .state
+                    .is_item(&client.state.hand_stack(u.hand), "bow")
+            })
+            .map(|u| client.ticks.saturating_sub(u.started_tick) as f32);
+        let target = crate::camera_fx::fov_target(&crate::camera_fx::FovInput {
+            flying: p.abilities.flying,
+            speed_factor: (walking != 0.0).then(|| speed / walking),
+            bow_ticks,
+            scoping_first_person: self.scoping(),
+            effect_scale: self.options.fov_effect_scale as f32,
+        });
+        self.fov_mod = crate::camera_fx::step_fov(self.fov_mod, target);
+    }
+
+    /// Ticks since the local player died, with the partial tick; `None` while alive.
+    fn death_ticks(&self, partial: f32) -> Option<f32> {
+        self.world
+            .client
+            .state
+            .player
+            .dead
+            .then(|| self.entities.as_ref().map_or(0, |e| e.local_death_time()) as f32 + partial)
+    }
+
+    /// `Camera#getFluidInCamera` is water or lava, which narrows the FOV.
+    fn camera_in_fluid(&self, camera: &Camera) -> bool {
+        matches!(
+            crate::vision::Vision::fog_kind(
+                &self.world.client.state,
+                camera.position.to_array(),
+                camera.forward().to_array(),
+            ),
+            mcr_render::FogKind::Water | mcr_render::FogKind::Lava
+        )
+    }
+
+    /// The hand's FOV: vanilla's fixed 70 degrees, narrowed by death and fluid.
+    fn hud_fov(&self, camera: &Camera, partial: f32) -> f32 {
+        crate::camera_fx::death_or_fluid_fov(
+            70.0,
+            self.death_ticks(partial),
+            self.camera_in_fluid(camera),
+            self.options.fov_effect_scale as f32,
+        )
+    }
+
+    /// `GameRenderer#bobHurt` then `bobView` (when the option is on) for the local player.
+    fn shake(&self, partial: f32) -> Mat4 {
+        if self.spectate_view.is_some() {
+            return Mat4::IDENTITY;
+        }
+        let player = &self.world.client.state.player;
+        let hurt = (player.hurt_duration > 0).then_some(crate::camera_fx::Hurt {
+            time: player.hurt_time as f32 - partial,
+            duration: player.hurt_duration as f32,
+            dir: player.hurt_dir,
+        });
+        let mut m = crate::camera_fx::hurt_matrix(
+            self.death_ticks(partial),
+            hurt,
+            self.options.damage_tilt_strength as f32,
+        );
+        if self.options.bob_view {
+            let (walked, amount) = self.camera_fx.walk.sample(partial);
+            m *= crate::camera_fx::bob_matrix(walked, amount);
+        }
+        m
+    }
+
+    /// The `camera_distance` attribute times the scale, or the mount's when that is further.
+    fn camera_distance(&self) -> f64 {
+        let state = &self.world.client.state;
+        let attr = |attrs: &rustc_hash::FxHashMap<i32, mcr_client::AttributeState>,
+                    name: &str,
+                    default: f64| {
+            self.data
+                .registry("minecraft:attribute")
+                .and_then(|r| r.id_of(name))
+                .and_then(|id| attrs.get(&(id as i32)))
+                .map_or(default, |a| a.value(None))
         };
-        self.fov_mod += (target - self.fov_mod) * 0.5;
+        let own = attr(&state.player.attributes, "minecraft:camera_distance", 4.0)
+            * attr(&state.player.attributes, "minecraft:scale", 1.0);
+        let mount = state
+            .player
+            .vehicle
+            .and_then(|id| state.entities.get(id))
+            .filter(|e| {
+                matches!(
+                    e.data.get(&LIVING_HEALTH),
+                    Some(mcr_protocol::types::entity_data::EntityDataValue::Float(_))
+                )
+            })
+            .map_or(0.0, |e| {
+                attr(&e.attributes, "minecraft:camera_distance", 4.0)
+                    * attr(&e.attributes, "minecraft:scale", 1.0)
+            });
+        let d = own.max(mount);
+        if d.is_finite() {
+            d.clamp(0.0, 512.0)
+        } else {
+            4.0
+        }
     }
 
     fn sync_map(&mut self, id: i32) {
@@ -1271,6 +1399,26 @@ impl Play {
         let local_id = self.world.client.state.player.entity_id;
         if let Some(entities) = &mut self.entities {
             entities.on_event(&event, local_id);
+        }
+        if let ClientEvent::EntitySwing {
+            entity_id,
+            offhand,
+            animation,
+        } = &event
+            && *entity_id == local_id
+            && let Some(hand) = &mut self.hand
+        {
+            use mcr_protocol::types::game::Hand as GameHand;
+            let h = if *offhand {
+                GameHand::Off
+            } else {
+                GameHand::Main
+            };
+            hand.swing_with(
+                &self.world.client.state,
+                h,
+                (animation.kind, animation.duration),
+            );
         }
         if let Some(block_entities) = &mut self.block_entities {
             block_entities.on_event(&event, &self.world.client.state);
@@ -1696,10 +1844,16 @@ impl Play {
         let Some(out) = self.net(|c| c.handle_keybinds(keys, hit, busy)) else {
             return;
         };
-        if out.swing
-            && let Some(hand) = &mut self.hand
-        {
-            hand.swing();
+        if let Some(hand) = &mut self.hand {
+            let state = &self.world.client.state;
+            if let Some((h, attack)) = out.swing_hand {
+                hand.swing(state, h, attack);
+            } else if out.swing {
+                hand.swing(state, mcr_protocol::types::game::Hand::Main, true);
+            }
+            if let Some(h) = out.item_used {
+                hand.item_used(h);
+            }
         }
         if let Some((at, state)) = out.placed {
             self.play_block(state, BlockSound::Place, center(at));
@@ -2690,7 +2844,11 @@ impl Play {
             if self.net(|c| c.drop_item(whole)) == Some(true)
                 && let Some(hand) = &mut self.hand
             {
-                hand.swing();
+                hand.swing_with(
+                    &self.world.client.state,
+                    mcr_protocol::types::game::Hand::Main,
+                    crate::hand::DEFAULT_SWING,
+                );
             }
         } else if i == k.swap {
             self.net(Client::swap_offhand);
@@ -2745,25 +2903,14 @@ impl Play {
         }
     }
 
+    /// The camera-space effects on the world: Java's roll, hurt tilt, view bobbing and the warp.
     fn view_roll(&self, partial: f32) -> Mat4 {
-        let player = &self.world.client.state.player;
-        let mut roll = Mat4::from_rotation_z(self.java_view_roll);
-        if player.dead {
-            let death = self.entities.as_ref().map_or(0, |e| e.local_death_time()) as f32;
-            let duration = (death + partial).min(20.0);
-            roll *= Mat4::from_rotation_z((40.0 - 8000.0 / (duration + 200.0)).to_radians());
-        }
-        let hurt = player.hurt_time as f32 - partial;
-        if hurt >= 0.0 && player.hurt_duration > 0 {
-            let t = hurt / player.hurt_duration as f32;
-            let s = (t * t * t * t * std::f32::consts::PI).sin();
-            let tilt = -s * 14.0 * self.options.damage_tilt_strength as f32;
-            let dir = player.hurt_dir.to_radians();
-            roll *= Mat4::from_rotation_y(-dir)
-                * Mat4::from_rotation_z(tilt.to_radians())
-                * Mat4::from_rotation_y(dir);
-        }
-        roll
+        let warp = crate::camera_fx::warp_matrix(
+            self.camera_fx
+                .spinning_intensity(partial, self.options.screen_effect_scale as f32),
+            self.camera_fx.spin.angle(partial),
+        );
+        Mat4::from_rotation_z(self.java_view_roll) * self.shake(partial) * warp
     }
 
     /// The camera mcr renders: a Java mod's while one set it, else the player's.
@@ -2794,7 +2941,7 @@ impl Play {
         let t = f64::from(partial);
         let eye = lerp3(self.prev_eye, self.cur_eye, t);
         let fov_mod = self.prev_fov_mod + (self.fov_mod - self.prev_fov_mod) * partial;
-        let fov = (self.options.fov.0 as f32 * fov_mod * self.java_fov_scale).clamp(1.0, 170.0);
+        let fov = self.options.fov.0 as f32 * fov_mod * self.java_fov_scale;
         let (look_yaw, look_pitch) = self.spectate_view.unwrap_or((self.yaw, self.pitch));
         let bed = self
             .bed_view
@@ -2826,7 +2973,7 @@ impl Play {
                 self.data,
                 eye,
                 dir,
-                THIRD_PERSON_DISTANCE,
+                self.camera_distance(),
             );
             camera.position = DVec3::from(eye) + DVec3::from(dir) * distance;
             if self.perspective == Perspective::ThirdFront {
@@ -2834,6 +2981,13 @@ impl Play {
                 camera.pitch = -camera.pitch;
             }
         }
+        let fov = crate::camera_fx::death_or_fluid_fov(
+            fov,
+            self.death_ticks(partial),
+            self.camera_in_fluid(&camera),
+            self.options.fov_effect_scale as f32,
+        );
+        camera.fov_y = fov.clamp(1.0, 170.0).to_radians();
         camera
     }
 
@@ -2901,6 +3055,7 @@ impl Play {
         });
         self.sky_factor = env.sky_factor;
         self.prepare_visuals(&camera, partial, aspect, &env);
+        let screen_fx = self.screen_effects(&camera, partial, aspect);
 
         self.update_gui_size();
         self.tick_toasts();
@@ -3000,7 +3155,7 @@ impl Play {
                     },
                 );
             }
-            if !hidden {
+            if !self.java_gui {
                 let scoping = self.perspective == Perspective::First
                     && self.hand.as_ref().is_some_and(HeldHand::scoping);
                 let state = &self.world.client.state;
@@ -3009,14 +3164,21 @@ impl Play {
                     .options
                     .vignette
                     .then(|| state.world.border.warning_strength(x, z));
-                self.overlays.draw(
-                    &mut frame,
-                    &mut self.gui.icons,
-                    &self.assets,
+                let overlay = crate::overlays::OverlayFrame {
+                    state,
+                    screen: screen_fx,
+                    hidden: self.hud_hidden,
+                    first_person: self.perspective == Perspective::First,
                     scoping,
+                    border_warning: warning,
+                    portal: self.camera_fx.portal.at(partial),
+                    nausea: self.camera_fx.nausea.at(partial),
+                    screen_effect_scale: self.options.screen_effect_scale as f32,
                     partial,
-                    warning,
-                );
+                    ticks: self.ticks,
+                };
+                self.overlays
+                    .draw(&mut frame, &mut self.gui.icons, &self.assets, &overlay);
             }
             self.hud.draw(&mut frame, &mut self.gui.icons, &input);
             if !hidden && self.options.show_subtitles {
@@ -3110,6 +3272,59 @@ impl Play {
         stats
     }
 
+    /// `LevelExtractor#extractPlayerState`'s in-block, water and fire overlays.
+    fn screen_effects(
+        &self,
+        camera: &Camera,
+        partial: f32,
+        aspect: f32,
+    ) -> crate::overlays::ScreenEffects {
+        use mcr_protocol::types::entity_data::EntityDataValue;
+        let state = &self.world.client.state;
+        let player = &state.player;
+        let mut fx = crate::overlays::ScreenEffects {
+            hud_fov: self.hud_fov(camera, partial),
+            yaw: self.yaw,
+            pitch: self.pitch,
+            ..Default::default()
+        };
+        if self.java_world || !player.loaded || player.is_sleeping() {
+            return fx;
+        }
+        let spectator = player.game_mode == mcr_protocol::types::game::GameType::Spectator;
+        let p = &player.physics;
+        let feet = player.pos();
+        let eye_y = feet[1] + f64::from(p.eye_height());
+        if !spectator {
+            let b = p.bounding_box();
+            let near = crate::camera_fx::near_plane_box(
+                [feet[0], eye_y, feet[2]],
+                camera.forward(),
+                camera.up(),
+                camera.fov_y,
+                aspect,
+            );
+            fx.block = crate::camera_fx::view_blocking_state(
+                &state.chunks,
+                feet,
+                eye_y,
+                b.max[0] - b.min[0],
+                p.attributes.scale.clamp(0.0625, 16.0),
+                &near,
+            );
+        }
+        if self.perspective == Perspective::First && !spectator {
+            if p.eye_in_water() {
+                let [block, sky] = crate::entities::light_at(&state.chunks, feet, p.eye_height());
+                let darken = ((1.0 - self.sky_factor.clamp(0.0, 1.0)) * 15.0).round() as u8;
+                let raw = block.max(sky.saturating_sub(darken));
+                fx.water = Some(crate::overlays::level_brightness(raw));
+            }
+            fx.fire = matches!(player.data.get(&0), Some(EntityDataValue::Byte(f)) if f & 1 != 0);
+        }
+        fx
+    }
+
     fn prepare_visuals(&mut self, camera: &Camera, partial: f32, aspect: f32, env: &Environment) {
         let state = &self.world.client.state;
         let size = self.render.renderer.size();
@@ -3187,6 +3402,9 @@ impl Play {
                 );
             }
         }
+        let hand_fov = self.hud_fov(camera, partial);
+        let shake = self.shake(partial);
+        let state = &self.world.client.state;
         if let Some(hand) = &mut self.hand {
             let eye = lerp3(self.prev_eye, self.cur_eye, f64::from(partial));
             let frame = HandFrame {
@@ -3194,6 +3412,8 @@ impl Play {
                 options: &self.options,
                 partial,
                 aspect,
+                fov: hand_fov,
+                shake,
                 pitch: self.pitch,
                 yaw: self.yaw,
                 lightmap: &env.lightmap(1.0),

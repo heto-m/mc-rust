@@ -735,7 +735,7 @@ impl Vision {
         }
     }
 
-    fn fog_kind(state: &ClientState, camera: [f64; 3], forward: [f32; 3]) -> FogKind {
+    pub(crate) fn fog_kind(state: &ClientState, camera: [f64; 3], forward: [f32; 3]) -> FogKind {
         let chunks = &state.chunks;
         if crate::effects::camera_in_water(chunks, camera) {
             return FogKind::Water;

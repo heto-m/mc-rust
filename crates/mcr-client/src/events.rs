@@ -190,6 +190,7 @@ pub enum ClientEvent {
     EntitySwing {
         entity_id: i32,
         offhand: bool,
+        animation: mcr_protocol::types::component::SwingAnimation,
     },
     EntityDamaged {
         entity_id: i32,

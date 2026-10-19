@@ -199,14 +199,14 @@ Scope: mcr-app hud and play, mcr-ui screens/hud.
 
 Scope: mcr-app overlays, play camera and FOV.
 
-- [ ] 13.1 H4 (V) Camera overlays missing (pumpkin, powder snow, portal, nausea, fire, in-block, underwater)
-- [ ] 13.2 E4 (V) View bobbing and hurt tilt apply only to the hand or only to the world
-- [ ] 13.3 E5 (V) FOV: bow zoom, clamp, death and fluid FOV missing
-- [ ] 13.4 E6 (V) Nausea and portal screen warp missing
-- [ ] 13.5 E20 (M) Third-person distance and eye height ignore attributes and scale
-- [ ] 13.6 S4 (V) Portal trigger sound missing
-- [ ] 13.7 Unit tests: FOV clamp, bow and fluid factors, overlay order and alpha, portal state ticks
-- [ ] 13.8 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 13.1 H4 (V) Camera overlays missing (pumpkin, powder snow, portal, nausea, fire, in-block, underwater)
+- [x] 13.2 E4 (V) View bobbing and hurt tilt apply only to the hand or only to the world
+- [x] 13.3 E5 (V) FOV: bow zoom, clamp, death and fluid FOV missing
+- [x] 13.4 E6 (V) Nausea and portal screen warp missing
+- [x] 13.5 E20 (M) Third-person distance and eye height ignore attributes and scale
+- [x] 13.6 S4 (V) Portal trigger sound missing
+- [x] 13.7 Unit tests: FOV clamp, bow and fluid factors, overlay order and alpha, portal state ticks
+- [x] 13.8 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 14. Movement effects and equipment
 
@@ -229,12 +229,12 @@ Scope: mcr-physics tick, effects and fly; mcr-client state.
 
 Scope: mcr-app hand.
 
-- [ ] 15.1 E2 (V) Off-hand use not animated, wrong hand animated, off-hand scoping
-- [ ] 15.2 E3 (V) Off-hand charged crossbow hides the main hand
-- [ ] 15.3 E13 (V) First-person re-equip and lowering behaviours missing
-- [ ] 15.4 E14 (M) Swing duration and animation type fixed
-- [ ] 15.5 Unit tests: off-hand use animation, crossbow hand selection, item-used dip, swing duration with Haste
-- [ ] 15.6 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 15.1 E2 (V) Off-hand use not animated, wrong hand animated, off-hand scoping
+- [x] 15.2 E3 (V) Off-hand charged crossbow hides the main hand
+- [x] 15.3 E13 (V) First-person re-equip and lowering behaviours missing
+- [x] 15.4 E14 (M) Swing duration and animation type fixed
+- [x] 15.5 Unit tests: off-hand use animation, crossbow hand selection, item-used dip, swing duration with Haste
+- [x] 15.6 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 16. Entity motion and projectiles
 
