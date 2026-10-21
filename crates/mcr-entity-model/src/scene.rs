@@ -634,10 +634,17 @@ impl EntityScene {
                 continue;
             };
             out[0] = crate::gpu::Bone34::from_mat(&(matrix * part.local));
+            // Vanilla picks `item_translucent` for quads whose sprite has translucent pixels.
+            let pipeline = match part.pipeline {
+                crate::gpu::Pipeline::Cutout if tex.translucent => {
+                    crate::gpu::Pipeline::Translucent
+                }
+                p => p,
+            };
             self.gpu.push(&PartInstance {
                 model: model_id,
                 texture: tex,
-                pipeline: part.pipeline,
+                pipeline,
                 bone_base: base,
                 tint: part.tint,
                 hurt: false,
@@ -1220,6 +1227,23 @@ impl EntityScene {
 
     pub fn draw_blended(&self, pass: &mut wgpu::RenderPass<'_>) {
         self.gpu.draw_blended(pass);
+    }
+
+    pub fn draw_decals(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.gpu.draw_decals(pass);
+    }
+
+    pub fn prepare_oit(&mut self, info: mcr_render::OitInfo<'_>) -> bool {
+        self.gpu.prepare_oit(info)
+    }
+
+    pub fn draw_oit(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        stage: mcr_render::OitStage,
+        oit: &wgpu::BindGroup,
+    ) {
+        self.gpu.draw_oit(pass, stage, oit);
     }
 
     /// Compass and clock inputs for item models drawn from now on.

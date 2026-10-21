@@ -1067,6 +1067,25 @@ impl EntityLayer {
         }
     }
 
+    pub fn draw_decals(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.has_parts() {
+            self.scene.draw_decals(pass);
+        }
+    }
+
+    pub fn prepare_oit(&mut self, info: mcr_render::OitInfo<'_>) -> bool {
+        self.has_parts() && self.scene.prepare_oit(info)
+    }
+
+    pub fn draw_oit(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        stage: mcr_render::OitStage,
+        oit: &wgpu::BindGroup,
+    ) {
+        self.scene.draw_oit(pass, stage, oit);
+    }
+
     pub fn take_text_draws(&mut self) -> Vec<mcr_block_entity::TextDisplayDraw> {
         self.texts.take()
     }

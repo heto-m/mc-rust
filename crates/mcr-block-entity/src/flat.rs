@@ -75,12 +75,19 @@ enum DepthMode {
 
 pub const MAX_QUADS: usize = 1 << 17;
 
+/// What improved transparency draws through its stages; see-through text stays on top afterwards.
+const OIT_KINDS: [FlatKind; 3] = [FlatKind::BeamGlow, FlatKind::Text, FlatKind::DisplayText];
+
 /// Pipelines for geometry that does not fit the skinned entity renderer: portals, beam shells and sign text.
 #[derive(Debug)]
 pub struct FlatRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipelines: [wgpu::RenderPipeline; 6],
+    formats: TargetFormats,
+    globals_layout: wgpu::BindGroupLayout,
+    /// Improved transparency stages for [`OIT_KINDS`], built for one bounds format.
+    oit: Option<(wgpu::TextureFormat, [[wgpu::RenderPipeline; 3]; 3])>,
     globals: wgpu::Buffer,
     globals_group: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
@@ -392,6 +399,9 @@ impl FlatRenderer {
             device: device.clone(),
             queue: queue.clone(),
             pipelines,
+            formats,
+            globals_layout,
+            oit: None,
             globals,
             globals_group,
             texture_layout,
@@ -634,6 +644,15 @@ impl FlatRenderer {
     }
 
     fn draw_filtered(&self, pass: &mut wgpu::RenderPass<'_>, keep: impl Fn(FlatKind) -> bool) {
+        self.draw_with(pass, keep, |k| &self.pipelines[k as usize]);
+    }
+
+    fn draw_with<'p>(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        keep: impl Fn(FlatKind) -> bool,
+        pick: impl Fn(FlatKind) -> &'p wgpu::RenderPipeline,
+    ) {
         if self.draws.is_empty() {
             return;
         }
@@ -646,12 +665,109 @@ impl FlatRenderer {
                 continue;
             };
             if current != Some(d.kind) {
-                pass.set_pipeline(&self.pipelines[d.kind as usize]);
+                pass.set_pipeline(pick(d.kind));
                 current = Some(d.kind);
             }
             pass.set_bind_group(1, group, &[]);
             pass.draw_indexed(d.first_quad * 6..(d.first_quad + d.quads) * 6, 0, 0..1);
         }
+    }
+
+    /// Improved transparency: see-through text display text, drawn over the composited world.
+    pub fn draw_see_through(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_filtered(pass, |k| k == FlatKind::DisplayTextSeeThrough);
+    }
+
+    /// Improved transparency: builds the stage pipelines on first use and reports whether this frame
+    /// has beam glow or text for [`FlatRenderer::draw_oit`].
+    pub fn prepare_oit(&mut self, info: mcr_render::OitInfo<'_>) -> bool {
+        if self
+            .oit
+            .as_ref()
+            .is_none_or(|(f, _)| *f != info.bounds_format)
+        {
+            self.oit = Some((info.bounds_format, self.oit_pipelines(info)));
+        }
+        self.draws.iter().any(|d| OIT_KINDS.contains(&d.kind))
+    }
+
+    fn oit_pipelines(&self, info: mcr_render::OitInfo<'_>) -> [[wgpu::RenderPipeline; 3]; 3] {
+        let device = &self.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("flat oit"),
+            source: wgpu::ShaderSource::Wgsl(
+                [
+                    include_str!("flat.wgsl"),
+                    mcr_render::oit_wgsl(2).as_str(),
+                    include_str!("flat_oit.wgsl"),
+                ]
+                .concat()
+                .into(),
+            ),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("flat oit"),
+            bind_group_layouts: &[
+                Some(&self.globals_layout),
+                Some(&self.texture_layout),
+                Some(info.layout),
+            ],
+            immediate_size: 0,
+        });
+        let attributes = wgpu::vertex_attr_array![
+            0 => Float32x3, 1 => Float32x2, 2 => Unorm8x4
+        ];
+        let buffers = [Some(wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<FlatVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &attributes,
+        })];
+        let reverse = self.formats.reverse_z;
+        OIT_KINDS.map(|kind| {
+            let bias = if kind == FlatKind::DisplayText {
+                wgpu::DepthBiasState {
+                    constant: if reverse { 16 } else { -16 },
+                    slope_scale: if reverse { 2.0 } else { -2.0 },
+                    clamp: 0.0,
+                }
+            } else {
+                Default::default()
+            };
+            mcr_render::OitPipelineDesc {
+                label: "flat oit",
+                layout: &layout,
+                module: &module,
+                vertex: "vs_main",
+                buffers: &buffers,
+                primitive: wgpu::PrimitiveState::default(),
+                bias,
+                fragment: "fs_tex",
+                bounds_format: info.bounds_format,
+            }
+            .build(device)
+        })
+    }
+
+    /// Beam glow and text into one improved transparency stage; `oit` binds its inputs.
+    pub fn draw_oit(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        stage: mcr_render::OitStage,
+        oit: &wgpu::BindGroup,
+    ) {
+        let Some((_, pipelines)) = &self.oit else {
+            return;
+        };
+        pass.set_bind_group(2, oit, &[]);
+        let i = stage.index();
+        self.draw_with(
+            pass,
+            |k| OIT_KINDS.contains(&k),
+            |k| {
+                let at = OIT_KINDS.iter().position(|o| *o == k).unwrap_or(0);
+                &pipelines[at][i]
+            },
+        );
     }
 
     pub fn draw_calls(&self) -> usize {

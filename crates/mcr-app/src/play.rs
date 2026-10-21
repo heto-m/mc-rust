@@ -307,28 +307,53 @@ struct FrameOverlay<'a> {
     outline: &'a OutlineRenderer,
     ui_renderer: &'a mut UiRenderer,
     ui: &'a mut Ui,
-    entities: Option<&'a EntityLayer>,
-    block_entities: Option<&'a BlockEntities>,
+    entities: Option<&'a mut EntityLayer>,
+    block_entities: Option<&'a mut BlockEntities>,
     hand: Option<&'a HeldHand>,
     preview: Option<&'a Preview>,
     particles: &'a mut ParticleEngine,
     env: &'a Environment,
     partial: f32,
     glow: &'a mut Option<(wgpu::TextureFormat, mcr_render::GlowOutline)>,
+    /// Improved transparency is on: decals join the opaque parts.
+    oit: bool,
+    /// [`Overlay::prepare_oit`] ran this frame, so the stages drew the translucent work.
+    oit_prepared: bool,
 }
 
 impl Overlay for FrameOverlay<'_> {
     fn opaque(&mut self, pass: &mut wgpu::RenderPass<'_>) {
-        if let Some(entities) = self.entities {
+        if let Some(entities) = self.entities.as_deref() {
             entities.draw_opaque(pass);
+            if self.oit {
+                entities.draw_decals(pass);
+            }
         }
-        if let Some(block_entities) = self.block_entities {
+        if let Some(block_entities) = self.block_entities.as_deref() {
             block_entities.draw_opaque(pass);
+            if self.oit {
+                block_entities.draw_decals(pass);
+            }
         }
     }
 
     fn prepare_oit(&mut self, ctx: &mut OverlayCtx<'_>) -> bool {
-        self.particles.prepare_oit(ctx, self.partial, self.env)
+        self.oit_prepared = true;
+        // The block outline sits on opaque blocks: drawn now, translucent surfaces in front cover it.
+        self.outline.record(ctx);
+        let particles = self.particles.prepare_oit(ctx, self.partial, self.env);
+        let Some(info) = ctx.oit else {
+            return particles;
+        };
+        let entities = self
+            .entities
+            .as_deref_mut()
+            .is_some_and(|e| e.prepare_oit(info));
+        let block_entities = self
+            .block_entities
+            .as_deref_mut()
+            .is_some_and(|b| b.prepare_oit(info));
+        particles || entities || block_entities
     }
 
     fn draw_oit(
@@ -338,10 +363,19 @@ impl Overlay for FrameOverlay<'_> {
         oit: &wgpu::BindGroup,
     ) {
         self.particles.draw_oit(pass, stage, oit);
+        if let Some(entities) = self.entities.as_deref() {
+            entities.draw_oit(pass, stage, oit);
+        }
+        if let Some(block_entities) = self.block_entities.as_deref() {
+            block_entities.draw_oit(pass, stage, oit);
+        }
     }
 
     fn record(&mut self, ctx: &mut OverlayCtx<'_>) {
-        self.outline.record(ctx);
+        let oit = std::mem::take(&mut self.oit_prepared);
+        if !oit {
+            self.outline.record(ctx);
+        }
         if self.entities.is_some() || self.block_entities.is_some() {
             let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("entities"),
@@ -366,18 +400,28 @@ impl Overlay for FrameOverlay<'_> {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let Some(entities) = self.entities {
-                entities.draw_blended(&mut pass);
-            }
-            if let Some(block_entities) = self.block_entities {
-                block_entities.draw_blended(&mut pass);
+            match (
+                oit,
+                self.entities.as_deref(),
+                self.block_entities.as_deref(),
+            ) {
+                (true, _, Some(block_entities)) => block_entities.draw_see_through(&mut pass),
+                (true, _, None) => {}
+                (false, entities, block_entities) => {
+                    if let Some(entities) = entities {
+                        entities.draw_blended(&mut pass);
+                    }
+                    if let Some(block_entities) = block_entities {
+                        block_entities.draw_blended(&mut pass);
+                    }
+                }
             }
         }
         self.particles.record(ctx, self.partial, self.env);
         if let Some(hand) = self.hand {
             hand.record(ctx);
         }
-        if let Some(entities) = self.entities.filter(|e| e.has_outlines()) {
+        if let Some(entities) = self.entities.as_deref().filter(|e| e.has_outlines()) {
             if self.glow.as_ref().is_none_or(|(f, _)| *f != ctx.format) {
                 *self.glow = Some((
                     ctx.format,
@@ -4360,18 +4404,21 @@ impl Play {
         self.render
             .renderer
             .set_menu_blur(self.options.menu_background_blurriness.max(0) as u32);
+        let java_world = self.java_world;
         let mut overlay = FrameOverlay {
             outline: &self.outline,
             ui_renderer: &mut self.gui.ui_renderer,
             ui: &mut self.gui.ui,
-            entities: self.entities.as_ref().filter(|_| !self.java_world),
-            block_entities: self.block_entities.as_ref().filter(|_| !self.java_world),
+            entities: self.entities.as_mut().filter(|_| !java_world),
+            block_entities: self.block_entities.as_mut().filter(|_| !java_world),
             hand: self.hand.as_ref().filter(|_| !self.java_world),
             preview: self.preview.as_ref(),
             particles: &mut self.effects.particles,
             env: &env,
             partial,
             glow: &mut self.glow,
+            oit: self.render.renderer.improved_transparency(),
+            oit_prepared: false,
         };
         if std::mem::take(&mut self.capture_icon) {
             self.render.renderer.request_capture();

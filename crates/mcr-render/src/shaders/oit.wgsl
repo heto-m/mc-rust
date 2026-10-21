@@ -134,3 +134,9 @@ fn oit_accumulated(frag: vec4<f32>, color: vec4<f32>) -> vec4<f32> {
     let t = oit_transmittance_at(vec2<i32>(frag.xy), oit_normalized_depth(frag), 1.0 - color.a);
     return vec4<f32>(color.rgb * color.a, color.a) * t;
 }
+
+// Additive surfaces: light behind what lies in front of them, without coverage or transmittance.
+fn oit_accumulated_additive(frag: vec4<f32>, color: vec4<f32>) -> vec4<f32> {
+    let t = oit_transmittance_at(vec2<i32>(frag.xy), oit_normalized_depth(frag), 1.0);
+    return vec4<f32>(color.rgb * color.a, 0.0) * t;
+}

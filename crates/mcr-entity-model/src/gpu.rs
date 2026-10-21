@@ -50,6 +50,8 @@ pub struct TexId {
     pub class: u8,
     pub layer: u16,
     pub uv_scale: [f32; 2],
+    /// Some pixel is neither clear nor opaque (vanilla's `Transparency#hasTranslucent`).
+    pub translucent: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -206,12 +208,21 @@ struct Run {
     count: u32,
 }
 
+/// Improved transparency stages for blended and additive parts, built for one bounds format.
+#[derive(Debug)]
+struct OitPipelines {
+    bounds_format: wgpu::TextureFormat,
+    blend: [wgpu::RenderPipeline; 3],
+    additive: [wgpu::RenderPipeline; 3],
+}
+
 #[derive(Debug)]
 pub struct EntityRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipelines: [wgpu::RenderPipeline; 5],
     outline_pipeline: wgpu::RenderPipeline,
+    oit: Option<OitPipelines>,
     frame_outlines: usize,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -444,6 +455,7 @@ impl EntityRenderer {
             queue: queue.clone(),
             pipelines,
             outline_pipeline,
+            oit: None,
             frame_outlines: 0,
             layout,
             sampler,
@@ -563,6 +575,12 @@ impl EntityRenderer {
                 image.width as f32 / size as f32,
                 image.height as f32 / size as f32,
             ],
+            translucent: image
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|p| p[3] != 0 && p[3] != 255),
         })
     }
 
@@ -872,29 +890,120 @@ impl EntityRenderer {
             self.draw_runs(
                 pass,
                 |p| !matches!(p, Pipeline::Additive | Pipeline::WaterMask),
-                Some(&self.outline_pipeline),
+                |_| &self.outline_pipeline,
             );
         }
     }
 
-    fn draw_filtered(&self, pass: &mut wgpu::RenderPass<'_>, keep: impl Fn(Pipeline) -> bool) {
-        self.draw_runs(pass, keep, None);
+    /// Improved transparency: decals sit on the cutout parts, so they draw before the stages.
+    pub fn draw_decals(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_filtered(pass, |p| p == Pipeline::Decal);
     }
 
-    fn draw_runs(
+    /// Improved transparency: builds the stage pipelines on first use and reports whether this frame
+    /// has blended or additive parts for [`EntityRenderer::draw_oit`].
+    pub fn prepare_oit(&mut self, info: mcr_render::OitInfo<'_>) -> bool {
+        if self
+            .oit
+            .as_ref()
+            .is_none_or(|o| o.bounds_format != info.bounds_format)
+        {
+            self.oit = Some(self.oit_pipelines(info));
+        }
+        self.runs
+            .iter()
+            .any(|r| matches!(r.pipeline, Pipeline::Translucent | Pipeline::Additive))
+    }
+
+    fn oit_pipelines(&self, info: mcr_render::OitInfo<'_>) -> OitPipelines {
+        let device = &self.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("entity oit"),
+            source: wgpu::ShaderSource::Wgsl(
+                [
+                    include_str!("shaders/entity.wgsl"),
+                    mcr_render::oit_wgsl(1).as_str(),
+                    include_str!("shaders/entity_oit.wgsl"),
+                ]
+                .concat()
+                .into(),
+            ),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("entity oit"),
+            bind_group_layouts: &[Some(&self.layout), Some(info.layout)],
+            immediate_size: 0,
+        });
+        let attributes = wgpu::vertex_attr_array![
+            0 => Float32x3, 1 => Uint32, 2 => Float32x3, 3 => Float32x2
+        ];
+        let buffers = [Some(wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &attributes,
+        })];
+        let build = |fragment: &str| {
+            mcr_render::OitPipelineDesc {
+                label: fragment,
+                layout: &layout,
+                module: &module,
+                vertex: "vs_main",
+                buffers: &buffers,
+                primitive: wgpu::PrimitiveState::default(),
+                bias: Default::default(),
+                fragment,
+                bounds_format: info.bounds_format,
+            }
+            .build(device)
+        };
+        OitPipelines {
+            bounds_format: info.bounds_format,
+            blend: build("fs_blend"),
+            additive: build("fs_additive"),
+        }
+    }
+
+    /// Blended and additive parts into one improved transparency stage; `oit` binds its inputs.
+    pub fn draw_oit(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        stage: mcr_render::OitStage,
+        oit: &wgpu::BindGroup,
+    ) {
+        let Some(o) = &self.oit else {
+            return;
+        };
+        let i = stage.index();
+        let additive = stage != mcr_render::OitStage::Transmittance;
+        pass.set_bind_group(1, oit, &[]);
+        self.draw_runs(
+            pass,
+            |p| p == Pipeline::Translucent || (additive && p == Pipeline::Additive),
+            |p| {
+                if p == Pipeline::Additive {
+                    &o.additive[i]
+                } else {
+                    &o.blend[i]
+                }
+            },
+        );
+    }
+
+    fn draw_filtered(&self, pass: &mut wgpu::RenderPass<'_>, keep: impl Fn(Pipeline) -> bool) {
+        self.draw_runs(pass, keep, |p| &self.pipelines[p as usize]);
+    }
+
+    fn draw_runs<'p>(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         keep: impl Fn(Pipeline) -> bool,
-        only: Option<&wgpu::RenderPipeline>,
+        pick: impl Fn(Pipeline) -> &'p wgpu::RenderPipeline,
     ) {
-        if let Some(pipeline) = only {
-            pass.set_pipeline(pipeline);
-        }
         let mut current: Option<(Pipeline, u8)> = None;
         for run in self.runs.iter().filter(|r| keep(r.pipeline)) {
             if current != Some((run.pipeline, run.class)) {
-                if only.is_none() && current.map(|c| c.0) != Some(run.pipeline) {
-                    pass.set_pipeline(&self.pipelines[run.pipeline as usize]);
+                if current.map(|c| c.0) != Some(run.pipeline) {
+                    pass.set_pipeline(pick(run.pipeline));
                 }
                 if let Some((_, group)) = &self.bind_groups[run.class as usize] {
                     pass.set_bind_group(0, group, &[]);

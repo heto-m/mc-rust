@@ -926,11 +926,15 @@ fn dynamic_light_brightens_terrain_near_it_only() {
 }
 
 fn pane(layer: u16, z: f32) -> ModelQuad {
+    lit_pane(layer, z, LIGHT_FULL_SKY)
+}
+
+fn lit_pane(layer: u16, z: f32, light: u16) -> ModelQuad {
     ModelQuad::encode(&ModelQuadDesc {
         corners: [[7.0, 7.0, z], [9.5, 7.0, z], [7.0, 9.5, z], [9.5, 9.5, z]],
         uvs: [[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
         layer,
-        light: [LIGHT_FULL_SKY; 4],
+        light: [light; 4],
         shade_face: Face::PosZ,
         flags: 0,
         ao: [63; 4],
@@ -1008,4 +1012,158 @@ fn improved_transparency_turns_off_cleanly() {
     r.set_improved_transparency(false);
     assert!(!r.improved_transparency());
     frame(&mut r, &cam);
+}
+
+/// Paints, after the world, a full-screen quad 10 blocks from the camera, depth-tested against the
+/// world depth: between the glass (8 blocks away) and the wall behind it.
+struct BehindGlass {
+    pipeline: Option<wgpu::RenderPipeline>,
+}
+
+impl mcr_render::Overlay for BehindGlass {
+    fn record(&mut self, ctx: &mut mcr_render::OverlayCtx<'_>) {
+        let depth = ctx.camera.near / 10.0;
+        let pipeline = self.pipeline.get_or_insert_with(|| {
+            let src = format!(
+                "@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {{
+                    let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+                    return vec4f(p * 2.0 - 1.0, {depth:?}, 1.0);
+                }}
+                @fragment fn fs() -> @location(0) vec4f {{ return vec4f(1.0, 0.0, 1.0, 1.0); }}"
+            );
+            let module = ctx
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: None,
+                    source: wgpu::ShaderSource::Wgsl(src.into()),
+                });
+            ctx.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: None,
+                    layout: None,
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: Default::default(),
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: Some(false),
+                        depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("fs"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(ctx.format.into())],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        });
+        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: ctx.color,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: ctx.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+        pass.set_pipeline(pipeline);
+        pass.draw(0..3, 0..1);
+    }
+}
+
+fn behind_glass_pixel(improved: bool) -> Option<[u8; 4]> {
+    let mut r = renderer(64, 64)?;
+    r.set_improved_transparency(improved);
+    r.set_texture_groups(&[flat_group(&[[255, 0, 0, 255], [0, 255, 0, 128]])]);
+    let mut m = wall(0, 0);
+    m.translucent = vec![pane(1, 12.0)];
+    r.set_section([0, 0, 0], &m).unwrap();
+    let cam = Camera {
+        position: DVec3::new(8.0, 8.0, 20.0),
+        ..Camera::default()
+    };
+    let mut overlay = BehindGlass { pipeline: None };
+    r.render_with_overlay(
+        &FrameInputs {
+            camera: &cam,
+            sky_light: 1.0,
+        },
+        Some(&mut overlay),
+    )
+    .expect("render");
+    let px = r.read_offscreen().unwrap();
+    let i = (32 * 64 + 32) * 4;
+    Some([px[i], px[i + 1], px[i + 2], px[i + 3]])
+}
+
+#[test]
+fn improved_transparency_composite_writes_the_nearest_translucent_depth() {
+    let Some(classic) = behind_glass_pixel(false) else {
+        return;
+    };
+    let improved = behind_glass_pixel(true).unwrap();
+    assert_eq!(classic[..3], [255, 0, 255], "classic writes no glass depth");
+    assert!(
+        improved[1] > 60 && improved[2] < 40,
+        "the glass hides what is drawn behind it: {improved:?}"
+    );
+}
+
+fn dark_pane_pixel(lights: &[mcr_render::DynamicLight]) -> Option<[u8; 4]> {
+    let mut r = renderer_with(
+        64,
+        64,
+        RendererConfig {
+            dynamic_lights: true,
+            ..RendererConfig::default()
+        },
+    )?;
+    r.set_improved_transparency(true);
+    r.set_texture_groups(&[flat_group(&[[0, 0, 0, 255], [255, 255, 255, 160]])]);
+    r.set_environment(&mcr_render::Environment::overworld(18000, 0.0, 0.0));
+    let mut m = lit_wall(0, mcr_render::pack_light(0, 0));
+    m.translucent = vec![lit_pane(1, 12.0, mcr_render::pack_light(0, 0))];
+    r.set_section([0, 0, 0], &m).unwrap();
+    r.set_dynamic_lights(lights);
+    let cam = Camera {
+        position: DVec3::new(8.0, 8.0, 20.0),
+        ..Camera::default()
+    };
+    frame(&mut r, &cam);
+    let px = r.read_offscreen().unwrap();
+    let i = (32 * 64 + 32) * 4;
+    Some([px[i], px[i + 1], px[i + 2], px[i + 3]])
+}
+
+#[test]
+fn dynamic_lights_reach_translucent_terrain_with_improved_transparency() {
+    use mcr_render::DynamicLight;
+    let Some(dark) = dark_pane_pixel(&[]) else {
+        return;
+    };
+    let lit = dark_pane_pixel(&[DynamicLight::point(DVec3::new(8.0, 8.0, 13.0), 14.0)]).unwrap();
+    assert!(
+        lit[0] > dark[0].saturating_add(60),
+        "a torch lights the glass: {dark:?} -> {lit:?}"
+    );
 }

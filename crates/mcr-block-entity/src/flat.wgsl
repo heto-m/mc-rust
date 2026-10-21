@@ -53,6 +53,10 @@ fn finish(rgb: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_tex(in: VsOut) -> @location(0) vec4<f32> {
+    return tex_color(in);
+}
+
+fn tex_color(in: VsOut) -> vec4<f32> {
     let c = textureSample(tex0, samp, in.uv) * in.color;
     if c.a < 0.004 {
         discard;

@@ -11,6 +11,7 @@ mcr-data = { path = "../mcr-data" }
 mcr-entity-model = { path = "../mcr-entity-model" }
 mcr-nbt = { path = "../mcr-nbt" }
 mcr-protocol = { path = "../mcr-protocol" }
+mcr-render = { path = "../mcr-render" }
 mcr-ui = { path = "../mcr-ui" }
 wgpu = "30"
 glam = { version = "0.34", features = ["bytemuck"] }

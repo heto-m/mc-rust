@@ -39,7 +39,7 @@ pub use glow::GlowOutline;
 pub use graph::{ReachedSections, SectionVisibility};
 pub use mesh::SectionMesh;
 pub use mesh::{TINT_KINDS, TINT_TABLE_WORDS, TintTable, tint_at};
-pub use oit::{OitInfo, OitStage, oit_wgsl};
+pub use oit::{OitInfo, OitPipelineDesc, OitStage, oit_wgsl};
 pub use overlay::{Overlay, OverlayCtx};
 pub use post::{MAX_POST_CHAINS, PostChain, PostOverrides, PostStack};
 pub use quad::{

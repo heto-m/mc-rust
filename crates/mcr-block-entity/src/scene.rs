@@ -2061,6 +2061,37 @@ impl BlockEntityScene {
         self.flat.draw_blended(pass);
     }
 
+    /// Improved transparency, inside the world pass: decals over the opaque parts.
+    pub fn draw_decals(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.gpu.draw_decals(pass);
+        self.display.draw_decals(pass);
+    }
+
+    /// Improved transparency: whether blended parts, beam glow or text go through
+    /// [`BlockEntityScene::draw_oit`] this frame.
+    pub fn prepare_oit(&mut self, info: mcr_render::OitInfo<'_>) -> bool {
+        let gpu = self.gpu.prepare_oit(info);
+        let display = self.display.prepare_oit(info);
+        let flat = self.flat.prepare_oit(info);
+        gpu || display || flat
+    }
+
+    pub fn draw_oit(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        stage: mcr_render::OitStage,
+        oit: &wgpu::BindGroup,
+    ) {
+        self.gpu.draw_oit(pass, stage, oit);
+        self.display.draw_oit(pass, stage, oit);
+        self.flat.draw_oit(pass, stage, oit);
+    }
+
+    /// Improved transparency: what stays on top of the composited world (see-through text).
+    pub fn draw_see_through(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.flat.draw_see_through(pass);
+    }
+
     pub fn render(&mut self, pass: &mut wgpu::RenderPass<'_>, frame: &BlockEntityFrame) {
         self.prepare(frame);
         self.draw(pass);

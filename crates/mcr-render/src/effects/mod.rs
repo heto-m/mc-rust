@@ -116,11 +116,20 @@ struct Pipelines {
     border: wgpu::RenderPipeline,
 }
 
+/// Improved transparency stages for the border, weather and clouds.
+struct OitPipelines {
+    border: [wgpu::RenderPipeline; 3],
+    weather: [wgpu::RenderPipeline; 3],
+    clouds_fancy: [wgpu::RenderPipeline; 3],
+    clouds_flat: [wgpu::RenderPipeline; 3],
+}
+
 pub(crate) struct Effects {
     device: wgpu::Device,
     queue: wgpu::Queue,
     bgl: wgpu::BindGroupLayout,
     pipelines: Pipelines,
+    oit: Option<OitPipelines>,
     uniforms: wgpu::Buffer,
     sky_buffer: wgpu::Buffer,
     layout: SkyLayout,
@@ -461,6 +470,7 @@ impl Effects {
             device: device.clone(),
             bgl,
             pipelines,
+            oit: None,
             textures: None,
             groups: None,
             clouds: Clouds::default(),
@@ -819,23 +829,119 @@ impl Effects {
         }
     }
 
+    /// Builds the improved transparency pipelines, or drops them with `None`.
+    pub(crate) fn set_oit(
+        &mut self,
+        oit: Option<(crate::oit::OitInfo<'_>, &wgpu::BindGroupLayout, &str)>,
+    ) {
+        let Some((info, globals_bgl, globals_src)) = oit else {
+            self.oit = None;
+            return;
+        };
+        let device = &self.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("effects oit"),
+            source: wgpu::ShaderSource::Wgsl(
+                [
+                    globals_src,
+                    include_str!("../shaders/effects.wgsl"),
+                    crate::oit::oit_wgsl(2).as_str(),
+                    include_str!("../shaders/effects_oit.wgsl"),
+                ]
+                .concat()
+                .into(),
+            ),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("effects oit"),
+            bind_group_layouts: &[Some(globals_bgl), Some(&self.bgl), Some(info.layout)],
+            immediate_size: 0,
+        });
+        let build = |label: &str, vertex: &str, fragment: &str, cull: Option<wgpu::Face>| {
+            crate::oit::OitPipelineDesc {
+                label,
+                layout: &layout,
+                module: &module,
+                vertex,
+                buffers: &[],
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: cull,
+                    ..Default::default()
+                },
+                bias: Default::default(),
+                fragment,
+                bounds_format: info.bounds_format,
+            }
+            .build(device)
+        };
+        self.oit = Some(OitPipelines {
+            border: build("world border oit", "vs_quad", "fs_border", None),
+            weather: build("weather oit", "vs_quad", "fs_weather", None),
+            clouds_fancy: build("clouds oit", "vs_cloud", "fs_cloud", Some(wgpu::Face::Back)),
+            clouds_flat: build("flat clouds oit", "vs_cloud", "fs_cloud", None),
+        });
+    }
+
     pub(crate) fn draw_world(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_destroy(pass);
+        let p = &self.pipelines;
+        self.draw_translucent(
+            pass,
+            [&p.border, &p.weather, &p.clouds_fancy, &p.clouds_flat],
+        );
+    }
+
+    /// Crumbling decals sit on opaque blocks, so improved transparency draws them before its stages.
+    pub(crate) fn draw_destroy(&self, pass: &mut wgpu::RenderPass<'_>) {
         let (Some(g), p) = (&self.groups, &self.plan) else {
             return;
         };
-        let at = |s: usize| [(s as u64 * SLOT) as u32];
         if p.destroy > 0 {
             pass.set_pipeline(&self.pipelines.destroy);
-            pass.set_bind_group(1, &g.destroy, &at(slot::DESTROY));
+            pass.set_bind_group(1, &g.destroy, &[(slot::DESTROY as u64 * SLOT) as u32]);
             pass.draw(0..p.destroy * 6, 0..1);
         }
+    }
+
+    /// The border, weather and clouds in one improved transparency stage; group 2 is bound by the caller.
+    pub(crate) fn draw_oit(&self, pass: &mut wgpu::RenderPass<'_>, stage: crate::oit::OitStage) {
+        let Some(o) = &self.oit else {
+            return;
+        };
+        let i = stage.index();
+        self.draw_translucent(
+            pass,
+            [
+                &o.border[i],
+                &o.weather[i],
+                &o.clouds_fancy[i],
+                &o.clouds_flat[i],
+            ],
+        );
+    }
+
+    pub(crate) fn has_oit_work(&self) -> bool {
+        let p = &self.plan;
+        self.groups.is_some() && (p.border > 0 || p.rain + p.snow > 0 || p.clouds)
+    }
+
+    fn draw_translucent(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipelines: [&wgpu::RenderPipeline; 4],
+    ) {
+        let (Some(g), p) = (&self.groups, &self.plan) else {
+            return;
+        };
+        let [border, weather, clouds_fancy, clouds_flat] = pipelines;
+        let at = |s: usize| [(s as u64 * SLOT) as u32];
         if p.border > 0 {
-            pass.set_pipeline(&self.pipelines.border);
+            pass.set_pipeline(border);
             pass.set_bind_group(1, &g.border, &at(slot::BORDER));
             pass.draw(0..p.border * 6, 0..1);
         }
         if p.rain + p.snow > 0 {
-            pass.set_pipeline(&self.pipelines.weather);
+            pass.set_pipeline(weather);
             if p.rain > 0 {
                 pass.set_bind_group(1, &g.rain, &at(slot::RAIN));
                 pass.draw(0..p.rain * 6, 0..1);
@@ -847,9 +953,9 @@ impl Effects {
         }
         if p.clouds {
             pass.set_pipeline(if self.cloud_settings.mode == CloudMode::Fancy {
-                &self.pipelines.clouds_fancy
+                clouds_fancy
             } else {
-                &self.pipelines.clouds_flat
+                clouds_flat
             });
             pass.set_bind_group(1, &g.clouds, &at(slot::CLOUDS));
             pass.draw(0..self.clouds.quads * 6, 0..1);

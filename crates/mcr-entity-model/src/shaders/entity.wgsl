@@ -154,6 +154,10 @@ fn fs_cutout(in: VertexOut) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_blend(in: VertexOut) -> @location(0) vec4<f32> {
+    return blend_color(in);
+}
+
+fn blend_color(in: VertexOut) -> vec4<f32> {
     let c = textureSample(entity_textures, entity_sampler, in.uv, in.layer);
     if c.a < 0.003 {
         discard;
@@ -171,6 +175,10 @@ fn fs_mask(in: VertexOut) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_additive(in: VertexOut) -> @location(0) vec4<f32> {
+    return additive_color(in);
+}
+
+fn additive_color(in: VertexOut) -> vec4<f32> {
     let c = textureSample(entity_textures, entity_sampler, in.uv, in.layer);
     let f = max(fog_factor(in.fog_dist.x, globals.fog.x, globals.fog.y), fog_factor(in.fog_dist.y, globals.fog.z, globals.fog.w));
     return vec4<f32>(finish(c.rgb * in.tint.rgb), c.a * in.tint.a * (1.0 - f));

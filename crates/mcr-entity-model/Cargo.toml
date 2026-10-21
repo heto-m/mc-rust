@@ -10,6 +10,7 @@ mcr-buf.workspace = true
 mcr-assets = { path = "../mcr-assets" }
 mcr-data = { path = "../mcr-data" }
 mcr-protocol = { path = "../mcr-protocol" }
+mcr-render = { path = "../mcr-render" }
 wgpu = "30"
 glam = { version = "0.34", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }

@@ -27,8 +27,9 @@ fn fs_bounds_cull(in: FullOut) -> CullOut {
     return CullOut(vec4<f32>(b.r, min(b.g, opaque), b.b, b.a), b.a);
 }
 
+// Writes the nearest translucent depth, so later passes test against the composited surfaces.
 @fragment
-fn fs_composite(in: FullOut) -> @location(0) vec4<f32> {
+fn fs_composite(in: FullOut) -> CullOut {
     let pixel = vec2<i32>(in.clip.xy);
     let accum = textureLoad(oit_accum, pixel, 0);
     let t = oit_transmittance_at(pixel, 100000.0, 1.0);
@@ -37,5 +38,6 @@ fn fs_composite(in: FullOut) -> @location(0) vec4<f32> {
         discard;
     }
     let scale = select(1.0, coverage / accum.a, accum.a > 0.00001);
-    return vec4<f32>(accum.rgb * scale, coverage);
+    let nearest = textureLoad(oit_bounds, pixel, 0).b;
+    return CullOut(vec4<f32>(accum.rgb * scale, coverage), nearest);
 }

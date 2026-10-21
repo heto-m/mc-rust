@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use mcr_block_entity::{
-    BeaconData, BeamBlock, BeamSection, BlockEntityData, BlockEntityFrame, BlockEntityKind,
-    BlockEntityScene, DyeColor, PistonData, beacon_levels, beam_sections,
+    BeaconData, BeamBlock, BeamScan, BeamSection, BlockEntityData, BlockEntityFrame,
+    BlockEntityKind, BlockEntityScene, DyeColor, PistonData, beacon_levels,
 };
 use mcr_client::{ClientEvent, ClientState};
 use mcr_entity_model::glam::Quat;
@@ -18,7 +18,8 @@ use uuid::Uuid;
 
 const MAX_PER_CHUNK: usize = 4096;
 const MAX_TOTAL: usize = 1 << 16;
-const BEAM_INTERVAL: u64 = 20;
+/// Beacons whose beam scan steps in one client tick; more take turns.
+const MAX_BEAM_SCANS_PER_TICK: usize = 256;
 /// `BeaconBlockEntity#tick` recounts the pyramid when the game time is a multiple of this.
 const BEACON_LEVELS_INTERVAL: i64 = 80;
 /// Pyramid recounts per client tick; the rest wait in a queue.
@@ -48,6 +49,9 @@ pub struct BlockEntities {
     conduit_frames: FxHashMap<Pos, Vec<Pos>>,
     /// Pyramid levels per beacon, zero until the first recount as in vanilla.
     beacon_levels: FxHashMap<Pos, u8>,
+    /// Per beacon: the scan in progress and the sections of the last finished one.
+    beams: FxHashMap<Pos, (BeamScan, Vec<BeamSection>)>,
+    beam_cursor: usize,
     recount_clock: RecountClock,
     recount_queue: std::collections::VecDeque<Pos>,
 }
@@ -97,11 +101,6 @@ fn world_pos(chunk: ChunkPos, x: usize, y: i16, z: usize) -> Option<Pos> {
     ])
 }
 
-fn top_y(min_y: i32, height: u32) -> i32 {
-    let height = i32::try_from(height).unwrap_or(i32::MAX);
-    min_y.saturating_add(height).saturating_sub(1)
-}
-
 fn state_at(chunks: &ChunkStore, pos: Pos) -> Option<u32> {
     chunks.block(pos[0], pos[1], pos[2]).map(|s| s.0)
 }
@@ -129,12 +128,25 @@ fn beam_block(state: u32) -> BeamBlock {
     }
 }
 
-fn beam(state: &ClientState, pos: Pos) -> Vec<BeamSection> {
-    let chunks = &state.chunks;
-    let top = top_y(chunks.config().min_y(), chunks.config().height());
-    beam_sections(pos[1], top, |y| {
-        state_at(chunks, [pos[0], y, pos[2]]).map_or(BeamBlock::Open, beam_block)
-    })
+/// Vanilla's `WORLD_SURFACE` height, the first free y above the column's top block, read from the
+/// blocks: the chunk heightmaps are only as fresh as the chunk packet.
+fn surface(chunks: &ChunkStore, x: i32, z: i32) -> Option<i32> {
+    let column = chunks.column(ChunkPos::from_block(x, z))?;
+    let config = chunks.config();
+    let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+    for (i, section) in column.sections().iter().enumerate().rev() {
+        if section.is_empty() {
+            continue;
+        }
+        let base = column.min_y().saturating_add(16 * i as i32);
+        if let Some(dy) = (0..16)
+            .rev()
+            .find(|&dy| !config.is_air(section.block(lx, dy, lz)))
+        {
+            return Some(base.saturating_add(dy as i32 + 1));
+        }
+    }
+    Some(column.min_y())
 }
 
 fn pyramid_levels(state: &ClientState, pos: Pos) -> u8 {
@@ -154,11 +166,11 @@ fn pyramid_levels(state: &ClientState, pos: Pos) -> u8 {
 }
 
 /// Vanilla draws no beam while the beacon has no pyramid (`getBeamSections` with zero levels).
-fn beacon_data(state: &ClientState, pos: Pos, levels: u8) -> BlockEntityData {
+fn beacon_data(levels: u8, beam: &[BeamSection]) -> BlockEntityData {
     let sections = if levels == 0 {
         Vec::new()
     } else {
-        beam(state, pos)
+        beam.to_vec()
     };
     BlockEntityData::Beacon(BeaconData { sections })
 }
@@ -275,6 +287,8 @@ impl BlockEntities {
             by_chunk: FxHashMap::default(),
             conduit_frames: FxHashMap::default(),
             beacon_levels: FxHashMap::default(),
+            beams: FxHashMap::default(),
+            beam_cursor: 0,
             recount_clock: RecountClock::default(),
             recount_queue: Default::default(),
         })
@@ -285,6 +299,7 @@ impl BlockEntities {
         self.by_chunk.clear();
         self.conduit_frames.clear();
         self.beacon_levels.clear();
+        self.beams.clear();
         self.recount_queue.clear();
         self.scene.clear();
     }
@@ -305,7 +320,8 @@ impl BlockEntities {
         match (kind, &mut data) {
             (BlockEntityKind::Beacon, d) => {
                 let levels = self.beacon_levels.get(&pos).copied().unwrap_or(0);
-                *d = beacon_data(state, pos, levels);
+                let (_, beam) = self.beams.entry(pos).or_default();
+                *d = beacon_data(levels, beam);
             }
             (BlockEntityKind::Conduit, BlockEntityData::Conduit(c)) => {
                 let frame = conduit_frame(&state.chunks, pos);
@@ -373,6 +389,7 @@ impl BlockEntities {
     fn remove(&mut self, pos: Pos) {
         self.conduit_frames.remove(&pos);
         self.beacon_levels.remove(&pos);
+        self.beams.remove(&pos);
         if self.entries.remove(&pos).is_some() {
             self.scene.remove(pos);
             let chunk = ChunkPos::from_block(pos[0], pos[2]);
@@ -389,6 +406,7 @@ impl BlockEntities {
         for p in self.by_chunk.remove(&pos).unwrap_or_default() {
             self.conduit_frames.remove(&p);
             self.beacon_levels.remove(&p);
+            self.beams.remove(&p);
             self.entries.remove(&p);
             self.scene.remove(p);
         }
@@ -453,6 +471,7 @@ impl BlockEntities {
 
     /// Re-derives world-dependent state (beacon beams, conduit shells) at their vanilla cadence.
     pub fn tick(&mut self, state: &ClientState, ticks: u64) {
+        self.scan_beams(state);
         let world = &state.world;
         if self
             .recount_clock
@@ -473,7 +492,7 @@ impl BlockEntities {
             let Some((BlockEntityKind::Beacon, data)) = self.entries.get(&pos).cloned() else {
                 continue;
             };
-            let levels = if beam(state, pos).is_empty() {
+            let levels = if self.beams.get(&pos).is_none_or(|(_, b)| b.is_empty()) {
                 self.beacon_levels.get(&pos).copied().unwrap_or(0)
             } else {
                 pyramid_levels(state, pos)
@@ -484,15 +503,53 @@ impl BlockEntities {
         let due: Vec<(Pos, BlockEntityKind)> = self
             .entries
             .iter()
-            .filter(|(_, (k, _))| match k {
-                BlockEntityKind::Beacon => ticks.is_multiple_of(BEAM_INTERVAL),
-                BlockEntityKind::Conduit => ticks.is_multiple_of(CONDUIT_INTERVAL),
-                _ => false,
+            .filter(|(_, (k, _))| {
+                *k == BlockEntityKind::Conduit && ticks.is_multiple_of(CONDUIT_INTERVAL)
             })
             .map(|(p, (k, _))| (*p, *k))
             .collect();
         for (pos, kind) in due {
             if let Some((_, data)) = self.entries.get(&pos).cloned() {
+                self.put(state, pos, kind, data);
+            }
+        }
+    }
+
+    /// One step of every beacon's beam scan, as `BeaconBlockEntity#tick`; a finished scan that changed the
+    /// beam updates the scene.
+    fn scan_beams(&mut self, state: &ClientState) {
+        let n = self.beams.len();
+        if n == 0 {
+            return;
+        }
+        let start = self.beam_cursor % n;
+        let picked: Vec<Pos> = self
+            .beams
+            .keys()
+            .cycle()
+            .skip(start)
+            .take(n.min(MAX_BEAM_SCANS_PER_TICK))
+            .copied()
+            .collect();
+        self.beam_cursor = start + picked.len();
+        let chunks = &state.chunks;
+        for pos in picked {
+            let Some(surface) = surface(chunks, pos[0], pos[2]) else {
+                continue;
+            };
+            let Some((scan, beam)) = self.beams.get_mut(&pos) else {
+                continue;
+            };
+            let Some(sections) = scan.step(pos[1], surface, |y| {
+                state_at(chunks, [pos[0], y, pos[2]]).map_or(BeamBlock::Open, beam_block)
+            }) else {
+                continue;
+            };
+            if sections == *beam {
+                continue;
+            }
+            *beam = sections;
+            if let Some((kind @ BlockEntityKind::Beacon, data)) = self.entries.get(&pos).cloned() {
                 self.put(state, pos, kind, data);
             }
         }
@@ -544,6 +601,31 @@ impl BlockEntities {
             self.scene.draw_blended(pass);
         }
     }
+
+    pub fn draw_decals(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.has_content() {
+            self.scene.draw_decals(pass);
+        }
+    }
+
+    pub fn prepare_oit(&mut self, info: mcr_render::OitInfo<'_>) -> bool {
+        self.has_content() && self.scene.prepare_oit(info)
+    }
+
+    pub fn draw_oit(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        stage: mcr_render::OitStage,
+        oit: &wgpu::BindGroup,
+    ) {
+        self.scene.draw_oit(pass, stage, oit);
+    }
+
+    pub fn draw_see_through(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.has_content() {
+            self.scene.draw_see_through(pass);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -565,15 +647,13 @@ mod tests {
     }
 
     #[test]
-    fn offsets_and_heights_saturate() {
+    fn offsets_saturate() {
         assert_eq!(offset([i32::MAX, 0, 0], [1, 0, 0]), None);
         assert_eq!(offset([i32::MIN, 0, 0], [-2, 0, 0]), None);
         assert_eq!(
             offset([30_000_000, 0, 0], [2, 1, -1]),
             Some([30_000_002, 1, -1])
         );
-        assert_eq!(top_y(i32::MAX, u32::MAX), i32::MAX - 1);
-        assert_eq!(top_y(-64, 384), 319);
     }
 
     #[test]

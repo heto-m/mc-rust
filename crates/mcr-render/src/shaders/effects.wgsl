@@ -85,14 +85,12 @@ fn fs_color(in: Out) -> @location(0) vec4<f32> {
     return in.color;
 }
 
-@fragment
-fn fs_cloud(in: Out) -> @location(0) vec4<f32> {
+fn cloud_color(in: Out) -> vec4<f32> {
     let fade = 1.0 - clamp(in.dist / fx.extra.w, 0.0, 1.0);
     return vec4<f32>(in.color.rgb, in.color.a * fade);
 }
 
-@fragment
-fn fs_weather(in: Out) -> @location(0) vec4<f32> {
+fn weather_color(in: Out) -> vec4<f32> {
     let t = textureSample(tex, smp, in.uv, 0);
     if t.a < 0.01 {
         discard;
@@ -102,13 +100,27 @@ fn fs_weather(in: Out) -> @location(0) vec4<f32> {
     return vec4<f32>(c, t.a * in.color.a);
 }
 
-@fragment
-fn fs_border(in: Out) -> @location(0) vec4<f32> {
+fn border_color(in: Out) -> vec4<f32> {
     let t = textureSample(tex, smp, in.uv, 0);
     if t.a < 0.004 {
         discard;
     }
     return t * in.color;
+}
+
+@fragment
+fn fs_cloud(in: Out) -> @location(0) vec4<f32> {
+    return cloud_color(in);
+}
+
+@fragment
+fn fs_weather(in: Out) -> @location(0) vec4<f32> {
+    return weather_color(in);
+}
+
+@fragment
+fn fs_border(in: Out) -> @location(0) vec4<f32> {
+    return border_color(in);
 }
 
 @fragment

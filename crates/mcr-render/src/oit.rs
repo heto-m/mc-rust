@@ -9,13 +9,26 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OitStage {
-    DepthBounds,
-    Transmittance,
-    Accumulate,
+    DepthBounds = 0,
+    Transmittance = 1,
+    Accumulate = 2,
 }
 
 impl OitStage {
     pub const ALL: [Self; 3] = [Self::DepthBounds, Self::Transmittance, Self::Accumulate];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The fragment entry suffix [`OitPipelineDesc`] appends: `bounds`, `coefficients` or `accumulate`.
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Self::DepthBounds => "bounds",
+            Self::Transmittance => "coefficients",
+            Self::Accumulate => "accumulate",
+        }
+    }
 
     /// The colour targets of this stage's pass, with their blending.
     pub fn targets(
@@ -63,6 +76,52 @@ impl OitStage {
             Self::Transmittance => "fs_oit_coefficients",
             Self::Accumulate => "fs_oit_accumulate",
         }
+    }
+}
+
+/// The three stage pipelines over a shader whose fragment entries are `{fragment}_{suffix}`.
+#[derive(Debug)]
+pub struct OitPipelineDesc<'a> {
+    pub label: &'a str,
+    pub layout: &'a wgpu::PipelineLayout,
+    pub module: &'a wgpu::ShaderModule,
+    pub vertex: &'a str,
+    pub buffers: &'a [Option<wgpu::VertexBufferLayout<'a>>],
+    pub primitive: wgpu::PrimitiveState,
+    pub bias: wgpu::DepthBiasState,
+    pub fragment: &'a str,
+    pub bounds_format: wgpu::TextureFormat,
+}
+
+impl OitPipelineDesc<'_> {
+    pub fn build(&self, device: &wgpu::Device) -> [wgpu::RenderPipeline; 3] {
+        OitStage::ALL.map(|stage| {
+            let entry = format!("{}_{}", self.fragment, stage.suffix());
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(&format!("{} {}", self.label, stage.suffix())),
+                layout: Some(self.layout),
+                vertex: wgpu::VertexState {
+                    module: self.module,
+                    entry_point: Some(self.vertex),
+                    compilation_options: Default::default(),
+                    buffers: self.buffers,
+                },
+                primitive: self.primitive,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    bias: self.bias,
+                    ..OitStage::depth_state()
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: self.module,
+                    entry_point: Some(&entry),
+                    compilation_options: Default::default(),
+                    targets: &stage.targets(self.bounds_format),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        })
     }
 }
 
@@ -239,7 +298,7 @@ impl OitShared {
                 "fs_composite",
                 color_format,
                 Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                depth(false, wgpu::CompareFunction::Always),
+                depth(true, wgpu::CompareFunction::GreaterEqual),
             ),
             dummy: target(device, "oit dummy", (1, 1), COEFF_FORMAT),
             layout,
@@ -288,7 +347,7 @@ impl OitShared {
                 group([&culled, &coeffs[0], &coeffs[1], d]),
             ],
             cull_group: group([&bounds, d, d, d]),
-            composite_group: group([d, &coeffs[0], &coeffs[1], &accum]),
+            composite_group: group([&bounds, &coeffs[0], &coeffs[1], &accum]),
             bounds,
             culled,
             coeffs,

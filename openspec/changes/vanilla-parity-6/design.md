@@ -128,3 +128,67 @@ incrementally with `lastCheckY`; `LevelRenderer` branches on `useImprovedTranspa
 #### Live checks (batch 2 and 4), vanilla 26.3 server on loopback
 - P7: 37 named banners and a painted map in an item frame, screenshots offscreen. P13: F3+F6 screen, entry buttons, Performance profile (`debug-profile.json` written as `{"profile":"performance"}`), F3+1 pie and an F3+L zip (six files). World Options and Restrictions on a remote world (op). F3+F6 used to toggle the overlay on F3's release because opening the screen reset the chord state; fixed with `keep_chord`.
 - Not live: the local-world rows (LAN, Command Access, Force Game Mode) and the pack drop toast, which need a managed singleplayer server and a window file drop; both are unit-tested. P6 needs an online account.
+
+## Implementation notes (batch 1 and batch 3)
+
+GPU medians at 1920x1080, render distance 16, 600 frames, 3 interleaved rounds (ms; the forest, canopy,
+beach and edge views of the parity-5 Batch 8 notes):
+
+| Build | Forest | Canopy | Beach | Edge |
+|---|---|---|---|---|
+| Before, improved transparency off | 0.237 | 0.139 | 0.155 | 0.167 |
+| After, improved transparency off | 0.237 | 0.139 | 0.155 | 0.167 |
+| Before, improved transparency on | 0.364 | 0.254 | 0.334 | 0.331 |
+| After, improved transparency on | 0.368 | 0.259 | 0.344 | 0.337 |
+
+With the option off the frames are byte-identical to before. With it on, the 4 to 10 µs are the composite's
+depth write (most on the beach, where most pixels hold water); these views have no entities, weather or
+border.
+
+#### P1 Entities, items and block entities
+- `EntityRenderer` builds stage pipelines (`entity_oit.wgsl`) on first use: blended parts as `OIT_ENTITY`;
+  additive parts (glint, eyes, energy swirl) as `OIT_ADDITIVE`, which bound depth and add light behind
+  what lies in front but have no transmittance stage. Decals (armor trims) sit on cutout parts, so they
+  draw with the opaque parts inside the world pass. Block entities route beam glow, sign text and text
+  displays through the stages (`flat_oit.wgsl`, the display offset kept as depth bias); see-through text
+  stays on top after the composite, as vanilla's see-through phase.
+- Items: vanilla picks `item_translucent` for quads whose sprite has translucent pixels
+  (`BakedQuad.MaterialInfo#of`). A texture now records that when it is uploaded, and item parts on such a
+  texture draw translucent, so stained glass, ice, slime and honey items blend in both modes and go
+  through the stages with the option on.
+- The block outline draws before the stages (vanilla's `shapeOutlines` go through them), so translucent
+  surfaces in front cover it instead of the composite depth hiding it.
+
+#### P2 Border, weather and clouds
+- Drawn in every stage after the overlay's work: rain and snow and clouds as translucent, the border as
+  additive. Crumbling decals stay classic and draw before the stages, over the opaque blocks they crack.
+- Not modelled: vanilla's separate cloud depth target, which lets only the nearest fancy-cloud face
+  contribute; every front face contributes here, as in mcr's classic path.
+
+#### P3 Composite depth
+- The composite writes the nearest translucent depth (bounds `b`) like `oit_composite.fsh`, tested
+  `GreaterEqual` instead of vanilla's always-pass: identical wherever coverage exists, and pixels lit only by
+  near-transparent additive surfaces keep the opaque depth instead of the far plane.
+
+#### P4 Dynamic lights
+- With dynamic lights built, the accumulate stage uses a variant (`terrain_oit_dyn.wgsl`, light grid at group
+  2, stage inputs at group 3); the other two stages only need alpha.
+
+#### P8 Late phase
+- The late cull phase splits each disoccluded section into a solid list and a cutout list like the early
+  phase: four command regions (early solid, late solid, early cutout, late cutout) and four more counters.
+  Frames are byte-identical in all four culling modes on all four views, first frames included. GPU medians
+  unchanged (within 0.001 ms in every mode): steady views disocclude few sections.
+
+#### P9 Beacon beam
+- `BeamScan` follows `BeaconBlockEntity#tick`: up to 10 blocks a tick from the beacon to the column's
+  `WORLD_SURFACE` height, publishing the sections when it gets there, then starting over; the pyramid
+  recount uses the published beam. The surface is read from the blocks because the client's heightmaps are
+  only as fresh as the chunk packet. Hostile bounds: 256 beacons step per tick (round robin), heights are
+  checked in 64-bit and a scan is capped at `MAX_BEAM_HEIGHT`; parity-5's recount clock is unchanged.
+
+#### Live checks (batch 1 and 3), vanilla 26.3 server on loopback, offscreen
+- A slime and a lime glass item between light blue glass and water, a red glass item and signs in front:
+  with the option on the slime and item behind the glass take its tint and no longer draw over it; clouds and
+  the world border behind the glass are attenuated by it instead of covering it; rain blends in both modes.
+- A level 1 beacon: placing red stained glass three blocks above it turns the beam above the glass red.

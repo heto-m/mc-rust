@@ -6,11 +6,11 @@
 
 Scope: mcr-render transparency, mcr-app.
 
-- [ ] 1.1 P1 (V) Translucent entity layers and item entities through the OIT chain
-- [ ] 1.2 P2 (V) Weather, clouds and world border through the OIT chain
-- [ ] 1.3 P3 (M) Composite writes depth
-- [ ] 1.4 P4 (M) Dynamic lights in the OIT terrain pass
-- [ ] 1.5 Offscreen tests; GPU time with the option on and off; fmt, clippy and workspace tests
+- [x] 1.1 P1 (V) Translucent entity layers and item entities through the OIT chain
+- [x] 1.2 P2 (V) Weather, clouds and world border through the OIT chain
+- [x] 1.3 P3 (M) Composite writes depth
+- [x] 1.4 P4 (M) Dynamic lights in the OIT terrain pass
+- [x] 1.5 Offscreen tests; GPU time with the option on and off; fmt, clippy and workspace tests
 
 ## 2. Skin elytra texture and live checks
 
@@ -25,9 +25,9 @@ Scope: mcr-auth, mcr-entity-model humanoids and maps.
 
 Scope: mcr-render cull and terrain, mcr-app block_entities.
 
-- [ ] 3.1 P8 (M) Solid-before-cutout in the late cull phase, pixel-identical
-- [ ] 3.2 P9 (M) Beacon beam scan one step per tick
-- [ ] 3.3 GPU medians before and after; fmt, clippy and workspace tests
+- [x] 3.1 P8 (M) Solid-before-cutout in the late cull phase, pixel-identical
+- [x] 3.2 P9 (M) Beacon beam scan one step per tick
+- [x] 3.3 GPU medians before and after; fmt, clippy and workspace tests
 
 ## 4. World Options and debug screens
 

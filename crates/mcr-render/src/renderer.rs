@@ -34,6 +34,7 @@ const DYNLIGHT_SRC: &str = include_str!("shaders/dynlight.wgsl");
 const CULL_SRC: &str = include_str!("shaders/cull.wgsl");
 const TRANS_CULL_SRC: &str = include_str!("shaders/trans_cull.wgsl");
 const TERRAIN_OIT_SRC: &str = include_str!("shaders/terrain_oit.wgsl");
+const TERRAIN_OIT_DYN_SRC: &str = include_str!("shaders/terrain_oit_dyn.wgsl");
 
 pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -41,7 +42,7 @@ const TICKS_PER_SECOND: f64 = 20.0;
 const LIGHTMAP_BYTES: u64 = 256 * 16;
 const READBACK_SLOTS: usize = 3;
 const STATS_COUNTER_OFFSET: u64 = 256;
-const COUNTERS_SIZE: u64 = 32;
+const COUNTERS_SIZE: u64 = 48;
 const TIMESTAMPS: u32 = 10;
 /// Query indices bracketing the improved transparency passes.
 const OIT_TIMESTAMPS: u32 = 8;
@@ -484,6 +485,12 @@ struct ImprovedTransparency {
     layout: wgpu::PipelineLayout,
     /// Translucent terrain per stage, specialised for the texture filter.
     terrain: [wgpu::RenderPipeline; 3],
+    /// The accumulate stage with the dynamic light term: its module, layout and pipeline.
+    dyn_accumulate: Option<(
+        wgpu::ShaderModule,
+        wgpu::PipelineLayout,
+        wgpu::RenderPipeline,
+    )>,
 }
 
 fn oit_terrain_pipelines(
@@ -493,42 +500,77 @@ fn oit_terrain_pipelines(
     bounds_format: wgpu::TextureFormat,
     mode: FilterMode,
 ) -> [wgpu::RenderPipeline; 3] {
-    let constants = [("FILTER_MODE", f64::from(mode as u8))];
     OitStage::ALL.map(|stage| {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(stage.entry()),
-            layout: Some(layout),
-            vertex: wgpu::VertexState {
-                module,
-                entry_point: Some("vs_model"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
+        oit_terrain_pipeline(
+            device,
+            (module, layout),
+            bounds_format,
+            mode,
+            stage,
+            ("vs_model", stage.entry()),
+        )
+    })
+}
+
+fn oit_terrain_pipeline(
+    device: &wgpu::Device,
+    (module, layout): (&wgpu::ShaderModule, &wgpu::PipelineLayout),
+    bounds_format: wgpu::TextureFormat,
+    mode: FilterMode,
+    stage: OitStage,
+    (vs, fs): (&str, &str),
+) -> wgpu::RenderPipeline {
+    let constants = [("FILTER_MODE", f64::from(mode as u8))];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(fs),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some(vs),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(OitStage::depth_state()),
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some(fs),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &constants,
                 ..Default::default()
             },
-            depth_stencil: Some(OitStage::depth_state()),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module,
-                entry_point: Some(stage.entry()),
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: &constants,
-                    ..Default::default()
-                },
-                targets: &stage.targets(bounds_format),
-            }),
-            multiview_mask: None,
-            cache: None,
-        })
+            targets: &stage.targets(bounds_format),
+        }),
+        multiview_mask: None,
+        cache: None,
     })
+}
+
+fn dyn_accumulate_pipeline(
+    device: &wgpu::Device,
+    shader: (&wgpu::ShaderModule, &wgpu::PipelineLayout),
+    bounds_format: wgpu::TextureFormat,
+    mode: FilterMode,
+) -> wgpu::RenderPipeline {
+    oit_terrain_pipeline(
+        device,
+        shader,
+        bounds_format,
+        mode,
+        OitStage::Accumulate,
+        ("vs_model_dyn", "fs_oit_accumulate_dyn"),
+    )
 }
 
 /// Terrain pipelines with the dynamic light term, its uniform and this frame's sources.
 struct DynamicLights {
     pipelines: TerrainPipelines,
     shader: TerrainShader,
+    layout: wgpu::BindGroupLayout,
     buffer: wgpu::Buffer,
     grid_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -873,7 +915,7 @@ impl Renderer {
             cube_cmds: storage_buffer(
                 &device,
                 "cube cmds",
-                3 * max_sections * 6 * DRAW_CMD_SIZE,
+                4 * max_sections * 6 * DRAW_CMD_SIZE,
                 wgpu::BufferUsages::INDIRECT,
             ),
             quad_indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -890,7 +932,7 @@ impl Renderer {
             model_cmds: storage_buffer(
                 &device,
                 "model cmds",
-                3 * max_sections * DRAW_CMD_SIZE,
+                4 * max_sections * DRAW_CMD_SIZE,
                 wgpu::BufferUsages::INDIRECT,
             ),
             model_draws: storage_buffer(
@@ -1189,6 +1231,7 @@ impl Renderer {
             DynamicLights {
                 pipelines: shader.pipelines(&device, FilterMode::default()),
                 shader,
+                layout: bgl,
                 buffer,
                 grid_buffer,
                 bind_group,
@@ -1486,9 +1529,12 @@ impl Renderer {
         }
         if !on {
             self.oit = None;
+            self.effects.set_oit(None);
             return;
         }
         let shared = OitShared::new(&self.device, self.target_format());
+        self.effects
+            .set_oit(Some((shared.info(), &self.globals_bgl, GLOBALS_SRC)));
         let module = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1523,12 +1569,51 @@ impl Renderer {
             shared.bounds_format,
             self.filter.mode,
         );
+        let dyn_accumulate = self.dyn_lights.as_ref().map(|d| {
+            let module = self
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("terrain oit dynamic lights"),
+                    source: wgpu::ShaderSource::Wgsl(
+                        [
+                            QUAD_SRC,
+                            GLOBALS_SRC,
+                            TERRAIN_SRC,
+                            DYNLIGHT_SRC,
+                            crate::oit::oit_wgsl(3).as_str(),
+                            TERRAIN_OIT_DYN_SRC,
+                        ]
+                        .concat()
+                        .into(),
+                    ),
+                });
+            let layout = self
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("terrain oit dynamic lights"),
+                    bind_group_layouts: &[
+                        Some(&self.globals_bgl),
+                        Some(&self.geom_bgl),
+                        Some(&d.layout),
+                        Some(&shared.layout),
+                    ],
+                    immediate_size: 0,
+                });
+            let pipeline = dyn_accumulate_pipeline(
+                &self.device,
+                (&module, &layout),
+                shared.bounds_format,
+                self.filter.mode,
+            );
+            (module, layout, pipeline)
+        });
         self.oit = Some(ImprovedTransparency {
             targets: shared.targets(&self.device, self.size),
             shared,
             module,
             layout,
             terrain,
+            dyn_accumulate,
         });
     }
 
@@ -1549,6 +1634,14 @@ impl Renderer {
                     o.shared.bounds_format,
                     filter.mode,
                 );
+                if let Some((module, layout, pipeline)) = &mut o.dyn_accumulate {
+                    *pipeline = dyn_accumulate_pipeline(
+                        &self.device,
+                        (module, layout),
+                        o.shared.bounds_format,
+                        filter.mode,
+                    );
+                }
             }
             self.terrain = self.terrain_shader.pipelines(&self.device, filter.mode);
             if let Some(d) = &mut self.dyn_lights {
@@ -2200,8 +2293,8 @@ impl Renderer {
                         cull_ms: ms(ts[0], ts[1]) + ms(ts[4], ts[5]),
                         draw_ms: ms(ts[2], ts[3]) + ms(ts[6], ts[7]),
                         frame_ms: ms(ts[0], ts[7]),
-                        cube_draws: c[4] + c[6] + c[2],
-                        model_draws: c[5] + c[7] + c[3],
+                        cube_draws: c[4] + c[6] + c[8] + c[10],
+                        model_draws: c[5] + c[7] + c[9] + c[11],
                     }
                 } else {
                     GpuTimes {
@@ -2489,8 +2582,10 @@ impl Renderer {
             encoder.clear_buffer(&self.geo.cube_cmds, 2 * late_cube, Some(cube_len));
             encoder.clear_buffer(&self.geo.model_cmds, 2 * late_model, Some(model_len));
             if two_phase {
-                encoder.clear_buffer(&self.geo.cube_cmds, late_cube, Some(cube_len));
-                encoder.clear_buffer(&self.geo.model_cmds, late_model, Some(model_len));
+                for at in [1, 3] {
+                    encoder.clear_buffer(&self.geo.cube_cmds, at * late_cube, Some(cube_len));
+                    encoder.clear_buffer(&self.geo.model_cmds, at * late_model, Some(model_len));
+                }
             }
         }
         let groups = self.slot_count.div_ceil(64).max(1);
@@ -2839,8 +2934,8 @@ impl Renderer {
         })
     }
 
-    /// The improved transparency stages over translucent terrain and the overlay's translucent work,
-    /// the composite, then the world effects that stay classic.
+    /// The improved transparency stages over translucent terrain, the overlay's translucent work, the
+    /// world border, weather and clouds, then the composite, which writes the nearest translucent depth.
     fn draw_oit<'o>(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -2869,6 +2964,7 @@ impl Renderer {
                 oit: Some(oit.shared.info()),
             })
         });
+        let effects = self.effects.has_oit_work();
         let ts = |begin: Option<u32>, end: Option<u32>| {
             self.timestamps
                 .as_ref()
@@ -2900,10 +2996,24 @@ impl Renderer {
                     multiview_mask: None,
                 });
                 if trans_n > 0 {
-                    pass.set_pipeline(&oit.terrain[i]);
+                    let lit = self.dyn_lights.as_ref().filter(|d| d.active).zip(
+                        oit.dyn_accumulate
+                            .as_ref()
+                            .filter(|_| stage == OitStage::Accumulate),
+                    );
                     pass.set_bind_group(0, &self.globals_bg, &[]);
                     pass.set_bind_group(1, &self.trans_geom_bg, &[]);
-                    pass.set_bind_group(2, &oit.targets.stage_groups[i], &[]);
+                    match lit {
+                        Some((d, (_, _, pipeline))) => {
+                            pass.set_pipeline(pipeline);
+                            pass.set_bind_group(2, &d.bind_group, &[]);
+                            pass.set_bind_group(3, &oit.targets.stage_groups[i], &[]);
+                        }
+                        None => {
+                            pass.set_pipeline(&oit.terrain[i]);
+                            pass.set_bind_group(2, &oit.targets.stage_groups[i], &[]);
+                        }
+                    }
                     pass.set_index_buffer(
                         self.geo.quad_indices.slice(..),
                         wgpu::IndexFormat::Uint32,
@@ -2912,6 +3022,11 @@ impl Renderer {
                 }
                 if drawn_by_overlay && let Some(o) = overlay.as_deref_mut() {
                     o.draw_oit(&mut pass, stage, &oit.targets.stage_groups[i]);
+                }
+                if effects {
+                    pass.set_bind_group(0, &self.globals_bg, &[]);
+                    pass.set_bind_group(2, &oit.targets.stage_groups[i], &[]);
+                    self.effects.draw_oit(&mut pass, stage);
                 }
             }
             if stage == OitStage::DepthBounds {
@@ -2957,8 +3072,6 @@ impl Renderer {
         pass.set_bind_group(0, &oit.targets.composite_group, &[]);
         pass.set_pipeline(&oit.shared.composite);
         pass.draw(0..3, 0..1);
-        pass.set_bind_group(0, &self.globals_bg, &[]);
-        self.effects.draw_world(&mut pass);
     }
 
     fn late_cube_base(&self) -> u32 {
@@ -2982,13 +3095,22 @@ impl Renderer {
         self.draw_list(pass, &p.model, &self.geo.model_cmds, cut_model, 28, 1);
     }
 
-    /// Sections the occlusion test let through late, few in a steady view: one alpha-tested draw each.
+    /// Sections the occlusion test let through late, split the same way as the early phase.
     fn draw_late_sections(&self, pass: &mut wgpu::RenderPass<'_>) {
         let p = self.bind_terrain(pass);
         let late_cube = u64::from(self.late_cube_base()) * DRAW_CMD_SIZE;
         let late_model = u64::from(self.late_model_base()) * DRAW_CMD_SIZE;
-        self.draw_list(pass, &p.cube, &self.geo.cube_cmds, late_cube, 8, 6);
-        self.draw_list(pass, &p.model, &self.geo.model_cmds, late_model, 12, 1);
+        self.draw_list(pass, &p.cube_solid, &self.geo.cube_cmds, late_cube, 32, 6);
+        self.draw_list(
+            pass,
+            &p.model_solid,
+            &self.geo.model_cmds,
+            late_model,
+            36,
+            1,
+        );
+        self.draw_list(pass, &p.cube, &self.geo.cube_cmds, 3 * late_cube, 40, 6);
+        self.draw_list(pass, &p.model, &self.geo.model_cmds, 3 * late_model, 44, 1);
     }
 
     fn bind_terrain(&self, pass: &mut wgpu::RenderPass<'_>) -> &TerrainPipelines {
@@ -3022,7 +3144,7 @@ impl Renderer {
     }
 
     /// Everything after opaque terrain: overlay opaque geometry, translucent terrain and world effects;
-    /// with improved transparency the last two come after, in [`Renderer::draw_oit`].
+    /// with improved transparency all but the crumbling decals come after, in [`Renderer::draw_oit`].
     fn draw_late_layers<'o>(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -3034,6 +3156,7 @@ impl Renderer {
             pass.set_bind_group(0, &self.globals_bg, &[]);
         }
         if self.oit.is_some() {
+            self.effects.draw_destroy(pass);
             return;
         }
         if trans_n > 0 {

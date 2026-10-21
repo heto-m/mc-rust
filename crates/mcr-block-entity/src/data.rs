@@ -544,43 +544,88 @@ pub enum BeamBlock {
     Solid,
 }
 
-/// Vanilla beam colouring: the beacon itself is the first (white) section; tints open a section or mix into the
-/// previous one, and the first solid block clears the beam.
+/// Blocks `BeaconBlockEntity#tick` checks per tick.
+pub const BEAM_SCAN_STEPS: usize = 10;
+
+/// `BeaconBlockEntity#tick`'s incremental beam scan (`lastCheckY`): up to [`BEAM_SCAN_STEPS`] blocks a
+/// tick from the beacon up to the column's surface. The beacon itself is the first (white) section; tints
+/// open a section or mix into the previous one, and the first solid block clears the beam.
+#[derive(Debug, Clone, Default)]
+pub struct BeamScan {
+    /// The last height checked; `None` starts over at the beacon.
+    last: Option<i64>,
+    checking: Vec<BeamSection>,
+}
+
+impl BeamScan {
+    /// One tick. `surface` is vanilla's `lastSetBlock`, the first free height above the column's top
+    /// block. Returns the sections when the scan reaches it; the next tick starts over.
+    pub fn step(
+        &mut self,
+        base_y: i32,
+        surface: i32,
+        mut at: impl FnMut(i32) -> BeamBlock,
+    ) -> Option<Vec<BeamSection>> {
+        const WHITE: u32 = 0xF9FFFE;
+        let end = i64::from(surface).min(i64::from(base_y) + i64::from(MAX_BEAM_HEIGHT));
+        let mut last = match self.last {
+            Some(y) if y >= i64::from(base_y) => y,
+            _ => {
+                self.checking.clear();
+                i64::from(base_y) - 1
+            }
+        };
+        for _ in 0..BEAM_SCAN_STEPS {
+            let y = last + 1;
+            if y > end {
+                break;
+            }
+            let block = if y == i64::from(base_y) {
+                BeamBlock::Tint(WHITE)
+            } else {
+                at(y as i32)
+            };
+            if let (BeamBlock::Tint(color), 0 | 1) = (block, self.checking.len()) {
+                self.checking.push(BeamSection { color, height: 1 });
+                last = y;
+                continue;
+            }
+            let room = self.checking.len() < MAX_BEAM_SECTIONS;
+            match (block, self.checking.last_mut()) {
+                (BeamBlock::Tint(rgb), Some(section)) if section.color != rgb && room => {
+                    let color = mix(section.color, rgb);
+                    self.checking.push(BeamSection { color, height: 1 });
+                }
+                (BeamBlock::Open | BeamBlock::Tint(_), Some(section)) => section.height += 1,
+                _ => {
+                    self.checking.clear();
+                    last = end;
+                    break;
+                }
+            }
+            last = y;
+        }
+        if last >= end {
+            self.last = None;
+            return Some(std::mem::take(&mut self.checking));
+        }
+        self.last = Some(last);
+        None
+    }
+}
+
+/// A whole [`BeamScan`] at once, from the beacon at `base_y` up to `top_y`.
 pub fn beam_sections(
     base_y: i32,
     top_y: i32,
     mut at: impl FnMut(i32) -> BeamBlock,
 ) -> Vec<BeamSection> {
-    const WHITE: u32 = 0xF9FFFE;
-    let mut sections = vec![BeamSection {
-        color: WHITE,
-        height: 1,
-    }];
-    let end = top_y.min(base_y.saturating_add(MAX_BEAM_HEIGHT));
-    for y in base_y.saturating_add(1)..=end {
-        match at(y) {
-            BeamBlock::Tint(rgb) => {
-                let count = sections.len();
-                let last = sections.last_mut().expect("seeded with the beacon section");
-                if count <= 1 {
-                    sections.push(BeamSection {
-                        color: rgb,
-                        height: 1,
-                    });
-                } else if last.color == rgb {
-                    last.height += 1;
-                } else if count < MAX_BEAM_SECTIONS {
-                    let color = mix(last.color, rgb);
-                    sections.push(BeamSection { color, height: 1 });
-                } else {
-                    last.height += 1;
-                }
-            }
-            BeamBlock::Solid => return Vec::new(),
-            BeamBlock::Open => sections.last_mut().expect("seeded").height += 1,
+    let mut scan = BeamScan::default();
+    loop {
+        if let Some(sections) = scan.step(base_y, top_y, &mut at) {
+            return sections;
         }
     }
-    sections
 }
 
 /// Vanilla's `BeaconBlockEntity#updateBase`: complete pyramid layers under the beacon at `pos`, up to
@@ -868,6 +913,68 @@ mod tests {
         assert_eq!(sections[1].color, 0xFF0000);
         assert_eq!(sections[2].color, 0x7F007F);
         assert_eq!(sections.iter().map(|s| s.height).sum::<i32>(), 21);
+    }
+
+    #[test]
+    fn beam_scan_checks_ten_blocks_a_tick_up_to_the_surface() {
+        let mut scan = BeamScan::default();
+        let mut checked = Vec::new();
+        let tick = |scan: &mut BeamScan, checked: &mut Vec<i32>| {
+            scan.step(64, 89, |y| {
+                checked.push(y);
+                if y == 70 {
+                    BeamBlock::Tint(0xFF0000)
+                } else {
+                    BeamBlock::Open
+                }
+            })
+        };
+        assert!(tick(&mut scan, &mut checked).is_none());
+        assert_eq!(
+            checked,
+            (65..=73).collect::<Vec<_>>(),
+            "the beacon is the first step"
+        );
+        assert!(tick(&mut scan, &mut checked).is_none());
+        let sections = tick(&mut scan, &mut checked).expect("third tick reaches y 89");
+        assert_eq!(checked.last(), Some(&89));
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections.iter().map(|s| s.height).sum::<i32>(), 26);
+        checked.clear();
+        assert!(tick(&mut scan, &mut checked).is_none());
+        assert_eq!(checked.first(), Some(&65), "starts over at the beacon");
+    }
+
+    #[test]
+    fn beam_scan_clears_at_a_solid_block_and_bounds_hostile_heights() {
+        let mut scan = BeamScan::default();
+        let solid = scan.step(0, 300, |y| {
+            if y == 4 {
+                BeamBlock::Solid
+            } else {
+                BeamBlock::Open
+            }
+        });
+        assert_eq!(solid, Some(Vec::new()));
+        let mut scan = BeamScan::default();
+        let mut ticks = 0;
+        while scan
+            .step(i32::MAX - 5, i32::MAX, |_| BeamBlock::Open)
+            .is_none()
+        {
+            ticks += 1;
+        }
+        assert_eq!(ticks, 0);
+        let mut calls = 0;
+        let mut scan = BeamScan::default();
+        while scan
+            .step(i32::MIN, i32::MAX, |_| {
+                calls += 1;
+                BeamBlock::Open
+            })
+            .is_none()
+        {}
+        assert!(calls <= MAX_BEAM_HEIGHT as usize, "{calls}");
     }
 
     #[test]
