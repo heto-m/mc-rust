@@ -30,6 +30,8 @@ pub struct TeamEntry {
     pub display_name: Component,
     /// The team colour as 0xRRGGBB, drawn behind the icon.
     pub color: Option<u32>,
+    /// The member whose face is the team's icon, picked at random when the menu opens.
+    pub icon: Uuid,
     pub players: Vec<PlayerEntry>,
 }
 
@@ -147,12 +149,11 @@ impl SpectatorMenu {
             .take(MAX_ENTRIES)
             .map(|p| (p.name.as_str(), p))
             .collect();
-        let mut names: Vec<&String> = board.teams.keys().take(MAX_ENTRIES).collect();
-        names.sort();
+        let names = fastutil_order(board.teams.keys().take(MAX_ENTRIES).map(String::as_str));
         let teams = names
             .into_iter()
             .filter_map(|name| {
-                let team = &board.teams[name];
+                let team = &board.teams[name.as_str()];
                 let mut members: Vec<&PlayerInfo> = team
                     .players
                     .iter()
@@ -160,11 +161,13 @@ impl SpectatorMenu {
                     .filter_map(|m| by_name.get(m.as_str()).copied())
                     .filter(|p| p.game_mode != GameType::Spectator)
                     .collect();
-                members.sort_by(|a, b| a.name.cmp(&b.name));
+                members.sort_by_key(|p| p.uuid);
+                let icon = members.get(random_below(members.len()))?.uuid;
                 let players: Vec<PlayerEntry> = members.into_iter().map(entry).collect();
-                (!players.is_empty()).then(|| TeamEntry {
+                Some(TeamEntry {
                     display_name: team.parameters.display_name.clone(),
                     color: team.parameters.color.map(|c| team_named_color(c).rgb()),
+                    icon,
                     players,
                 })
             })
@@ -265,6 +268,56 @@ impl SpectatorMenu {
         self.select_slot(slot);
         true
     }
+}
+
+fn random_below(n: usize) -> usize {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    nanos as usize % n.max(1)
+}
+
+fn java_hash(s: &str) -> i32 {
+    s.encode_utf16()
+        .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c)))
+}
+
+fn slot_of(name: &str, mask: usize) -> usize {
+    let h = java_hash(name).wrapping_mul(0x9E37_79B9u32 as i32) as u32;
+    ((h ^ (h >> 16)) as usize) & mask
+}
+
+fn place<'a>(table: &mut [Option<&'a str>], name: &'a str) {
+    let mask = table.len() - 1;
+    let mut at = slot_of(name, mask);
+    while table[at].is_some() {
+        at = (at + 1) & mask;
+    }
+    table[at] = Some(name);
+}
+
+/// Iteration order of a fastutil `Object2ObjectOpenHashMap` filled in name order, which is how
+/// vanilla's `Scoreboard#getPlayerTeams` lists teams.
+pub(crate) fn fastutil_order<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut sorted: Vec<&str> = names.collect();
+    sorted.sort_unstable();
+    let mut table: Vec<Option<&str>> = vec![None; 32];
+    for (count, name) in sorted.into_iter().enumerate() {
+        place(&mut table, name);
+        if count + 1 > table.len() / 4 * 3 {
+            let grown = vec![None; table.len() * 2];
+            let old = std::mem::replace(&mut table, grown);
+            for name in old.into_iter().rev().flatten() {
+                place(&mut table, name);
+            }
+        }
+    }
+    table
+        .into_iter()
+        .rev()
+        .flatten()
+        .map(str::to_owned)
+        .collect()
 }
 
 fn entry(p: &PlayerInfo) -> PlayerEntry {

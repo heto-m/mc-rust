@@ -575,6 +575,8 @@ pub enum Update {
     /// Status line for the progress screen (`lang:key|arg` or plain text).
     Status(String),
     Ready(u16),
+    /// The server's world save began (`true`) or ended.
+    Saving(bool),
     Failed(String),
     /// The server stopped; `requested` when mcr asked it to.
     Exited {
@@ -633,6 +635,27 @@ pub fn lan_commands(settings: &LanSettings, host: &str, world_cheats: bool) -> V
             let verb = if settings.cheats { "op" } else { "deop" };
             lines.push(format!("{verb} {host}"));
         }
+    }
+    lines
+}
+
+/// The console lines for World Options' game modes and allow commands, in the order they apply.
+pub fn world_option_commands(change: &mcr_ui::WorldOptionsChange, host: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let (Some(cheats), true) = (change.allow_commands, plain_player(host)) {
+        lines.push(format!("{} {host}", if cheats { "op" } else { "deop" }));
+    }
+    if let Some(mode) = change.default_mode {
+        lines.push(format!(
+            "defaultgamemode {}",
+            GAME_MODES[usize::from(mode.min(3))]
+        ));
+    }
+    if let (Some(mode), true) = (change.personal_mode, plain_player(host)) {
+        lines.push(format!(
+            "gamemode {} {host}",
+            GAME_MODES[usize::from(mode.min(3))]
+        ));
     }
     lines
 }
@@ -809,6 +832,7 @@ impl Session {
                     }
                     Some(Update::Ready(*port))
                 }
+                Event::Saving(on) => Some(Update::Saving(on)),
                 Event::Exited {
                     requested, reason, ..
                 } => {
@@ -849,6 +873,14 @@ impl Session {
                 ready: true, port, ..
             } => Some(*port),
             _ => None,
+        }
+    }
+
+    pub fn run_console(&self, lines: &[String]) {
+        if let Some(server) = self.running_server() {
+            for line in lines {
+                server.console(line);
+            }
         }
     }
 

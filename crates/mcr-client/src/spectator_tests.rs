@@ -153,6 +153,39 @@ fn team_category_lists_teams_with_players_then_their_members() {
 }
 
 #[test]
+fn team_page_orders_members_by_uuid_and_icons_a_member() {
+    let mut c = spectator();
+    player(&mut c, 1, "Zed", GameType::Survival);
+    player(&mut c, 2, "Amy", GameType::Survival);
+    team(&mut c, "red", &["Amy", "Zed"]);
+    let mut menu = SpectatorMenu::new(&c.state.players, &c.state.scoreboard);
+    menu.select_slot(1);
+    menu.select_slot(1);
+    let MenuItem::Team(t) = menu.item(0) else {
+        panic!("team slot");
+    };
+    assert!([Uuid::from_u128(1), Uuid::from_u128(2)].contains(&t.icon));
+    menu.select_slot(0);
+    menu.select_slot(0);
+    assert_eq!(menu.item(0).name().to_plain_string(), "Zed");
+    assert_eq!(menu.item(1).name().to_plain_string(), "Amy");
+}
+
+#[test]
+fn teams_list_in_fastutil_hash_order() {
+    let names = ["a", "b", "blue", "c", "red"];
+    let order = crate::spectator::fastutil_order(names.into_iter());
+    assert_eq!(order, ["c", "a", "blue", "b", "red"]);
+    let many: Vec<String> = (0..40).map(|i| format!("team{i}")).collect();
+    let order = crate::spectator::fastutil_order(many.iter().map(String::as_str));
+    assert_eq!(
+        order[..5],
+        ["team29", "team25", "team37", "team1", "team17"]
+    );
+    assert_eq!(order.len(), 40);
+}
+
+#[test]
 fn scroll_moves_the_menu_or_changes_fly_speed() {
     let mut c = spectator();
     c.state.player.physics.abilities.flying_speed = 0.05;

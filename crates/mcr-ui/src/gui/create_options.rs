@@ -97,6 +97,8 @@ pub struct GameRulesScreen {
     extras: SharedExtras,
     rows: Vec<RuleRow>,
     values: HashMap<&'static str, String>,
+    /// The running world's values; Done then sends the differences instead of storing them.
+    live: Option<HashMap<&'static str, String>>,
     editing: Option<usize>,
     list: ScrollList,
     widgets: WidgetSet,
@@ -137,12 +139,41 @@ impl GameRulesScreen {
             extras,
             rows,
             values,
+            live: None,
             editing: None,
             list: ScrollList::new([0, TOP, 0, 0], ROW),
             widgets: WidgetSet::default(),
             gui: (0, 0),
             mouse: (0.0, 0.0),
         }
+    }
+
+    /// Vanilla's `InWorldGameRulesScreen`: edits the running world's `current` values.
+    pub fn in_world(current: &[(String, String)]) -> Self {
+        let extras = Rc::new(RefCell::new(CreateExtras {
+            game_rules: current.to_vec(),
+            ..CreateExtras::default()
+        }));
+        let mut screen = Self::new(extras);
+        screen.live = Some(screen.values.clone());
+        screen
+    }
+
+    /// The rules whose value differs from the running world's, normalized for the command.
+    pub fn live_changes(&self) -> Vec<(String, String)> {
+        let Some(live) = &self.live else {
+            return Vec::new();
+        };
+        let mut changes: Vec<(String, String)> = GAME_RULES_26_3
+            .iter()
+            .filter_map(|r| {
+                let now = r.normalize(self.values.get(r.id)?)?;
+                (live.get(r.id).and_then(|v| r.normalize(v)).as_ref() != Some(&now))
+                    .then(|| (r.id.to_owned(), now))
+            })
+            .collect();
+        changes.truncate(GAME_RULES_26_3.len());
+        changes
     }
 
     /// The rules that differ from their defaults, as Done would store them.
@@ -339,7 +370,12 @@ impl GameRulesScreen {
                 continue;
             }
             out.push(ScreenAction::ClickSound);
-            if id == DONE {
+            if id == DONE && self.live.is_some() {
+                let changes = self.live_changes();
+                if !changes.is_empty() {
+                    out.push(ScreenAction::SetGameRules(changes));
+                }
+            } else if id == DONE {
                 self.extras.borrow_mut().game_rules = self
                     .changed()
                     .into_iter()

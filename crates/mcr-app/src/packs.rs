@@ -1,13 +1,17 @@
 //! The player's own resource packs: `options.txt` `resourcePacks`, the `resourcepacks` folder, the
 //! built-in packs from the asset index, and `PackSelectionScreen`.
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use mcr_assets::{AssetSource, PackMeta, ZipSource};
 use mcr_settings::Options;
 use mcr_ui::{
-    Button, Env, Key, MouseButton, RenderCx, Screen, ScreenAction, ScrollList, UiInput,
-    WidgetEventKind, WidgetSet, contains, draw_menu_background, tile_texture,
+    Button, ConfirmScreen, Env, Key, MouseButton, RenderCx, Screen, ScreenAction, ScrollList,
+    SpriteId, SpriteReleaser, UiInput, WidgetEventKind, WidgetSet, contains, draw_menu_background,
+    tile_texture,
 };
 
 use crate::options_list::{FOOTER, HEADER};
@@ -17,6 +21,10 @@ pub const HIGH_CONTRAST: &str = "high_contrast";
 const BUILTIN: [&str; 2] = ["programmer_art", HIGH_CONTRAST];
 const MAX_PACKS: usize = 256;
 const MAX_DESCRIPTION: usize = 256;
+const MAX_ICON_BYTES: usize = 4 << 20;
+const MAX_ICON_SIDE: u32 = 512;
+const MAX_COPY_ENTRIES: usize = 20_000;
+const MAX_COPY_DEPTH: usize = 16;
 const ROW: i32 = 36;
 const LIST_WIDTH: i32 = 200;
 const OPEN_FOLDER: u32 = 1;
@@ -32,6 +40,14 @@ pub struct PackHost {
     pub builtin: Vec<(String, PathBuf)>,
 }
 
+/// A pack's `pack.png`, decoded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackIcon {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PackInfo {
     /// The `options.txt` id: `file/<name>` or a built-in id.
@@ -39,6 +55,8 @@ pub struct PackInfo {
     pub title: String,
     pub description: String,
     pub path: PathBuf,
+    /// `None` shows `unknown_pack`.
+    pub icon: Option<Rc<PackIcon>>,
 }
 
 fn plain(value: &serde_json::Value, depth: usize, out: &mut String) {
@@ -82,6 +100,35 @@ fn read_meta(path: &Path) -> Option<PackMeta> {
         ZipSource::open(path).ok()?.read("pack.mcmeta").ok()??
     };
     PackMeta::parse(&bytes).ok()
+}
+
+fn read_root_file(path: &Path, name: &str) -> Option<Vec<u8>> {
+    if path.is_dir() {
+        let file = std::fs::File::open(path.join(name)).ok()?;
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() || meta.len() > MAX_ICON_BYTES as u64 {
+            return None;
+        }
+        std::fs::read(path.join(name)).ok()
+    } else {
+        ZipSource::open(path)
+            .ok()?
+            .read(name)
+            .ok()?
+            .filter(|b| b.len() <= MAX_ICON_BYTES)
+    }
+}
+
+fn read_icon(path: &Path) -> Option<Rc<PackIcon>> {
+    let bytes = read_root_file(path, "pack.png")?;
+    let (width, height, rgba) = crate::status::decode_png_rgba(&bytes, |w, h| {
+        (1..=MAX_ICON_SIDE).contains(&w) && (1..=MAX_ICON_SIDE).contains(&h)
+    })?;
+    Some(Rc::new(PackIcon {
+        width,
+        height,
+        rgba,
+    }))
 }
 
 /// `minecraft/resourcepacks/<id>.zip` in the asset index, resolved to its object file.
@@ -155,6 +202,7 @@ impl PackHost {
                 title: format!("lang:resourcePack.{id}.name"),
                 description: read_meta(path).map(|m| description(&m)).unwrap_or_default(),
                 path: path.clone(),
+                icon: read_icon(path),
             })
             .collect();
         let mut files: Vec<PathBuf> = std::fs::read_dir(&self.dir)
@@ -178,6 +226,7 @@ impl PackHost {
                 id: format!("file/{name}"),
                 title: name,
                 description: description(&meta),
+                icon: read_icon(&path),
                 path,
             });
         }
@@ -204,6 +253,65 @@ pub struct PackScreen {
     lists: [ScrollList; 2],
     widgets: WidgetSet,
     gui: (i32, i32),
+    icons: RefCell<HashMap<String, Option<SpriteId>>>,
+    releaser: RefCell<Option<SpriteReleaser>>,
+    /// Bumped by the drop confirmation when it copied packs in.
+    copied: Rc<Cell<u32>>,
+    seen_copied: u32,
+}
+
+impl Drop for PackScreen {
+    fn drop(&mut self) {
+        if let Some(releaser) = self.releaser.get_mut() {
+            releaser.release(self.icons.get_mut().drain().filter_map(|(_, id)| id));
+        }
+    }
+}
+
+/// A pack `PackDetector` would take: a folder or a zip with `pack.mcmeta` at its root.
+pub fn is_pack(path: &Path) -> bool {
+    read_meta(path).is_some()
+}
+
+/// Copies `src` into `dir` under its own name without following symlinks or replacing anything.
+fn copy_into(src: &Path, dir: &Path) -> std::io::Result<()> {
+    let name = src
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("no file name"))?;
+    let mut budget = MAX_COPY_ENTRIES;
+    copy_tree(src, &dir.join(name), 0, &mut budget)
+}
+
+fn copy_tree(src: &Path, dest: &Path, depth: usize, budget: &mut usize) -> std::io::Result<()> {
+    *budget = budget
+        .checked_sub(1)
+        .ok_or_else(|| std::io::Error::other("too many files"))?;
+    let kind = std::fs::symlink_metadata(src)?.file_type();
+    if kind.is_symlink() {
+        return Err(std::io::Error::other("symbolic link"));
+    }
+    if kind.is_dir() {
+        if depth >= MAX_COPY_DEPTH {
+            return Err(std::io::Error::other("too deep"));
+        }
+        std::fs::create_dir_all(dest)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_tree(
+                &entry.path(),
+                &dest.join(entry.file_name()),
+                depth + 1,
+                budget,
+            )?;
+        }
+        return Ok(());
+    }
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)?;
+    std::io::copy(&mut std::fs::File::open(src)?, &mut out)?;
+    Ok(())
 }
 
 impl std::fmt::Debug for PackScreen {
@@ -236,7 +344,87 @@ impl PackScreen {
             ],
             widgets: WidgetSet::default(),
             gui: (0, 0),
+            icons: RefCell::default(),
+            releaser: RefCell::default(),
+            copied: Rc::new(Cell::new(0)),
+            seen_copied: 0,
         }
+    }
+
+    fn reload(&mut self) {
+        let all = self.host.available();
+        let known: Vec<String> = self.selected.iter().map(|p| p.id.clone()).collect();
+        self.selected = known
+            .iter()
+            .filter_map(|id| all.iter().find(|p| p.id == *id).cloned())
+            .collect();
+        self.available = all.into_iter().filter(|p| !known.contains(&p.id)).collect();
+        self.lists[0].set_count(self.available.len());
+        self.lists[1].set_count(self.selected.len());
+    }
+
+    fn icon(&self, cx: &mut RenderCx<'_, '_>, pack: &PackInfo) -> Option<SpriteId> {
+        let icon = pack.icon.as_ref()?;
+        self.releaser
+            .borrow_mut()
+            .get_or_insert_with(|| cx.frame.ui().sprites_mut().releaser());
+        let mut cache = self.icons.borrow_mut();
+        if !cache.contains_key(&pack.id) && cache.len() >= MAX_PACKS {
+            for (_, id) in cache.drain() {
+                if let Some(id) = id {
+                    cx.frame.ui().sprites_mut().free_raw(id);
+                }
+            }
+        }
+        *cache.entry(pack.id.clone()).or_insert_with(|| {
+            cx.frame
+                .ui()
+                .sprites_mut()
+                .add_raw(icon.width, icon.height, &icon.rgba)
+        })
+    }
+
+    /// `PackSelectionScreen#onFilesDrop`: asks, then copies the packs into the folder.
+    fn drop_confirmation(&self, files: &[PathBuf]) -> ConfirmScreen {
+        let (packs, rejected): (Vec<PathBuf>, Vec<PathBuf>) =
+            files.iter().cloned().partition(|p| is_pack(p));
+        let names = |paths: &[PathBuf]| {
+            paths
+                .iter()
+                .filter_map(|p| p.file_name()?.to_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let (dir, copied) = (self.host.dir.clone(), self.copied.clone());
+        let rejected_names = names(&rejected);
+        let yes = move || {
+            let _ = std::fs::create_dir_all(&dir);
+            for pack in &packs {
+                if let Err(e) = copy_into(pack, &dir) {
+                    eprintln!("packs: could not copy {}: {e}", pack.display());
+                }
+            }
+            if !packs.is_empty() {
+                copied.set(copied.get().wrapping_add(1));
+            }
+            let mut actions = vec![ScreenAction::Pop];
+            if !rejected_names.is_empty() {
+                actions.push(ScreenAction::Push(Box::new(ConfirmScreen::new(
+                    "lang:pack.dropRejected.title",
+                    &format!("lang:pack.dropRejected.message|{rejected_names}"),
+                    vec![("lang:gui.ok".into(), Box::new(|| vec![ScreenAction::Pop]))],
+                ))));
+            }
+            actions
+        };
+        ConfirmScreen::new(
+            "lang:pack.dropConfirm",
+            &names(files),
+            vec![
+                ("lang:gui.yes".into(), Box::new(yes)),
+                ("lang:gui.no".into(), Box::new(|| vec![ScreenAction::Pop])),
+            ],
+        )
     }
 
     fn list_x(&self, side: usize) -> i32 {
@@ -323,7 +511,9 @@ impl PackScreen {
                 cx.frame
                     .fill_rect(x, y, x + LIST_WIDTH, y + ROW - 4, 0x40FF_FFFF);
             }
-            if let Some((iw, ih)) = cx.assets.size("misc/unknown_pack") {
+            if let Some(icon) = self.icon(cx, pack) {
+                cx.frame.sprite(icon, x + 2, y, 32, 32);
+            } else if let Some((iw, ih)) = cx.assets.size("misc/unknown_pack") {
                 cx.texture_scaled(
                     "misc/unknown_pack",
                     (0, 0, iw as i32, ih as i32),
@@ -396,6 +586,22 @@ impl Screen for PackScreen {
         self.draw_list(cx, 0);
         self.draw_list(cx, 1);
         self.widgets.render(cx);
+    }
+
+    fn tick(&mut self, _env: &mut Env<'_>, _out: &mut Vec<ScreenAction>) {
+        if self.seen_copied != self.copied.get() {
+            self.seen_copied = self.copied.get();
+            self.reload();
+        }
+    }
+
+    fn files_dropped(&mut self, paths: &[PathBuf], out: &mut Vec<ScreenAction>) -> bool {
+        if paths.is_empty() {
+            return false;
+        }
+        let paths = &paths[..paths.len().min(MAX_PACKS)];
+        out.push(ScreenAction::Push(Box::new(self.drop_confirmation(paths))));
+        true
     }
 
     fn input(&mut self, env: &mut Env<'_>, input: &UiInput, out: &mut Vec<ScreenAction>) -> bool {
@@ -517,6 +723,82 @@ mod tests {
             host.resolve(&[HIGH_CONTRAST.into()]),
             vec![assets.join("objects/ab/abcd")]
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut enc = png::Encoder::new(&mut bytes, width, height);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut w = enc.write_header().unwrap();
+        w.write_image_data(&vec![200; (width * height * 4) as usize])
+            .unwrap();
+        drop(w);
+        bytes
+    }
+
+    fn pack_dir(root: &Path, name: &str, icon: Option<Vec<u8>>) -> PathBuf {
+        let pack = root.join(name);
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(
+            pack.join("pack.mcmeta"),
+            r#"{"pack":{"pack_format":64,"description":"d"}}"#,
+        )
+        .unwrap();
+        if let Some(icon) = icon {
+            std::fs::write(pack.join("pack.png"), icon).unwrap();
+        }
+        pack
+    }
+
+    #[test]
+    fn packs_show_their_icon_or_fall_back_to_unknown_pack() {
+        let dir = temp("icons");
+        pack_dir(&dir.join("resourcepacks"), "With", Some(png(16, 16)));
+        pack_dir(&dir.join("resourcepacks"), "Without", None);
+        pack_dir(&dir.join("resourcepacks"), "Huge", Some(png(600, 8)));
+        let host = PackHost::new(&dir, &dir.join("assets"), None);
+        let by_name = |n: &str| host.available().into_iter().find(|p| p.title == n).unwrap();
+        let icon = by_name("With").icon.unwrap();
+        assert_eq!((icon.width, icon.height, icon.rgba.len()), (16, 16, 1024));
+        assert!(by_name("Without").icon.is_none());
+        assert!(by_name("Huge").icon.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dropped_packs_are_checked_and_copied_without_replacing() {
+        let dir = temp("drop");
+        let source = dir.join("incoming");
+        let good = pack_dir(&source, "Good", None);
+        std::fs::write(good.join("data.txt"), "x").unwrap();
+        let bad = source.join("notes");
+        std::fs::create_dir_all(&bad).unwrap();
+        assert!(is_pack(&good));
+        assert!(!is_pack(&bad));
+        let target = dir.join("resourcepacks");
+        copy_into(&good, &target).unwrap();
+        assert!(target.join("Good/pack.mcmeta").is_file());
+        assert!(target.join("Good/data.txt").is_file());
+        assert!(copy_into(&good, &target).is_err(), "existing pack is kept");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_drop_on_the_pack_screen_asks_before_copying() {
+        let dir = temp("screen");
+        let good = pack_dir(&dir.join("incoming"), "Good", None);
+        let settings = crate::settings::Settings::load(&dir);
+        let mut screen = PackScreen::new(settings, PackHost::new(&dir, &dir.join("assets"), None));
+        let mut out = Vec::new();
+        assert!(screen.files_dropped(&[good], &mut out));
+        assert!(matches!(out.as_slice(), [ScreenAction::Push(_)]));
+        assert!(
+            !dir.join("resourcepacks/Good").exists(),
+            "nothing copied before Yes"
+        );
+        assert!(!screen.files_dropped(&[], &mut Vec::new()));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -387,8 +387,8 @@ fn superflat_layers_only_for_superflat() {
 }
 
 #[test]
-fn pause_offers_open_to_lan_in_local_worlds() {
-    let mut pause = mcr_ui::PauseScreen::new(true, true).with_lan(true);
+fn pause_offers_world_options_beside_options() {
+    let mut pause = mcr_ui::PauseScreen::new(true, true);
     pause.init(W, H);
     let top = (H - 166) / 4;
     let out = send(
@@ -396,13 +396,25 @@ fn pause_offers_open_to_lan_in_local_worlds() {
         &NoView,
         &click((213 - 102 + 106 + 49) as f32, (top + 122 + 10) as f32),
     );
-    assert!(out.iter().any(|a| matches!(a, ScreenAction::OpenLan)));
+    assert!(
+        out.iter()
+            .any(|a| matches!(a, ScreenAction::OpenWorldOptions))
+    );
     let mut remote = mcr_ui::PauseScreen::new(false, false);
     remote.init(W, H);
     let out = send(
         &mut remote,
         &NoView,
         &click((213 - 102 + 106 + 49) as f32, (top + 122 + 10) as f32),
+    );
+    assert!(
+        out.iter()
+            .any(|a| matches!(a, ScreenAction::OpenWorldOptions))
+    );
+    let out = send(
+        &mut remote,
+        &NoView,
+        &click((213 - 102 + 49) as f32, (top + 122 + 10) as f32),
     );
     assert!(out.iter().any(|a| matches!(a, ScreenAction::OpenOptions)));
 }
@@ -449,4 +461,85 @@ fn lan_screen_validates_the_port() {
         (hardcore.settings().mode, hardcore.settings().cheats),
         (0, false)
     );
+}
+
+fn world_options(gamemaster: bool, hardcore: bool, local: bool) -> mcr_ui::WorldOptionsScreen {
+    let mut screen = mcr_ui::WorldOptionsScreen::new(mcr_ui::WorldOptionsInit {
+        difficulty: 1,
+        difficulty_locked: false,
+        hardcore,
+        gamemaster,
+        local: local.then_some(mcr_ui::LocalWorldOptions {
+            default_mode: 0,
+            personal_mode: 0,
+            allow_commands: gamemaster,
+            lan_open: false,
+        }),
+    });
+    screen.init(W, H);
+    screen
+}
+
+#[test]
+fn world_options_local_rows_apply_changes() {
+    let mut screen = world_options(true, false, true);
+    assert_eq!(screen.change(), mcr_ui::WorldOptionsChange::default());
+    let apply = (213.0 - 155.0 + 75.0, (H - 28 + 10) as f32);
+    assert!(
+        !send(&mut screen, &NoView, &click(apply.0, apply.1))
+            .iter()
+            .any(|a| matches!(a, ScreenAction::ApplyWorldOptions(_))),
+        "nothing changed"
+    );
+    send(&mut screen, &NoView, &click(213.0 - 155.0 + 150.0, 80.0));
+    send(&mut screen, &NoView, &click(213.0 + 5.0 + 60.0, 104.0));
+    send(
+        &mut screen,
+        &NoView,
+        &click(213.0 + 5.0 + 126.0 + 14.0, 104.0),
+    );
+    let change = screen.change();
+    assert_eq!(change.personal_mode, Some(1));
+    assert_eq!(change.difficulty, Some(2));
+    assert!(change.lock_difficulty);
+    let out = send(&mut screen, &NoView, &click(apply.0, apply.1));
+    assert!(out.iter().any(|a| matches!(a, ScreenAction::Pop)));
+    assert!(
+        out.iter()
+            .any(|a| matches!(a, ScreenAction::ApplyWorldOptions(c) if *c == change))
+    );
+}
+
+#[test]
+fn world_options_lock_out_players_without_rights() {
+    let mut remote = world_options(false, false, false);
+    send(&mut remote, &NoView, &click(213.0 - 155.0 + 60.0, 56.0));
+    assert_eq!(remote.change().difficulty, None);
+    let rules = click(213.0 - 155.0 + 75.0, 80.0);
+    assert!(
+        !send(&mut remote, &NoView, &rules)
+            .iter()
+            .any(|a| matches!(a, ScreenAction::OpenGameRules))
+    );
+    let mut op = world_options(true, false, false);
+    assert!(
+        send(&mut op, &NoView, &rules)
+            .iter()
+            .any(|a| matches!(a, ScreenAction::OpenGameRules))
+    );
+    let mut hardcore = world_options(true, true, false);
+    send(&mut hardcore, &NoView, &click(213.0 - 155.0 + 60.0, 56.0));
+    assert_eq!(hardcore.change().difficulty, None);
+    assert!(
+        !send(&mut hardcore, &NoView, &rules)
+            .iter()
+            .any(|a| matches!(a, ScreenAction::OpenGameRules))
+    );
+}
+
+#[test]
+fn in_world_game_rules_send_only_the_differences() {
+    let current = vec![("minecraft:keep_inventory".to_owned(), "false".to_owned())];
+    let screen = mcr_ui::GameRulesScreen::in_world(&current);
+    assert!(screen.live_changes().is_empty());
 }

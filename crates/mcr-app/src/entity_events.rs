@@ -962,6 +962,12 @@ impl EntityEvents {
         }
     }
 
+    /// `LivingEntity#getTicksSinceLastKineticHitFeedback`.
+    pub fn kinetic_feedback_ticks(&self, id: i32, partial: f32) -> f32 {
+        let last = self.timers.get(&id).and_then(|t| t.kinetic);
+        age(self.tick, last, u64::MAX, partial).unwrap_or(0.0)
+    }
+
     pub fn view(&self, id: i32, partial: f32) -> EventView {
         let Some(t) = self.timers.get(&id) else {
             return EventView::default();

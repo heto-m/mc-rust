@@ -274,6 +274,10 @@ mod ease {
         1.0 + 2.70158 * (x - 1.0).powi(3) + 1.70158 * (x - 1.0).powi(2)
     }
 
+    pub fn out_quart(x: f32) -> f32 {
+        1.0 - (1.0 - x).powi(4)
+    }
+
     pub fn out_cubic(x: f32) -> f32 {
         1.0 - (1.0 - x).powi(3)
     }
@@ -377,6 +381,8 @@ pub struct HandFrame<'a> {
     pub aspect: f32,
     /// The hand projection's FOV in degrees (`Camera#hudFov`).
     pub fov: f32,
+    /// Ticks since the last kinetic hit feedback, 0 before any.
+    pub kinetic_feedback: f32,
     /// `GameRenderer#bobHurt` and `bobView`, which move the hand like the world.
     pub shake: Mat4,
     pub pitch: f32,
@@ -928,7 +934,7 @@ impl Hand {
                 UseKind::Spear => {
                     pose.translate(inv * 0.56, -0.52, -0.72);
                     if let Some(k) = kinetic(f.state, item) {
-                        spear_use(&mut pose, held, side, &k);
+                        spear_use(&mut pose, held, side, &k, f.kinetic_feedback);
                     }
                 }
                 _ => {}
@@ -1257,8 +1263,8 @@ impl SpearUse {
     }
 }
 
-/// `SpearAnimations#firstPersonUse`, without the kinetic hit feedback dip.
-fn spear_use(pose: &mut Pose, time: f32, side: Side, k: &Kinetic) {
+/// `SpearAnimations#firstPersonUse`.
+fn spear_use(pose: &mut Pose, time: f32, side: Side, k: &Kinetic, feedback: f32) {
     let p = SpearUse::new(k, time);
     let inv = side.sign();
     pose.translate(
@@ -1278,6 +1284,13 @@ fn spear_use(pose: &mut Pose, time: f32, side: Side, k: &Kinetic) {
         Mat4::from_rotation_y(-y.to_radians()),
         Vec3::new(inv * 0.15, 0.0, 0.0),
     );
+    pose.translate(0.0, -hit_feedback(feedback), 0.0);
+}
+
+/// `SpearAnimations#hitFeedbackAmount`: a quick dip after a kinetic hit that eases back by tick 10.
+fn hit_feedback(ticks: f32) -> f32 {
+    0.4 * (ease::out_quart(progress(ticks, 1.0, 3.0))
+        - ease::in_out_sine(progress(ticks, 3.0, 10.0)))
 }
 
 /// `SpearAnimations#firstPersonAttack`: the stab swing.
@@ -1330,6 +1343,16 @@ mod tests {
         eat_transform(&mut end, Side::Right, 1.0, 32.0);
         assert!(start.0.w_axis.x.abs() < 0.05);
         assert!(end.0.w_axis.x.abs() > 0.2);
+    }
+
+    #[test]
+    fn hit_feedback_dips_then_recovers() {
+        assert_eq!(hit_feedback(0.0), 0.0);
+        assert_eq!(hit_feedback(1.0), 0.0);
+        assert!((hit_feedback(3.0) - 0.4).abs() < 1e-5);
+        assert!(hit_feedback(6.5) > 0.0 && hit_feedback(6.5) < 0.4);
+        assert!(hit_feedback(10.0).abs() < 1e-5);
+        assert!(hit_feedback(40.0).abs() < 1e-5);
     }
 
     #[test]

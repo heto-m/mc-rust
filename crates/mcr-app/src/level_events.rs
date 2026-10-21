@@ -338,6 +338,14 @@ pub struct Cx<'a> {
     pub effects: &'a mut WorldEffects,
     pub audio: Option<&'a mut Audio>,
     pub camera: [f64; 3],
+    /// The current event plays its sounds with `distanceDelay`.
+    pub delay: bool,
+}
+
+/// `LevelEventHandler#levelEvent`: the trial spawner, vault and cobweb events play their sounds
+/// with `distanceDelay`.
+pub fn delays_sound(event: i32) -> bool {
+    (3012..=3021).contains(&event)
 }
 
 impl Cx<'_> {
@@ -349,8 +357,18 @@ impl Cx<'_> {
         pitch: f32,
         source: SoundSource,
     ) {
-        if let Some(audio) = self.audio.as_deref_mut() {
-            audio.play(name, at, volume, pitch, source);
+        let delay = match at {
+            Some(at) if self.delay => crate::audio::distance_delay_ticks(self.camera, at),
+            _ => 0,
+        };
+        let Some(audio) = self.audio.as_deref_mut() else {
+            return;
+        };
+        match at {
+            Some(at) if delay > 0 => audio.play_delayed(name, at, volume, pitch, source, delay),
+            _ => {
+                audio.play(name, at, volume, pitch, source);
+            }
         }
     }
 
@@ -418,11 +436,13 @@ impl LevelEvents {
         let Some(row) = lookup(event) else {
             return;
         };
+        cx.delay = delays_sound(event);
         if let Some(s) = row.sound {
             let pitch = self.rng.pitch(s.pitch);
             cx.sound(s.name, Some(center(pos)), s.volume, pitch, s.source);
         }
         self.fx(cx, row.fx, pos, data);
+        cx.delay = false;
     }
 
     fn global(&mut self, cx: &mut Cx<'_>, event: i32, pos: BlockPos) {
@@ -1097,6 +1117,37 @@ mod tests {
         2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 3000, 3001, 3002, 3003, 3004, 3005, 3006,
         3007, 3008, 3009, 3011, 3012, 3013, 3014, 3015, 3016, 3017, 3018, 3019, 3020, 3021,
     ];
+
+    #[test]
+    fn only_the_trial_spawner_vault_and_cobweb_events_delay_their_sounds() {
+        assert!((3012..=3021).all(delays_sound));
+        assert!(
+            ![3000, 3009, 3011, 2001, 1000, 3022]
+                .into_iter()
+                .any(delays_sound)
+        );
+    }
+
+    #[test]
+    fn delay_grows_with_distance_and_near_sounds_play_at_once() {
+        use crate::audio::distance_delay_ticks as ticks;
+        let eye = [0.0, 64.0, 0.0];
+        assert_eq!(
+            ticks(eye, [10.0, 64.0, 0.0]),
+            0,
+            "ten blocks is not beyond the threshold"
+        );
+        assert_eq!(ticks(eye, [20.0, 64.0, 0.0]), 10);
+        assert_eq!(ticks(eye, [100.0, 64.0, 0.0]), 50);
+        assert_eq!(ticks(eye, [0.0, 64.0, -41.0]), 20, "20.5 ticks truncate");
+        let mut last = 0;
+        for d in (11..200).step_by(7) {
+            let t = ticks(eye, [f64::from(d), 64.0, 0.0]);
+            assert!(t >= last);
+            last = t;
+        }
+        assert_eq!(ticks(eye, [f64::NAN, 0.0, 0.0]), 0);
+    }
 
     #[test]
     fn table_covers_every_vanilla_event_once_in_order() {

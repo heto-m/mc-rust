@@ -8,6 +8,7 @@ mod camera_fx;
 mod cli;
 mod debug;
 mod debug_keys;
+mod debug_tools;
 mod editors;
 mod effects;
 mod engine;

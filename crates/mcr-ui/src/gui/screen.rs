@@ -43,6 +43,18 @@ pub enum EditorPacket {
     TestInstance(Box<mcr_protocol::play::serverbound::TestInstanceBlockAction>),
 }
 
+/// The switches on the F3+F6 debug options screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DebugToggle {
+    Hitboxes,
+    ChunkBorders,
+    AdvancedTooltips,
+    FpsCharts,
+    NetworkCharts,
+    LightmapTexture,
+    ProfilerChart,
+}
+
 /// What a screen asks the app to do; navigation variants are consumed by [`ScreenStack`].
 pub enum ScreenAction {
     Push(Box<dyn Screen>),
@@ -80,6 +92,14 @@ pub enum ScreenAction {
     /// Open the local world's Open to LAN screen.
     OpenLan,
     StartLan(super::lan_screen::LanSettings),
+    /// The pause menu's World Options button.
+    OpenWorldOptions,
+    ApplyWorldOptions(super::world_options::WorldOptionsChange),
+    /// World Options' Game Rules button.
+    OpenGameRules,
+    ToggleDebug(DebugToggle),
+    /// Game rules changed in a running world, as `(id, value)`.
+    SetGameRules(Vec<(String, String)>),
     OpenOptions,
     OpenMods,
     /// Leave the title screen for the launcher.
@@ -190,6 +210,11 @@ impl std::fmt::Debug for ScreenAction {
             Self::CreateWorld(s) => f.debug_tuple("CreateWorld").field(s).finish(),
             Self::OpenLan => f.write_str("OpenLan"),
             Self::StartLan(s) => f.debug_tuple("StartLan").field(s).finish(),
+            Self::OpenWorldOptions => f.write_str("OpenWorldOptions"),
+            Self::ApplyWorldOptions(c) => f.debug_tuple("ApplyWorldOptions").field(c).finish(),
+            Self::OpenGameRules => f.write_str("OpenGameRules"),
+            Self::ToggleDebug(t) => f.debug_tuple("ToggleDebug").field(t).finish(),
+            Self::SetGameRules(r) => f.debug_tuple("SetGameRules").field(r).finish(),
             Self::OpenOptions => f.write_str("OpenOptions"),
             Self::OpenMods => f.write_str("OpenMods"),
             Self::Launcher => f.write_str("Launcher"),
@@ -324,6 +349,19 @@ pub trait Screen {
     fn captures_keys(&self) -> bool {
         false
     }
+
+    fn is_debug_options(&self) -> bool {
+        false
+    }
+
+    /// `Screen#onFilesDrop`; true when the screen took the files.
+    fn files_dropped(
+        &mut self,
+        _paths: &[std::path::PathBuf],
+        _out: &mut Vec<ScreenAction>,
+    ) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -404,6 +442,10 @@ impl ScreenStack {
         self.top().is_some_and(Screen::is_dialog)
     }
 
+    pub fn top_is_debug_options(&self) -> bool {
+        self.top().is_some_and(Screen::is_debug_options)
+    }
+
     pub fn top_captures_keys(&self) -> bool {
         self.top().is_some_and(Screen::captures_keys)
     }
@@ -412,6 +454,20 @@ impl ScreenStack {
         let mut local = Vec::new();
         let used = match self.screens.last_mut() {
             Some(screen) => screen.key_released(key, &mut local),
+            None => false,
+        };
+        self.apply(local, out);
+        used
+    }
+
+    pub fn files_dropped(
+        &mut self,
+        paths: &[std::path::PathBuf],
+        out: &mut Vec<ScreenAction>,
+    ) -> bool {
+        let mut local = Vec::new();
+        let used = match self.screens.last_mut() {
+            Some(screen) => screen.files_dropped(paths, &mut local),
             None => false,
         };
         self.apply(local, out);

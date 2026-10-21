@@ -47,31 +47,31 @@ Scope: mcr-entity-model humanoids, misc and maps, mcr-app entities, mcr-particle
 
 Scope: mcr-app hand, mcr-client spectator, mcr-app hud.
 
-- [ ] 5.1 L14 (M) Spear hit feedback dip missing
-- [ ] 5.2 L15 (M) Spectator team page order and icons
-- [ ] 5.3 Unit tests: feedback curve after a kinetic hit; team and player page order
-- [ ] 5.4 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 5.1 L14 (M) Spear hit feedback dip missing
+- [x] 5.2 L15 (M) Spectator team page order and icons
+- [x] 5.3 Unit tests: feedback curve after a kinetic hit; team and player page order
+- [x] 5.4 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 6. Screens and debug keys
 
 Scope: mcr-ui menus and lan_screen, mcr-app packs, debug_keys, play and hud, mcr-singleplayer.
 
-- [ ] 6.1 L16 (V) Pause menu lacks World Options
-- [ ] 6.2 L17 (M) Pack screen without drag and drop or icons
-- [ ] 6.3 L18 (M) Missing debug chords
-- [ ] 6.4 L19 (M) Debug chords ignored while a screen is open
-- [ ] 6.5 L20 (M) No autosave indicator in local worlds
-- [ ] 6.6 Unit tests: pause menu layout local and remote, World Options rows, pack icon fallback, chords with a non-consuming screen, F3+C hold timing
-- [ ] 6.7 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 6.1 L16 (V) Pause menu lacks World Options
+- [x] 6.2 L17 (M) Pack screen without drag and drop or icons
+- [x] 6.3 L18 (M) Missing debug chords
+- [x] 6.4 L19 (M) Debug chords ignored while a screen is open
+- [x] 6.5 L20 (M) No autosave indicator in local worlds
+- [x] 6.6 Unit tests: pause menu layout local and remote, World Options rows, pack icon fallback, chords with a non-consuming screen, F3+C hold timing
+- [x] 6.7 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 7. Level event and mod-mode sounds
 
 Scope: mcr-app level_events and audio, mcr-modbridge sound.
 
-- [ ] 7.1 L21 (M) Distance-delayed level events play at once
-- [ ] 7.2 L22 (M) stop_sound not Java-owned in mod mode
-- [ ] 7.3 Unit tests: delay grows with distance for 3012 to 3021; stop_sound owned by Java in mod mode
-- [ ] 7.4 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 7.1 L21 (M) Distance-delayed level events play at once
+- [x] 7.2 L22 (M) stop_sound not Java-owned in mod mode
+- [x] 7.3 Unit tests: delay grows with distance for 3012 to 3021; stop_sound owned by Java in mod mode
+- [x] 7.4 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 8. World rendering
 

@@ -152,6 +152,7 @@ pub fn build(input: &DebugInput<'_>) -> DebugOverlay {
         left,
         right,
         charts: Vec::new(),
+        lightmap: None,
     }
 }
 

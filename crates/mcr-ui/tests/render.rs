@@ -92,6 +92,7 @@ fn debug_overlay_renders() {
             warn: 16.7,
             bad: 33.4,
         }],
+        lightmap: None,
     };
     {
         let mut f = ui.frame(SIZE.0, SIZE.1);

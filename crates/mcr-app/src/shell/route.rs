@@ -394,6 +394,8 @@ impl Shell {
     pub fn dropped_file(&mut self, path: &std::path::Path) {
         if let Some(input) = self.java_input() {
             input.drop_files(vec![path.to_string_lossy().into_owned()]);
+        } else {
+            self.drops.push(path.to_path_buf());
         }
     }
 

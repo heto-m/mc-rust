@@ -9,6 +9,7 @@ mod container;
 mod create_options;
 mod creative;
 mod credits;
+mod debug_options;
 mod dialog;
 mod dialog_screen;
 mod edit_box;
@@ -30,6 +31,7 @@ mod stats;
 mod tooltip;
 mod widgets;
 mod world_list;
+mod world_options;
 
 pub use advancements::AdvancementsScreen;
 pub use assets::ScreenAssets;
@@ -51,6 +53,7 @@ pub use credits::{
     CREDITS_PATH, CreditsLine, CreditsScreen, CreditsSource, POEM_PATH, POSTCREDITS_PATH, Scroll,
     build_lines,
 };
+pub use debug_options::DebugOptionsScreen;
 pub use dialog::Dialog;
 pub use dialog_screen::{DialogScreen, WaitingForResponseScreen};
 pub use edit_box::{EditBox, is_allowed_char};
@@ -81,7 +84,8 @@ pub use mods::{
 };
 pub use multiline::MultiLineEdit;
 pub use screen::{
-    ClickType, ContainerClick, EditorPacket, Screen, ScreenAction, ScreenPreview, ScreenStack,
+    ClickType, ContainerClick, DebugToggle, EditorPacket, Screen, ScreenAction, ScreenPreview,
+    ScreenStack,
 };
 pub use server_list::{
     EditServerScreen, FAVICON_SIZE, Favicon, MemoryServerStore, OnlineStatus, PackSetting,
@@ -96,4 +100,7 @@ pub use widgets::{Button, CycleButton, Slider, Widget, WidgetEvent, WidgetEventK
 pub use world_list::{
     CreateWorldScreen, CreateWorldSettings, EditWorldScreen, MAX_WORLD_NAME, MemoryWorldStore,
     NewGameMode, SelectWorldScreen, SharedWorlds, WorldEntry, WorldPreset, WorldStore,
+};
+pub use world_options::{
+    LocalWorldOptions, WorldOptionsChange, WorldOptionsInit, WorldOptionsScreen,
 };

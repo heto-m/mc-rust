@@ -211,6 +211,31 @@ pub struct Audio {
     java: Option<JavaSound>,
     /// The `soundDevice` the engine was opened for.
     device: String,
+    delayed: Vec<DelayedSound>,
+}
+
+const MAX_DELAYED: usize = 256;
+
+/// `SoundManager#playDelayed`: a distant sound that starts once the sound has travelled.
+#[derive(Debug, Clone, PartialEq)]
+struct DelayedSound {
+    due: u64,
+    event: String,
+    position: [f64; 3],
+    volume: f32,
+    pitch: f32,
+    category: SoundSource,
+}
+
+/// `ClientLevel#playSound` with `distanceDelay`: beyond ten blocks sound travels at 40 blocks a
+/// second, which is half a tick per block; nearer sounds play at once.
+pub fn distance_delay_ticks(listener: [f64; 3], at: [f64; 3]) -> u64 {
+    let d2: f64 = (0..3).map(|i| (listener[i] - at[i]).powi(2)).sum();
+    if d2 > 100.0 {
+        (d2.sqrt() / 40.0 * 20.0) as u64
+    } else {
+        0
+    }
 }
 
 /// Mod mode: Java's sound engine plays through this mixer and its sliders set every volume.
@@ -286,6 +311,7 @@ impl Audio {
             listener: [0.0; 3],
             log,
             tick: 0,
+            delayed: Vec::new(),
             java: None,
             device: options.sound_device.0.clone(),
         })
@@ -440,6 +466,33 @@ impl Audio {
         self.play_seeded(event, position, volume, pitch, category, self.seed, looping)
     }
 
+    /// Plays `event` after `ticks`, or now when that is zero.
+    pub fn play_delayed(
+        &mut self,
+        event: &str,
+        position: [f64; 3],
+        volume: f32,
+        pitch: f32,
+        category: SoundSource,
+        ticks: u64,
+    ) {
+        if ticks == 0 {
+            self.play(event, Some(position), volume, pitch, category);
+            return;
+        }
+        if self.delayed.len() >= MAX_DELAYED {
+            self.delayed.remove(0);
+        }
+        self.delayed.push(DelayedSound {
+            due: self.tick.saturating_add(ticks),
+            event: event.to_owned(),
+            position,
+            volume,
+            pitch,
+            category,
+        });
+    }
+
     /// `ClientLevel#playSeededSound`: the server's seed picks the variant.
     #[allow(clippy::too_many_arguments)]
     pub fn play_seeded(
@@ -497,6 +550,14 @@ impl Audio {
     /// `ClientPacketListener#handleStopSoundEvent`: by event name, by category, both, or everything.
     pub fn stop_sound(&mut self, name: Option<&str>, category: Option<SoundSource>) {
         let everything = name.is_none() && category.is_none();
+        self.delayed.retain(|d| {
+            let named = name.is_none_or(|n| {
+                d.event.strip_prefix("minecraft:").unwrap_or(&d.event)
+                    == n.strip_prefix("minecraft:").unwrap_or(n)
+            });
+            let sourced = category.is_none_or(|c| d.category == c);
+            !(named && sourced)
+        });
         let stopped = self.book.take_matching(name, category);
         let source = category.map_or("-", SoundSource::name);
         self.note(&format!(
@@ -636,6 +697,15 @@ impl Audio {
     /// Once per client tick: learns which tracked voices finished by themselves.
     pub fn poll(&mut self, tick: u64) {
         self.tick = tick;
+        if !self.delayed.is_empty() {
+            let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.delayed)
+                .into_iter()
+                .partition(|d| d.due <= tick);
+            self.delayed = waiting;
+            for d in due {
+                self.play(&d.event, Some(d.position), d.volume, d.pitch, d.category);
+            }
+        }
         self.sync_java_volumes();
         self.ended.clear();
         self.manager.handle().take_ended(&mut self.ended);

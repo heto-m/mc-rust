@@ -350,7 +350,7 @@ fn pause_buttons_and_escape() {
         [ScreenAction::Pop]
     ));
     let top = (H - 166) / 4;
-    let options = send(&mut screen, &NoView, &click(213.0, (top + 122 + 10) as f32));
+    let options = send(&mut screen, &NoView, &click(160.0, (top + 122 + 10) as f32));
     assert!(
         options
             .iter()

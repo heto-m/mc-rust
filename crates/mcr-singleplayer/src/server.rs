@@ -129,6 +129,9 @@ impl Spec {
         args.push(format!("-Xmx{}M", launch.heap_mib).into());
         args.push(format!("-Xms{}M", launch.heap_mib.min(512)).into());
         args.push("-Djava.awt.headless=true".into());
+        let mut log_config = OsString::from("-Dlog4j2.configurationFile=");
+        log_config.push(cwd.join(LOG_CONFIG_FILE));
+        args.push(log_config);
         let world = layout.world(launch.folder)?;
         let token = crate::stale::new_token();
         args.push(crate::stale::world_marker(&world));
@@ -165,6 +168,8 @@ pub enum Event {
     /// Loading the level; a percentage once "Preparing spawn area" lines appear.
     Preparing(Option<u8>),
     Ready,
+    /// A world save began (`true`) or finished, as the console reports them.
+    Saving(bool),
     Exited {
         code: Option<i32>,
         /// A stop was asked for, so this exit is expected.
@@ -179,6 +184,7 @@ enum LineEvent {
     Done,
     Spawn(u8),
     Loading,
+    Saving(bool),
 }
 
 /// A log line without its `[time] [thread/LEVEL]: ` prefix.
@@ -192,6 +198,13 @@ fn message_of(line: &str) -> &str {
 /// What one server output line tells the supervisor.
 fn parse_line(line: &str) -> Option<LineEvent> {
     let message = message_of(line);
+    let message = message.strip_prefix("System chat: ").unwrap_or(message);
+    if message == "Autosave started" || message.starts_with("Saving the game") {
+        return Some(LineEvent::Saving(true));
+    }
+    if message == "Autosave finished" || message.starts_with("Saved the game") {
+        return Some(LineEvent::Saving(false));
+    }
     if message.starts_with("Done (") && message.contains(")! For help") {
         return Some(LineEvent::Done);
     }
@@ -357,8 +370,43 @@ fn send_console(stdin: &mut Option<ChildStdin>, line: &str) {
     }
 }
 
+const LOG_CONFIG_FILE: &str = "mcr-log4j2.xml";
+
+/// The server's own `log4j2.xml` plus the debug lines of `MinecraftServer`, which are the only
+/// place an autosave shows ("Autosave started" and "Autosave finished").
+const LOG_CONFIG: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN">
+    <Appenders>
+        <Console name="SysOut" target="SYSTEM_OUT">
+            <PatternLayout pattern="[%d{HH:mm:ss}] [%t/%level]: %msg{nolookups}%n" />
+        </Console>
+        <RollingRandomAccessFile name="File" fileName="logs/latest.log" filePattern="logs/%d{yyyy-MM-dd}-%i.log.gz">
+            <PatternLayout pattern="[%d{HH:mm:ss}] [%t/%level]: %msg{nolookups}%n" />
+            <Policies>
+                <TimeBasedTriggeringPolicy />
+                <OnStartupTriggeringPolicy />
+            </Policies>
+        </RollingRandomAccessFile>
+    </Appenders>
+    <Loggers>
+        <Logger name="net.minecraft.server.MinecraftServer" level="debug" />
+        <Root level="info">
+            <filters>
+                <MarkerFilter marker="NETWORK_PACKETS" onMatch="DENY" onMismatch="NEUTRAL" />
+            </filters>
+            <AppenderRef ref="SysOut"/>
+            <AppenderRef ref="File"/>
+        </Root>
+    </Loggers>
+</Configuration>
+"#;
+
 fn spawn(spec: &Spec) -> io::Result<Child> {
     crate::safe::ensure_dir(&spec.cwd).map_err(io::Error::other)?;
+    if let Err(e) = crate::safe::write_file(&spec.cwd.join(LOG_CONFIG_FILE), LOG_CONFIG.as_bytes())
+    {
+        tracing::warn!("server log config: {e}");
+    }
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
         .current_dir(&spec.cwd)
@@ -442,6 +490,7 @@ fn supervise(
                     }
                     Some(LineEvent::Spawn(p)) if !ready => Some(Event::Preparing(Some(p))),
                     Some(LineEvent::Loading) if !ready => Some(Event::Preparing(None)),
+                    Some(LineEvent::Saving(on)) if ready => Some(Event::Saving(on)),
                     _ => None,
                 };
                 if let Some(e) = out {
@@ -848,6 +897,26 @@ done
             Some(LineEvent::Loading)
         );
         assert_eq!(parse_line("<Steve> Done (1s)! For help"), None);
+        assert_eq!(
+            parse_line("[12:00:02] [Server thread/DEBUG]: Autosave started"),
+            Some(LineEvent::Saving(true))
+        );
+        assert_eq!(
+            parse_line("[12:00:03] [Server thread/DEBUG]: Autosave finished"),
+            Some(LineEvent::Saving(false))
+        );
+        assert_eq!(
+            parse_line("[1] [Server thread/INFO]: Saving the game (this may take a moment!)"),
+            Some(LineEvent::Saving(true))
+        );
+        assert_eq!(
+            parse_line("[1] [Server thread/INFO]: Saved the game"),
+            Some(LineEvent::Saving(false))
+        );
+        assert_eq!(
+            parse_line("[1] [Server thread/INFO]: <Steve> Saved the game"),
+            None
+        );
         assert_eq!(parse_line("[1] [x]: Preparing spawn area: x%"), None);
     }
 

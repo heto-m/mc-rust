@@ -91,6 +91,7 @@ pub struct ShellConfig {
 pub struct Shell {
     cfg: ShellConfig,
     applied_vsync: Option<bool>,
+    drops: Vec<PathBuf>,
     parts: Option<Parts>,
     pub play: Option<Play>,
     stack: ScreenStack,
@@ -290,6 +291,7 @@ impl Shell {
             heap_trim: Default::default(),
             java_title_seen: false,
             cfg,
+            drops: Vec::new(),
         };
         shell.heap_trim.milestone(Instant::now());
         shell.show_title();
@@ -766,6 +768,11 @@ impl Shell {
     fn java_sp_update(&mut self, update: Update) {
         match update {
             Update::Status(text) => self.java_world(WorldEvent::Status(text)),
+            Update::Saving(on) => {
+                if let Some(play) = &mut self.play {
+                    play.set_saving(on);
+                }
+            }
             Update::Ready(port) => {
                 let folder = self.sp.as_ref().and_then(|s| s.folder.clone());
                 self.worlds.borrow_mut().set_busy(folder);
@@ -847,6 +854,39 @@ impl Shell {
             }
         } else if !sp.set_difficulty(Difficulty::from_id(i64::from(id))) {
             eprintln!("singleplayer: difficulty change refused");
+        }
+    }
+
+    /// World Options' Apply Changes: a hosted world goes through the console, a remote one through packets.
+    fn apply_world_options(&mut self, change: &mcr_ui::WorldOptionsChange) {
+        let local = self.sp.is_some();
+        if let Some(id) = change.difficulty {
+            if local {
+                self.local_difficulty(id);
+            } else if let Some(play) = &mut self.play
+                && let Err(e) = play.world.client.change_difficulty(id)
+            {
+                eprintln!("world options: difficulty change failed: {e}");
+            }
+        }
+        if change.lock_difficulty {
+            if local {
+                self.lock_local_difficulty();
+            } else if let Some(play) = &mut self.play
+                && let Err(e) = play.world.client.lock_difficulty()
+            {
+                eprintln!("world options: difficulty lock failed: {e}");
+            }
+        }
+        if !local {
+            return;
+        }
+        if let Some(lan) = &change.lan {
+            self.start_lan(lan, false);
+        }
+        let lines = crate::singleplayer::world_option_commands(change, &self.cfg.name);
+        if let Some(sp) = &self.sp {
+            sp.run_console(&lines);
         }
     }
 
@@ -934,6 +974,11 @@ impl Shell {
                 Update::Status(text) => {
                     if let Some(status) = &self.sp_status {
                         *status.borrow_mut() = text;
+                    }
+                }
+                Update::Saving(on) => {
+                    if let Some(play) = &mut self.play {
+                        play.set_saving(on);
                     }
                 }
                 Update::Ready(port) => {
@@ -1276,11 +1321,19 @@ impl Shell {
         self.poll_mod_worlds();
         self.poll_mod_connects();
         self.sync_java_settings();
+        self.flush_drops();
         self.poll_packs();
         self.poll_dialogs();
         self.poll_conduct();
         if let Some(settings) = self.play.as_mut().and_then(Play::take_lan_request) {
             self.start_lan(&settings, false);
+        }
+        if let Some(change) = self
+            .play
+            .as_mut()
+            .and_then(Play::take_world_options_request)
+        {
+            self.apply_world_options(&change);
         }
         if let Some(icon) = self.play.as_mut().and_then(Play::take_server_icon) {
             self.servers
@@ -1632,6 +1685,28 @@ impl Shell {
         };
         self.stack.input(&mut env, &input, &mut actions);
         self.menu_actions(actions);
+    }
+
+    /// Files dropped on the window go to the open native screen, such as the pack screen.
+    fn flush_drops(&mut self) {
+        if !self.drops.is_empty() {
+            let paths = std::mem::take(&mut self.drops);
+            self.drop_to_screen(&paths);
+        }
+    }
+
+    fn drop_to_screen(&mut self, paths: &[std::path::PathBuf]) -> bool {
+        match &mut self.play {
+            Some(play) if play.screen_open() => play.files_dropped(paths),
+            Some(_) => false,
+            None => {
+                let Some(_) = &self.parts else { return false };
+                let mut actions = Vec::new();
+                let used = self.stack.files_dropped(paths, &mut actions);
+                self.menu_actions(actions);
+                used
+            }
+        }
     }
 
     pub fn ui_input(&mut self, input: UiInput) {

@@ -56,6 +56,18 @@ impl DebugAction {
     }
 }
 
+const CRASH_HOLD_MS: u64 = 10_000;
+const CRASH_REPORT_MS: u64 = 1_000;
+const CRASH_EAT_AFTER_MS: u64 = 100;
+
+/// What holding F3+C asks for on a tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrashEvent {
+    Notice,
+    Warning(u32),
+    Crash,
+}
+
 /// What a key press did besides (or instead of) its ordinary bindings.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DebugPress {
@@ -63,12 +75,41 @@ pub struct DebugPress {
     /// F3+Esc: pause without the menu.
     pub pause_without_menu: bool,
     pub actions: Vec<DebugAction>,
+    /// The crash hold is running, so chords are swallowed without acting.
+    pub eaten: bool,
 }
 
 impl DebugPress {
     /// A chord fired, so the key does not also act as a game key.
     pub fn consumed(&self) -> bool {
-        self.pause_without_menu || !self.actions.is_empty()
+        self.pause_without_menu || self.eaten || !self.actions.is_empty()
+    }
+}
+
+/// Where a press goes once the chords have looked at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyRoute {
+    PauseWithoutMenu,
+    Chord,
+    Pass,
+}
+
+impl DebugPress {
+    /// `KeyboardHandler#keyPress` falls through to the chords when the screen did not take the key;
+    /// F3+Esc only pauses where no menu is open.
+    pub fn route(&self, screen_open: bool) -> KeyRoute {
+        if self.pause_without_menu {
+            return if screen_open {
+                KeyRoute::Pass
+            } else {
+                KeyRoute::PauseWithoutMenu
+            };
+        }
+        if self.consumed() {
+            KeyRoute::Chord
+        } else {
+            KeyRoute::Pass
+        }
     }
 }
 
@@ -76,6 +117,11 @@ impl DebugPress {
 pub struct DebugKeys {
     modifier_down: bool,
     used_as_modifier: bool,
+    crash_down: bool,
+    crash_started: Option<u64>,
+    crash_reported: u64,
+    crash_count: u32,
+    now: u64,
 }
 
 fn index(name: &str) -> usize {
@@ -85,6 +131,52 @@ fn index(name: &str) -> usize {
 impl DebugKeys {
     pub fn modifier_down(&self) -> bool {
         self.modifier_down
+    }
+
+    /// Every physical key event, before `press` or `release`: F3+C held starts the crash countdown.
+    pub fn track_crash(&mut self, bindings: &KeyBindings, key: InputKey, pressed: bool, now: u64) {
+        self.now = now;
+        let crash = bindings.input(index("key.debug.crash"));
+        let modifier = bindings.input(index("key.debug.modifier"));
+        if key != InputKey::Unbound && key == crash {
+            self.crash_down = pressed;
+        }
+        let modifier_down = if key != InputKey::Unbound && key == modifier {
+            pressed
+        } else {
+            self.modifier_down
+        };
+        let both = self.crash_down && modifier_down && crash != InputKey::Unbound;
+        match self.crash_started {
+            Some(_) if !both => self.crash_started = None,
+            None if both => {
+                self.crash_started = Some(now);
+                self.crash_reported = now;
+                self.crash_count = 0;
+            }
+            _ => {}
+        }
+    }
+
+    /// `KeyboardHandler#tick`'s countdown: a notice after a second, then a warning every second.
+    pub fn crash_tick(&mut self, now: u64) -> Option<CrashEvent> {
+        self.now = now;
+        let start = self.crash_started?;
+        let remaining = CRASH_HOLD_MS as i64 - now.saturating_sub(start) as i64;
+        if remaining < 0 {
+            self.crash_started = None;
+            return Some(CrashEvent::Crash);
+        }
+        if now.saturating_sub(self.crash_reported) < CRASH_REPORT_MS {
+            return None;
+        }
+        self.crash_reported = now;
+        self.crash_count += 1;
+        Some(if self.crash_count == 1 {
+            CrashEvent::Notice
+        } else {
+            CrashEvent::Warning(((remaining + 999) / 1000) as u32)
+        })
     }
 
     /// A physical press. `chords` is false while a screen has the keyboard: only F3's own state is tracked.
@@ -103,8 +195,13 @@ impl DebugKeys {
         if !chords {
             return out;
         }
+        let counting_down = self
+            .crash_started
+            .is_some_and(|s| s < self.now.saturating_sub(CRASH_EAT_AFTER_MS));
         if key == InputKey::Keyboard(KEY_ESCAPE) {
             out.pause_without_menu = held;
+        } else if held && counting_down {
+            out.eaten = true;
         } else if held {
             out.actions = bindings
                 .lookup(key)
@@ -144,6 +241,8 @@ impl DebugKeys {
     pub fn reset(&mut self) {
         self.modifier_down = false;
         self.used_as_modifier = false;
+        self.crash_down = false;
+        self.crash_started = None;
     }
 }
 
@@ -209,6 +308,71 @@ mod tests {
         );
         assert!(d.press(&b, ESC, true).pause_without_menu);
         assert!(!d.release(&b, F3));
+    }
+
+    fn hold(d: &mut DebugKeys, b: &KeyBindings, key: InputKey, pressed: bool, now: u64) {
+        d.track_crash(b, key, pressed, now);
+        if pressed {
+            d.press(b, key, true);
+        } else {
+            d.release(b, key);
+        }
+    }
+
+    #[test]
+    fn holding_f3_c_counts_down_to_the_crash_after_ten_seconds() {
+        let b = KeyBindings::default();
+        let mut d = DebugKeys::default();
+        hold(&mut d, &b, F3, true, 0);
+        hold(&mut d, &b, C, true, 10);
+        assert_eq!(d.crash_tick(500), None);
+        assert_eq!(d.crash_tick(1010), Some(CrashEvent::Notice));
+        assert_eq!(d.crash_tick(1500), None);
+        assert_eq!(d.crash_tick(2010), Some(CrashEvent::Warning(8)));
+        assert_eq!(d.crash_tick(9010), Some(CrashEvent::Warning(1)));
+        assert_eq!(d.crash_tick(10_010), Some(CrashEvent::Warning(0)));
+        assert_eq!(d.crash_tick(10_011), Some(CrashEvent::Crash));
+        assert_eq!(d.crash_tick(10_012), None, "a crash fires once");
+    }
+
+    #[test]
+    fn releasing_either_key_cancels_the_crash_and_chords_wait_for_it() {
+        let b = KeyBindings::default();
+        let mut d = DebugKeys::default();
+        hold(&mut d, &b, F3, true, 0);
+        hold(&mut d, &b, C, true, 10);
+        d.crash_tick(1010);
+        let eaten = d.press(&b, H, true);
+        assert!(
+            eaten.eaten && eaten.actions.is_empty(),
+            "chords are eaten while counting down"
+        );
+        hold(&mut d, &b, C, false, 3000);
+        assert_eq!(d.crash_tick(20_000), None);
+        assert!(!d.press(&b, H, true).eaten);
+        hold(&mut d, &b, C, true, 21_000);
+        hold(&mut d, &b, F3, false, 22_000);
+        assert_eq!(d.crash_tick(40_000), None);
+    }
+
+    #[test]
+    fn the_crash_key_alone_never_counts_down() {
+        let b = KeyBindings::default();
+        let mut d = DebugKeys::default();
+        hold(&mut d, &b, C, true, 0);
+        assert_eq!(d.crash_tick(30_000), None);
+    }
+
+    #[test]
+    fn chords_reach_the_debug_keys_while_a_screen_is_open() {
+        let b = KeyBindings::default();
+        let mut d = DebugKeys::default();
+        d.press(&b, F3, true);
+        assert_eq!(d.press(&b, H, true).route(true), KeyRoute::Chord);
+        assert_eq!(d.press(&b, W, true).route(true), KeyRoute::Pass);
+        let esc = d.press(&b, ESC, true);
+        assert_eq!(esc.route(true), KeyRoute::Pass, "Esc closes the screen");
+        assert_eq!(esc.route(false), KeyRoute::PauseWithoutMenu);
     }
 
     #[test]

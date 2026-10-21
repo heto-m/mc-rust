@@ -371,7 +371,7 @@ const PAUSE_ADVANCEMENTS: u32 = 2;
 const PAUSE_STATS: u32 = 3;
 const PAUSE_OPTIONS: u32 = 4;
 const PAUSE_DISCONNECT: u32 = 5;
-const PAUSE_LAN: u32 = 6;
+const PAUSE_WORLD_OPTIONS: u32 = 6;
 const PAUSE_BUGS: u32 = 7;
 const PAUSE_FEEDBACK: u32 = 8;
 const PAUSE_FRIENDS: u32 = 9;
@@ -407,7 +407,6 @@ pub struct PauseScreen {
     gui: (i32, i32),
     pauses: bool,
     local_server: bool,
-    lan: bool,
     /// F3+Esc pauses with only the title.
     menu: bool,
     addition: Option<PauseAddition>,
@@ -420,16 +419,9 @@ impl PauseScreen {
             gui: (0, 0),
             pauses: pauses_game,
             local_server,
-            lan: false,
             menu: true,
             addition: None,
         }
-    }
-
-    /// Offers Open to LAN beside Options (a local world not yet published).
-    pub fn with_lan(mut self, offered: bool) -> Self {
-        self.lan = offered;
-        self
     }
 
     /// `PauseScreen(false)`: the game pauses but no menu is shown.
@@ -500,19 +492,16 @@ impl Screen for PauseScreen {
             w.add(b);
             y += 24;
         }
-        let options_width = if self.lan { 98 } else { 204 };
         w.add(Button::new(
             PAUSE_OPTIONS,
-            [left, y, options_width, 20],
+            [left, y, 98, 20],
             "lang:menu.options",
         ));
-        if self.lan {
-            w.add(Button::new(
-                PAUSE_LAN,
-                [left + 106, y, 98, 20],
-                "lang:menu.multiplayerOptions.button",
-            ));
-        }
+        w.add(Button::new(
+            PAUSE_WORLD_OPTIONS,
+            [left + 106, y, 98, 20],
+            "lang:options.worldOptions.button",
+        ));
         y += 24;
         w.add(Button::new(
             PAUSE_DISCONNECT,
@@ -575,7 +564,7 @@ impl Screen for PauseScreen {
                 PAUSE_ADVANCEMENTS => out.push(ScreenAction::OpenAdvancements),
                 PAUSE_STATS => out.push(ScreenAction::OpenStats),
                 PAUSE_OPTIONS => out.push(ScreenAction::OpenOptions),
-                PAUSE_LAN => out.push(ScreenAction::OpenLan),
+                PAUSE_WORLD_OPTIONS => out.push(ScreenAction::OpenWorldOptions),
                 PAUSE_DISCONNECT => out.push(ScreenAction::Disconnect),
                 PAUSE_BUGS | PAUSE_FEEDBACK => {
                     let url = if id == PAUSE_BUGS {

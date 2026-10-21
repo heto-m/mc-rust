@@ -122,6 +122,39 @@ impl Client {
         self.send_play(&S::ChangeDifficulty(sb::ChangeDifficulty { difficulty }))
     }
 
+    /// World Options' lock button.
+    pub fn lock_difficulty(&mut self) -> Result<()> {
+        self.send_play(&S::LockDifficulty(sb::LockDifficulty { locked: true }))
+    }
+
+    /// `InWorldGameRulesScreen` asks for the current values before it opens.
+    pub fn request_game_rules(&mut self) -> Result<()> {
+        self.send_play(&S::ClientCommand(sb::ClientCommand {
+            action: sb::ClientCommandAction::RequestGameruleValues,
+        }))
+    }
+
+    /// Edited game rules as `(id, value)`; the server applies them for gamemasters.
+    pub fn set_game_rules(&mut self, rules: &[(String, String)]) -> Result<()> {
+        let entries: Vec<_> = rules
+            .iter()
+            .take(crate::state::MAX_GAME_RULES)
+            .filter_map(|(id, value)| {
+                let rule = mcr_buf::Identifier::parse(id)
+                    .or_else(|_| mcr_buf::Identifier::new("minecraft", id))
+                    .ok()?;
+                Some(sb::GameRuleEntry {
+                    rule,
+                    value: value.clone(),
+                })
+            })
+            .collect();
+        if entries.is_empty() {
+            return Ok(());
+        }
+        self.send_play(&S::SetGameRule(sb::SetGameRule { entries }))
+    }
+
     /// The main hand's attack swing.
     pub fn swing(&mut self) -> Result<()> {
         self.local_action(LocalAction::Swing {

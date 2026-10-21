@@ -9,6 +9,8 @@ pub struct DebugOverlay {
     pub left: Vec<String>,
     pub right: Vec<String>,
     pub charts: Vec<DebugChart>,
+    /// The 16x16 level lightmap (sky by block light), drawn bottom right.
+    pub lightmap: Option<Vec<[f32; 4]>>,
 }
 
 pub const CHART_SAMPLES: usize = 240;
@@ -104,6 +106,17 @@ impl DebugOverlay {
         for (i, chart) in self.charts.iter().enumerate() {
             let (left, bottom) = chart_slot(i, width, gui_width, gui_height);
             chart.draw(frame, left, width, bottom);
+        }
+        if let Some(map) = &self.lightmap {
+            let (x, y) = (gui_width - 66, gui_height - 66);
+            frame.fill_rect(x - 1, y - 1, x + 65, y + 65, 0xFF00_0000);
+            for (i, texel) in map.iter().take(256).enumerate() {
+                let (col, row) = ((i % 16) as i32, (i / 16) as i32);
+                let [r, g, b] = [texel[0], texel[1], texel[2]]
+                    .map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u32);
+                let (cx, cy) = (x + col * 4, y + 60 - row * 4);
+                frame.fill_rect(cx, cy, cx + 4, cy + 4, 0xFF00_0000 | r << 16 | g << 8 | b);
+            }
         }
         for (lines, align_left) in [(&self.left, true), (&self.right, false)] {
             let placed: Vec<_> = lines

@@ -17,6 +17,7 @@ pub fn event_owner(event: &ClientEvent) -> Option<SoundOwner> {
         } => Some(SoundOwner::Mcr),
         ClientEvent::LevelEvent { .. }
         | ClientEvent::Sound { .. }
+        | ClientEvent::StopSound { .. }
         | ClientEvent::LocalSound { .. }
         | ClientEvent::Explosion { .. }
         | ClientEvent::ItemTaken { .. }
@@ -46,5 +47,14 @@ mod tests {
         assert_eq!(event_owner(&level_event(true)), Some(SoundOwner::Mcr));
         assert_eq!(event_owner(&level_event(false)), Some(SoundOwner::Java));
         assert_eq!(event_owner(&ClientEvent::ChatCleared), None);
+    }
+
+    #[test]
+    fn stop_sound_belongs_to_java_with_the_sounds_it_stops() {
+        let stop = ClientEvent::StopSound {
+            source: None,
+            name: None,
+        };
+        assert_eq!(event_owner(&stop), Some(SoundOwner::Java));
     }
 }

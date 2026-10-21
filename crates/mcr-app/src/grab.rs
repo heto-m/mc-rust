@@ -86,7 +86,7 @@ fn free_name(dir: &Path, name: &str) -> PathBuf {
 }
 
 /// `yyyy-MM-dd_HH.mm.ss` in local time, like `Util#getFilenameFormattedDateTime`.
-fn local_timestamp() -> String {
+pub fn local_timestamp() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs()) as libc::time_t;

@@ -172,6 +172,25 @@ pub struct SpectatorHud<'a> {
     pub keys: [InputKey; 9],
 }
 
+/// `Hud#tickAutosaveIndicator`: eases toward 1 while the local server saves, back to 0 after.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct AutosaveFade {
+    value: f32,
+    last: f32,
+}
+
+impl AutosaveFade {
+    pub fn tick(&mut self, saving: bool) {
+        self.last = self.value;
+        self.value += (if saving { 1.0 } else { 0.0 } - self.value) * 0.2;
+    }
+
+    /// The indicator's opacity between ticks, 0 to 1.
+    pub fn alpha(&self, partial: f32) -> f32 {
+        (self.last + (self.value - self.last) * partial).clamp(0.0, 1.0)
+    }
+}
+
 pub struct HudInput<'a> {
     pub state: &'a ClientState,
     pub options: &'a Options,
@@ -182,6 +201,8 @@ pub struct HudInput<'a> {
     pub sleep_overlay: bool,
     pub tab_held: bool,
     pub chat_open: bool,
+    /// The saving indicator's opacity.
+    pub autosave: f32,
     pub debug: Option<&'a DebugOverlay>,
     pub skins: &'a SkinStore,
     pub camera: mcr_client::locator::Camera,
@@ -620,6 +641,32 @@ impl Hud {
         if let Some(debug) = input.debug {
             debug.draw(frame);
         }
+        if !input.hidden {
+            self.draw_autosave(frame, input);
+        }
+    }
+
+    /// `Hud#extractSavingIndicator`.
+    fn draw_autosave(&self, frame: &mut UiFrame<'_>, input: &HudInput<'_>) {
+        if !input.options.show_autosave_indicator {
+            return;
+        }
+        let alpha = (255.0 * input.autosave.clamp(0.0, 1.0)).floor() as u32;
+        if alpha == 0 {
+            return;
+        }
+        let text = frame
+            .ui()
+            .lang()
+            .get("menu.savingLevel")
+            .unwrap_or("Saving world")
+            .to_owned();
+        let width = frame.ui().text_width(&text).ceil() as i32;
+        let (gui_w, gui_h) = frame.gui_size();
+        let (x, y) = (gui_w - width - 5, gui_h - 9 - 5);
+        let argb = alpha << 24 | 0xFF_FFFF;
+        text_backdrop(frame, input.options, x, y, width, argb);
+        frame.text(&text, x as f32, y as f32, argb, true);
     }
 
     fn draw_gameplay(
@@ -986,9 +1033,7 @@ impl Hud {
                             0xFF00_0000 | scale(16) | scale(8) | scale(0),
                         );
                     }
-                    if let Some(p) = t.players.first() {
-                        self.draw_face(frame, input, p.uuid, x + 2, iy + 2, color);
-                    }
+                    self.draw_face(frame, input, t.icon, x + 2, iy + 2, color);
                     None
                 }
                 MenuItem::Empty => None,
@@ -1525,6 +1570,32 @@ impl Hud {
                 y += 9;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod autosave_tests {
+    use super::*;
+
+    #[test]
+    fn the_indicator_fades_in_while_saving_and_out_afterwards() {
+        let mut fade = AutosaveFade::default();
+        assert_eq!(fade.alpha(0.5), 0.0);
+        for _ in 0..20 {
+            fade.tick(true);
+        }
+        assert!(fade.alpha(1.0) > 0.98);
+        let full = fade.alpha(1.0);
+        fade.tick(false);
+        assert!(fade.alpha(0.0) >= fade.alpha(1.0));
+        assert!(
+            (fade.alpha(0.0) - full).abs() < 1e-6,
+            "partial 0 shows the previous tick"
+        );
+        for _ in 0..40 {
+            fade.tick(false);
+        }
+        assert!(fade.alpha(1.0) < 0.01);
     }
 }
 
