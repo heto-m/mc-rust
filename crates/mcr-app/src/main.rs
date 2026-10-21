@@ -21,6 +21,7 @@ mod game;
 mod game_mode_switcher;
 mod gizmos;
 mod grab;
+mod guests;
 mod gui;
 mod hand;
 #[cfg(feature = "heap-profile")]

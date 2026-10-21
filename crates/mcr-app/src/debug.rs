@@ -39,34 +39,70 @@ pub fn resident_mb() -> u64 {
         .map_or(0, |pages| (pages * 4096) >> 20)
 }
 
-pub fn build(input: &DebugInput<'_>) -> DebugOverlay {
+/// Lines grouped by entry, with a blank line between non-empty groups.
+fn join_groups(groups: Vec<Vec<String>>) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for group in groups.into_iter().filter(|g| !g.is_empty()) {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.extend(group);
+    }
+    lines
+}
+
+/// The F3 text for the entries `on` says are showing.
+pub fn build(input: &DebugInput<'_>, on: &dyn Fn(&str) -> bool) -> DebugOverlay {
     let state = input.state;
     let [x, y, z] = input.feet;
     let block = [x.floor() as i32, y.floor() as i32, z.floor() as i32];
     let chunk = ChunkPos::from_block(block[0], block[2]);
     let (dir, towards) = facing_name(input.yaw);
-    let mut left = vec![
-        "mc-rust 26.3 (vanilla protocol)".to_owned(),
-        format!(
-            "{:.0} fps ({:.1} ms) T: {}",
-            input.fps, input.frame_ms, input.tick
-        ),
-        format!(
+    let mut left = Vec::new();
+    if on("game_version") {
+        left.push(vec!["mc-rust 26.3 (vanilla protocol)".to_owned()]);
+    }
+    let mut timing = Vec::new();
+    if on("fps") {
+        timing.push(format!("{:.0} fps ({:.1} ms)", input.fps, input.frame_ms));
+    }
+    if on("tps") {
+        timing.push(format!("T: {}", input.tick));
+        timing.push(format!(
+            "Server: {}, {} players",
+            state.server.brand.as_deref().unwrap_or("unknown"),
+            state.players.len()
+        ));
+    }
+    left.push(timing);
+    let mut chunks = Vec::new();
+    if on("chunk_render_stats") {
+        chunks.push(format!(
             "C: {} sections meshed, {} queued, {:.2}M quads",
             input.pipeline.uploaded,
             input.pipeline.queued,
             f64::from(input.pipeline.quads) / 1e6
-        ),
-        format!(
+        ));
+    }
+    if on("chunk_source_stats") {
+        chunks.push(format!(
             "Chunks: {} / {} (view {})",
             state.chunks.len(),
             input.meshed_columns,
             state.world.view_distance
-        ),
-        String::new(),
-        format!("XYZ: {x:.3} / {y:.5} / {z:.3}"),
-        format!("Block: {} {} {}", block[0], block[1], block[2]),
-        format!(
+        ));
+    }
+    if on("entity_render_stats") {
+        chunks.push(format!("E: {}", state.entities.len()));
+    }
+    left.push(chunks);
+    let mut position = Vec::new();
+    if on("player_position") {
+        position.push(format!("XYZ: {x:.3} / {y:.5} / {z:.3}"));
+        position.push(format!("Block: {} {} {}", block[0], block[1], block[2]));
+    }
+    if on("player_section_position") {
+        position.push(format!(
             "Chunk: {} {} {} in {} {} {}",
             block[0] & 15,
             block[1] & 15,
@@ -74,26 +110,34 @@ pub fn build(input: &DebugInput<'_>) -> DebugOverlay {
             chunk.x,
             block[1] >> 4,
             chunk.z
-        ),
-        format!(
+        ));
+    }
+    if on("player_position") {
+        position.push(format!(
             "Facing: {dir} ({towards}) ({:.1} / {:.1})",
             wrap_yaw(input.yaw),
             input.pitch
-        ),
-    ];
+        ));
+    }
+    left.push(position);
+    let mut world = Vec::new();
     if let Some(column) = state.chunks.column(chunk) {
         let lx = (block[0] & 15) as usize;
         let lz = (block[2] & 15) as usize;
-        let sky = column.sky_light_or_above(lx, block[1], lz);
-        let blk = column.block_light(lx, block[1], lz);
-        left.push(format!(
-            "Client Light: {} ({} sky, {} block)",
-            sky.unwrap_or(0).max(blk.unwrap_or(0)),
-            sky.map_or("?".into(), |v| v.to_string()),
-            blk.map_or("?".into(), |v| v.to_string())
-        ));
+        if on("light_levels") {
+            let sky = column.sky_light_or_above(lx, block[1], lz);
+            let blk = column.block_light(lx, block[1], lz);
+            world.push(format!(
+                "Client Light: {} ({} sky, {} block)",
+                sky.unwrap_or(0).max(blk.unwrap_or(0)),
+                sky.map_or("?".into(), |v| v.to_string()),
+                blk.map_or("?".into(), |v| v.to_string())
+            ));
+        }
         let index = ((block[1] - column.min_y()) >> 4).max(0) as usize;
-        if let Some(section) = column.section(index) {
+        if on("biome")
+            && let Some(section) = column.section(index)
+        {
             let biome = section
                 .biome(
                     (lx >> 2) & 3,
@@ -106,53 +150,56 @@ pub fn build(input: &DebugInput<'_>) -> DebugOverlay {
                 .get("minecraft:worldgen/biome")
                 .and_then(|r| r.get(i32::from(biome)))
                 .map_or("?", |e| e.id.as_str());
-            left.push(format!("Biome: {name}"));
+            world.push(format!("Biome: {name}"));
         }
     }
-    left.push(format!(
-        "Dimension: {}  Game time: {}",
-        state.dimension.name.as_str(),
-        state.world.game_time
-    ));
-    let mut right = vec![
-        format!("Rust {}", env!("CARGO_PKG_VERSION")),
-        format!("Mem: {} MB", input.memory_mb),
-        String::new(),
-        format!(
-            "Display: {}x{} ({})",
-            input.size.0, input.size.1, input.adapter
-        ),
-        format!(
-            "Server: {}",
-            state.server.brand.as_deref().unwrap_or("unknown")
-        ),
-        format!("Players: {}", state.players.len()),
-        format!("Entities: {}", state.entities.len()),
-        String::new(),
-    ];
+    if on("day_count") {
+        world.push(format!(
+            "Dimension: {}  Game time: {}",
+            state.dimension.name.as_str(),
+            state.world.game_time
+        ));
+    }
+    left.push(world);
+    let mut right = Vec::new();
+    if on("memory") {
+        right.push(vec![format!("Mem: {} MB", input.memory_mb)]);
+    }
+    if on("system_specs") {
+        right.push(vec![
+            format!("Rust {}", env!("CARGO_PKG_VERSION")),
+            format!(
+                "Display: {}x{} ({})",
+                input.size.0, input.size.1, input.adapter
+            ),
+        ]);
+    }
+    let mut looking = Vec::new();
     match input.target {
-        Some(Target::Block(hit)) => {
-            right.push(format!(
+        Some(Target::Block(hit)) if on("looking_at_block_state") => {
+            looking.push(format!(
                 "Targeted Block: {}, {}, {}",
                 hit.pos.x, hit.pos.y, hit.pos.z
             ));
             if let Some(name) = input.data.state_block_name(hit.state) {
-                right.push(name.to_owned());
+                looking.push(name.to_owned());
             }
             for (k, v) in input.data.state_properties(hit.state) {
-                right.push(format!("{k}: {v}"));
+                looking.push(format!("{k}: {v}"));
             }
         }
-        Some(Target::Entity { id, .. }) => {
-            right.push(format!("Targeted Entity: {id}"));
+        Some(Target::Entity { id, .. }) if on("looking_at_entity") => {
+            looking.push(format!("Targeted Entity: {id}"));
         }
-        None => {}
+        _ => {}
     }
+    right.push(looking);
     DebugOverlay {
-        left,
-        right,
+        left: join_groups(left),
+        right: join_groups(right),
         charts: Vec::new(),
         lightmap: None,
+        pie: None,
     }
 }
 

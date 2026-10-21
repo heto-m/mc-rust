@@ -237,6 +237,12 @@ impl DebugKeys {
         }
     }
 
+    /// A chord opened a screen, whose release of focus must not end the chord: F3's release still toggles nothing.
+    pub fn keep_chord(&mut self) {
+        self.modifier_down = true;
+        self.used_as_modifier = true;
+    }
+
     /// Focus moved away with F3 held: forget it like a release that toggles nothing.
     pub fn reset(&mut self) {
         self.modifier_down = false;
@@ -277,6 +283,19 @@ mod tests {
         assert!(!d.release(&b, F3));
         d.press(&b, F3, true);
         assert!(d.release(&b, F3), "the next plain F3 toggles again");
+    }
+
+    #[test]
+    fn a_chord_that_opens_a_screen_still_swallows_the_f3_release() {
+        let b = KeyBindings::default();
+        let mut d = DebugKeys::default();
+        d.press(&b, F3, true);
+        d.press(&b, InputKey::Keyboard(63), true);
+        d.reset();
+        d.keep_chord();
+        assert!(d.modifier_down());
+        assert!(!d.release(&b, F3));
+        assert!(!d.modifier_down());
     }
 
     #[test]

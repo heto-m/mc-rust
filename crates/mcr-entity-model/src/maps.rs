@@ -179,7 +179,7 @@ impl EntityScene {
             .filter(|d| held || d.on_frame)
             .enumerate()
             .map(|(i, d)| {
-                let cx = f32::from(d.x) / 2.0 / 128.0;
+                let cx = -f32::from(d.x) / 2.0 / 128.0;
                 let cy = -f32::from(d.y) / 2.0 / 128.0;
                 let m = matrix
                     * Mat4::from_translation(Vec3::new(cx, cy, -LAYER * (2.0 + i as f32 * 0.1)))

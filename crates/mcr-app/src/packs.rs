@@ -274,6 +274,29 @@ pub fn is_pack(path: &Path) -> bool {
 }
 
 /// Copies `src` into `dir` under its own name without following symlinks or replacing anything.
+const COPY_FAILURE_TOAST: u32 = 0x5043_4601;
+
+/// Copies each pack into `dir`; true when any copy failed.
+fn copy_all(packs: &[PathBuf], dir: &Path) -> bool {
+    let mut failed = std::fs::create_dir_all(dir).is_err();
+    for pack in packs {
+        if let Err(e) = copy_into(pack, dir) {
+            eprintln!("packs: could not copy {}: {e}", pack.display());
+            failed = true;
+        }
+    }
+    failed
+}
+
+/// `SystemToast.onPackCopyFailure`: names the folder the packs were going to.
+fn copy_failure_toast(dir: &Path) -> ScreenAction {
+    ScreenAction::SystemToast {
+        key: COPY_FAILURE_TOAST,
+        title: "pack.copyFailure".into(),
+        message: Some(dir.display().to_string()),
+    }
+}
+
 fn copy_into(src: &Path, dir: &Path) -> std::io::Result<()> {
     let name = src
         .file_name()
@@ -398,16 +421,14 @@ impl PackScreen {
         let (dir, copied) = (self.host.dir.clone(), self.copied.clone());
         let rejected_names = names(&rejected);
         let yes = move || {
-            let _ = std::fs::create_dir_all(&dir);
-            for pack in &packs {
-                if let Err(e) = copy_into(pack, &dir) {
-                    eprintln!("packs: could not copy {}: {e}", pack.display());
-                }
-            }
+            let failed = copy_all(&packs, &dir);
             if !packs.is_empty() {
                 copied.set(copied.get().wrapping_add(1));
             }
             let mut actions = vec![ScreenAction::Pop];
+            if failed {
+                actions.push(copy_failure_toast(&dir));
+            }
             if !rejected_names.is_empty() {
                 actions.push(ScreenAction::Push(Box::new(ConfirmScreen::new(
                     "lang:pack.dropRejected.title",
@@ -764,6 +785,23 @@ mod tests {
         assert_eq!((icon.width, icon.height, icon.rgba.len()), (16, 16, 1024));
         assert!(by_name("Without").icon.is_none());
         assert!(by_name("Huge").icon.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_copy_raises_the_toast_naming_the_folder() {
+        let dir = temp("copy-fail");
+        let good = pack_dir(&dir.join("incoming"), "Good", None);
+        let target = dir.join("resourcepacks");
+        assert!(!copy_all(std::slice::from_ref(&good), &target));
+        std::fs::write(dir.join("blocker"), "").unwrap();
+        assert!(copy_all(&[good], &dir.join("blocker").join("sub")));
+        assert!(copy_all(&[dir.join("missing")], &target));
+        let ScreenAction::SystemToast { title, message, .. } = copy_failure_toast(&target) else {
+            panic!("a toast")
+        };
+        assert_eq!(title, "pack.copyFailure");
+        assert_eq!(message, Some(target.display().to_string()));
         let _ = std::fs::remove_dir_all(dir);
     }
 

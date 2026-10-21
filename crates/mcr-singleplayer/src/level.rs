@@ -35,6 +35,15 @@ impl GameMode {
         }
     }
 
+    pub fn id(self) -> u8 {
+        match self {
+            Self::Survival => 0,
+            Self::Creative => 1,
+            Self::Adventure => 2,
+            Self::Spectator => 3,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Survival => "survival",

@@ -84,6 +84,7 @@ fn closeup() {
                     }
                 }),
             }),
+            elytra: None,
         }
     });
     let cloak: Vec<f32> = std::env::var("CU_CLOAK")

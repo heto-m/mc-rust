@@ -63,6 +63,7 @@ pub struct Skin {
     pub rgba: Vec<u8>,
     pub slim: bool,
     pub cape: Option<Cape>,
+    pub elytra: Option<Cape>,
 }
 
 /// Cape pixels for a player, 64x32 RGBA.

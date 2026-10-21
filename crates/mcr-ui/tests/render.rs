@@ -93,6 +93,7 @@ fn debug_overlay_renders() {
             bad: 33.4,
         }],
         lightmap: None,
+        pie: None,
     };
     {
         let mut f = ui.frame(SIZE.0, SIZE.1);

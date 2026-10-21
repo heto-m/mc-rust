@@ -65,7 +65,7 @@ pub fn decorations(map: &MapData) -> Vec<MapDecoration> {
         .collect()
 }
 
-const MAX_LABELS: usize = 32;
+const MAX_LABELS: usize = 256;
 const MAX_LABEL_CELLS: usize = 64;
 const LABEL_BACKGROUND: [u8; 4] = [0, 0, 0, 128];
 

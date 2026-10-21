@@ -98,3 +98,33 @@ incrementally with `lastCheckY`; `LevelRenderer` branches on `useImprovedTranspa
 
 #### P15 Untested live (M)
 - Spear hit dip, distance-delayed level events 3012-3021 and stop_sound in mod mode are unit-tested only.
+
+## Implementation notes (batch 2 and batch 4)
+
+#### P5 Elytra texture
+- `parse_textures` reads `ELYTRA` from the trusted texture host only, exactly like `CAPE`; the PNG goes through the same 256 KiB, 64..=1024 px bounded download. `WingsLayer` order: the profile elytra, else the cape while the cape part shows, else the item texture.
+
+#### P10 to P12 World Options
+- Rows follow `WorldOptionsScreen`: Restrictions (a `RestrictionsScreen` that derives its limits from the chat visibility option; the launcher and profile limits need an online account and are not modelled), Command Access and Force Game Mode with vanilla's enable/force rules and tooltips, plus tooltips on the difficulty, game rules, game mode and allow commands rows.
+- The page does not scroll (vanilla's does); the rows fit from a 240 px high GUI.
+- The managed vanilla dedicated server has no command for guest command access or forced game mode, so the client applies them through the console to the guests the LAN forwarder lists: `op` or `gamemode <default> <guest>` when a guest joins or the setting changes, `deop` when they leave or LAN closes. Force Game Mode defaults on, as in `IntegratedServer`.
+- Closing LAN stops the forwarder and announcer; changing the port of an open LAN closes and reopens it.
+- The default game mode comes from the world (`level.dat` or the new-world settings) and is tracked by the session after each change.
+
+#### P13 Debug screens
+- Entries: only entries this client has data for are listed (game_version, fps, tps, memory, system_specs, player_position, player_section_position, chunk_render_stats, chunk_source_stats, entity_render_stats, light_levels, biome, day_count, looking_at_block_state, looking_at_entity, entity_hitboxes, chunk_borders). Unlisted vanilla ids found in `debug-profile.json` are kept and written back. Profiles Default and Performance match `DebugScreenEntries.PROFILES`; the file is `debug-profile.json` in vanilla's shape (`{"profile": ..}` or `{"custom": {..}}`, `DataVersion` omitted).
+- Text order: our fixed grouping (version, timing, chunks, position, world, then memory, specs, target) instead of vanilla's per-entry priorities. `tps` carries the client tick and the server brand and player count, since a vanilla server's tick time is not sent; `day_count` carries the dimension and game time.
+- Reduced debug info hides the same entries it does in vanilla (`reduced_ok` on the entry).
+- The screen has the search box, the warning, category headers, Off / In Overlay / Always buttons, tooltips for hidden entries, the two profile buttons and Done. No debug GUI scale button (the option does not exist here). Advanced tooltips, FPS and network charts, lightmap and profiler chart are not entries in vanilla either; they stay on their F3 chords.
+- F3+L writes `debug/profiling/<stamp>-<world>-<version>.zip` with `system.txt`, `client/options.txt`, `client/metrics.txt`, `client/sections.txt` and the frame and tick samples as CSV. Vanilla's zip holds its own sampler and profiler formats; ours keeps what this client measures.
+- F3+1 draws the profiler pie of five flat sections (tick, update, visuals, gui, draw) smoothed over frames, with vanilla's list layout and colour rule. The ellipse is a flat disc with a darker wall, and the digit keys do not descend into the tree because there is no nested profile.
+
+#### P14 Pack drop toast
+- Copy failures raise vanilla's `pack.copyFailure` system toast naming the pack folder, once per drop, through a `SystemToast` screen action.
+
+#### P7 Map labels (live check)
+- 37 named banner markers on a vanilla 26.3 server showed three bugs the offscreen test could not: only 32 names were baked (`MAX_LABELS` is now 256, the decoration cap); item frames drew the picture and names rotated 180 degrees (the quad already carries `MapRenderer`'s Z rotation, so the frame's extra one went); and the markers' x offset was mirrored against the picture (`cx` is now negative east). The ordering check passes: the 36th and 37th icons cover the names, the earlier ones sit under them.
+
+#### Live checks (batch 2 and 4), vanilla 26.3 server on loopback
+- P7: 37 named banners and a painted map in an item frame, screenshots offscreen. P13: F3+F6 screen, entry buttons, Performance profile (`debug-profile.json` written as `{"profile":"performance"}`), F3+1 pie and an F3+L zip (six files). World Options and Restrictions on a remote world (op). F3+F6 used to toggle the overlay on F3's release because opening the screen reset the chord state; fixed with `keep_chord`.
+- Not live: the local-world rows (LAN, Command Access, Force Game Mode) and the pack drop toast, which need a managed singleplayer server and a window file drop; both are unit-tested. P6 needs an online account.

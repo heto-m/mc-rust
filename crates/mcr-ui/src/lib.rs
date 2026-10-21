@@ -31,7 +31,7 @@ pub use renderer::{UiRenderer, UiStats};
 pub use screens::{
     AirBubbles, AirState, CHART_SAMPLES, ChatClick, ChatHud, ChatLineTag, ChatOptions,
     ContextualBar, CrosshairIndicator, DebugChart, DebugOverlay, HeartKind, HudEffect, HudItems,
-    HudSprites, HudState, MAX_VEHICLE_HEARTS, effect_alpha, fade_alpha,
+    HudSprites, HudState, MAX_VEHICLE_HEARTS, PieSlice, ProfilerPie, effect_alpha, fade_alpha,
 };
 pub use sprites::{
     OwnedSprites, Scaling, SpriteId, SpriteInfo, SpriteQuad, SpriteReleaser, Sprites,

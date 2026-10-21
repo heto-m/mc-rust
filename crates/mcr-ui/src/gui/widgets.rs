@@ -16,6 +16,8 @@ pub struct Button {
     /// Draws nothing itself; the owner paints the button.
     pub flat: bool,
     pub tooltip: Option<TooltipLines>,
+    /// A language key shown as a tooltip while hovered.
+    pub tip: Option<String>,
 }
 
 impl Button {
@@ -28,7 +30,13 @@ impl Button {
             visible: true,
             flat: false,
             tooltip: None,
+            tip: None,
         }
+    }
+
+    pub fn with_tip(mut self, key: impl Into<String>) -> Self {
+        self.tip = Some(key.into());
+        self
     }
 
     pub fn flat(mut self) -> Self {
@@ -142,6 +150,8 @@ pub struct CycleButton {
     pub values: Vec<String>,
     pub active: bool,
     pub visible: bool,
+    /// A language key shown as a tooltip while hovered.
+    pub tip: Option<String>,
     index: usize,
 }
 
@@ -161,12 +171,22 @@ impl CycleButton {
             values,
             active: true,
             visible: true,
+            tip: None,
             index,
         }
     }
 
+    pub fn with_tip(mut self, key: impl Into<String>) -> Self {
+        self.tip = Some(key.into());
+        self
+    }
+
     pub fn index(&self) -> usize {
         self.index
+    }
+
+    pub fn set_index(&mut self, index: usize) {
+        self.index = index.min(self.values.len().saturating_sub(1));
     }
 
     pub fn cycle(&mut self, delta: i32) {
@@ -529,11 +549,20 @@ impl WidgetSet {
                     }
                     if hovered && let Some(t) = &b.tooltip {
                         hovered_tip = Some(t.clone());
+                    } else if hovered && let Some(key) = &b.tip {
+                        let text = cx.lang(key);
+                        hovered_tip = Some(TooltipLines::wrapped(cx, &text));
                     }
                 }
                 Widget::Checkbox(c) => c.render(cx, hovered && c.active || focused),
                 Widget::Slider(s) => s.render(cx, hovered || focused),
-                Widget::Cycle(c) => c.render(cx, hovered && c.active || focused),
+                Widget::Cycle(c) => {
+                    c.render(cx, hovered && c.active || focused);
+                    if hovered && let Some(key) = &c.tip {
+                        let text = cx.lang(key);
+                        hovered_tip = Some(TooltipLines::wrapped(cx, &text));
+                    }
+                }
                 Widget::Edit(e) => e.render(cx, focused),
             }
         }

@@ -11,6 +11,133 @@ pub struct DebugOverlay {
     pub charts: Vec<DebugChart>,
     /// The 16x16 level lightmap (sky by block light), drawn bottom right.
     pub lightmap: Option<Vec<[f32; 4]>>,
+    /// The profiler pie of F3+1, bottom right above the charts.
+    pub pie: Option<ProfilerPie>,
+}
+
+/// One section of the profiler pie.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PieSlice {
+    pub name: String,
+    /// Share of the root in percent.
+    pub percent: f32,
+    pub color: u32,
+}
+
+/// `ProfilerPieChart`: the root's name and its children, largest first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProfilerPie {
+    pub root: String,
+    pub slices: Vec<PieSlice>,
+}
+
+const PIE_HALF_WIDTH: i32 = 130;
+const PIE_HALF_HEIGHT: i32 = 52;
+const PIE_THICKNESS: i32 = 10;
+const PIE_PANEL: u32 = 0x9050_5050;
+const MAX_PIE_SLICES: usize = 32;
+
+/// The slice index of each pixel run on the pie's row `dy` (relative to its centre): `(x0, x1, slice)`.
+fn pie_runs(rx: i32, ry: i32, dy: i32, cumulative: &[f32]) -> Vec<(i32, i32, usize)> {
+    let v = dy as f32 / ry.max(1) as f32;
+    if v.abs() > 1.0 || cumulative.is_empty() {
+        return Vec::new();
+    }
+    let half = (rx as f32 * (1.0 - v * v).sqrt()) as i32;
+    let mut runs: Vec<(i32, i32, usize)> = Vec::new();
+    for dx in -half..half {
+        let angle = (dx as f32 / rx.max(1) as f32).atan2(-v);
+        let fraction = angle.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
+        let slice = cumulative
+            .iter()
+            .position(|c| fraction < *c)
+            .unwrap_or(cumulative.len() - 1);
+        match runs.last_mut() {
+            Some(last) if last.2 == slice => last.1 = dx + 1,
+            _ => runs.push((dx, dx + 1, slice)),
+        }
+    }
+    runs
+}
+
+fn darker(argb: u32) -> u32 {
+    let [a, r, g, b] = argb.to_be_bytes();
+    u32::from_be_bytes([a, r / 2, g / 2, b / 2])
+}
+
+impl ProfilerPie {
+    /// Slice boundaries as fractions of the full circle, from the slices' shares.
+    fn cumulative(&self) -> Vec<f32> {
+        let total: f32 = self.slices.iter().map(|s| s.percent.max(0.0)).sum();
+        let mut sum = 0.0;
+        self.slices
+            .iter()
+            .map(|s| {
+                sum += s.percent.max(0.0) / total.max(f32::MIN_POSITIVE);
+                sum
+            })
+            .collect()
+    }
+
+    fn draw(&self, frame: &mut UiFrame<'_>, gui_width: i32, gui_height: i32, bottom_offset: i32) {
+        let slices = &self.slices[..self.slices.len().min(MAX_PIE_SLICES)];
+        let center_x = gui_width - 140;
+        let (left, right) = (center_x - PIE_HALF_WIDTH, center_x + PIE_HALF_WIDTH);
+        let bottom = gui_height - bottom_offset - 5;
+        let text_top = bottom - slices.len() as i32 * 9;
+        let center_y = text_top - 62 - 5;
+        let title_top = center_y - 62;
+        frame.fill_rect(left - 5, title_top - 5, right + 5, bottom + 5, PIE_PANEL);
+        let pie = ProfilerPie {
+            root: String::new(),
+            slices: slices.to_vec(),
+        };
+        let cumulative = pie.cumulative();
+        let ring_y = center_y + 5;
+        let wall = [PIE_THICKNESS, 7, 4, 2];
+        for shift in wall.into_iter().chain([0]) {
+            for dy in -PIE_HALF_HEIGHT..PIE_HALF_HEIGHT {
+                for (x0, x1, slice) in pie_runs(PIE_HALF_WIDTH, PIE_HALF_HEIGHT, dy, &cumulative) {
+                    let color = slices[slice].color;
+                    let color = if shift == 0 { color } else { darker(color) };
+                    let y = ring_y + dy + shift;
+                    frame.fill_rect(center_x + x0, y, center_x + x1, y + 1, color);
+                }
+            }
+        }
+        let percent = |p: f32| format!("{p:.2}%");
+        let total = percent(100.0);
+        let total_width = frame.ui().text_width(&total).ceil() as i32;
+        frame.text(
+            &self.root,
+            left as f32,
+            title_top as f32,
+            0xFFFF_FFFF,
+            false,
+        );
+        frame.text(
+            &total,
+            (right - total_width) as f32,
+            title_top as f32,
+            0xFFFF_FFFF,
+            false,
+        );
+        for (i, slice) in slices.iter().enumerate() {
+            let y = (text_top + i as i32 * 9) as f32;
+            frame.text(
+                &format!("[{}] {}", i + 1, slice.name),
+                left as f32,
+                y,
+                slice.color,
+                false,
+            );
+            let text = percent(slice.percent);
+            let width = frame.ui().text_width(&text).ceil() as i32;
+            for column in [right - 50, right] {
+                frame.text(&text, (column - width) as f32, y, slice.color, false);
+            }
+        }
+    }
 }
 
 pub const CHART_SAMPLES: usize = 240;
@@ -107,6 +234,10 @@ impl DebugOverlay {
             let (left, bottom) = chart_slot(i, width, gui_width, gui_height);
             chart.draw(frame, left, width, bottom);
         }
+        if let Some(pie) = &self.pie {
+            let offset = (self.charts.len().saturating_sub(1) as i32) * (CHART_HEIGHT + 2);
+            pie.draw(frame, gui_width, gui_height, offset);
+        }
         if let Some(map) = &self.lightmap {
             let (x, y) = (gui_width - 66, gui_height - 66);
             frame.fill_rect(x - 1, y - 1, x + 65, y + 65, 0xFF00_0000);
@@ -148,6 +279,58 @@ impl DebugOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pie_rows_split_by_angle_from_twelve_o_clock() {
+        let cumulative = [0.5, 1.0];
+        let top = pie_runs(100, 50, -25, &cumulative);
+        assert_eq!(
+            top.first().map(|r| r.2),
+            Some(1),
+            "left of the top is the last slice"
+        );
+        assert_eq!(
+            top.last().map(|r| r.2),
+            Some(0),
+            "right of the top is the first"
+        );
+        let split = top.iter().find(|r| r.2 == 0).unwrap().0;
+        assert!(
+            (-2..=2).contains(&split),
+            "the boundary sits at the vertical axis: {split}"
+        );
+        let bottom = pie_runs(100, 50, 25, &cumulative);
+        assert_eq!(
+            bottom.first().map(|r| r.2),
+            Some(1),
+            "the second half closes the circle on the left"
+        );
+        assert_eq!(bottom.last().map(|r| r.2), Some(0));
+        assert!(pie_runs(100, 50, 60, &cumulative).is_empty());
+        assert!(pie_runs(100, 50, 0, &[]).is_empty());
+    }
+
+    #[test]
+    fn pie_boundaries_follow_the_shares() {
+        let pie = ProfilerPie {
+            root: "root".into(),
+            slices: vec![
+                PieSlice {
+                    name: "a".into(),
+                    percent: 30.0,
+                    color: 0,
+                },
+                PieSlice {
+                    name: "b".into(),
+                    percent: 70.0,
+                    color: 0,
+                },
+            ],
+        };
+        let c = pie.cumulative();
+        assert!((c[0] - 0.3).abs() < 1e-6 && (c[1] - 1.0).abs() < 1e-6);
+        assert!(ProfilerPie::default().cumulative().is_empty());
+    }
 
     #[test]
     fn charts_sit_bottom_left_then_bottom_right() {

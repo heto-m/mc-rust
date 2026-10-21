@@ -881,6 +881,12 @@ impl Shell {
         if !local {
             return;
         }
+        if change.close_lan {
+            self.stop_lan();
+        }
+        if let Some(sp) = &mut self.sp {
+            sp.apply_guest_options(change);
+        }
         if let Some(lan) = &change.lan {
             self.start_lan(lan, false);
         }
@@ -898,6 +904,17 @@ impl Shell {
             self.java_world(WorldEvent::DifficultyLocked);
         } else {
             eprintln!("singleplayer: difficulty lock refused");
+        }
+    }
+
+    fn stop_lan(&mut self) {
+        let Some(sp) = &mut self.sp else { return };
+        sp.close_lan();
+        if let Some(play) = &mut self.play {
+            play.local_chat(&Component::translatable(
+                "menu.multiplayerOptions.publish.stopped",
+                Vec::new(),
+            ));
         }
     }
 
@@ -955,6 +972,13 @@ impl Shell {
             play.request_icon_capture();
         }
         self.sp_was_paused = paused;
+        if let Some(sp) = &mut self.sp {
+            sp.sync_guests();
+            if let Some(play) = &mut self.play {
+                play.host = sp.host_options();
+                play.lan_open = play.host.lan_port.is_some();
+            }
+        }
         let updates = match &mut self.sp {
             Some(sp) => {
                 sp.set_paused(paused);
@@ -1656,6 +1680,20 @@ impl Shell {
                 ScreenAction::CopyToClipboard(text) => {
                     if let Some(p) = &mut self.parts {
                         p.gui.clipboard.set(&text);
+                    }
+                }
+                ScreenAction::SystemToast {
+                    key,
+                    title,
+                    message,
+                } => {
+                    if let Some(p) = &mut self.parts {
+                        p.gui.toasts.add_system_lang(
+                            &mut p.gui.ui,
+                            mcr_ui::SystemToastId::new(key),
+                            &title,
+                            message.as_deref(),
+                        );
                     }
                 }
                 ScreenAction::ClickSound => {

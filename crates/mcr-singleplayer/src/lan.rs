@@ -287,6 +287,14 @@ impl Forwarder {
         self.port
     }
 
+    /// Lowercase names of the guests logged in through the forwarder.
+    pub fn guests(&self) -> Vec<String> {
+        self.shared
+            .guests
+            .lock()
+            .map_or_else(|_| Vec::new(), |g| g.clone())
+    }
+
     pub fn connections(&self) -> usize {
         self.shared.live.load(Ordering::Acquire)
     }

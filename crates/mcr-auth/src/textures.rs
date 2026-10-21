@@ -15,6 +15,7 @@ pub struct SkinSource {
     pub url: String,
     pub slim: bool,
     pub cape: Option<String>,
+    pub elytra: Option<String>,
 }
 
 /// The skin and cape of a `textures` property value. Only `textures.minecraft.net` is trusted, over https.
@@ -35,10 +36,15 @@ pub fn parse_textures(value: &str) -> Option<SkinSource> {
         .get("CAPE")
         .and_then(|c| c.get("url")?.as_str())
         .and_then(trusted_url);
+    let elytra = textures
+        .get("ELYTRA")
+        .and_then(|c| c.get("url")?.as_str())
+        .and_then(trusted_url);
     Some(SkinSource {
         url: trusted_url(skin.get("url")?.as_str()?)?,
         slim,
         cape,
+        elytra,
     })
 }
 
@@ -140,6 +146,32 @@ mod tests {
         );
         let s = parse_textures(&value("http://evil.example/c")).unwrap();
         assert_eq!(s.cape, None);
+    }
+
+    #[test]
+    fn elytra_is_read_from_the_trusted_host_only() {
+        let value = |elytra: &str| {
+            STANDARD.encode(format!(
+                r#"{{"textures":{{"SKIN":{{"url":"http://textures.minecraft.net/texture/s"}},"ELYTRA":{{"url":"{elytra}"}}}}}}"#
+            ))
+        };
+        let s = parse_textures(&value("http://textures.minecraft.net/texture/e")).unwrap();
+        assert_eq!(
+            s.elytra.as_deref(),
+            Some("https://textures.minecraft.net/texture/e")
+        );
+        assert_eq!(
+            parse_textures(&value("http://evil.example/e"))
+                .unwrap()
+                .elytra,
+            None
+        );
+        assert_eq!(
+            parse_textures(&property("http://textures.minecraft.net/texture/s", None))
+                .unwrap()
+                .elytra,
+            None
+        );
     }
 
     #[test]

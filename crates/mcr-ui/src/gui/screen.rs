@@ -43,18 +43,6 @@ pub enum EditorPacket {
     TestInstance(Box<mcr_protocol::play::serverbound::TestInstanceBlockAction>),
 }
 
-/// The switches on the F3+F6 debug options screen.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DebugToggle {
-    Hitboxes,
-    ChunkBorders,
-    AdvancedTooltips,
-    FpsCharts,
-    NetworkCharts,
-    LightmapTexture,
-    ProfilerChart,
-}
-
 /// What a screen asks the app to do; navigation variants are consumed by [`ScreenStack`].
 pub enum ScreenAction {
     Push(Box<dyn Screen>),
@@ -97,7 +85,14 @@ pub enum ScreenAction {
     ApplyWorldOptions(super::world_options::WorldOptionsChange),
     /// World Options' Game Rules button.
     OpenGameRules,
-    ToggleDebug(DebugToggle),
+    /// A system toast whose title is a language key.
+    SystemToast {
+        key: u32,
+        title: String,
+        message: Option<String>,
+    },
+    /// The debug options screen changed an entry or loaded a profile.
+    SetDebugEntries(Box<super::debug_entries::DebugEntries>),
     /// Game rules changed in a running world, as `(id, value)`.
     SetGameRules(Vec<(String, String)>),
     OpenOptions,
@@ -213,7 +208,12 @@ impl std::fmt::Debug for ScreenAction {
             Self::OpenWorldOptions => f.write_str("OpenWorldOptions"),
             Self::ApplyWorldOptions(c) => f.debug_tuple("ApplyWorldOptions").field(c).finish(),
             Self::OpenGameRules => f.write_str("OpenGameRules"),
-            Self::ToggleDebug(t) => f.debug_tuple("ToggleDebug").field(t).finish(),
+            Self::SystemToast { key, title, .. } => f
+                .debug_struct("SystemToast")
+                .field("key", key)
+                .field("title", title)
+                .finish(),
+            Self::SetDebugEntries(e) => f.debug_tuple("SetDebugEntries").field(e).finish(),
             Self::SetGameRules(r) => f.debug_tuple("SetGameRules").field(r).finish(),
             Self::OpenOptions => f.write_str("OpenOptions"),
             Self::OpenMods => f.write_str("OpenMods"),

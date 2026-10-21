@@ -439,8 +439,7 @@ fn item_frame(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
             id,
             local: base
                 * Mat4::from_translation(Vec3::new(0.0, 0.0, 0.4375 - 1.0 / 128.0))
-                * Mat4::from_rotation_z((rotation * 90.0).to_radians())
-                * Mat4::from_rotation_z(180f32.to_radians()),
+                * Mat4::from_rotation_z((rotation * 90.0).to_radians()),
         });
     } else if v.stack(idx::FRAME_ITEM).is_some() {
         let rotation = v.int(idx::FRAME_ROTATION).unwrap_or(0) as f32;

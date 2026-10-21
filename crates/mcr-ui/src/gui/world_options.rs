@@ -1,10 +1,11 @@
-//! Vanilla's `WorldOptionsScreen`: difficulty, game rules, game modes, allow commands and LAN.
+//! Vanilla's `WorldOptionsScreen`: difficulty, game rules, restrictions, game modes, allow commands, LAN and guest access.
 
 use super::edit_box::EditBox;
 use super::env::{Env, RenderCx};
 use super::input::{Key, UiInput, contains};
 use super::lan_screen::{LanSettings, PortCheck};
 use super::menus::{WHITE, draw_dim_background};
+use super::restrictions::{ChatLimit, RestrictionsScreen};
 use super::screen::{Screen, ScreenAction};
 use super::widgets::{Button, CycleButton, WidgetEvent, WidgetEventKind, WidgetSet};
 
@@ -18,6 +19,9 @@ const LAN: u32 = 7;
 const PORT: u32 = 8;
 const APPLY: u32 = 9;
 const CANCEL: u32 = 10;
+const RESTRICTIONS: u32 = 11;
+const GUEST_COMMANDS: u32 = 12;
+const FORCE_MODE: u32 = 13;
 const MIN_PORT: u16 = 1024;
 const ERROR: u32 = 0xFFFF_5555;
 const HEADER: &str = "§n§l";
@@ -42,6 +46,7 @@ pub struct WorldOptionsInit {
     pub difficulty_locked: bool,
     pub hardcore: bool,
     pub gamemaster: bool,
+    pub chat_limit: ChatLimit,
     pub local: Option<LocalWorldOptions>,
 }
 
@@ -51,7 +56,10 @@ pub struct LocalWorldOptions {
     pub default_mode: u8,
     pub personal_mode: u8,
     pub allow_commands: bool,
-    pub lan_open: bool,
+    /// The port the world is shared on, while it is open to LAN.
+    pub lan_port: Option<u16>,
+    pub guest_commands: bool,
+    pub force_game_mode: bool,
 }
 
 /// The changes Apply Changes sends; `None` fields stayed as they were.
@@ -63,6 +71,10 @@ pub struct WorldOptionsChange {
     pub personal_mode: Option<u8>,
     pub allow_commands: Option<bool>,
     pub lan: Option<LanSettings>,
+    /// Stop sharing first (alone to close LAN, with `lan` to move it to another port).
+    pub close_lan: bool,
+    pub guest_commands: Option<bool>,
+    pub force_game_mode: Option<bool>,
 }
 
 pub struct WorldOptionsScreen {
@@ -84,6 +96,8 @@ struct Wanted {
     personal_mode: u8,
     allow_commands: bool,
     lan: bool,
+    guest_commands: bool,
+    force_game_mode: bool,
 }
 
 impl std::fmt::Debug for WorldOptionsScreen {
@@ -107,13 +121,35 @@ impl WorldOptionsScreen {
                 default_mode: local.map_or(0, |l| l.default_mode.min(3)),
                 personal_mode: local.map_or(0, |l| l.personal_mode.min(3)),
                 allow_commands: local.is_some_and(|l| l.allow_commands),
-                lan: local.is_some_and(|l| l.lan_open),
+                lan: local.is_some_and(|l| l.lan_port.is_some()),
+                guest_commands: local.is_some_and(|l| l.guest_commands),
+                force_game_mode: local.is_none_or(|l| l.force_game_mode),
             },
             init,
             check: None,
             port: None,
             port_error: None,
         }
+    }
+
+    /// Vanilla's `updateGuestCommandAccessButton`.
+    fn update_guest_commands(&mut self) {
+        let Some(local) = self.init.local else { return };
+        self.wanted.guest_commands =
+            self.wanted.lan && self.wanted.allow_commands && local.guest_commands;
+        self.update_force_mode();
+    }
+
+    /// Vanilla's `updateForceGameModeButton`.
+    fn update_force_mode(&mut self) {
+        let Some(local) = self.init.local else { return };
+        self.wanted.force_game_mode = if self.init.hardcore || !self.wanted.lan {
+            true
+        } else if self.wanted.guest_commands {
+            false
+        } else {
+            local.force_game_mode
+        };
     }
 
     pub fn with_port_check(mut self, check: PortCheck) -> Self {
@@ -137,13 +173,24 @@ impl WorldOptionsScreen {
                 (w.personal_mode != local.personal_mode.min(3)).then_some(w.personal_mode);
             change.allow_commands =
                 (w.allow_commands != local.allow_commands).then_some(w.allow_commands);
-            if w.lan && !local.lan_open {
-                change.lan = Some(LanSettings {
-                    mode: w.default_mode,
-                    cheats: w.allow_commands,
-                    port: self.port,
-                });
+            let open_port = local.lan_port;
+            let settings = LanSettings {
+                mode: w.default_mode,
+                cheats: w.allow_commands,
+                port: self.port,
+            };
+            if w.lan && open_port.is_none() {
+                change.lan = Some(settings);
+            } else if !w.lan && open_port.is_some() {
+                change.close_lan = true;
+            } else if w.lan && self.port.is_some() && self.port != open_port {
+                change.close_lan = true;
+                change.lan = Some(settings);
             }
+            change.guest_commands =
+                (w.guest_commands != local.guest_commands).then_some(w.guest_commands);
+            change.force_game_mode =
+                (w.force_game_mode != local.force_game_mode).then_some(w.force_game_mode);
         }
         change
     }
@@ -166,7 +213,8 @@ impl WorldOptionsScreen {
     }
 
     fn sync(&mut self) {
-        let allowed = self.commands_allowed() && !self.init.hardcore;
+        let commands_allowed = self.commands_allowed();
+        let allowed = commands_allowed && !self.init.hardcore;
         let difficulty = self.difficulty_editable();
         let apply = self.has_changes();
         let port_error = self.port_error.is_some();
@@ -179,6 +227,9 @@ impl WorldOptionsScreen {
         if let Some(c) = w.cycle_mut(DIFFICULTY) {
             c.active = difficulty;
         }
+        if let Some(c) = w.cycle_mut(ALLOW_COMMANDS) {
+            c.active = !self.init.hardcore;
+        }
         if let Some(b) = w.button_mut(LOCK) {
             b.active = difficulty && !self.wanted.locked;
         }
@@ -186,10 +237,108 @@ impl WorldOptionsScreen {
             b.active = allowed;
         }
         if let Some(c) = w.cycle_mut(LAN) {
-            c.active = self.init.local.is_some_and(|l| !l.lan_open);
+            c.tip = Some(
+                if self.wanted.lan {
+                    "menu.multiplayerOptions.network.lan.tooltip"
+                } else {
+                    "menu.multiplayerOptions.network.off.tooltip"
+                }
+                .into(),
+            );
         }
         if let Some(e) = w.edit_mut(PORT) {
             e.text_color = if port_error { ERROR } else { 0xFFE0_E0E0 };
+            e.active = self.wanted.lan;
+            e.editable = self.wanted.lan;
+        }
+        let (lan, commands, guest, hardcore) = (
+            self.wanted.lan,
+            self.wanted.allow_commands,
+            self.wanted.guest_commands,
+            self.init.hardcore,
+        );
+        if let Some(c) = w.cycle_mut(GUEST_COMMANDS) {
+            c.active = lan && commands;
+            c.set_index(usize::from(!guest));
+            c.tip = Some(
+                if !lan {
+                    "options.worldOptions.guest.command_access.disabled.scope.tooltip"
+                } else if !commands {
+                    "options.worldOptions.guest.command_access.disabled.commands.tooltip"
+                } else {
+                    "options.worldOptions.guest.command_access.tooltip"
+                }
+                .into(),
+            );
+        }
+        let force = self.wanted.force_game_mode;
+        if let Some(c) = w.cycle_mut(FORCE_MODE) {
+            c.active = lan && !guest && !hardcore;
+            c.set_index(usize::from(!force));
+            c.tip = Some(
+                if hardcore {
+                    "options.worldOptions.guest.force_game_mode.off.hardcore.tooltip"
+                } else if !lan {
+                    "options.worldOptions.guest.force_game_mode.off.scope.tooltip"
+                } else if guest {
+                    "options.worldOptions.guest.force_game_mode.off.commands.tooltip"
+                } else if force {
+                    "options.worldOptions.guest.force_game_mode.on.tooltip"
+                } else {
+                    "options.worldOptions.guest.force_game_mode.off.tooltip"
+                }
+                .into(),
+            );
+        }
+        let difficulty_tip = if self.init.hardcore {
+            Some("options.worldOptions.difficulty.disabled.hardcore.tooltip")
+        } else if self.init.difficulty_locked {
+            Some("options.worldOptions.difficulty.disabled.locked.tooltip")
+        } else if !commands_allowed {
+            Some("options.worldOptions.difficulty.disabled.operator.tooltip")
+        } else {
+            None
+        };
+        if let Some(c) = w.cycle_mut(DIFFICULTY) {
+            c.tip = difficulty_tip.map(String::from);
+        }
+        let rules_tip = if self.init.hardcore {
+            Some("editGamerule.inGame.disabled.hardcore.tooltip")
+        } else if !commands_allowed {
+            Some("editGamerule.inGame.disabled.tooltip")
+        } else {
+            None
+        };
+        if let Some(b) = w.button_mut(GAME_RULES) {
+            b.tip = rules_tip.map(String::from);
+        }
+        let mode_tip = if self.init.hardcore {
+            "options.worldOptions.game_mode.disabled.tooltip"
+        } else if !commands_allowed {
+            "options.worldOptions.game_mode.disabled.operator.tooltip"
+        } else {
+            "options.worldOptions.game_mode.tooltip"
+        };
+        if let Some(c) = w.cycle_mut(DEFAULT_MODE) {
+            c.tip = Some(mode_tip.into());
+        }
+        let personal_tip = if mode_tip.ends_with("game_mode.tooltip") {
+            "options.worldOptions.personal_game_mode.tooltip"
+        } else {
+            mode_tip
+        };
+        if let Some(c) = w.cycle_mut(PERSONAL_MODE) {
+            c.tip = Some(personal_tip.into());
+        }
+        if let Some(c) = w.cycle_mut(ALLOW_COMMANDS) {
+            c.tip = Some(
+                if self.init.hardcore {
+                    "options.worldOptions.allow_commands.disabled.tooltip"
+                } else {
+                    "options.worldOptions.allow_commands.tooltip"
+                }
+                .into(),
+            );
         }
         if let Some(b) = w.button_mut(APPLY) {
             b.active = apply;
@@ -273,25 +422,49 @@ impl Screen for WorldOptionsScreen {
         let lock = self.lock_rect();
         self.widgets.add(Button::new(LOCK, lock, "").flat());
         y += 24;
+        let local = self.init.local.is_some();
         self.widgets.add(Button::new(
             GAME_RULES,
             [left, y, 150, 20],
             "lang:editGamerule.inGame.button",
         ));
+        self.widgets.add(Button::new(
+            RESTRICTIONS,
+            [right, y, 150, 20],
+            "lang:restrictions_screen.button",
+        ));
         y += 36;
-        if self.init.local.is_some() {
+        if local {
+            let on_off = || vec!["lang:options.on".into(), "lang:options.off".into()];
             self.widgets.add(CycleButton::new(
                 LAN,
                 [left, y + 12, 150, 20],
                 "lang:menu.multiplayerOptions.lan",
-                vec!["lang:options.on".into(), "lang:options.off".into()],
+                on_off(),
                 usize::from(!self.wanted.lan),
             ));
+            let open_port = self.init.local.and_then(|l| l.lan_port);
+            let initial =
+                keep.unwrap_or_else(|| open_port.map(|p| p.to_string()).unwrap_or_default());
             let mut port = EditBox::new(PORT, [right, y + 12, 150, 20]).with_max_length(5);
-            port.set_value(&keep.unwrap_or_default());
+            port.set_value(&initial);
             port.hint = Some("lang:lanServer.port".into());
             port.take_changed();
             self.widgets.add(port);
+            self.widgets.add(CycleButton::new(
+                GUEST_COMMANDS,
+                [left, y + 36, 150, 20],
+                "lang:options.worldOptions.guest.command_access",
+                on_off(),
+                usize::from(!self.wanted.guest_commands),
+            ));
+            self.widgets.add(CycleButton::new(
+                FORCE_MODE,
+                [right, y + 36, 150, 20],
+                "lang:options.worldOptions.guest.force_game_mode",
+                on_off(),
+                usize::from(!self.wanted.force_game_mode),
+            ));
         }
         self.widgets.add(Button::new(
             APPLY,
@@ -315,7 +488,7 @@ impl Screen for WorldOptionsScreen {
         let general = format!("{HEADER}{}", cx.lang("options.worldOptions.general.title"));
         cx.centered_text(&general, center, 32, WHITE, true);
         if self.init.local.is_some() {
-            let top = self.widgets.find(LAN).map_or(0, |w| w.rect()[1]) - 12;
+            let top = self.widgets.find(LAN).map_or(0, |w| w.rect()[1]) - 14;
             let multiplayer = format!(
                 "{HEADER}{}",
                 cx.lang("options.worldOptions.multiplayer.title")
@@ -382,6 +555,7 @@ impl Screen for WorldOptionsScreen {
                 (ALLOW_COMMANDS, WidgetEventKind::Cycled(i)) => {
                     out.push(ScreenAction::ClickSound);
                     self.wanted.allow_commands = i == 0;
+                    self.update_guest_commands();
                     if !self.wanted.allow_commands {
                         if let Some(local) = self.init.local {
                             self.wanted.default_mode = local.default_mode.min(3);
@@ -405,7 +579,23 @@ impl Screen for WorldOptionsScreen {
                 (LAN, WidgetEventKind::Cycled(i)) => {
                     out.push(ScreenAction::ClickSound);
                     self.wanted.lan = i == 0;
+                    self.update_guest_commands();
                     self.read_port();
+                }
+                (GUEST_COMMANDS, WidgetEventKind::Cycled(i)) => {
+                    out.push(ScreenAction::ClickSound);
+                    self.wanted.guest_commands = i == 0;
+                    self.update_force_mode();
+                }
+                (FORCE_MODE, WidgetEventKind::Cycled(i)) => {
+                    out.push(ScreenAction::ClickSound);
+                    self.wanted.force_game_mode = i == 0;
+                }
+                (RESTRICTIONS, WidgetEventKind::Pressed) => {
+                    out.push(ScreenAction::ClickSound);
+                    out.push(ScreenAction::Push(Box::new(RestrictionsScreen::new(
+                        self.init.chat_limit,
+                    ))));
                 }
                 (PORT, WidgetEventKind::Edited) => self.read_port(),
                 (APPLY, WidgetEventKind::Pressed) => {

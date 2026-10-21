@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use crate::guests::GuestPolicy;
 use mcr_singleplayer::fabric::{self, FabricServer};
 use mcr_singleplayer::lan::{self, Announcer, Forwarder};
 use mcr_singleplayer::level::{self, Difficulty, GameMode, LevelInfo};
@@ -324,6 +325,7 @@ struct Prepared {
     port: u16,
     world_name: String,
     cheats: bool,
+    default_mode: u8,
     /// Game rules to set once a new world's server is ready.
     rules: Vec<(String, String)>,
 }
@@ -553,6 +555,12 @@ fn prepare(
             ""
         }
     );
+    let default_mode = match (&created, &level) {
+        (Some(w), _) => w.game_mode,
+        (None, Some(l)) => l.game_mode,
+        (None, None) => GameMode::Survival,
+    }
+    .id();
     let world_name = match (&created, &level) {
         (Some(w), _) => w.name.clone(),
         (None, Some(l)) if !l.name.trim().is_empty() => l.name.clone(),
@@ -563,6 +571,7 @@ fn prepare(
         world_dir,
         world_name,
         cheats,
+        default_mode,
         rules: created.map(|w| w.game_rules).unwrap_or_default(),
         folder,
         port,
@@ -596,6 +605,15 @@ enum State {
     Done,
 }
 
+/// The hosted world's settings that World Options starts from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HostOptions {
+    pub default_mode: u8,
+    pub lan_port: Option<u16>,
+    pub guest_commands: bool,
+    pub force_game_mode: bool,
+}
+
 /// The LAN forwarder and its announcement while the world is open to LAN.
 struct Lan {
     forwarder: Forwarder,
@@ -611,6 +629,7 @@ pub struct Session {
     pub return_to_list: bool,
     world_name: String,
     cheats: bool,
+    guests: GuestPolicy,
     rules: Vec<(String, String)>,
     lan: Option<Lan>,
     world_dir: Option<PathBuf>,
@@ -618,10 +637,10 @@ pub struct Session {
     difficulty_locked: bool,
 }
 
-const GAME_MODES: [&str; 4] = ["survival", "creative", "adventure", "spectator"];
+pub(crate) const GAME_MODES: [&str; 4] = ["survival", "creative", "adventure", "spectator"];
 
 /// A name the console can take as one player argument (no selectors, no spaces).
-fn plain_player(name: &str) -> bool {
+pub(crate) fn plain_player(name: &str) -> bool {
     (1..=16).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
@@ -693,6 +712,7 @@ impl Session {
             return_to_list: false,
             world_name: String::new(),
             cheats: false,
+            guests: GuestPolicy::default(),
             rules: Vec::new(),
             lan: None,
             world_dir: None,
@@ -750,7 +770,10 @@ impl Session {
         Ok(lan_port)
     }
 
-    fn close_lan(&mut self) {
+    /// Stops sharing the world; guests lose the command access they were given.
+    pub fn close_lan(&mut self) {
+        let lines = self.guests.release();
+        self.run_console(&lines);
         if let Some(mut lan) = self.lan.take() {
             if let Some(a) = &mut lan.announcer {
                 a.stop();
@@ -784,8 +807,10 @@ impl Session {
                         port,
                         world_name,
                         cheats,
+                        default_mode,
                         rules,
                     } = *prepared;
+                    self.guests.default_mode = default_mode;
                     self.folder = Some(folder);
                     self.world_dir = Some(world_dir);
                     self.world_name = world_name;
@@ -874,6 +899,33 @@ impl Session {
             } => Some(*port),
             _ => None,
         }
+    }
+
+    /// What World Options shows for the hosted world.
+    pub fn host_options(&self) -> HostOptions {
+        HostOptions {
+            default_mode: self.guests.default_mode,
+            lan_port: self.lan_port(),
+            guest_commands: self.guests.commands,
+            force_game_mode: self.guests.force_mode,
+        }
+    }
+
+    /// Applies the guest settings and the new default mode of World Options.
+    pub fn apply_guest_options(&mut self, change: &mcr_ui::WorldOptionsChange) {
+        let lines = self.guests.set(
+            change.guest_commands,
+            change.force_game_mode,
+            change.default_mode,
+        );
+        self.run_console(&lines);
+    }
+
+    /// Gives joining guests their access and mode; called every frame.
+    pub fn sync_guests(&mut self) {
+        let Some(lan) = &self.lan else { return };
+        let lines = self.guests.sync(&lan.forwarder.guests());
+        self.run_console(&lines);
     }
 
     pub fn run_console(&self, lines: &[String]) {

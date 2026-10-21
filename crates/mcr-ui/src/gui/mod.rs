@@ -9,6 +9,7 @@ mod container;
 mod create_options;
 mod creative;
 mod credits;
+mod debug_entries;
 mod debug_options;
 mod dialog;
 mod dialog_screen;
@@ -24,6 +25,7 @@ mod menus;
 mod mods;
 mod multiline;
 mod recipe_book;
+mod restrictions;
 mod screen;
 mod server_list;
 mod sign;
@@ -52,6 +54,9 @@ pub use creative::{CreativeScreen, HotbarStore, TabKind, creative_tabs};
 pub use credits::{
     CREDITS_PATH, CreditsLine, CreditsScreen, CreditsSource, POEM_PATH, POSTCREDITS_PATH, Scroll,
     build_lines,
+};
+pub use debug_entries::{
+    Category, DebugEntries, DebugProfile, ENTRIES, EntryDef, EntryStatus, entry_def,
 };
 pub use debug_options::DebugOptionsScreen;
 pub use dialog::Dialog;
@@ -83,9 +88,9 @@ pub use mods::{
     crash_fallback_screen,
 };
 pub use multiline::MultiLineEdit;
+pub use restrictions::{ChatLimit, RestrictionsScreen};
 pub use screen::{
-    ClickType, ContainerClick, DebugToggle, EditorPacket, Screen, ScreenAction, ScreenPreview,
-    ScreenStack,
+    ClickType, ContainerClick, EditorPacket, Screen, ScreenAction, ScreenPreview, ScreenStack,
 };
 pub use server_list::{
     EditServerScreen, FAVICON_SIZE, Favicon, MemoryServerStore, OnlineStatus, PackSetting,

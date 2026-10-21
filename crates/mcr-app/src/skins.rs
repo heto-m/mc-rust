@@ -149,7 +149,7 @@ fn valid_skin_size(w: u32, h: u32) -> bool {
 fn download(source: &SkinSource) -> Option<Skin> {
     let bytes = fetch_skin(source).ok()?;
     let (width, height, rgba) = decode_png_rgba(&bytes, valid_skin_size)?;
-    let cape = source.cape.as_ref().and_then(|url| {
+    let wing_texture = |url: &String| {
         let bytes = fetch_texture(url).ok()?;
         let (width, height, rgba) = decode_png_rgba(&bytes, valid_cape_size)?;
         Some(Cape {
@@ -158,7 +158,9 @@ fn download(source: &SkinSource) -> Option<Skin> {
             height,
             rgba,
         })
-    });
+    };
+    let cape = source.cape.as_ref().and_then(wing_texture);
+    let elytra = source.elytra.as_ref().and_then(wing_texture);
     Some(Skin {
         key: source.url.clone(),
         width,
@@ -166,6 +168,7 @@ fn download(source: &SkinSource) -> Option<Skin> {
         rgba,
         slim: source.slim,
         cape,
+        elytra,
     })
 }
 

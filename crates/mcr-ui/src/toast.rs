@@ -585,6 +585,18 @@ impl ToastManager {
         }
     }
 
+    /// `add_system` with the title looked up in the language file.
+    pub fn add_system_lang(
+        &mut self,
+        ui: &mut Ui,
+        id: SystemToastId,
+        title_key: &str,
+        message: Option<&str>,
+    ) {
+        let title = ui.lang().get(title_key).unwrap_or(title_key).to_owned();
+        self.add_system(ui, id, &title, message);
+    }
+
     fn free_slots(&self) -> usize {
         self.occupied.iter().filter(|o| !**o).count()
     }

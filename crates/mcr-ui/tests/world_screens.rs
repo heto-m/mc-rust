@@ -464,16 +464,28 @@ fn lan_screen_validates_the_port() {
 }
 
 fn world_options(gamemaster: bool, hardcore: bool, local: bool) -> mcr_ui::WorldOptionsScreen {
+    world_options_with(gamemaster, hardcore, local, None)
+}
+
+fn world_options_with(
+    gamemaster: bool,
+    hardcore: bool,
+    local: bool,
+    lan_port: Option<u16>,
+) -> mcr_ui::WorldOptionsScreen {
     let mut screen = mcr_ui::WorldOptionsScreen::new(mcr_ui::WorldOptionsInit {
         difficulty: 1,
         difficulty_locked: false,
         hardcore,
         gamemaster,
+        chat_limit: mcr_ui::ChatLimit::None,
         local: local.then_some(mcr_ui::LocalWorldOptions {
             default_mode: 0,
             personal_mode: 0,
             allow_commands: gamemaster,
-            lan_open: false,
+            lan_port,
+            guest_commands: false,
+            force_game_mode: true,
         }),
     });
     screen.init(W, H);
@@ -542,4 +554,69 @@ fn in_world_game_rules_send_only_the_differences() {
     let current = vec![("minecraft:keep_inventory".to_owned(), "false".to_owned())];
     let screen = mcr_ui::GameRulesScreen::in_world(&current);
     assert!(screen.live_changes().is_empty());
+}
+
+const LAN_ROW: (f32, f32) = (213.0 - 155.0 + 75.0, 176.0);
+const GUEST_ROW: (f32, f32) = (213.0 - 155.0 + 75.0, 200.0);
+const FORCE_ROW: (f32, f32) = (213.0 + 5.0 + 75.0, 200.0);
+
+#[test]
+fn world_options_close_lan_and_move_its_port() {
+    let mut open = world_options_with(true, false, true, Some(25570));
+    assert_eq!(open.change(), mcr_ui::WorldOptionsChange::default());
+    send(&mut open, &NoView, &click(LAN_ROW.0, LAN_ROW.1));
+    let change = open.change();
+    assert!(change.close_lan && change.lan.is_none(), "{change:?}");
+
+    let mut moved = world_options_with(true, false, true, Some(25570));
+    send(&mut moved, &NoView, &click(213.0 + 5.0 + 75.0, 176.0));
+    send(&mut moved, &NoView, &[UiInput::key(Key::Backspace)]);
+    send(&mut moved, &NoView, &typed("1"));
+    let change = moved.change();
+    assert!(change.close_lan, "{change:?}");
+    assert_eq!(change.lan.map(|l| l.port), Some(Some(25571)));
+}
+
+#[test]
+fn world_options_guest_rows_follow_vanilla() {
+    let mut screen = world_options_with(true, false, true, None);
+    let before = screen.change();
+    send(&mut screen, &NoView, &click(GUEST_ROW.0, GUEST_ROW.1));
+    send(&mut screen, &NoView, &click(FORCE_ROW.0, FORCE_ROW.1));
+    assert_eq!(
+        screen.change(),
+        before,
+        "both rows are off while LAN is off"
+    );
+
+    send(&mut screen, &NoView, &click(LAN_ROW.0, LAN_ROW.1));
+    send(&mut screen, &NoView, &click(FORCE_ROW.0, FORCE_ROW.1));
+    assert_eq!(screen.change().force_game_mode, Some(false));
+    send(&mut screen, &NoView, &click(FORCE_ROW.0, FORCE_ROW.1));
+    assert_eq!(screen.change().force_game_mode, None);
+
+    send(&mut screen, &NoView, &click(GUEST_ROW.0, GUEST_ROW.1));
+    let change = screen.change();
+    assert_eq!(change.guest_commands, Some(true));
+    assert_eq!(
+        change.force_game_mode,
+        Some(false),
+        "command access switches the forced mode off"
+    );
+    send(&mut screen, &NoView, &click(FORCE_ROW.0, FORCE_ROW.1));
+    assert_eq!(
+        screen.change().force_game_mode,
+        Some(false),
+        "inactive while guests have commands"
+    );
+    send(&mut screen, &NoView, &click(GUEST_ROW.0, GUEST_ROW.1));
+    assert_eq!(screen.change().guest_commands, None);
+    assert_eq!(screen.change().force_game_mode, None);
+}
+
+#[test]
+fn world_options_restrictions_button_opens_the_screen() {
+    let mut screen = world_options(true, false, true);
+    let out = send(&mut screen, &NoView, &click(213.0 + 5.0 + 75.0, 128.0));
+    assert!(out.iter().any(|a| matches!(a, ScreenAction::Push(_))));
 }

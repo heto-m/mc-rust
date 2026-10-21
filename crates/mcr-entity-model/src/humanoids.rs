@@ -728,7 +728,7 @@ fn player(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     attach_head_item(cx, v, plan, "head");
     let prefix = if slim { "player_slim" } else { "player" };
     humanoid_armor(cx, v, plan, prefix, false);
-    let elytra = cape_texture(cx, v, mask & 1 != 0);
+    let elytra = elytra_texture(cx, v, mask & 1 != 0);
     wings_with(cx, v, plan, false, elytra.as_deref());
     avatar_layers(cx, v, plan, &texture, slim, mask & 1 != 0);
     plan.post_rot = avatar_rotation(v);
@@ -933,6 +933,18 @@ fn cape_texture(cx: &mut PlanCx<'_>, v: &EntityView<'_>, show_cape: bool) -> Opt
         .filter(|_| show_cape)?;
     let key = format!("dyn:cape:{}", cape.key);
     let (w, h, rgba) = (cape.width, cape.height, &cape.rgba);
+    cx.tex
+        .register(&key, || crate::skin::prepare_cape(w, h, rgba));
+    Some(key)
+}
+
+/// `WingsLayer#getPlayerElytraTexture`: the profile's elytra texture, else the cape while shown.
+fn elytra_texture(cx: &mut PlanCx<'_>, v: &EntityView<'_>, show_cape: bool) -> Option<String> {
+    let Some(elytra) = v.player.skin.and_then(|s| s.elytra.as_ref()) else {
+        return cape_texture(cx, v, show_cape);
+    };
+    let key = format!("dyn:elytra:{}", elytra.key);
+    let (w, h, rgba) = (elytra.width, elytra.height, &elytra.rgba);
     cx.tex
         .register(&key, || crate::skin::prepare_cape(w, h, rgba));
     Some(key)

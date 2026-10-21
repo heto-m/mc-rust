@@ -521,6 +521,7 @@ pub struct Play {
     local_server: bool,
     /// The local world is open to LAN: no pausing, no second Open to LAN.
     pub lan_open: bool,
+    pub host: crate::singleplayer::HostOptions,
     lan_request: Option<mcr_ui::LanSettings>,
     world_options_request: Option<mcr_ui::WorldOptionsChange>,
     capture_icon: bool,
@@ -583,8 +584,7 @@ pub struct Play {
     pub open_mods: bool,
     debug_on: bool,
     debug_keys: crate::debug_keys::DebugKeys,
-    show_hitboxes: bool,
-    chunk_borders: bool,
+    debug_entries: mcr_ui::DebugEntries,
     fps_charts: bool,
     network_charts: bool,
     lightmap_texture: bool,
@@ -634,6 +634,7 @@ pub struct Play {
     ghost_age: Option<u32>,
     frame_history: Vec<f32>,
     tick_history: Vec<f32>,
+    sections: crate::debug_tools::FrameSections,
     ping_history: Vec<f32>,
     movement: MovementSounds,
     placed_seen: bool,
@@ -751,6 +752,7 @@ impl Play {
             quit: false,
             local_server: cfg.local_server,
             lan_open: false,
+            host: crate::singleplayer::HostOptions::default(),
             lan_request: None,
             world_options_request: None,
             capture_icon: false,
@@ -794,8 +796,7 @@ impl Play {
             open_mods: false,
             debug_on: false,
             debug_keys: Default::default(),
-            show_hitboxes: false,
-            chunk_borders: false,
+            debug_entries: crate::debug_tools::load_entries(&cfg.game_dir),
             fps_charts: false,
             network_charts: false,
             lightmap_texture: false,
@@ -842,6 +843,7 @@ impl Play {
             ghost_age: None,
             frame_history: Vec::new(),
             tick_history: Vec::new(),
+            sections: crate::debug_tools::FrameSections::default(),
             ping_history: Vec::new(),
             skins: crate::skins::SkinStore::new(skin_reader),
             movement: MovementSounds::new(data),
@@ -1035,6 +1037,7 @@ impl Play {
             .map_or(0, |p| p.latency);
         let tick_ms = started.elapsed().as_secs_f32() * 1000.0;
         push_sample(&mut self.tick_history, tick_ms);
+        self.sections.tick(tick_ms);
         if let Some(profile) = &mut self.profiling {
             profile.tick(tick_ms);
         }
@@ -2524,16 +2527,25 @@ impl Play {
     fn open_world_options(&mut self) {
         let state = &self.world.client.state;
         let mode = state.player.game_mode as u8;
+        let host = self.host;
+        let chat_limit = match self.options.chat_visibility {
+            mcr_settings::value::ChatVisibility::Full => mcr_ui::ChatLimit::None,
+            mcr_settings::value::ChatVisibility::System => mcr_ui::ChatLimit::PlayerChat,
+            mcr_settings::value::ChatVisibility::Hidden => mcr_ui::ChatLimit::ChatAndCommands,
+        };
         let init = mcr_ui::WorldOptionsInit {
             difficulty: state.world.difficulty,
             difficulty_locked: state.world.difficulty_locked,
             hardcore: state.world.hardcore,
             gamemaster: state.player.permission_level >= 2,
+            chat_limit,
             local: self.local_server.then_some(mcr_ui::LocalWorldOptions {
-                default_mode: mode,
+                default_mode: host.default_mode,
                 personal_mode: mode,
                 allow_commands: state.player.permission_level >= 2,
-                lan_open: self.lan_open,
+                lan_port: host.lan_port,
+                guest_commands: host.guest_commands,
+                force_game_mode: host.force_game_mode,
             }),
         };
         let screen = mcr_ui::WorldOptionsScreen::new(init)
@@ -2843,14 +2855,12 @@ impl Play {
                 self.debug_feedback_key("debug.reload_chunks.message");
             }
             DebugAction::ShowHitboxes if !reduced => {
-                self.show_hitboxes = !self.show_hitboxes;
-                let on = self.show_hitboxes;
+                let on = self.toggle_entry("entity_hitboxes");
                 self.debug_toggle_feedback(on, "debug.show_hitboxes.on", "debug.show_hitboxes.off");
             }
             DebugAction::ClearChat => self.hud.chat.borrow_mut().clear_messages(),
             DebugAction::ShowChunkBorders if !reduced => {
-                self.chunk_borders = !self.chunk_borders;
-                let on = self.chunk_borders;
+                let on = self.toggle_entry("chunk_borders");
                 self.debug_toggle_feedback(
                     on,
                     "debug.chunk_boundaries.on",
@@ -3003,30 +3013,26 @@ impl Play {
         if self.java_screen || self.closed.is_some() {
             return;
         }
-        let on = |t| match t {
-            mcr_ui::DebugToggle::Hitboxes => self.show_hitboxes,
-            mcr_ui::DebugToggle::ChunkBorders => self.chunk_borders,
-            mcr_ui::DebugToggle::AdvancedTooltips => self.options.advanced_item_tooltips,
-            mcr_ui::DebugToggle::FpsCharts => self.fps_charts,
-            mcr_ui::DebugToggle::NetworkCharts => self.network_charts,
-            mcr_ui::DebugToggle::LightmapTexture => self.lightmap_texture,
-            mcr_ui::DebugToggle::ProfilerChart => self.profiler_chart,
-        };
-        let states = mcr_ui::DebugToggle::ALL.map(on);
-        self.push_screen(Box::new(mcr_ui::DebugOptionsScreen::new(states)));
+        let reduced = self.reduced_debug_info();
+        let chord = self.debug_keys.modifier_down();
+        self.push_screen(Box::new(mcr_ui::DebugOptionsScreen::new(
+            self.debug_entries.clone(),
+            reduced,
+        )));
+        if chord {
+            self.debug_keys.keep_chord();
+        }
     }
 
-    fn toggle_debug(&mut self, toggle: mcr_ui::DebugToggle) {
-        use mcr_ui::DebugToggle as T;
-        self.debug_action(match toggle {
-            T::Hitboxes => DebugAction::ShowHitboxes,
-            T::ChunkBorders => DebugAction::ShowChunkBorders,
-            T::AdvancedTooltips => DebugAction::AdvancedTooltips,
-            T::FpsCharts => DebugAction::FpsCharts,
-            T::NetworkCharts => DebugAction::NetworkCharts,
-            T::LightmapTexture => DebugAction::LightmapTexture,
-            T::ProfilerChart => DebugAction::ProfilingChart,
-        });
+    fn toggle_entry(&mut self, id: &str) -> bool {
+        let on = self.debug_entries.toggle(id, self.debug_on);
+        crate::debug_tools::save_entries(&self.game_dir, &self.debug_entries);
+        on
+    }
+
+    fn entry_on(&self, id: &str) -> bool {
+        self.debug_entries
+            .enabled(id, self.debug_on, self.reduced_debug_info())
     }
 
     /// F3+S: the GUI sprite sheets to `debug/dynamic_textures_<stamp>` (the block and particle
@@ -3101,7 +3107,19 @@ impl Play {
                 )),
             ],
         ));
-        match profile.write(&self.game_dir, &crate::grab::local_timestamp()) {
+        let system = self.system_report();
+        let options =
+            std::fs::read_to_string(self.game_dir.join("options.txt")).unwrap_or_default();
+        let options: String = options.chars().take(256 * 1024).collect();
+        let shares = self.sections.shares();
+        let input = crate::debug_tools::ArchiveInput {
+            world: &self.server_name,
+            version: "26.3",
+            system: &system,
+            options: &options,
+            shares: &shares,
+        };
+        match profile.write(&self.game_dir, &crate::grab::local_timestamp(), &input) {
             Ok(path) => {
                 let link = Component::text(path.display().to_string()).styled(Style {
                     underlined: Some(true),
@@ -3120,6 +3138,28 @@ impl Play {
             }
             Err(e) => eprintln!("debug: could not save the profile: {e}"),
         }
+    }
+
+    /// `SystemReport`: what the profile archive records about this machine.
+    fn system_report(&self) -> String {
+        let threads = std::thread::available_parallelism().map_or(0, usize::from);
+        format!(
+            "mcr {}\nMinecraft: 26.3\nOS: {} {}\nCPU threads: {threads}\nResident memory: {} MB\nGPU: {}\nDisplay: {}x{}\nServer: {}\n",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            debug::resident_mb(),
+            self.render.renderer.adapter_info().name,
+            self.render.renderer.size().0,
+            self.render.renderer.size().1,
+            self.world
+                .client
+                .state
+                .server
+                .brand
+                .as_deref()
+                .unwrap_or("unknown"),
+        )
     }
 
     fn game_rules_tick(&mut self) {
@@ -3615,7 +3655,10 @@ impl Play {
                 ScreenAction::Disconnect => self.leave = true,
                 ScreenAction::OpenWorldOptions => self.open_world_options(),
                 ScreenAction::OpenGameRules => self.open_game_rules(),
-                ScreenAction::ToggleDebug(toggle) => self.toggle_debug(toggle),
+                ScreenAction::SetDebugEntries(entries) => {
+                    self.debug_entries = *entries;
+                    crate::debug_tools::save_entries(&self.game_dir, &self.debug_entries);
+                }
                 ScreenAction::SetGameRules(rules) => {
                     self.net(|c| c.set_game_rules(&rules));
                 }
@@ -3688,6 +3731,18 @@ impl Play {
                 ScreenAction::CopyToClipboard(text) => {
                     use mcr_ui::Clipboard;
                     self.gui.clipboard.set(&text);
+                }
+                ScreenAction::SystemToast {
+                    key,
+                    title,
+                    message,
+                } => {
+                    self.gui.toasts.add_system_lang(
+                        &mut self.gui.ui,
+                        mcr_ui::SystemToastId::new(key),
+                        &title,
+                        message.as_deref(),
+                    );
                 }
                 ScreenAction::ClickSound => {
                     if let Some(audio) = &mut self.audio {
@@ -3967,6 +4022,22 @@ impl Play {
         camera
     }
 
+    fn profiler_pie(&self) -> mcr_ui::ProfilerPie {
+        mcr_ui::ProfilerPie {
+            root: "root".into(),
+            slices: self
+                .sections
+                .shares()
+                .into_iter()
+                .map(|(name, percent)| mcr_ui::PieSlice {
+                    name: name.to_owned(),
+                    percent,
+                    color: crate::debug_tools::section_color(name),
+                })
+                .collect(),
+        }
+    }
+
     fn debug_charts(&self) -> Vec<mcr_ui::DebugChart> {
         let chart = |title: &str, unit, samples: &[f32], scale, warn, bad| mcr_ui::DebugChart {
             title: title.to_owned(),
@@ -4020,6 +4091,7 @@ impl Play {
             self.turn_player(f64::from(dt));
         }
 
+        self.sections.begin();
         self.world.camera = self.camera(self.partial());
         self.world.camera.fov_y = self.world.camera.fov_y.max(0.1);
         if let Err(e) = self.render.update(&mut self.world) {
@@ -4035,6 +4107,7 @@ impl Play {
         let boxes = self.outline_boxes();
         let lines = self.debug_lines(camera.position);
         self.outline.build(&boxes, &lines, &camera, size);
+        self.sections.lap(crate::debug_tools::SECTION_UPDATE);
 
         let partial = self.partial();
         let aspect = size.0 as f32 / size.1.max(1) as f32;
@@ -4064,6 +4137,7 @@ impl Play {
         self.moon_phase = env.moon_phase;
         self.prepare_visuals(&camera, partial, aspect, &env);
         let screen_fx = self.screen_effects(&camera, partial, aspect);
+        self.sections.lap(crate::debug_tools::SECTION_VISUALS);
 
         self.update_gui_size();
         self.tick_toasts();
@@ -4080,25 +4154,34 @@ impl Play {
         let chat_open = self.chat_open();
         let (crosshair, hotbar_attack) = self.crosshair_hud();
         self.view_cache.refresh(&self.world.client.state);
-        let debug = self.debug_on.then(|| {
-            let mut overlay = debug::build(&DebugInput {
-                state: &self.world.client.state,
-                data: self.data,
-                feet: self.feet(),
-                yaw: self.yaw,
-                pitch: self.pitch,
-                target: self.target,
-                fps: self.fps,
-                frame_ms: self.frame_ms,
-                pipeline: self.render.stats(),
-                tick: self.ticks,
-                adapter: &self.render.renderer.adapter_info().name,
-                size,
-                memory_mb: debug::resident_mb(),
-                meshed_columns: self.world.loaded_count(),
-            });
-            overlay.charts = self.debug_charts();
-            overlay.lightmap = self.lightmap_texture.then(|| env.lightmap(1.0).to_vec());
+        let reduced = self.reduced_debug_info();
+        let shows_text = self.debug_entries.any_text_enabled(self.debug_on, reduced);
+        let debug = (self.debug_on || shows_text).then(|| {
+            let on = |id: &str| self.debug_entries.enabled(id, self.debug_on, reduced);
+            let mut overlay = debug::build(
+                &DebugInput {
+                    state: &self.world.client.state,
+                    data: self.data,
+                    feet: self.feet(),
+                    yaw: self.yaw,
+                    pitch: self.pitch,
+                    target: self.target,
+                    fps: self.fps,
+                    frame_ms: self.frame_ms,
+                    pipeline: self.render.stats(),
+                    tick: self.ticks,
+                    adapter: &self.render.renderer.adapter_info().name,
+                    size,
+                    memory_mb: debug::resident_mb(),
+                    meshed_columns: self.world.loaded_count(),
+                },
+                &on,
+            );
+            if self.debug_on {
+                overlay.pie = self.profiler_chart.then(|| self.profiler_pie());
+                overlay.charts = self.debug_charts();
+                overlay.lightmap = self.lightmap_texture.then(|| env.lightmap(1.0).to_vec());
+            }
             overlay
         });
         let input =
@@ -4265,6 +4348,7 @@ impl Play {
                 SoundSource::Players,
             );
         }
+        self.sections.lap(crate::debug_tools::SECTION_GUI);
         self.render.renderer.set_environment(&env);
         self.render.renderer.set_animation_tick(self.ticks);
         crate::post_effects::requested(
@@ -4293,6 +4377,7 @@ impl Play {
             self.render.renderer.request_capture();
         }
         let stats = self.render.draw_with(&camera, 1.0, Some(&mut overlay));
+        self.sections.lap(crate::debug_tools::SECTION_DRAW);
         if self.spectate_view.is_none() {
             let (yaw, pitch) = self.shown_look(&camera);
             self.turn_latency.shown(yaw, pitch, Instant::now());
@@ -4562,11 +4647,11 @@ impl Play {
             return lines;
         }
         let state = &self.world.client.state;
-        if self.show_hitboxes {
+        if self.entry_on("entity_hitboxes") {
             let first_person = self.perspective == Perspective::First;
             crate::gizmos::hitboxes(state, camera, first_person, &mut lines);
         }
-        if self.chunk_borders {
+        if self.entry_on("chunk_borders") {
             let min_y = state.dimension.min_y;
             let max_y = min_y + state.dimension.height - 1;
             crate::gizmos::chunk_borders(camera, min_y, max_y, &mut lines);
