@@ -192,3 +192,39 @@ border.
   with the option on the slime and item behind the glass take its tint and no longer draw over it; clouds and
   the world border behind the glass are attenuated by it instead of covering it; rain blends in both modes.
 - A level 1 beacon: placing red stained glass three blocks above it turns the beam above the glass red.
+
+## Close-out notes (batch 5)
+
+#### P15 live checks, vanilla 26.3 server on loopback, gamescope headless
+- Spear dip: an iron spear with a patched `kinetic_weapon` (damage condition only, no speed minimum) held
+  in use against a NoAI zombie three blocks ahead. The server stabbed every 10 ticks; the dip ran from tick 1
+  to 10 after each `KINETIC_HIT` entity event, and only on hits more than 10 game ticks after the last one,
+  as `LivingEntity#onKineticHit` gates it. No hit sound plays because the patched component has none, as in
+  vanilla.
+- Delayed level events: a zombie with Weaving killed 29 blocks away; level event 3018 scheduled
+  `block.cobweb.place` 14 ticks out (`distanceDelay`: 29 / 40 * 20) and it played 14 ticks later. The sound log
+  (`MCR_SOUND_LOG`) now notes each delayed sound when it is scheduled.
+- stop_sound in mod mode: not run. The machine had about 1 GiB of RAM free beside another agent's mod
+  benchmark, too little for the Fabric JVM; moved to `vanilla-parity-7`.
+
+#### Typed commands rejected (reported by the batch 1-4 live checks)
+- Not a client bug: the chat screen and the autopilot `chat` step send every typed command
+  (`ScreenAction::SendCommand`, `Play::submit_chat`); only clicked `run_command` goes through the local
+  check. The "Unknown or incomplete command" lines came from the server.
+- Cause: `op Bot` on the console before `Bot` had joined. The server resolves an unseen name through the
+  profile lookup, and `Bot` is a real account, so ops.json held that account's UUID instead of the offline
+  UUID the player joins with. Opping after the join works: `/setblock`, `/summon` and `/time set` all ran.
+- Regression test `chat_sends_commands_the_local_parse_rejects` (mcr-ui): Enter sends the command even when
+  the local parse shows an error. The autopilot no longer cuts `chat` and `type` lines at `#`, which had
+  truncated commands with block tags or colours.
+
+#### Re-audit
+- Spot-checked against the decompiled client: `BeaconBlockEntity#tick` (10 blocks a tick, `% 80` recount),
+  `KineticWeapon#damageEntities` and `LivingEntity#onKineticHit`, `SystemToast` `pack.copyFailure`,
+  `DebugScreenEntries` profiles.
+- Leftovers, all in `vanilla-parity-7`: 26 of vanilla's 43 debug entries missing and the F3 text in mcr's
+  own order (Q1, Q2); the World Options page doesn't scroll (Q3); no separate cloud depth target with improved
+  transparency (Q4); live checks left: stop_sound in mod mode (Q5), local-world rows (Q6), pack drop toast
+  (Q7). P6 stays owner-only (Q8).
+- Kept as designed: the F3+L zip holds this client's own metrics, and the F3+1 pie has flat sections, because
+  there is no nested profiler.

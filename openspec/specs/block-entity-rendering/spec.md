@@ -68,3 +68,10 @@ crumbling overlay on their own model parts.
 #### Scenario: Mining a chest
 - **WHEN** the player mines a chest
 - **THEN** the cracks follow the chest's lid and body
+
+### Requirement: Beacon beam cadence
+A beacon beam SHALL be scanned one step per tick as vanilla's `BeaconBlockEntity#tick` does.
+
+#### Scenario: Extending the beam
+- **WHEN** the block above a beam is removed
+- **THEN** the beam lengthens at vanilla's rate

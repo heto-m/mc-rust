@@ -85,7 +85,14 @@ pub fn key_by_name(name: &str) -> Option<InputKey> {
 pub fn parse(text: &str) -> Result<Vec<Step>, String> {
     let mut steps = Vec::new();
     for (n, raw) in text.lines().enumerate() {
-        let line = raw.split('#').next().unwrap_or("").trim();
+        let raw = raw.trim();
+        let verbatim = raw.starts_with("chat ") || raw.starts_with("type ");
+        // Chat and typed text keep `#`: block tags and colours are part of commands.
+        let line = if verbatim {
+            raw
+        } else {
+            raw.split('#').next().unwrap_or("").trim()
+        };
         if line.is_empty() {
             continue;
         }
@@ -518,6 +525,12 @@ mod tests {
         assert_eq!(steps[5], Step::WaitMods);
         assert!(matches!(&steps[1], Step::Hold(keys, 20) if keys.len() == 2));
         assert_eq!(steps[3], Step::Chat("/time set day".into()));
+        assert_eq!(
+            parse("# setup\nchat /fill ~ ~ ~ ~1 ~ ~1 air replace #minecraft:logs").unwrap(),
+            [Step::Chat(
+                "/fill ~ ~ ~ ~1 ~ ~1 air replace #minecraft:logs".into()
+            )]
+        );
         assert_eq!(
             parse("hover 12 34.5").unwrap(),
             [Step::Hover { x: 12.0, y: 34.5 }]

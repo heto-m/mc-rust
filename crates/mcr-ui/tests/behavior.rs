@@ -102,6 +102,28 @@ fn chat_slash_sends_command_without_slash() {
 }
 
 #[test]
+fn chat_sends_commands_the_local_parse_rejects() {
+    let (_, mut screen, script) = chat();
+    send(&mut screen, &NoView, &typed("/setblock ~ ~ ~ stone"));
+    script.0.borrow_mut().result = Some(SuggestionSet {
+        text: "/setblock ~ ~ ~ stone".into(),
+        suggestions: vec![suggestion(1, 9, "setblock")],
+        usage: vec![Component::text(
+            "Unknown or incomplete command. See below for error",
+        )],
+        usage_start: 1,
+        command: true,
+        ..SuggestionSet::default()
+    });
+    tick(&mut screen, &NoView, 1);
+    assert_eq!(screen.popup_len(), 1);
+    let out = key(&mut screen, Key::Enter);
+    assert!(
+        matches!(out.as_slice(), [ScreenAction::SendCommand(c), ScreenAction::Pop] if c == "setblock ~ ~ ~ stone")
+    );
+}
+
+#[test]
 fn chat_normalizes_whitespace_and_skips_blank() {
     let (hud, mut screen, _) = chat();
     send(&mut screen, &NoView, &typed("  a   b  "));

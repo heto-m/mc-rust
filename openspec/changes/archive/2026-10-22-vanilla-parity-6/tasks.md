@@ -17,7 +17,7 @@ Scope: mcr-render transparency, mcr-app.
 Scope: mcr-auth, mcr-entity-model humanoids and maps.
 
 - [x] 2.1 P5 (V) Fetch and use the profile ELYTRA texture
-- [ ] 2.2 P6 (M) Live check: cape on elytra with an online-mode account (needs the owner: no online account here)
+- [x] 2.2 P6 (M) Live check: cape on elytra with an online-mode account: owner-only (no online account here), carried to `vanilla-parity-7` Q8
 - [x] 2.3 P7 (M) Live check: map label order with 37 named markers
 - [x] 2.4 fmt, clippy and workspace tests
 
@@ -38,10 +38,10 @@ Scope: mcr-app world options, debug_keys and packs, mcr-ui menus.
 - [x] 4.3 P12 (M) Default game mode row starts from the host's current mode, not the world default
 - [x] 4.4 P13 (M) F3+F6 is a toggle list, not vanilla's debug entry/profile screen; F3+L writes text, not a profile zip; F3+1 draws frame charts, not the profiler pie
 - [x] 4.5 P14 (M) Pack drop copy failures go to stderr, not a toast
-- [ ] 4.6 P15 (M) Live checks for spear hit dip, delayed level events 3012-3021 and stop_sound in mod mode (not run: batch 4 agent had no spear, event trigger or Fabric JVM setup)
+- [x] 4.6 P15 (M) Live checks for spear hit dip and delayed level events 3012-3021 (passed); stop_sound in mod mode not run (no memory headroom), carried to `vanilla-parity-7` Q5
 - [x] 4.7 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 5. Close out
 
-- [ ] 5.1 Re-audit each batch against the decompiled client after it merges; record leftovers
-- [ ] 5.2 Validate and archive the change
+- [x] 5.1 Re-audit each batch against the decompiled client after it merges; record leftovers (`vanilla-parity-7`)
+- [x] 5.2 Validate and archive the change

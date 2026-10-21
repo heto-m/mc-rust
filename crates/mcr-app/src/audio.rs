@@ -480,6 +480,9 @@ impl Audio {
             self.play(event, Some(position), volume, pitch, category);
             return;
         }
+        if self.log.is_some() {
+            self.note(&format!("delayed sound={event} ticks={ticks}"));
+        }
         if self.delayed.len() >= MAX_DELAYED {
             self.delayed.remove(0);
         }
