@@ -182,6 +182,8 @@ impl RenderSystem {
     pub fn apply_options(&mut self, options: &Options, world: &dyn MeshWorld) {
         self.renderer
             .set_section_fade(options.chunk_section_fade_in_time as f32);
+        self.renderer
+            .set_improved_transparency(options.improved_transparency);
         self.renderer.set_texture_filter(TextureFilter {
             mode: match options.texture_filtering {
                 TextureFiltering::None => FilterMode::Nearest,

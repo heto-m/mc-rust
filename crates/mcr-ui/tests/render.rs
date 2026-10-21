@@ -509,3 +509,37 @@ fn vehicle_hearts_replace_food_and_jump_bar_replaces_xp() {
         "no bar in the empty state"
     );
 }
+
+#[test]
+fn linear_sprites_blend_between_texels() {
+    let Some((gpu, mut renderer, mut ui)) = setup() else {
+        return;
+    };
+    let px = [0, 0, 0, 255, 255, 255, 255, 255];
+    let sprite = ui.sprites_mut().add_raw(2, 1, &px).expect("fits");
+    let draw = |ui: &mut mcr_ui::Ui, linear: bool| {
+        let mut f = ui.frame(200, 100);
+        f.set_linear(linear);
+        f.sprite_quad(
+            sprite,
+            [[0.0, 0.0], [0.0, 100.0], [200.0, 100.0], [200.0, 0.0]],
+            [[0.25, 0.5], [0.25, 0.5], [0.75, 0.5], [0.75, 0.5]],
+            0xFFFF_FFFF,
+        );
+    };
+    draw(&mut ui, false);
+    let nearest = common::render(&gpu, &mut renderer, &mut ui, (200, 100), wgpu::Color::BLACK);
+    draw(&mut ui, true);
+    let linear = common::render(&gpu, &mut renderer, &mut ui, (200, 100), wgpu::Color::BLACK);
+    assert_eq!(common::pixel(&nearest, 200, 60, 50)[0], 0);
+    assert_eq!(common::pixel(&nearest, 200, 140, 50)[0], 255);
+    let (left, mid, right) = (
+        common::pixel(&linear, 200, 60, 50)[0],
+        common::pixel(&linear, 200, 100, 50)[0],
+        common::pixel(&linear, 200, 140, 50)[0],
+    );
+    assert!(
+        0 < left && left < mid && mid < right && right < 255,
+        "{left} {mid} {right}"
+    );
+}

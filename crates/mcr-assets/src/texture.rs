@@ -662,6 +662,10 @@ impl TextureArrays {
         self.slots.get(id.0 as usize)?.as_ref()
     }
 
+    pub fn slots(&self) -> impl Iterator<Item = &SpriteSlot> {
+        self.slots.iter().flatten()
+    }
+
     pub fn animation(&self, id: SpriteId) -> Option<&Animation> {
         self.animations.get(&id)
     }

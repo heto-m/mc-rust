@@ -176,6 +176,10 @@ impl PackedQuad {
     pub fn face(self) -> Face {
         Face::ALL[(self.0[0] >> 15 & 7).min(5) as usize]
     }
+
+    pub fn is_opaque(self) -> bool {
+        self.0[1] >> 31 != 0
+    }
 }
 
 /// Brightness of a cube AO level.
@@ -230,6 +234,10 @@ fn quantize(
 
 impl ModelQuad {
     pub const SIZE: usize = 40;
+
+    pub fn is_opaque(&self) -> bool {
+        self.0[6] >> 19 & u32::from(MODEL_FLAG_OPAQUE) != 0
+    }
 
     pub fn encode(q: &ModelQuadDesc) -> Result<Self, QuadError> {
         let mut w = [0u32; 10];

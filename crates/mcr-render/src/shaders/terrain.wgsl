@@ -348,6 +348,12 @@ fn opaque_texel(uv: vec2<f32>, layer: u32, tint: vec2<u32>, cell: vec3<f32>) -> 
     return t.rgb * tint_color(tint.x, tint.y, cell);
 }
 
+// Opaque-layer texel: no alpha test, so the solid pipeline keeps early depth testing.
+fn solid_texel(uv: vec2<f32>, layer: u32, tint: vec2<u32>, cell: vec3<f32>) -> vec3<f32> {
+    let t = sample_animated(uv, layer, dpdx(uv), dpdy(uv));
+    return t.rgb * tint_color(tint.x, tint.y, cell);
+}
+
 fn translucent_texel(uv: vec2<f32>, layer: u32, tint: vec2<u32>, cell: vec3<f32>) -> vec4<f32> {
     let dx = dpdx(uv);
     let dy = dpdy(uv);
@@ -361,6 +367,12 @@ fn translucent_texel(uv: vec2<f32>, layer: u32, tint: vec2<u32>, cell: vec3<f32>
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let c = opaque_texel(in.uv, in.layer, in.tint, in.cell) * in.color;
+    return vec4<f32>(apply_faded_fog(c, in.fog_distance), 1.0);
+}
+
+@fragment
+fn fs_solid(in: VsOut) -> @location(0) vec4<f32> {
+    let c = solid_texel(in.uv, in.layer, in.tint, in.cell) * in.color;
     return vec4<f32>(apply_faded_fog(c, in.fog_distance), 1.0);
 }
 

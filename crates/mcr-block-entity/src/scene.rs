@@ -177,7 +177,18 @@ pub struct BlockEntityScene {
     time: f32,
     has_gateway: bool,
     queued_text: Vec<TextDisplayDraw>,
+    cracking: Vec<[i32; 3]>,
+    /// Block-local model quads of each cracking entity drawn this frame, for its crumbling overlay.
+    crack_quads: Vec<([i32; 3], Vec<CrackQuad>)>,
+    crack_slot: Option<usize>,
 }
+
+/// Block entities cracked at once, and model quads kept per crack.
+const MAX_CRACKING: usize = 64;
+/// A posed model face in world space.
+pub type CrackQuad = [[f32; 3]; 4];
+
+pub const MAX_CRACK_QUADS: usize = 128;
 
 impl BlockEntityScene {
     pub fn new(
@@ -221,7 +232,45 @@ impl BlockEntityScene {
             time: 0.0,
             has_gateway: false,
             queued_text: Vec::new(),
+            cracking: Vec::new(),
+            crack_quads: Vec::new(),
+            crack_slot: None,
         })
+    }
+
+    /// Block entities the next [`update`](Self::update) records crack geometry for.
+    pub fn set_cracking(&mut self, positions: impl IntoIterator<Item = [i32; 3]>) {
+        self.cracking.clear();
+        self.cracking
+            .extend(positions.into_iter().take(MAX_CRACKING));
+    }
+
+    /// The posed model quads of a cracking block entity, block-local, as last drawn.
+    pub fn crack_quads(&self, pos: [i32; 3]) -> &[CrackQuad] {
+        self.crack_quads
+            .iter()
+            .find(|(p, _)| *p == pos)
+            .map_or(&[], |(_, q)| q.as_slice())
+    }
+
+    /// Vanilla's crumbling overlay follows the model parts a block entity renderer draws.
+    fn record_crack(&mut self, li: usize, local: Mat4) {
+        let Some((_, quads)) = self.crack_slot.and_then(|i| self.crack_quads.get_mut(i)) else {
+            return;
+        };
+        let model = &self.layers[li].model;
+        for face in model.vertices.as_chunks::<4>().0 {
+            if quads.len() >= MAX_CRACK_QUADS {
+                break;
+            }
+            let Some(world) = self.scratch_world.get(face[0].bone as usize) else {
+                continue;
+            };
+            let m = local * *world;
+            quads.push(std::array::from_fn(|i| {
+                m.transform_point3(Vec3::from(face[i].pos)).to_array()
+            }));
+        }
     }
 
     /// Text displays drawn by the next [`update`](Self::update).
@@ -432,6 +481,7 @@ impl BlockEntityScene {
         for (o, w) in out.iter_mut().zip(&self.scratch_world) {
             *o = Bone34::from_mat(&(local * *w));
         }
+        self.record_crack(li, local);
         self.gpu.push(&PartInstance {
             model,
             texture: tex,
@@ -521,6 +571,7 @@ impl BlockEntityScene {
                 atlas.pages().iter().map(|p| p.pixels.as_slice()),
             );
         }
+        self.crack_quads.clear();
         let mut entries = std::mem::take(&mut self.entries);
         let mut displays: Vec<Display> = Vec::new();
         let mut stats = BlockEntityStats {
@@ -534,8 +585,13 @@ impl BlockEntityScene {
             }
             stats.drawn += 1;
             let lt = (ctx.light)(*pos);
+            self.crack_slot = self.cracking.contains(pos).then(|| {
+                self.crack_quads.push((*pos, Vec::new()));
+                self.crack_quads.len() - 1
+            });
             self.emit(*pos, e, lt, &ctx, &mut displays, ui.as_deref_mut());
         }
+        self.crack_slot = None;
         self.entries = entries;
         self.emit_text_displays(&ctx);
         let views: Vec<EntityView<'_>> = displays
@@ -1235,6 +1291,7 @@ impl BlockEntityScene {
         for (o, w) in out.iter_mut().zip(&self.scratch_world) {
             *o = Bone34::from_mat(&(local * *w));
         }
+        self.record_crack(li, local);
         self.gpu.push(&PartInstance {
             model,
             texture: tex,

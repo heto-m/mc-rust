@@ -31,6 +31,10 @@ pub fn run(opts: &crate::cli::Options, out: &Path, launched: Instant) -> Result<
     let (assets, source) = world_setup::open(opts)?;
     let streaming = Instant::now();
     let mut engine = Engine::new(renderer, assets, source, opts.camera, opts.render_distance);
+    engine
+        .render
+        .renderer
+        .set_improved_transparency(opts.improved_transparency);
     if opts.bench_frames > 0 {
         engine.render.renderer.set_animation_tick(0);
     }

@@ -63,6 +63,8 @@ pub struct DrawCmd {
     pub page: PageRef,
     pub scissor: [u32; 4],
     pub blend: Blend,
+    /// Bilinear sampling, for textures whose `.mcmeta` asks for `blur`.
+    pub linear: bool,
     pub quads: Range<u32>,
 }
 
@@ -75,6 +77,7 @@ pub struct Batch {
     /// First quad drawn above the app's 3D screen preview, when a screen marked one.
     pub preview_split: Option<u32>,
     blend: Blend,
+    linear: bool,
 }
 
 impl Batch {
@@ -94,15 +97,21 @@ impl Batch {
         for (pos, uv) in corners.into_iter().zip(uv) {
             self.vertices.push(Vertex { pos, uv, color });
         }
-        let blend = self.blend;
+        let (blend, linear) = (self.blend, self.linear);
         match self.cmds.last_mut() {
-            Some(cmd) if cmd.page == page && cmd.scissor == scissor && cmd.blend == blend => {
+            Some(cmd)
+                if cmd.page == page
+                    && cmd.scissor == scissor
+                    && cmd.blend == blend
+                    && cmd.linear == linear =>
+            {
                 cmd.quads.end = quad + 1
             }
             _ => self.cmds.push(DrawCmd {
                 page,
                 scissor,
                 blend,
+                linear,
                 quads: quad..quad + 1,
             }),
         }
@@ -223,6 +232,7 @@ impl Ui {
         self.batch.cmds.clear();
         self.batch.preview_split = None;
         self.batch.blend = Blend::Normal;
+        self.batch.linear = false;
         self.batch.scale = scale;
         self.batch.framebuffer = (width, height);
         UiFrame {
@@ -285,6 +295,12 @@ impl UiFrame<'_> {
     /// Blend mode of everything drawn until the next call.
     pub fn set_blend(&mut self, blend: Blend) {
         self.ui.batch.blend = blend;
+    }
+
+    /// Bilinear sampling for everything drawn until the next call; sprites sit unpadded in the atlas,
+    /// so callers keep UVs half a texel inside.
+    pub fn set_linear(&mut self, linear: bool) {
+        self.ui.batch.linear = linear;
     }
 
     /// Number of UI frames started so far.

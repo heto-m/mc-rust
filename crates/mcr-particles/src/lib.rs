@@ -23,7 +23,8 @@ use std::collections::HashMap;
 use mcr_protocol::play::clientbound::world::{LevelParticles, ParticleRandomization};
 use mcr_protocol::types::particle::{BlockParticleKind, Particle, PositionSource};
 use mcr_render::glam::DVec3;
-use mcr_render::{EffectImage, Environment, OverlayCtx};
+use mcr_render::wgpu;
+use mcr_render::{EffectImage, Environment, OitStage, OverlayCtx};
 
 pub use atlas::{ParticleAtlas, Uv};
 pub use names::PARTICLE_NAMES;
@@ -131,6 +132,8 @@ pub struct ParticleEngine {
     spores: usize,
     elder_guardian: bool,
     gpu: Option<Gpu>,
+    /// This frame's instances were uploaded by `prepare_oit`.
+    prepared: bool,
 }
 
 fn finite3(v: [f64; 3]) -> bool {
@@ -168,6 +171,7 @@ impl ParticleEngine {
             spores: 0,
             elder_guardian: false,
             gpu: None,
+            prepared: false,
         }
     }
 
@@ -690,9 +694,56 @@ impl ParticleEngine {
         }
     }
 
-    /// Draws every live particle into the frame after the world pass, depth-tested against it.
+    /// Improved transparency, before the translucent world: draws the opaque particles and reports
+    /// whether translucent ones go through [`ParticleEngine::draw_oit`].
+    pub fn prepare_oit(
+        &mut self,
+        ctx: &mut OverlayCtx<'_>,
+        partial: f32,
+        env: &Environment,
+    ) -> bool {
+        self.upload(ctx, partial, env);
+        self.prepared = true;
+        let Some(gpu) = &mut self.gpu else {
+            return false;
+        };
+        // Opaque pools draw here so the translucent world composited next covers them.
+        gpu.draw(ctx);
+        ctx.oit
+            .is_some_and(|info| gpu.prepare_oit(ctx.device, info))
+    }
+
+    pub fn draw_oit(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        stage: OitStage,
+        oit: &wgpu::BindGroup,
+    ) {
+        if let Some(gpu) = &self.gpu {
+            gpu.draw_oit(pass, stage, oit);
+        }
+    }
+
+    /// Draws every live particle into the frame after the world pass, depth-tested against it, unless
+    /// [`ParticleEngine::prepare_oit`] already did this frame.
     pub fn record(&mut self, ctx: &mut OverlayCtx<'_>, partial: f32, env: &Environment) {
+        if std::mem::take(&mut self.prepared) {
+            return;
+        }
+        self.upload(ctx, partial, env);
         if self.count() == 0 {
+            return;
+        }
+        if let Some(gpu) = &self.gpu {
+            gpu.draw(ctx);
+        }
+    }
+
+    fn upload(&mut self, ctx: &OverlayCtx<'_>, partial: f32, env: &Environment) {
+        if self.count() == 0 {
+            if let Some(gpu) = &mut self.gpu {
+                gpu.clear_counts();
+            }
             return;
         }
         if self.gpu.as_ref().is_none_or(|g| g.format() != ctx.format) {
@@ -711,7 +762,7 @@ impl ParticleEngine {
             0.0
         };
         if let Some(gpu) = &mut self.gpu {
-            gpu.record(ctx, &self.pools, &self.atlas, partial, env);
+            gpu.upload(ctx, &self.pools, &self.atlas, partial, env);
         }
     }
 

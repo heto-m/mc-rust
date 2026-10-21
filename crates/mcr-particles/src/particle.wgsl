@@ -2,6 +2,8 @@ struct Uniforms {
     view_proj: mat4x4<f32>,
     right: vec4<f32>,
     up: vec4<f32>,
+    fog_color: vec4<f32>,
+    fog: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -19,6 +21,8 @@ struct Out {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
+    // Spherical and cylindrical distance, as vanilla's particle fog.
+    @location(2) fog_distance: vec2<f32>,
 }
 
 @vertex
@@ -45,7 +49,23 @@ fn vs(@builtin(vertex_index) vi: u32, inst: Instance) -> Out {
     let t = vec2<f32>((c.x + 1.0) * 0.5, 1.0 - (c.y + 1.0) * 0.5);
     o.uv = mix(inst.uv.xy, inst.uv.zw, t);
     o.color = inst.color;
+    o.fog_distance = vec2<f32>(length(world), max(length(world.xz), abs(world.y)));
     return o;
+}
+
+fn linear_fog(d: f32, start: f32, end: f32) -> f32 {
+    if d <= start {
+        return 0.0;
+    }
+    if d >= end {
+        return 1.0;
+    }
+    return (d - start) / (end - start);
+}
+
+fn fogged(rgb: vec3<f32>, d: vec2<f32>) -> vec3<f32> {
+    let f = max(linear_fog(d.x, u.fog.x, u.fog.y), linear_fog(d.y, u.fog.z, u.fog.w));
+    return mix(rgb, u.fog_color.rgb, f * u.fog_color.a);
 }
 
 @fragment
@@ -54,7 +74,7 @@ fn fs_opaque(in: Out) -> @location(0) vec4<f32> {
     if t.a * in.color.a < 0.1 {
         discard;
     }
-    return vec4<f32>(t.rgb * in.color.rgb, 1.0);
+    return vec4<f32>(fogged(t.rgb * in.color.rgb, in.fog_distance), 1.0);
 }
 
 @fragment
@@ -63,5 +83,5 @@ fn fs_blend(in: Out) -> @location(0) vec4<f32> {
     if t.a * in.color.a < 0.1 {
         discard;
     }
-    return vec4<f32>(t.rgb * in.color.rgb, t.a * in.color.a);
+    return vec4<f32>(fogged(t.rgb * in.color.rgb, in.fog_distance), t.a * in.color.a);
 }

@@ -101,6 +101,12 @@ fn fs_main_dyn(in: VsOutDyn) -> @location(0) vec4<f32> {
 }
 
 @fragment
+fn fs_solid_dyn(in: VsOutDyn) -> @location(0) vec4<f32> {
+    let c = solid_texel(in.uv, in.layer, in.tint, in.cell) * dyn_color(in);
+    return vec4<f32>(apply_faded_fog(c, in.fog_distance), 1.0);
+}
+
+@fragment
 fn fs_translucent_dyn(in: VsOutDyn) -> @location(0) vec4<f32> {
     let t = translucent_texel(in.uv, in.layer, in.tint, in.cell);
     return vec4<f32>(apply_faded_fog(t.rgb * dyn_color(in), in.fog_distance), t.a);

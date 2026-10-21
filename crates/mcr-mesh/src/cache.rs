@@ -277,6 +277,8 @@ pub struct ModelCache {
     /// vanilla's palette.
     pub modded_tints: Vec<u32>,
     pub textures: TextureArrays,
+    /// Bit per packed texture layer whose sprite has no transparent texel in any frame.
+    opaque_layers: Vec<u64>,
     pub missing_sprites: Vec<String>,
     pub unbaked_states: usize,
     /// The first few blocks with unbaked states.
@@ -285,6 +287,17 @@ pub struct ModelCache {
     pub java_requests: Vec<String>,
     /// States meshed from Java's baked quads.
     pub java_states: usize,
+}
+
+fn opaque_layers(textures: &TextureArrays) -> Vec<u64> {
+    let mut bits = vec![0u64; (1 << 16) / 64];
+    for s in textures.slots() {
+        if s.transparency == Transparency::Opaque && s.group < 4 && s.first_layer < 1 << 14 {
+            let layer = (s.group << 14 | s.first_layer) as usize;
+            bits[layer / 64] |= 1 << (layer % 64);
+        }
+    }
+    bits
 }
 
 fn compute_meta(attr: u8, occ: u8, partial: u8, emission: u8, dark: bool) -> u32 {
@@ -581,12 +594,30 @@ impl ModelCache {
             modded_fluids: Vec::new(),
             modded_tints: Vec::new(),
             textures: TextureArrays::default(),
+            opaque_layers: Vec::new(),
             missing_sprites: Vec::new(),
             unbaked_states: 0,
             unbaked_blocks: Vec::new(),
             java_requests: Vec::new(),
             java_states: 0,
         }
+    }
+
+    /// Whether a quad on this packed texture layer can skip the alpha test without changing a pixel.
+    pub fn layer_opaque(&self, layer: u16) -> bool {
+        self.opaque_layers
+            .get(usize::from(layer) / 64)
+            .is_some_and(|w| w >> (layer % 64) & 1 != 0)
+    }
+
+    /// Marks a hand-built cache's texture layer opaque.
+    pub fn with_opaque_layer(mut self, layer: u16) -> Self {
+        let word = usize::from(layer) / 64;
+        if self.opaque_layers.len() <= word {
+            self.opaque_layers.resize(word + 1, 0);
+        }
+        self.opaque_layers[word] |= 1 << (layer % 64);
+        self
     }
 
     /// Overrides the shade brightness of a hand-built cache's state: `dark` is vanilla's 0.2.
@@ -994,6 +1025,7 @@ impl ModelCache {
         }
 
         cache.fluid_sprites = fluid_sprites;
+        cache.opaque_layers = opaque_layers(&textures);
         cache.textures = textures;
         cache.missing_sprites = missing_sprites;
         cache.unbaked_states = unbaked;

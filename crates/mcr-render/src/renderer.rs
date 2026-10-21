@@ -19,6 +19,7 @@ use crate::graph::VisibilityGraph;
 use crate::mesh::SectionMesh;
 use crate::mesh::TINT_TABLE_WORDS;
 use crate::occlusion::HiZ;
+use crate::oit::{OitShared, OitStage, OitTargets};
 use crate::overlay::{Overlay, OverlayCtx};
 use crate::post::{MAX_POST_CHAINS, PostChain, PostOverrides, PostStack};
 use crate::quad::{ModelQuad, PackedQuad};
@@ -32,6 +33,7 @@ const TERRAIN_SRC: &str = include_str!("shaders/terrain.wgsl");
 const DYNLIGHT_SRC: &str = include_str!("shaders/dynlight.wgsl");
 const CULL_SRC: &str = include_str!("shaders/cull.wgsl");
 const TRANS_CULL_SRC: &str = include_str!("shaders/trans_cull.wgsl");
+const TERRAIN_OIT_SRC: &str = include_str!("shaders/terrain_oit.wgsl");
 
 pub(crate) const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -39,13 +41,19 @@ const TICKS_PER_SECOND: f64 = 20.0;
 const LIGHTMAP_BYTES: u64 = 256 * 16;
 const READBACK_SLOTS: usize = 3;
 const STATS_COUNTER_OFFSET: u64 = 256;
-const COUNTERS_SIZE: u64 = 16;
-const TIMESTAMPS: u32 = 8;
-const STATS_SIZE: u64 = 512;
+const COUNTERS_SIZE: u64 = 32;
+const TIMESTAMPS: u32 = 10;
+/// Query indices bracketing the improved transparency passes.
+const OIT_TIMESTAMPS: u32 = 8;
+const STATS_SIZE: u64 = 768;
+/// Query resolves land on 256-byte boundaries.
+const OIT_STATS_OFFSET: u64 = 512;
 /// `DrawIndexedIndirect` arguments.
 const DRAW_CMD_SIZE: u64 = 20;
 /// Greedy meshing leaves at most one face plus one overlay per cell and direction.
 const MAX_CUBE_QUADS_PER_DRAW: u32 = 2 * 16 * 16 * 16;
+// Section metadata packs a face list's opaque count into the high half of its quad count.
+const _: () = assert!(MAX_CUBE_QUADS_PER_DRAW < 1 << 16);
 /// Bounds the shared quad index buffer; model or translucent quads past it in one section are dropped.
 const MAX_QUADS_PER_DRAW: u32 = 1 << 17;
 const DRAW_DATA_SIZE: u64 = 32;
@@ -256,6 +264,7 @@ struct Readback {
     buffer: wgpu::Buffer,
     state: Arc<AtomicU8>,
     two_phase: bool,
+    oit: bool,
     frame: u64,
 }
 
@@ -343,6 +352,7 @@ pub struct Renderer {
     terrain: TerrainPipelines,
     trans_geom_bg: wgpu::BindGroup,
     globals_bgl: wgpu::BindGroupLayout,
+    geom_bgl: wgpu::BindGroupLayout,
     globals_bg: wgpu::BindGroup,
     geom_bg: wgpu::BindGroup,
     sampler: wgpu::Sampler,
@@ -361,6 +371,8 @@ pub struct Renderer {
     sky_pipeline: wgpu::RenderPipeline,
     effects: Effects,
     dyn_lights: Option<DynamicLights>,
+    /// `improvedTransparency`; everything it allocates exists only while the option is on.
+    oit: Option<ImprovedTransparency>,
 
     cube_arena: Arena,
     model_arena: Arena,
@@ -401,11 +413,13 @@ struct TerrainShader {
     label: &'static str,
     /// Cube and model vertex entry points.
     vs: [&'static str; 2],
-    /// Opaque and translucent fragment entry points.
-    fs: [&'static str; 2],
+    /// Solid (no alpha test), cutout and translucent fragment entry points.
+    fs: [&'static str; 3],
 }
 
 struct TerrainPipelines {
+    cube_solid: wgpu::RenderPipeline,
+    model_solid: wgpu::RenderPipeline,
     cube: wgpu::RenderPipeline,
     model: wgpu::RenderPipeline,
     trans: wgpu::RenderPipeline,
@@ -454,11 +468,61 @@ impl TerrainShader {
             })
         };
         TerrainPipelines {
-            cube: build("cube", self.vs[0], self.fs[0], false),
-            model: build("model", self.vs[1], self.fs[0], false),
-            trans: build("translucent", self.vs[1], self.fs[1], true),
+            cube_solid: build("cube solid", self.vs[0], self.fs[0], false),
+            model_solid: build("model solid", self.vs[1], self.fs[0], false),
+            cube: build("cube", self.vs[0], self.fs[1], false),
+            model: build("model", self.vs[1], self.fs[1], false),
+            trans: build("translucent", self.vs[1], self.fs[2], true),
         }
     }
+}
+
+struct ImprovedTransparency {
+    shared: OitShared,
+    targets: OitTargets,
+    module: wgpu::ShaderModule,
+    layout: wgpu::PipelineLayout,
+    /// Translucent terrain per stage, specialised for the texture filter.
+    terrain: [wgpu::RenderPipeline; 3],
+}
+
+fn oit_terrain_pipelines(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    bounds_format: wgpu::TextureFormat,
+    mode: FilterMode,
+) -> [wgpu::RenderPipeline; 3] {
+    let constants = [("FILTER_MODE", f64::from(mode as u8))];
+    OitStage::ALL.map(|stage| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(stage.entry()),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs_model"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(OitStage::depth_state()),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some(stage.entry()),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &constants,
+                    ..Default::default()
+                },
+                targets: &stage.targets(bounds_format),
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+    })
 }
 
 /// Terrain pipelines with the dynamic light term, its uniform and this frame's sources.
@@ -710,7 +774,9 @@ impl Renderer {
         if !have.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE) {
             return Err(RenderError::MissingFeature("INDIRECT_FIRST_INSTANCE"));
         }
-        let optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | wgpu::Features::TIMESTAMP_QUERY;
+        let optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
+            | wgpu::Features::TIMESTAMP_QUERY
+            | wgpu::Features::FLOAT32_BLENDABLE;
         let features = wgpu::Features::INDIRECT_FIRST_INSTANCE
             | (have & optional)
             | (have & config.optional_features);
@@ -807,7 +873,7 @@ impl Renderer {
             cube_cmds: storage_buffer(
                 &device,
                 "cube cmds",
-                2 * max_sections * 6 * DRAW_CMD_SIZE,
+                3 * max_sections * 6 * DRAW_CMD_SIZE,
                 wgpu::BufferUsages::INDIRECT,
             ),
             quad_indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -824,7 +890,7 @@ impl Renderer {
             model_cmds: storage_buffer(
                 &device,
                 "model cmds",
-                2 * max_sections * DRAW_CMD_SIZE,
+                3 * max_sections * DRAW_CMD_SIZE,
                 wgpu::BufferUsages::INDIRECT,
             ),
             model_draws: storage_buffer(
@@ -1071,7 +1137,7 @@ impl Renderer {
             color_format,
             label: "terrain",
             vs: ["vs_cube", "vs_model"],
-            fs: ["fs_main", "fs_translucent"],
+            fs: ["fs_solid", "fs_main", "fs_translucent"],
         };
         let terrain = terrain_shader.pipelines(&device, FilterMode::default());
         let dyn_lights = config.dynamic_lights.then(|| {
@@ -1118,7 +1184,7 @@ impl Renderer {
                 color_format,
                 label: "terrain dynamic lights",
                 vs: ["vs_cube_dyn", "vs_model_dyn"],
-                fs: ["fs_main_dyn", "fs_translucent_dyn"],
+                fs: ["fs_solid_dyn", "fs_main_dyn", "fs_translucent_dyn"],
             };
             DynamicLights {
                 pipelines: shader.pipelines(&device, FilterMode::default()),
@@ -1202,6 +1268,7 @@ impl Renderer {
                 }),
                 state: Arc::new(AtomicU8::new(RB_IDLE)),
                 two_phase: false,
+                oit: false,
                 frame: 0,
             })
             .collect();
@@ -1222,6 +1289,7 @@ impl Renderer {
             sky_pipeline,
             effects,
             dyn_lights,
+            oit: None,
             cube_arena: Arena::new(cube_quads),
             model_arena: Arena::new(model_quads),
             occlusion: config.occlusion_culling,
@@ -1256,6 +1324,7 @@ impl Renderer {
             terrain,
             trans_geom_bg,
             globals_bgl,
+            geom_bgl,
             globals_bg,
             geom_bg,
             sampler,
@@ -1357,6 +1426,9 @@ impl Renderer {
         self.post.release();
         self.post_window = None;
         self.depth_view = depth_view(&self.device, width, height);
+        if let Some(o) = &mut self.oit {
+            o.targets = o.shared.targets(&self.device, self.size);
+        }
         self.hiz
             .resize(&self.device, &self.depth_view, width, height);
         self.cull_bg = make_cull_bg(
@@ -1406,11 +1478,78 @@ impl Renderer {
     }
 
     /// Vanilla's `textureFiltering`, `maxAnisotropyBit` and `mipmapLevels` for block textures.
+    /// Vanilla's `improvedTransparency`: translucent terrain and overlay work composited through
+    /// wavelet order-independent transparency. Off frees every target it used.
+    pub fn set_improved_transparency(&mut self, on: bool) {
+        if on == self.oit.is_some() {
+            return;
+        }
+        if !on {
+            self.oit = None;
+            return;
+        }
+        let shared = OitShared::new(&self.device, self.target_format());
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("terrain oit"),
+                source: wgpu::ShaderSource::Wgsl(
+                    [
+                        QUAD_SRC,
+                        GLOBALS_SRC,
+                        TERRAIN_SRC,
+                        crate::oit::oit_wgsl(2).as_str(),
+                        TERRAIN_OIT_SRC,
+                    ]
+                    .concat()
+                    .into(),
+                ),
+            });
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("terrain oit"),
+                bind_group_layouts: &[
+                    Some(&self.globals_bgl),
+                    Some(&self.geom_bgl),
+                    Some(&shared.layout),
+                ],
+                immediate_size: 0,
+            });
+        let terrain = oit_terrain_pipelines(
+            &self.device,
+            &module,
+            &layout,
+            shared.bounds_format,
+            self.filter.mode,
+        );
+        self.oit = Some(ImprovedTransparency {
+            targets: shared.targets(&self.device, self.size),
+            shared,
+            module,
+            layout,
+            terrain,
+        });
+    }
+
+    pub fn improved_transparency(&self) -> bool {
+        self.oit.is_some()
+    }
+
     pub fn set_texture_filter(&mut self, filter: TextureFilter) {
         if filter == self.filter {
             return;
         }
         if filter.mode != self.filter.mode {
+            if let Some(o) = &mut self.oit {
+                o.terrain = oit_terrain_pipelines(
+                    &self.device,
+                    &o.module,
+                    &o.layout,
+                    o.shared.bounds_format,
+                    filter.mode,
+                );
+            }
             self.terrain = self.terrain_shader.pipelines(&self.device, filter.mode);
             if let Some(d) = &mut self.dyn_lights {
                 d.pipelines = d.shader.pipelines(&self.device, filter.mode);
@@ -1727,7 +1866,8 @@ impl Renderer {
         if let Some((base, _)) = cube {
             let mut dst = u64::from(base) * PackedQuad::SIZE as u64;
             for (face, quads) in face_quads.iter().enumerate() {
-                counts[face] = quads.len() as u32;
+                let solid = quads.iter().take_while(|q| q.is_opaque()).count() as u32;
+                counts[face] = quads.len() as u32 | solid << 16;
                 let bytes: &[u8] = bytemuck::cast_slice(quads);
                 self.uploader.push(Dest::Cube, dst, bytes);
                 dst += bytes.len() as u64;
@@ -1764,7 +1904,12 @@ impl Renderer {
                 tint_base,
             ],
             counts_a: [counts[0], counts[1], counts[2], counts[3]],
-            counts_b: [counts[4], counts[5], born.to_bits(), 0],
+            counts_b: [
+                counts[4],
+                counts[5],
+                born.to_bits(),
+                model_quads.iter().take_while(|q| q.is_opaque()).count() as u32,
+            ],
         };
         self.uploader.push(
             Dest::Sections,
@@ -2038,29 +2183,39 @@ impl Renderer {
                     .slice(..)
                     .get_mapped_range()
                     .expect("mapped readback");
-                let ts: &[u64] = bytemuck::cast_slice(&view[..8 * TIMESTAMPS as usize]);
+                let ts: &[u64] = bytemuck::cast_slice(&view[..8 * OIT_TIMESTAMPS as usize]);
+                let oit_ts: &[u64] = bytemuck::cast_slice(&view[OIT_STATS_OFFSET as usize..][..16]);
                 let c: &[u32] = bytemuck::cast_slice(
                     &view[STATS_COUNTER_OFFSET as usize..][..COUNTERS_SIZE as usize],
                 );
                 let period = self.timestamps.as_ref().map_or(0.0, |t| t.period_ns);
                 let ms = |a: u64, b: u64| b.saturating_sub(a) as f32 * period / 1.0e6;
-                let times = if rb.two_phase {
+                let oit_ms = if rb.oit {
+                    ms(oit_ts[0], oit_ts[1])
+                } else {
+                    0.0
+                };
+                let mut times = if rb.two_phase {
                     GpuTimes {
                         cull_ms: ms(ts[0], ts[1]) + ms(ts[4], ts[5]),
                         draw_ms: ms(ts[2], ts[3]) + ms(ts[6], ts[7]),
                         frame_ms: ms(ts[0], ts[7]),
-                        cube_draws: c[0] + c[2],
-                        model_draws: c[1] + c[3],
+                        cube_draws: c[4] + c[6] + c[2],
+                        model_draws: c[5] + c[7] + c[3],
                     }
                 } else {
                     GpuTimes {
                         cull_ms: ms(ts[0], ts[1]),
                         draw_ms: ms(ts[2], ts[3]),
                         frame_ms: ms(ts[0], ts[3]),
-                        cube_draws: c[0],
-                        model_draws: c[1],
+                        cube_draws: c[4] + c[6],
+                        model_draws: c[5] + c[7],
                     }
                 };
+                if rb.oit {
+                    times.draw_ms += oit_ms;
+                    times.frame_ms = ms(ts[0], oit_ts[1]);
+                }
                 if rb.frame >= self.latest_gpu_frame {
                     self.latest_gpu = Some(times);
                     self.latest_gpu_frame = rb.frame;
@@ -2331,6 +2486,8 @@ impl Renderer {
             let (cube_len, model_len) = (slots * 6 * DRAW_CMD_SIZE, slots * DRAW_CMD_SIZE);
             encoder.clear_buffer(&self.geo.cube_cmds, 0, Some(cube_len));
             encoder.clear_buffer(&self.geo.model_cmds, 0, Some(model_len));
+            encoder.clear_buffer(&self.geo.cube_cmds, 2 * late_cube, Some(cube_len));
+            encoder.clear_buffer(&self.geo.model_cmds, 2 * late_model, Some(model_len));
             if two_phase {
                 encoder.clear_buffer(&self.geo.cube_cmds, late_cube, Some(cube_len));
                 encoder.clear_buffer(&self.geo.model_cmds, late_model, Some(model_len));
@@ -2401,7 +2558,7 @@ impl Renderer {
             pass.draw(0..3, 0..1);
             self.effects.draw_sky(&mut pass);
             pass.set_bind_group(1, &self.geom_bg, &[]);
-            self.draw_sections(&mut pass, 0, 0, 0);
+            self.draw_early_sections(&mut pass);
             if !two_phase && !split {
                 self.draw_late_layers(&mut pass, overlay.as_deref_mut(), trans_n);
             }
@@ -2448,7 +2605,7 @@ impl Renderer {
             });
             pass.set_bind_group(0, &self.globals_bg, &[]);
             pass.set_bind_group(1, &self.geom_bg, &[]);
-            self.draw_sections(&mut pass, late_cube, late_model, 8);
+            self.draw_late_sections(&mut pass);
             if !split {
                 self.draw_late_layers(&mut pass, overlay.as_deref_mut(), trans_n);
             }
@@ -2498,6 +2655,16 @@ impl Renderer {
         }
 
         let format = self.target_format();
+        if self.oit.is_some() {
+            self.draw_oit(
+                &mut encoder,
+                &color_view,
+                overlay.as_deref_mut(),
+                frame.camera,
+                trans_n,
+            );
+        }
+        let oit_info = self.oit.as_ref().map(|o| o.shared.info());
         if let Some(overlay) = overlay.as_deref_mut() {
             overlay.record(&mut OverlayCtx {
                 device: &self.device,
@@ -2508,6 +2675,7 @@ impl Renderer {
                 format,
                 size: self.size,
                 camera: frame.camera,
+                oit: oit_info,
             });
         }
         if let (Some(ext), Some(scene)) = (external.as_mut(), self.scene_texture()) {
@@ -2572,6 +2740,7 @@ impl Renderer {
                 format,
                 size: self.size,
                 camera: frame.camera,
+                oit: None,
             });
         }
         let screenshot = if std::mem::take(&mut self.screenshot_requested) {
@@ -2591,8 +2760,16 @@ impl Renderer {
             .find(|&i| self.readbacks[i].state.load(Ordering::Acquire) == RB_IDLE);
         if slot.is_some() {
             if let Some(t) = &self.timestamps {
-                let written = if two_phase { TIMESTAMPS } else { 4 };
+                let written = if two_phase { OIT_TIMESTAMPS } else { 4 };
                 encoder.resolve_query_set(&t.set, 0..written, &self.stats_gpu, 0);
+                if self.oit.is_some() {
+                    encoder.resolve_query_set(
+                        &t.set,
+                        OIT_TIMESTAMPS..TIMESTAMPS,
+                        &self.stats_gpu,
+                        OIT_STATS_OFFSET,
+                    );
+                }
             }
             encoder.copy_buffer_to_buffer(
                 &self.geo.counters,
@@ -2625,6 +2802,7 @@ impl Renderer {
             self.readback_cursor = (i + 1) % READBACK_SLOTS;
             let rb = &mut self.readbacks[i];
             rb.two_phase = two_phase;
+            rb.oit = self.oit.is_some();
             rb.frame = self.frame_index;
             rb.state.store(RB_PENDING, Ordering::Release);
             let state = rb.state.clone();
@@ -2661,6 +2839,128 @@ impl Renderer {
         })
     }
 
+    /// The improved transparency stages over translucent terrain and the overlay's translucent work,
+    /// the composite, then the world effects that stay classic.
+    fn draw_oit<'o>(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        color_view: &wgpu::TextureView,
+        mut overlay: Option<&mut (dyn Overlay + 'o)>,
+        camera: &Camera,
+        trans_n: u32,
+    ) {
+        let Some(oit) = &self.oit else { return };
+        self.queue.write_buffer(
+            &oit.shared.params,
+            0,
+            bytemuck::bytes_of(&[camera.near, 0.0, 0.0, 0.0]),
+        );
+        let format = self.target_format();
+        let drawn_by_overlay = overlay.as_deref_mut().is_some_and(|o| {
+            o.prepare_oit(&mut OverlayCtx {
+                device: &self.device,
+                queue: &self.queue,
+                encoder,
+                color: color_view,
+                depth: &self.depth_view,
+                format,
+                size: self.size,
+                camera,
+                oit: Some(oit.shared.info()),
+            })
+        });
+        let ts = |begin: Option<u32>, end: Option<u32>| {
+            self.timestamps
+                .as_ref()
+                .filter(|_| begin.is_some() || end.is_some())
+                .map(|t| wgpu::RenderPassTimestampWrites {
+                    query_set: &t.set,
+                    beginning_of_pass_write_index: begin,
+                    end_of_pass_write_index: end,
+                })
+        };
+        let depth = |store| {
+            Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store,
+                }),
+                stencil_ops: None,
+            })
+        };
+        for (i, stage) in OitStage::ALL.into_iter().enumerate() {
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(stage.entry()),
+                    color_attachments: &oit.targets.attachments(stage),
+                    depth_stencil_attachment: depth(wgpu::StoreOp::Store),
+                    timestamp_writes: ts((i == 0).then_some(OIT_TIMESTAMPS), None),
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                if trans_n > 0 {
+                    pass.set_pipeline(&oit.terrain[i]);
+                    pass.set_bind_group(0, &self.globals_bg, &[]);
+                    pass.set_bind_group(1, &self.trans_geom_bg, &[]);
+                    pass.set_bind_group(2, &oit.targets.stage_groups[i], &[]);
+                    pass.set_index_buffer(
+                        self.geo.quad_indices.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.multi_draw_indexed_indirect(&self.geo.trans_cmds, 0, trans_n);
+                }
+                if drawn_by_overlay && let Some(o) = overlay.as_deref_mut() {
+                    o.draw_oit(&mut pass, stage, &oit.targets.stage_groups[i]);
+                }
+            }
+            if stage == OitStage::DepthBounds {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("oit cull depth bounds"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &oit.targets.culled,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: depth(wgpu::StoreOp::Store),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_bind_group(0, &oit.targets.cull_group, &[]);
+                pass.set_pipeline(&oit.shared.copy);
+                pass.draw(0..3, 0..1);
+                pass.set_pipeline(&oit.shared.cull);
+                pass.draw(0..3, 0..1);
+            }
+        }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("oit composite"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: color_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: depth(wgpu::StoreOp::Store),
+            timestamp_writes: ts(None, Some(OIT_TIMESTAMPS + 1)),
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_bind_group(0, &oit.targets.composite_group, &[]);
+        pass.set_pipeline(&oit.shared.composite);
+        pass.draw(0..3, 0..1);
+        pass.set_bind_group(0, &self.globals_bg, &[]);
+        self.effects.draw_world(&mut pass);
+    }
+
     fn late_cube_base(&self) -> u32 {
         self.config.max_sections * 6
     }
@@ -2669,48 +2969,60 @@ impl Renderer {
         self.config.max_sections
     }
 
-    /// Cube and model draws from one culling phase; `counter_offset` selects its draw counters.
-    fn draw_sections(
-        &self,
-        pass: &mut wgpu::RenderPass<'_>,
-        cube_offset: u64,
-        model_offset: u64,
-        counter_offset: u64,
-    ) {
-        let cube_max = self.slot_count * 6;
-        let model_max = self.slot_count;
-        let dyn_lights = self.dyn_lights.as_ref().filter(|d| d.active);
-        if let Some(d) = dyn_lights {
-            pass.set_bind_group(2, &d.bind_group, &[]);
-        }
-        pass.set_pipeline(dyn_lights.map_or(&self.terrain.cube, |d| &d.pipelines.cube));
+    /// The early phase's solid draws, then its cutout draws, as vanilla draws SOLID before CUTOUT.
+    fn draw_early_sections(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let p = self.bind_terrain(pass);
+        let (cut_cube, cut_model) = (
+            2 * u64::from(self.late_cube_base()) * DRAW_CMD_SIZE,
+            2 * u64::from(self.late_model_base()) * DRAW_CMD_SIZE,
+        );
+        self.draw_list(pass, &p.cube_solid, &self.geo.cube_cmds, 0, 16, 6);
+        self.draw_list(pass, &p.model_solid, &self.geo.model_cmds, 0, 20, 1);
+        self.draw_list(pass, &p.cube, &self.geo.cube_cmds, cut_cube, 24, 6);
+        self.draw_list(pass, &p.model, &self.geo.model_cmds, cut_model, 28, 1);
+    }
+
+    /// Sections the occlusion test let through late, few in a steady view: one alpha-tested draw each.
+    fn draw_late_sections(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let p = self.bind_terrain(pass);
+        let late_cube = u64::from(self.late_cube_base()) * DRAW_CMD_SIZE;
+        let late_model = u64::from(self.late_model_base()) * DRAW_CMD_SIZE;
+        self.draw_list(pass, &p.cube, &self.geo.cube_cmds, late_cube, 8, 6);
+        self.draw_list(pass, &p.model, &self.geo.model_cmds, late_model, 12, 1);
+    }
+
+    fn bind_terrain(&self, pass: &mut wgpu::RenderPass<'_>) -> &TerrainPipelines {
         pass.set_index_buffer(self.geo.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
-        if self.draw_count_supported {
-            pass.multi_draw_indexed_indirect_count(
-                &self.geo.cube_cmds,
-                cube_offset,
-                &self.geo.counters,
-                counter_offset,
-                cube_max,
-            );
-        } else {
-            pass.multi_draw_indexed_indirect(&self.geo.cube_cmds, cube_offset, cube_max);
-        }
-        pass.set_pipeline(dyn_lights.map_or(&self.terrain.model, |d| &d.pipelines.model));
-        if self.draw_count_supported {
-            pass.multi_draw_indexed_indirect_count(
-                &self.geo.model_cmds,
-                model_offset,
-                &self.geo.counters,
-                counter_offset + 4,
-                model_max,
-            );
-        } else {
-            pass.multi_draw_indexed_indirect(&self.geo.model_cmds, model_offset, model_max);
+        match self.dyn_lights.as_ref().filter(|d| d.active) {
+            Some(d) => {
+                pass.set_bind_group(2, &d.bind_group, &[]);
+                &d.pipelines
+            }
+            None => &self.terrain,
         }
     }
 
-    /// Everything after opaque terrain: overlay opaque geometry, translucent terrain and world effects.
+    /// One command list; `per_slot` bounds it at that many commands per section without draw counts.
+    fn draw_list(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+        cmds: &wgpu::Buffer,
+        offset: u64,
+        counter: u64,
+        per_slot: u32,
+    ) {
+        pass.set_pipeline(pipeline);
+        let max = self.slot_count * per_slot;
+        if self.draw_count_supported {
+            pass.multi_draw_indexed_indirect_count(cmds, offset, &self.geo.counters, counter, max);
+        } else {
+            pass.multi_draw_indexed_indirect(cmds, offset, max);
+        }
+    }
+
+    /// Everything after opaque terrain: overlay opaque geometry, translucent terrain and world effects;
+    /// with improved transparency the last two come after, in [`Renderer::draw_oit`].
     fn draw_late_layers<'o>(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -2720,6 +3032,9 @@ impl Renderer {
         if let Some(overlay) = overlay {
             overlay.opaque(pass);
             pass.set_bind_group(0, &self.globals_bg, &[]);
+        }
+        if self.oit.is_some() {
+            return;
         }
         if trans_n > 0 {
             match self.dyn_lights.as_ref().filter(|d| d.active) {

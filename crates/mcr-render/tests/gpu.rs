@@ -924,3 +924,88 @@ fn dynamic_light_brightens_terrain_near_it_only() {
         "segment: {beam_lit:?}"
     );
 }
+
+fn pane(layer: u16, z: f32) -> ModelQuad {
+    ModelQuad::encode(&ModelQuadDesc {
+        corners: [[7.0, 7.0, z], [9.5, 7.0, z], [7.0, 9.5, z], [9.5, 9.5, z]],
+        uvs: [[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+        layer,
+        light: [LIGHT_FULL_SKY; 4],
+        shade_face: Face::PosZ,
+        flags: 0,
+        ao: [63; 4],
+        tint: 0,
+        cell: [7, 7, z as u8],
+    })
+    .unwrap()
+}
+
+/// Green glass at z 12 in front of blue water at z 10 over a red wall, uploaded in `order`.
+fn water_behind_glass(improved: bool, glass_first: bool) -> Option<[u8; 4]> {
+    let mut r = renderer(64, 64)?;
+    r.set_improved_transparency(improved);
+    r.set_texture_groups(&[flat_group(&[
+        [255, 0, 0, 255],
+        [0, 0, 255, 128],
+        [0, 255, 0, 128],
+    ])]);
+    let mut m = wall(0, 0);
+    let (glass, water) = (pane(2, 12.0), pane(1, 10.0));
+    m.translucent = if glass_first {
+        vec![glass, water]
+    } else {
+        vec![water, glass]
+    };
+    r.set_section([0, 0, 0], &m).unwrap();
+    let cam = Camera {
+        position: DVec3::new(8.0, 8.0, 20.0),
+        ..Camera::default()
+    };
+    frame(&mut r, &cam);
+    let px = r.read_offscreen().unwrap();
+    let i = (32 * 64 + 32) * 4;
+    Some([px[i], px[i + 1], px[i + 2], px[i + 3]])
+}
+
+#[test]
+fn improved_transparency_composites_water_behind_glass_in_any_order() {
+    let Some(sorted) = water_behind_glass(false, false) else {
+        return;
+    };
+    let unsorted = water_behind_glass(false, true).unwrap();
+    let oit_a = water_behind_glass(true, true).unwrap();
+    let oit_b = water_behind_glass(true, false).unwrap();
+    let close = |a: [u8; 4], b: [u8; 4], tol: u8| (0..3).all(|c| a[c].abs_diff(b[c]) <= tol);
+    assert!(
+        close(oit_a, oit_b, 1),
+        "order independent: {oit_a:?} {oit_b:?}"
+    );
+    assert!(
+        close(oit_a, sorted, 8),
+        "matches back to front: {oit_a:?} {sorted:?} (unsorted {unsorted:?})"
+    );
+    assert!(
+        sorted[1] > sorted[2],
+        "the nearer green glass dominates: {sorted:?}"
+    );
+    assert!(
+        unsorted[2] > unsorted[1],
+        "classic blending follows draw order: {unsorted:?}"
+    );
+}
+
+#[test]
+fn improved_transparency_turns_off_cleanly() {
+    let Some(mut r) = renderer(32, 32) else {
+        return;
+    };
+    let cam = Camera::default();
+    r.set_improved_transparency(true);
+    assert!(r.improved_transparency());
+    frame(&mut r, &cam);
+    r.resize(48, 40);
+    frame(&mut r, &cam);
+    r.set_improved_transparency(false);
+    assert!(!r.improved_transparency());
+    frame(&mut r, &cam);
+}

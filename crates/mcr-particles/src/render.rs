@@ -1,6 +1,6 @@
 use bytemuck::{Pod, Zeroable};
 use mcr_render::wgpu;
-use mcr_render::{Environment, OverlayCtx};
+use mcr_render::{Environment, OitInfo, OitStage, OverlayCtx};
 
 use crate::atlas::{DYNAMIC_SIZE, ParticleAtlas, SLOT, Uv};
 use crate::sim::{self, Kind, Light, P, POOL_CAP, Pool, fade};
@@ -21,12 +21,19 @@ struct Uniforms {
     view_proj: [f32; 16],
     right: [f32; 4],
     up: [f32; 4],
+    fog_color: [f32; 4],
+    /// Environmental start and end, render-distance start and end.
+    fog: [f32; 4],
 }
 
 const INSTANCE_BYTES: u64 = std::mem::size_of::<Instance>() as u64;
 
 pub(crate) struct Gpu {
     format: wgpu::TextureFormat,
+    bgl: wgpu::BindGroupLayout,
+    /// Improved transparency stages for the translucent pool, for one depth bounds format.
+    oit: Option<(wgpu::TextureFormat, [wgpu::RenderPipeline; 3])>,
+    counts: [u32; 3],
     uniforms: wgpu::Buffer,
     particle_bg: wgpu::BindGroup,
     dynamic_bg: wgpu::BindGroup,
@@ -94,7 +101,7 @@ impl Gpu {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -180,13 +187,7 @@ impl Gpu {
             bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
         });
-        let attributes: Vec<wgpu::VertexAttribute> = (0..4)
-            .map(|i| wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: i * 16,
-                shader_location: i as u32,
-            })
-            .collect();
+        let attributes = instance_attributes();
         let make = |fs: &str, blend: Option<wgpu::BlendState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(fs),
@@ -237,6 +238,9 @@ impl Gpu {
         });
         Self {
             format: ctx.format,
+            bgl,
+            oit: None,
+            counts: [0; 3],
             uniforms,
             particle_bg,
             dynamic_bg,
@@ -367,9 +371,9 @@ pub(crate) fn build_instances(
 }
 
 impl Gpu {
-    pub(crate) fn record(
+    pub(crate) fn upload(
         &mut self,
-        ctx: &mut OverlayCtx<'_>,
+        ctx: &OverlayCtx<'_>,
         pools: &[Vec<P>; 3],
         atlas: &ParticleAtlas,
         partial: f32,
@@ -384,10 +388,13 @@ impl Gpu {
         let forward = cam.forward();
         let right = cam.right();
         let up = right.cross(forward);
+        let (rd_start, rd_end) = env.render_fog_range();
         let uniforms = Uniforms {
             view_proj: cam.view_proj(aspect).to_cols_array(),
             right: [right.x, right.y, right.z, 0.0],
             up: [up.x, up.y, up.z, 0.0],
+            fog_color: [env.fog_color[0], env.fog_color[1], env.fog_color[2], 1.0],
+            fog: [env.fog_start, env.fog_end, rd_start, rd_end],
         };
         ctx.queue
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
@@ -409,6 +416,15 @@ impl Gpu {
             }
         }
         self.scratch = std::mem::take(&mut per_pool[0]);
+        self.counts = counts;
+    }
+
+    /// The pools from the last [`Gpu::upload`]; the translucent one only without improved transparency.
+    pub(crate) fn draw(&self, ctx: &mut OverlayCtx<'_>) {
+        let mut counts = self.counts;
+        if ctx.oit.is_some() {
+            counts[Pool::Translucent as usize] = 0;
+        }
         if counts.iter().all(|&c| c == 0) {
             return;
         }
@@ -451,4 +467,102 @@ impl Gpu {
             pass.draw(0..4, 0..n);
         }
     }
+
+    pub(crate) fn clear_counts(&mut self) {
+        self.counts = [0; 3];
+    }
+
+    /// Whether the translucent pool has particles for the improved transparency stages.
+    pub(crate) fn prepare_oit(&mut self, device: &wgpu::Device, info: OitInfo<'_>) -> bool {
+        if self.counts[Pool::Translucent as usize] == 0 {
+            return false;
+        }
+        if self
+            .oit
+            .as_ref()
+            .is_none_or(|(f, _)| *f != info.bounds_format)
+        {
+            self.oit = Some((info.bounds_format, self.oit_pipelines(device, info)));
+        }
+        true
+    }
+
+    fn oit_pipelines(&self, device: &wgpu::Device, info: OitInfo<'_>) -> [wgpu::RenderPipeline; 3] {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("particles oit"),
+            source: wgpu::ShaderSource::Wgsl(
+                [
+                    include_str!("particle.wgsl"),
+                    mcr_render::oit_wgsl(1).as_str(),
+                    include_str!("particle_oit.wgsl"),
+                ]
+                .concat()
+                .into(),
+            ),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("particles oit"),
+            bind_group_layouts: &[Some(&self.bgl), Some(info.layout)],
+            immediate_size: 0,
+        });
+        let attributes = instance_attributes();
+        OitStage::ALL.map(|stage| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(stage.entry()),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: INSTANCE_BYTES,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &attributes,
+                    })],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: Some(OitStage::depth_state()),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(stage.entry()),
+                    compilation_options: Default::default(),
+                    targets: &stage.targets(info.bounds_format),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        })
+    }
+
+    pub(crate) fn draw_oit(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        stage: OitStage,
+        oit: &wgpu::BindGroup,
+    ) {
+        let n = self.counts[Pool::Translucent as usize];
+        let Some((_, pipelines)) = self.oit.as_ref().filter(|_| n > 0) else {
+            return;
+        };
+        let i = OitStage::ALL.iter().position(|s| *s == stage).unwrap_or(0);
+        pass.set_pipeline(&pipelines[i]);
+        pass.set_bind_group(0, &self.particle_bg, &[]);
+        pass.set_bind_group(1, oit, &[]);
+        pass.set_vertex_buffer(0, self.instances[Pool::Translucent as usize].slice(..));
+        pass.draw(0..4, 0..n);
+    }
+}
+
+fn instance_attributes() -> Vec<wgpu::VertexAttribute> {
+    (0..4)
+        .map(|i| wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: i * 16,
+            shader_location: i as u32,
+        })
+        .collect()
 }

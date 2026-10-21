@@ -251,3 +251,37 @@ Against a vanilla 26.3 server on port 25585 (offline, flat world):
   third person, and translucent grey campfire smoke with the camera inside a signal fire column. The cape
   and the 36-icon map order are covered offscreen only: offline players have no cape, and named map
   markers need 37 banners.
+- Batch 8: an offscreen client run shows a level 1 beacon beam after the pyramid is filled, the F3+X
+  toggle switching improved transparency both ways over water behind blue and orange stained glass, the
+  posed chest model cracking while mined in survival, and the carved pumpkin blur scaled smoothly.
+
+## Batch 8 notes
+
+GPU medians at 1920x1080, render distance 16, 600 frames, 3 interleaved rounds (ms; views: dark forest
+from above, under the canopy, beach cliff, forest edge toward the ocean):
+
+| Build | Forest | Canopy | Beach | Edge |
+|---|---|---|---|---|
+| Before batch 8 | 0.254 | 0.170 | 0.162 | 0.165 |
+| L28 opaque before cutout | 0.238 | 0.139 | 0.154 | 0.167 |
+| Batch 8, improved transparency off | 0.236 | 0.139 | 0.154 | 0.167 |
+| Batch 8, improved transparency on | 0.363 | 0.255 | 0.334 | 0.330 |
+
+- L28: the mesher puts each face list's quads with fully opaque sprites first (overlay quads keep their
+  place behind their base), and the early cull phase writes a non-discarding solid draw and a cutout draw
+  per section, all solid draws first. Frames are pixel-identical in every culling mode on all four views.
+  With culling off: forest 0.354 to 0.335, canopy 0.175 to 0.137. The mesher bench moved 7.72 to 7.86 ms
+  (+1.3%). Late-phase (disoccluded) sections still draw in one discarding pass.
+- L23: vanilla's wavelet OIT (8 coefficients, rank 2, depth-bounds cull, 10-block precise range) for
+  translucent terrain and translucent particles. Opaque particles draw before the stages so water in front
+  covers them. Its targets exist only while the option is on. Still classic: translucent entity layers,
+  weather, clouds and the world border draw after the composite; the composite writes no depth; dynamic
+  lights do not reach the OIT terrain pass.
+- L25 declined: vanilla's `sampleNearest` on a linear sampler cost 14 to 21% more GPU in every view, and
+  only the ALU of the trick itself mattered (constant sizes, explicit LOD and hoisting changed nothing).
+  Hardware nearest stays; the pictures differ only at mip seams.
+- L26: levels recount every 80 ticks of the server's game time, but only when that time moved past the
+  last recount, at least 80 client ticks later and never while frozen, 8 beacons per tick round-robin.
+  The beam still rescans every 20 client ticks.
+- L27: block entity renderers report their posed model faces for the cracking positions (up to 64 block
+  entities, 128 faces each), which replace the outline boxes in the destroy decals.

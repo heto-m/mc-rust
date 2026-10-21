@@ -9,7 +9,8 @@ pub const TINT_TABLE_WORDS: usize = TINT_KINDS * 256;
 pub type TintTable = [u32; TINT_TABLE_WORDS];
 
 /// One 16^3 section's geometry. The main pass draws `faces` and `model` (opaque and cutout); the
-/// translucent pass draws `translucent`, which is always model quads.
+/// translucent pass draws `translucent`, which is always model quads. Opaque quads that lead a face
+/// list or `model` draw first, without alpha testing ([`SectionMesh::partition_opaque`]).
 #[derive(Debug, Default, Clone)]
 pub struct SectionMesh {
     pub faces: [Vec<PackedQuad>; 6],
@@ -54,6 +55,15 @@ impl SectionMesh {
         self.cube_count() == 0 && self.model.is_empty() && self.translucent.is_empty()
     }
 
+    /// Moves opaque quads ahead of cutout ones in every face list and in `model`, keeping each group's
+    /// order; the scratch vectors only carry capacity between calls.
+    pub fn partition_opaque(&mut self, cube: &mut Vec<PackedQuad>, model: &mut Vec<ModelQuad>) {
+        for face in &mut self.faces {
+            stable_partition(face, cube, |q| q.is_opaque());
+        }
+        stable_partition(&mut self.model, model, ModelQuad::is_opaque);
+    }
+
     pub fn clear(&mut self) {
         self.faces.iter_mut().for_each(Vec::clear);
         self.model.clear();
@@ -61,5 +71,44 @@ impl SectionMesh {
         self.tints = None;
         self.visibility = SectionVisibility::ALL;
         self.sort_camera = None;
+    }
+}
+
+fn stable_partition<T: Copy>(items: &mut Vec<T>, scratch: &mut Vec<T>, first: impl Fn(&T) -> bool) {
+    let lead = items.iter().take_while(|q| first(q)).count();
+    if items[lead..].iter().all(|q| !first(q)) {
+        return;
+    }
+    scratch.clear();
+    let mut kept = lead;
+    for i in lead..items.len() {
+        let q = items[i];
+        if first(&q) {
+            items[kept] = q;
+            kept += 1;
+        } else {
+            scratch.push(q);
+        }
+    }
+    items.truncate(kept);
+    items.extend_from_slice(scratch);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stable_partition_keeps_group_order() {
+        let mut v = vec![1, 2, 4, 3, 6, 5, 8];
+        let mut scratch = Vec::new();
+        stable_partition(&mut v, &mut scratch, |x| x % 2 == 0);
+        assert_eq!(v, [2, 4, 6, 8, 1, 3, 5]);
+        let mut sorted = vec![2, 4, 1];
+        stable_partition(&mut sorted, &mut scratch, |x| x % 2 == 0);
+        assert_eq!(sorted, [2, 4, 1]);
+        let mut empty: Vec<i32> = Vec::new();
+        stable_partition(&mut empty, &mut scratch, |x| x % 2 == 0);
+        assert!(empty.is_empty());
     }
 }

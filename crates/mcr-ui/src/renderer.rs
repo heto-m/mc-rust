@@ -19,6 +19,7 @@ struct Globals {
 struct GpuPage {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
+    linear_group: wgpu::BindGroup,
 }
 
 #[derive(Debug)]
@@ -27,6 +28,7 @@ struct Draw {
     page: usize,
     scissor: [u32; 4],
     blend: Blend,
+    linear: bool,
     indices: Range<u32>,
 }
 
@@ -44,6 +46,7 @@ pub struct UiRenderer {
     additive_pipeline: wgpu::RenderPipeline,
     page_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    linear_sampler: wgpu::Sampler,
     globals: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
     srgb_target: bool,
@@ -194,6 +197,14 @@ impl UiRenderer {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ui linear"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let vertices = Self::vertex_buffer(device, INITIAL_QUADS);
         let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ui indices"),
@@ -206,6 +217,7 @@ impl UiRenderer {
             additive_pipeline,
             page_layout,
             sampler,
+            linear_sampler,
             globals,
             globals_bg,
             srgb_target: target_format.is_srgb(),
@@ -244,7 +256,7 @@ impl UiRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         layout: &wgpu::BindGroupLayout,
-        sampler: &wgpu::Sampler,
+        samplers: [&wgpu::Sampler; 2],
         atlas: &mut Atlas,
         gpu: &mut Vec<GpuPage>,
     ) {
@@ -266,23 +278,26 @@ impl UiRenderer {
                     view_formats: &[],
                 });
                 let view = texture.create_view(&Default::default());
-                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("ui page"),
-                    layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(sampler),
-                        },
-                    ],
-                });
+                let group = |sampler| {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("ui page"),
+                        layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(sampler),
+                            },
+                        ],
+                    })
+                };
                 gpu.push(GpuPage {
                     texture,
-                    bind_group,
+                    bind_group: group(samplers[0]),
+                    linear_group: group(samplers[1]),
                 });
                 page.take_dirty();
                 Self::upload_rows(queue, &gpu[i].texture, &page.pixels, size, 0, size);
@@ -328,7 +343,7 @@ impl UiRenderer {
             device,
             queue,
             &self.page_layout,
-            &self.sampler,
+            [&self.sampler, &self.linear_sampler],
             ui.sprites_mut().atlas_mut(),
             &mut self.sprite_pages,
         );
@@ -336,7 +351,7 @@ impl UiRenderer {
             device,
             queue,
             &self.page_layout,
-            &self.sampler,
+            [&self.sampler, &self.linear_sampler],
             ui.fonts_mut().atlas_mut(),
             &mut self.glyph_pages,
         );
@@ -384,6 +399,7 @@ impl UiRenderer {
                     page: c.page.index as usize,
                     scissor: c.scissor,
                     blend: c.blend,
+                    linear: c.linear,
                     indices: quads.start * 6..split * 6,
                 });
                 quads.start = split;
@@ -396,6 +412,7 @@ impl UiRenderer {
                 page: c.page.index as usize,
                 scissor: c.scissor,
                 blend: c.blend,
+                linear: c.linear,
                 indices: quads.start * 6..quads.end * 6,
             });
         }
@@ -447,7 +464,16 @@ impl UiRenderer {
             };
             let [x, y, w, h] = d.scissor;
             pass.set_scissor_rect(x, y, w, h);
-            pass.set_bind_group(1, &pages[d.page].bind_group, &[]);
+            let page = &pages[d.page];
+            pass.set_bind_group(
+                1,
+                if d.linear {
+                    &page.linear_group
+                } else {
+                    &page.bind_group
+                },
+                &[],
+            );
             pass.draw_indexed(d.indices.clone(), 0, 0..1);
         }
     }

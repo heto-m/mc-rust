@@ -4,8 +4,9 @@
 @group(0) @binding(3) var<storage, read_write> cube_draws: array<DrawData>;
 @group(0) @binding(4) var<storage, read_write> model_cmds: array<DrawIndexedIndirect>;
 @group(0) @binding(5) var<storage, read_write> model_draws: array<DrawData>;
-// Early cube, early model, late cube, late model.
-@group(0) @binding(6) var<storage, read_write> counters: array<atomic<u32>, 4>;
+// Early cube and model slots, late cube and model draws, early solid cube and model draws, early
+// cutout cube and model draws.
+@group(0) @binding(6) var<storage, read_write> counters: array<atomic<u32>, 8>;
 // Per slot: nonzero when the section passed the occlusion test last frame.
 @group(0) @binding(7) var<storage, read_write> visibility: array<u32>;
 @group(0) @binding(8) var hiz: texture_2d<f32>;
@@ -84,6 +85,7 @@ fn hiz_visible(lo: vec3<f32>, hi: vec3<f32>) -> bool {
 }
 
 fn emit(s: SectionMeta, lo: vec3<f32>, late: bool) {
+    // Low half: quads in the face list; high half: how many of them lead it opaque.
     var counts = array<u32, 6>(s.counts_a.x, s.counts_a.y, s.counts_a.z, s.counts_a.w, s.counts_b.x, s.counts_b.y);
     let hi = lo + vec3<f32>(16.0);
     // Camera sits at the origin in this space; a face plane at p is visible from x > p.
@@ -94,37 +96,55 @@ fn emit(s: SectionMeta, lo: vec3<f32>, late: bool) {
     );
     var offset = s.bases.x;
     for (var d = 0u; d < 6u; d++) {
-        let n = counts[d];
+        let n = counts[d] & 0xffffu;
         if n > 0u && facing[d] {
-            var cmd: u32;
             var slot: u32;
             if late {
                 let k = atomicAdd(&counters[2], 1u);
-                cmd = g.params.z + k;
                 slot = atomicLoad(&counters[0]) + k;
+                cube_cmds[g.params.z + k] = DrawIndexedIndirect(n * 6u, 1u, 0u, 0, slot);
             } else {
                 slot = atomicAdd(&counters[0], 1u);
-                cmd = slot;
+                emit_split(true, n, counts[d] >> 16u, slot);
             }
-            cube_cmds[cmd] = DrawIndexedIndirect(n * 6u, 1u, 0u, 0, slot);
             cube_draws[slot] = DrawData(lo, offset, s.bases.w, 0u, s.counts_b.z, 0u);
         }
         offset += n;
     }
 
     if s.bases.z > 0u {
-        var cmd: u32;
         var slot: u32;
         if late {
             let k = atomicAdd(&counters[3], 1u);
-            cmd = g.params.w + k;
             slot = atomicLoad(&counters[1]) + k;
+            model_cmds[g.params.w + k] = DrawIndexedIndirect(s.bases.z * 6u, 1u, 0u, 0, slot);
         } else {
             slot = atomicAdd(&counters[1], 1u);
-            cmd = slot;
+            emit_split(false, s.bases.z, s.counts_b.w, slot);
         }
-        model_cmds[cmd] = DrawIndexedIndirect(s.bases.z * 6u, 1u, 0u, 0, slot);
         model_draws[slot] = DrawData(lo, s.bases.y, s.bases.w, 0u, s.counts_b.z, 0u);
+    }
+}
+
+// Early draws go to the solid list (opaque quads, no alpha test) and the cutout list (the rest, which
+// start `solid` quads further in), so opaque terrain fills depth before cutout fragments are shaded.
+fn emit_split(cube: bool, n: u32, solid: u32, slot: u32) {
+    let s = min(solid, n);
+    if s > 0u {
+        let cmd = DrawIndexedIndirect(s * 6u, 1u, 0u, 0, slot);
+        if cube {
+            cube_cmds[atomicAdd(&counters[4], 1u)] = cmd;
+        } else {
+            model_cmds[atomicAdd(&counters[5], 1u)] = cmd;
+        }
+    }
+    if n > s {
+        let cmd = DrawIndexedIndirect((n - s) * 6u, 1u, 0u, i32(s * 4u), slot);
+        if cube {
+            cube_cmds[2u * g.params.z + atomicAdd(&counters[6], 1u)] = cmd;
+        } else {
+            model_cmds[2u * g.params.w + atomicAdd(&counters[7], 1u)] = cmd;
+        }
     }
 }
 

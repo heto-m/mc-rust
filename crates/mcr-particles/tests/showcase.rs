@@ -8,8 +8,9 @@ use mcr_protocol::types::particle::{BlockParticleKind, Particle};
 use mcr_render::glam::DVec3;
 use mcr_render::wgpu;
 use mcr_render::{
-    Camera, EffectImage, Environment, FrameInputs, Overlay, OverlayCtx, RenderError, Renderer,
-    RendererConfig, Target,
+    Camera, EffectImage, Environment, Face, FrameInputs, LIGHT_FULL_SKY, ModelQuad, ModelQuadDesc,
+    OitStage, Overlay, OverlayCtx, RenderError, Renderer, RendererConfig, SectionMesh, Target,
+    TextureGroupData,
 };
 
 const W: u32 = 1280;
@@ -46,6 +47,19 @@ impl ParticleWorld for World {
 struct Draw<'a>(&'a mut ParticleEngine, Environment);
 
 impl Overlay for Draw<'_> {
+    fn prepare_oit(&mut self, ctx: &mut OverlayCtx<'_>) -> bool {
+        self.0.prepare_oit(ctx, 0.5, &self.1)
+    }
+
+    fn draw_oit(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        stage: OitStage,
+        oit: &wgpu::BindGroup,
+    ) {
+        self.0.draw_oit(pass, stage, oit);
+    }
+
     fn record(&mut self, ctx: &mut OverlayCtx<'_>) {
         self.0.record(ctx, 0.5, &self.1);
     }
@@ -410,5 +424,163 @@ fn campfire_smoke_at_the_eye_stays_a_translucent_sprite() {
         shades.len() > 20,
         "the sky gradient shows through each texel: {}",
         shades.len()
+    );
+}
+
+#[test]
+fn particles_fade_into_the_fog_like_terrain() {
+    let (Some(mut r), Some(_)) = (renderer(), jar()) else {
+        return;
+    };
+    let mut env = Environment::overworld(6000, 0.0, 0.0);
+    let cam = Camera {
+        position: DVec3::new(0.0, 8.0, 14.0),
+        pitch: 0.0,
+        ..Camera::default()
+    };
+    let shot = |r: &mut Renderer, env: &Environment, with: bool| {
+        let mut e = engine(jar().unwrap());
+        if with {
+            for i in 0..40 {
+                e.add_simple(
+                    "flame",
+                    DVec3::new(
+                        f64::from(i % 8) * 0.3 - 1.2,
+                        8.0,
+                        10.0 - f64::from(i / 8) * 0.01,
+                    ),
+                    DVec3::ZERO,
+                );
+            }
+        }
+        frame(r, &mut e, env, &cam);
+        r.read_offscreen().unwrap()
+    };
+    let clear = shot(&mut r, &env, false);
+    let lit = shot(&mut r, &env, true);
+    let changed = |a: &[u8], b: &[u8]| -> Vec<[u8; 4]> {
+        a.as_chunks::<4>()
+            .0
+            .iter()
+            .zip(b.as_chunks::<4>().0)
+            .filter(|(x, y)| (0..3).any(|c| x[c].abs_diff(y[c]) > 8))
+            .map(|(x, _)| *x)
+            .collect()
+    };
+    assert!(changed(&lit, &clear).len() > 200, "flames show without fog");
+    env.fog_start = 0.0;
+    env.fog_end = 1.0;
+    let clear = shot(&mut r, &env, false);
+    let fogged = shot(&mut r, &env, true);
+    let fog = env.fog_color.map(|c| (c * 255.0).round() as u8);
+    let fogged = changed(&fogged, &clear);
+    assert!(fogged.len() > 200, "flames differ from the sky behind them");
+    for px in fogged {
+        assert!(
+            (0..3).all(|c| px[c].abs_diff(fog[c]) <= 2),
+            "{px:?} against fog {fog:?}"
+        );
+    }
+}
+
+fn water_pane() -> SectionMesh {
+    let mut m = SectionMesh::default();
+    for (x, y) in [
+        (5.0, 5.0),
+        (7.5, 5.0),
+        (5.0, 7.5),
+        (7.5, 7.5),
+        (10.0, 5.0),
+        (10.0, 7.5),
+        (5.0, 10.0),
+        (7.5, 10.0),
+        (10.0, 10.0),
+    ] {
+        m.translucent.push(
+            ModelQuad::encode(&ModelQuadDesc {
+                corners: [
+                    [x, y, 10.0],
+                    [x + 2.5, y, 10.0],
+                    [x, y + 2.5, 10.0],
+                    [x + 2.5, y + 2.5, 10.0],
+                ],
+                uvs: [[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+                layer: 0,
+                light: [LIGHT_FULL_SKY; 4],
+                shade_face: Face::PosZ,
+                flags: 0,
+                ao: [63; 4],
+                tint: 0,
+                cell: [(x + 1.25) as u8, (y + 1.25) as u8, 10],
+            })
+            .unwrap(),
+        );
+    }
+    m
+}
+
+fn blue_group() -> TextureGroupData {
+    TextureGroupData {
+        width: 16,
+        height: 16,
+        layers: 1,
+        mips: (0..5)
+            .map(|m| [0u8, 0, 255, 160].repeat((16usize >> m).pow(2)))
+            .collect(),
+        animations: Vec::new(),
+    }
+}
+
+/// Mean colour where flames behind a translucent blue pane cover the view.
+fn flames_behind_water(improved: bool) -> Option<[f32; 3]> {
+    let mut r = renderer()?;
+    r.set_improved_transparency(improved);
+    r.set_texture_groups(&[blue_group()]);
+    r.set_section([0, 0, 0], &water_pane()).unwrap();
+    let env = Environment::overworld(6000, 0.0, 0.0);
+    let cam = Camera {
+        position: DVec3::new(8.75, 8.75, 20.0),
+        ..Camera::default()
+    };
+    let shot = |r: &mut Renderer, with: bool| {
+        let mut e = engine(jar().unwrap());
+        if with {
+            for i in 0..60 {
+                let (x, y) = (
+                    f64::from(i % 10) * 0.25 + 7.5,
+                    f64::from(i / 10) * 0.25 + 7.9,
+                );
+                e.add_simple("flame", DVec3::new(x, y, 4.0), DVec3::ZERO);
+            }
+        }
+        frame(r, &mut e, &env, &cam);
+        r.read_offscreen().unwrap()
+    };
+    let clear = shot(&mut r, false);
+    let lit = shot(&mut r, true);
+    let changed: Vec<&[u8; 4]> = lit
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(clear.as_chunks::<4>().0)
+        .filter(|(a, b)| (0..3).any(|c| a[c].abs_diff(b[c]) > 8))
+        .map(|(a, _)| a)
+        .collect();
+    assert!(changed.len() > 100, "flames show: {}", changed.len());
+    let n = changed.len() as f32;
+    Some(std::array::from_fn(|c| {
+        changed.iter().map(|p| f32::from(p[c])).sum::<f32>() / n
+    }))
+}
+
+#[test]
+fn particles_behind_water_are_tinted_with_improved_transparency() {
+    let (Some(classic), Some(_)) = (flames_behind_water(false), jar()) else {
+        return;
+    };
+    let improved = flames_behind_water(true).unwrap();
+    assert!(
+        improved[2] > classic[2] + 20.0 && improved[0] < classic[0],
+        "the water now covers the flames: classic {classic:?}, improved {improved:?}"
     );
 }

@@ -1,17 +1,21 @@
 ## ADDED Requirements
 
 ### Requirement: Improved transparency
-With `improvedTransparency` on, translucent terrain, particles, weather, clouds and item entities SHALL be
-composited in layers as vanilla's Fabulous mode does.
+With `improvedTransparency` on, translucent terrain and translucent particles SHALL be composited with
+order-independent transparency as vanilla's wavelet transparency does, opaque particles SHALL be covered by
+the translucent world in front of them, and with it off the renderer SHALL allocate and draw nothing for it.
 
 #### Scenario: Water behind glass
 - **WHEN** water is seen through stained glass with improved transparency on
-- **THEN** both blend in depth order
+- **THEN** both blend in depth order, whatever order they are drawn in
 
-### Requirement: Filtering and leaf shading cost
-Texture filtering NONE SHALL sample as vanilla's linear `sampleNearest` path does, and cutout terrain SHALL
-not be shaded behind solid terrain more often than vanilla's SOLID-then-CUTOUT order allows, without
-changing the picture.
+#### Scenario: Option off
+- **WHEN** improved transparency is turned off
+- **THEN** the frame and GPU time match the classic path
+
+### Requirement: Leaf shading cost
+Cutout terrain SHALL not be shaded behind solid terrain more often than vanilla's SOLID-then-CUTOUT order
+allows, without changing the picture.
 
 #### Scenario: Forest
 - **WHEN** a forest is drawn at render distance 16

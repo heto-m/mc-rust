@@ -327,6 +327,19 @@ impl Overlay for FrameOverlay<'_> {
         }
     }
 
+    fn prepare_oit(&mut self, ctx: &mut OverlayCtx<'_>) -> bool {
+        self.particles.prepare_oit(ctx, self.partial, self.env)
+    }
+
+    fn draw_oit(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        stage: mcr_render::OitStage,
+        oit: &wgpu::BindGroup,
+    ) {
+        self.particles.draw_oit(pass, stage, oit);
+    }
+
     fn record(&mut self, ctx: &mut OverlayCtx<'_>) {
         self.outline.record(ctx);
         if self.entities.is_some() || self.block_entities.is_some() {
@@ -4424,6 +4437,15 @@ impl Play {
             let params = layer.frame_params(camera, aspect, env);
             layer.scene.prepare(&params);
             if let Some(block_entities) = &mut self.block_entities {
+                let own = self
+                    .world
+                    .client
+                    .digging()
+                    .filter(|d| d.progress > 0.0)
+                    .map(|d| d.pos);
+                block_entities
+                    .scene
+                    .set_cracking(self.effects.cracking(own));
                 block_entities.update(
                     state,
                     params,
@@ -4520,7 +4542,10 @@ impl Play {
             .digging()
             .filter(|d| d.progress > 0.0)
             .map(|d| (d.pos, ((d.progress * 10.0) as u8).min(9)));
-        let decals = self.effects.decals(state, own);
+        let mut decals = self.effects.decals(state, own);
+        if let Some(block_entities) = &self.block_entities {
+            effects::with_block_entity_cracks(&mut decals, |p| block_entities.scene.crack_quads(p));
+        }
         self.render.renderer.set_destroy_decals(&decals);
         let distance = f64::from(self.world.render_distance().max(2) * 16);
         let millis = self.started.elapsed().as_millis();

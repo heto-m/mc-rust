@@ -14,8 +14,8 @@ use mcr_protocol::types::Particle;
 use mcr_protocol::types::component::{FireworkExplosion, FireworkShape};
 use mcr_render::glam::DVec3;
 use mcr_render::{
-    CloudMode, CloudSettings, DestroyDecal, EffectAssets, EffectImage, Precipitation,
-    WeatherSource, WorldBorderVisual,
+    CloudMode, CloudSettings, DestroyDecal, EffectAssets, EffectImage, MAX_QUADS_PER_DECAL,
+    Precipitation, WeatherSource, WorldBorderVisual,
 };
 use mcr_settings::Options;
 use mcr_settings::value::{CloudStatus, ParticleStatus};
@@ -574,6 +574,16 @@ impl WorldEffects {
         self.breaking.update(entity_id, pos, progress);
     }
 
+    /// Blocks being broken by anyone, the local player's `own` dig last.
+    pub fn cracking(&self, own: Option<BlockPos>) -> impl Iterator<Item = [i32; 3]> + '_ {
+        self.breaking
+            .0
+            .values()
+            .map(|b| b.pos)
+            .chain(own)
+            .map(|p| [p.x, p.y, p.z])
+    }
+
     pub fn decals(&self, state: &ClientState, own: Option<(BlockPos, u8)>) -> Vec<DestroyDecal> {
         let data = mcr_data::v26_3();
         let make = |pos: BlockPos, stage: u8| {
@@ -586,7 +596,7 @@ impl WorldEffects {
                 return decal;
             };
             self.cache.model_quads(s.0, decal.pos, &mut decal.quads);
-            // Block entity models crack themselves in vanilla; their outline stands in for them here.
+            // Block entity models add their own quads later (`with_block_entity_cracks`).
             if decal.quads.is_empty() {
                 decal.boxes = data
                     .outline_shape(s.0)
@@ -1137,9 +1147,62 @@ fn is_air(state: &ClientState, at: [f64; 3]) -> bool {
     })
 }
 
+/// Vanilla cracks a block entity's own model parts: they replace its outline boxes.
+pub fn with_block_entity_cracks<'a>(
+    decals: &mut [DestroyDecal],
+    quads: impl Fn([i32; 3]) -> &'a [[[f32; 3]; 4]],
+) {
+    for d in decals {
+        let extra = quads(d.pos);
+        if extra.is_empty() {
+            continue;
+        }
+        d.boxes.clear();
+        let room = MAX_QUADS_PER_DECAL.saturating_sub(d.quads.len());
+        d.quads.extend_from_slice(&extra[..extra.len().min(room)]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_entity_quads_replace_outline_boxes_within_the_budget() {
+        let quad = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let many = vec![quad; MAX_QUADS_PER_DECAL * 2];
+        let mut decals = vec![
+            DestroyDecal {
+                pos: [0, 0, 0],
+                boxes: vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]],
+                ..DestroyDecal::default()
+            },
+            DestroyDecal {
+                pos: [1, 0, 0],
+                boxes: vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]],
+                quads: vec![quad; 3],
+                ..DestroyDecal::default()
+            },
+            DestroyDecal {
+                pos: [2, 0, 0],
+                boxes: vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]],
+                ..DestroyDecal::default()
+            },
+        ];
+        with_block_entity_cracks(&mut decals, |p| match p[0] {
+            0 => &many[..18],
+            1 => &many,
+            _ => &[],
+        });
+        assert_eq!((decals[0].boxes.len(), decals[0].quads.len()), (0, 18));
+        assert_eq!(decals[1].quads.len(), MAX_QUADS_PER_DECAL);
+        assert_eq!(decals[2].boxes.len(), 1);
+    }
 
     #[test]
     fn climate_noise_matches_vanilla() {

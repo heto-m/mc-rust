@@ -77,14 +77,15 @@ Scope: mcr-app level_events and audio, mcr-modbridge sound.
 
 Scope: mcr-render, mcr-app overlays and block_entities, mcr-ui renderer, mcr-block-entity.
 
-- [ ] 8.1 L23 (V) improvedTransparency (Fabulous) not implemented
-- [ ] 8.2 L24 (M) Camera overlay textures sampled nearest
-- [ ] 8.3 L25 (M) Texture filtering NONE differs at mip seams
-- [ ] 8.4 L26 (M) Beacon levels refreshed every 20 ticks
-- [ ] 8.5 L27 (M) Model-less block entities crack along their outline
-- [ ] 8.6 L28 (M) Leaves behind terrain are shaded
-- [ ] 8.7 Offscreen tests: water behind glass with improved transparency, linear pumpkin blur, cracked chest; GPU time before and after L23 and L28 (1920x1080, render distance 16, 600 frames, median, interleaved) with pixel-identical frames for L28
-- [ ] 8.8 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 8.1 L23 (V) improvedTransparency (Fabulous) not implemented
+- [x] 8.2 L24 (M) Camera overlay textures sampled nearest
+- [x] 8.3 L25 (M) Texture filtering NONE differs at mip seams (measured and declined, see design)
+- [x] 8.4 L26 (M) Beacon levels refreshed every 20 ticks
+- [x] 8.5 L27 (M) Model-less block entities crack along their outline
+- [x] 8.6 L28 (M) Leaves behind terrain are shaded
+- [x] 8.7 Offscreen tests: water behind glass with improved transparency, linear pumpkin blur, cracked chest; GPU time before and after L23 and L28 (1920x1080, render distance 16, 600 frames, median, interleaved) with pixel-identical frames for L28
+- [x] 8.8 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 8.9 Leftover found in batch 8: particles ignored fog; they now fade like terrain (offscreen test)
 
 ## 9. Close out
 

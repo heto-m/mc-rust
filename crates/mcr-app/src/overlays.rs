@@ -77,6 +77,8 @@ struct Texture {
     sprite: Option<SpriteId>,
     /// Animation frames stacked vertically (square frames).
     frames: u32,
+    /// The `.mcmeta` asks for `blur`: vanilla samples it linearly.
+    linear: bool,
 }
 
 #[derive(Debug, Default)]
@@ -88,6 +90,7 @@ pub struct Overlays {
     seed: u32,
     vignette: Option<SpriteId>,
     vignette_loaded: bool,
+    vignette_linear: bool,
     vignette_brightness: f32,
     textures: Vec<Texture>,
     block: Option<(u16, Option<SpriteId>)>,
@@ -196,6 +199,41 @@ fn decode_scope(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         _ => return None,
     };
     (rgba.len() == (w * h * 4) as usize).then_some((w, h, rgba))
+}
+
+const VIGNETTE_FILE: &str = "assets/minecraft/textures/misc/vignette.png";
+
+/// `blur` in a texture's `.mcmeta`.
+fn blurred(assets: &Assets, file: &str) -> bool {
+    assets
+        .read(&format!("{file}.mcmeta"))
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("texture")?.get("blur")?.as_bool())
+        .unwrap_or(false)
+}
+
+/// Sprite fractions half a texel inside the edges, so bilinear taps stay off atlas neighbours.
+fn inset_uv(width: u32, height: u32) -> [[f32; 2]; 4] {
+    let (du, dv) = (0.5 / width.max(1) as f32, 0.5 / height.max(1) as f32);
+    let (u0, u1, v0, v1) = (du, 1.0 - du, dv, 1.0 - dv);
+    [[u0, v0], [u0, v1], [u1, v1], [u1, v0]]
+}
+
+fn blit(frame: &mut UiFrame<'_>, sprite: SpriteId, rect: [f32; 4], argb: u32, linear: bool) {
+    if !linear {
+        frame.sprite_f(sprite, rect, argb);
+        return;
+    }
+    let info = *frame.ui().sprites().info(sprite);
+    let [x0, y0, x1, y1] = rect;
+    frame.set_linear(true);
+    frame.sprite_quad(
+        sprite,
+        [[x0, y0], [x0, y1], [x1, y1], [x1, y0]],
+        inset_uv(info.width, info.height),
+        argb,
+    );
+    frame.set_linear(false);
 }
 
 /// `ns:path` to the texture file `textures/path.png`; rejects paths that climb out of `textures`.
@@ -346,9 +384,12 @@ impl Overlays {
         if self.textures.len() >= MAX_OVERLAY_TEXTURES {
             return None;
         }
-        let decoded = texture_file(id)
-            .and_then(|file| assets.read(&file))
+        let file = texture_file(id);
+        let decoded = file
+            .as_deref()
+            .and_then(|file| assets.read(file))
             .and_then(|b| decode_scope(&b));
+        let linear = file.is_some_and(|f| blurred(assets, &f));
         let (sprite, frames) = match decoded {
             Some((w, h, px)) => (
                 self.owned.add(frame.ui().sprites_mut(), w, h, &px),
@@ -360,6 +401,7 @@ impl Overlays {
             key: id.to_owned(),
             sprite,
             frames,
+            linear,
         });
         sprite.map(|s| (s, frames))
     }
@@ -493,7 +535,12 @@ impl Overlays {
             return;
         };
         let (w, h) = frame.gui_size();
-        frame.sprite_tinted(sprite, 0, 0, w, h, argb);
+        let rect = [0.0, 0.0, w as f32, h as f32];
+        blit(frame, sprite, rect, argb, self.linear(id));
+    }
+
+    fn linear(&self, id: &str) -> bool {
+        self.textures.iter().any(|t| t.key == id && t.linear)
     }
 
     fn draw_equipment(&mut self, frame: &mut UiFrame<'_>, assets: &Assets, state: &ClientState) {
@@ -551,15 +598,17 @@ impl Overlays {
             | channel(0.4 * strength) << 8
             | channel(0.2 * strength);
         frame.set_blend(mcr_ui::Blend::Additive);
-        frame.sprite_f(sprite, [cx - hw, cy - hh, cx + hw, cy + hh], argb);
+        let rect = [cx - hw, cy - hh, cx + hw, cy + hh];
+        blit(frame, sprite, rect, argb, self.linear(NAUSEA));
         frame.set_blend(mcr_ui::Blend::Normal);
     }
 
     fn draw_vignette(&mut self, frame: &mut UiFrame<'_>, assets: &Assets, warning: f32) {
         if !self.vignette_loaded {
             self.vignette_loaded = true;
+            self.vignette_linear = blurred(assets, VIGNETTE_FILE);
             self.vignette = assets
-                .read("assets/minecraft/textures/misc/vignette.png")
+                .read(VIGNETTE_FILE)
                 .and_then(|b| decode_scope(&b))
                 .and_then(|(w, h, px)| {
                     let sprites = frame.ui().sprites_mut();
@@ -574,7 +623,8 @@ impl Overlays {
             return;
         }
         let (gui_w, gui_h) = frame.gui_size();
-        frame.sprite_tinted(sprite, 0, 0, gui_w, gui_h, argb);
+        let rect = [0.0, 0.0, gui_w as f32, gui_h as f32];
+        blit(frame, sprite, rect, argb, self.vignette_linear);
     }
 
     fn draw_scope(&mut self, frame: &mut UiFrame<'_>, assets: &Assets) {
@@ -851,5 +901,13 @@ mod tests {
     #[test]
     fn hostile_scope_textures_are_rejected() {
         assert!(decode_scope(&[1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn linear_overlays_stay_half_a_texel_inside() {
+        let uv = inset_uv(256, 4);
+        assert_eq!(uv[0], [0.5 / 256.0, 0.125]);
+        assert_eq!(uv[2], [1.0 - 0.5 / 256.0, 0.875]);
+        assert_eq!(inset_uv(0, 0)[2], [0.5, 0.5]);
     }
 }

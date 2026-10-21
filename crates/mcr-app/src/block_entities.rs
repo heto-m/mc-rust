@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use mcr_block_entity::{
-    BeaconData, BeamBlock, BlockEntityData, BlockEntityFrame, BlockEntityKind, BlockEntityScene,
-    DyeColor, PistonData, beacon_levels, beam_sections,
+    BeaconData, BeamBlock, BeamSection, BlockEntityData, BlockEntityFrame, BlockEntityKind,
+    BlockEntityScene, DyeColor, PistonData, beacon_levels, beam_sections,
 };
 use mcr_client::{ClientEvent, ClientState};
 use mcr_entity_model::glam::Quat;
@@ -18,7 +18,11 @@ use uuid::Uuid;
 
 const MAX_PER_CHUNK: usize = 4096;
 const MAX_TOTAL: usize = 1 << 16;
-const BEACON_INTERVAL: u64 = 20;
+const BEAM_INTERVAL: u64 = 20;
+/// `BeaconBlockEntity#tick` recounts the pyramid when the game time is a multiple of this.
+const BEACON_LEVELS_INTERVAL: i64 = 80;
+/// Pyramid recounts per client tick; the rest wait in a queue.
+const MAX_RECOUNTS_PER_TICK: usize = 8;
 const CONDUIT_INTERVAL: u64 = 40;
 /// Vanilla's `#beacon_base_blocks`, for a server that sent no block tags.
 const BEACON_BASE: [&str; 5] = [
@@ -42,6 +46,10 @@ pub struct BlockEntities {
     entries: FxHashMap<Pos, (BlockEntityKind, BlockEntityData)>,
     by_chunk: FxHashMap<ChunkPos, Vec<Pos>>,
     conduit_frames: FxHashMap<Pos, Vec<Pos>>,
+    /// Pyramid levels per beacon, zero until the first recount as in vanilla.
+    beacon_levels: FxHashMap<Pos, u8>,
+    recount_clock: RecountClock,
+    recount_queue: std::collections::VecDeque<Pos>,
 }
 
 impl std::fmt::Debug for BlockEntities {
@@ -118,6 +126,66 @@ fn beam_block(state: u32) -> BeamBlock {
         BeamBlock::Solid
     } else {
         BeamBlock::Open
+    }
+}
+
+fn beam(state: &ClientState, pos: Pos) -> Vec<BeamSection> {
+    let chunks = &state.chunks;
+    let top = top_y(chunks.config().min_y(), chunks.config().height());
+    beam_sections(pos[1], top, |y| {
+        state_at(chunks, [pos[0], y, pos[2]]).map_or(BeamBlock::Open, beam_block)
+    })
+}
+
+fn pyramid_levels(state: &ClientState, pos: Pos) -> u8 {
+    let chunks = &state.chunks;
+    let data = mcr_data::v26_3();
+    let tag = state
+        .registries
+        .tag("minecraft:block", "minecraft:beacon_base_blocks");
+    beacon_levels(pos, chunks.config().min_y(), |x, y, z| {
+        state_at(chunks, [x, y, z]).is_some_and(|s| match tag {
+            Some(ids) => data
+                .block_state(s)
+                .is_some_and(|b| ids.contains(&(b.block as i32))),
+            None => BEACON_BASE.contains(&block_name(s)),
+        })
+    })
+}
+
+/// Vanilla draws no beam while the beacon has no pyramid (`getBeamSections` with zero levels).
+fn beacon_data(state: &ClientState, pos: Pos, levels: u8) -> BlockEntityData {
+    let sections = if levels == 0 {
+        Vec::new()
+    } else {
+        beam(state, pos)
+    };
+    BlockEntityData::Beacon(BeaconData { sections })
+}
+
+fn levels_due(game_time: i64) -> bool {
+    game_time.rem_euclid(BEACON_LEVELS_INTERVAL) == 0
+}
+
+/// Gates pyramid recounts on the server's game time without letting time packets force one per tick:
+/// the time must move forward and a full interval of client ticks must have passed.
+#[derive(Debug, Default)]
+struct RecountClock {
+    last: Option<(i64, u64)>,
+}
+
+impl RecountClock {
+    fn due(&mut self, game_time: i64, ticks: u64, running: bool) -> bool {
+        if !running || !levels_due(game_time) {
+            return false;
+        }
+        if let Some((time, tick)) = self.last
+            && (game_time <= time || ticks.saturating_sub(tick) < BEACON_LEVELS_INTERVAL as u64)
+        {
+            return false;
+        }
+        self.last = Some((game_time, ticks));
+        true
     }
 }
 
@@ -206,6 +274,9 @@ impl BlockEntities {
             entries: FxHashMap::default(),
             by_chunk: FxHashMap::default(),
             conduit_frames: FxHashMap::default(),
+            beacon_levels: FxHashMap::default(),
+            recount_clock: RecountClock::default(),
+            recount_queue: Default::default(),
         })
     }
 
@@ -213,6 +284,8 @@ impl BlockEntities {
         self.entries.clear();
         self.by_chunk.clear();
         self.conduit_frames.clear();
+        self.beacon_levels.clear();
+        self.recount_queue.clear();
         self.scene.clear();
     }
 
@@ -230,7 +303,10 @@ impl BlockEntities {
             return;
         };
         match (kind, &mut data) {
-            (BlockEntityKind::Beacon, d) => *d = Self::beacon_data(state, pos),
+            (BlockEntityKind::Beacon, d) => {
+                let levels = self.beacon_levels.get(&pos).copied().unwrap_or(0);
+                *d = beacon_data(state, pos, levels);
+            }
             (BlockEntityKind::Conduit, BlockEntityData::Conduit(c)) => {
                 let frame = conduit_frame(&state.chunks, pos);
                 c.active = frame.len() >= 16;
@@ -245,33 +321,6 @@ impl BlockEntities {
                 .or_default()
                 .push(pos);
         }
-    }
-
-    /// Vanilla draws no beam while the beacon has no pyramid (`getBeamSections` with zero levels).
-    fn beacon_data(state: &ClientState, pos: Pos) -> BlockEntityData {
-        let chunks = &state.chunks;
-        let top = top_y(chunks.config().min_y(), chunks.config().height());
-        let mut sections = beam_sections(pos[1], top, |y| {
-            state_at(chunks, [pos[0], y, pos[2]]).map_or(BeamBlock::Open, beam_block)
-        });
-        if !sections.is_empty() {
-            let data = mcr_data::v26_3();
-            let tag = state
-                .registries
-                .tag("minecraft:block", "minecraft:beacon_base_blocks");
-            let levels = beacon_levels(pos, chunks.config().min_y(), |x, y, z| {
-                state_at(chunks, [x, y, z]).is_some_and(|s| match tag {
-                    Some(ids) => data
-                        .block_state(s)
-                        .is_some_and(|b| ids.contains(&(b.block as i32))),
-                    None => BEACON_BASE.contains(&block_name(s)),
-                })
-            });
-            if levels == 0 {
-                sections.clear();
-            }
-        }
-        BlockEntityData::Beacon(BeaconData { sections })
     }
 
     /// Block entities with client-side particles and sounds.
@@ -323,6 +372,7 @@ impl BlockEntities {
 
     fn remove(&mut self, pos: Pos) {
         self.conduit_frames.remove(&pos);
+        self.beacon_levels.remove(&pos);
         if self.entries.remove(&pos).is_some() {
             self.scene.remove(pos);
             let chunk = ChunkPos::from_block(pos[0], pos[2]);
@@ -338,6 +388,7 @@ impl BlockEntities {
     fn unload_chunk(&mut self, pos: ChunkPos) {
         for p in self.by_chunk.remove(&pos).unwrap_or_default() {
             self.conduit_frames.remove(&p);
+            self.beacon_levels.remove(&p);
             self.entries.remove(&p);
             self.scene.remove(p);
         }
@@ -402,11 +453,39 @@ impl BlockEntities {
 
     /// Re-derives world-dependent state (beacon beams, conduit shells) at their vanilla cadence.
     pub fn tick(&mut self, state: &ClientState, ticks: u64) {
+        let world = &state.world;
+        if self
+            .recount_clock
+            .due(world.game_time, ticks, world.runs_normally)
+        {
+            self.recount_queue.clear();
+            self.recount_queue.extend(
+                self.entries
+                    .iter()
+                    .filter(|(_, (k, _))| *k == BlockEntityKind::Beacon)
+                    .map(|(p, _)| *p),
+            );
+        }
+        for _ in 0..MAX_RECOUNTS_PER_TICK {
+            let Some(pos) = self.recount_queue.pop_front() else {
+                break;
+            };
+            let Some((BlockEntityKind::Beacon, data)) = self.entries.get(&pos).cloned() else {
+                continue;
+            };
+            let levels = if beam(state, pos).is_empty() {
+                self.beacon_levels.get(&pos).copied().unwrap_or(0)
+            } else {
+                pyramid_levels(state, pos)
+            };
+            self.beacon_levels.insert(pos, levels);
+            self.put(state, pos, BlockEntityKind::Beacon, data);
+        }
         let due: Vec<(Pos, BlockEntityKind)> = self
             .entries
             .iter()
             .filter(|(_, (k, _))| match k {
-                BlockEntityKind::Beacon => ticks.is_multiple_of(BEACON_INTERVAL),
+                BlockEntityKind::Beacon => ticks.is_multiple_of(BEAM_INTERVAL),
                 BlockEntityKind::Conduit => ticks.is_multiple_of(CONDUIT_INTERVAL),
                 _ => false,
             })
@@ -495,6 +574,33 @@ mod tests {
         );
         assert_eq!(top_y(i32::MAX, u32::MAX), i32::MAX - 1);
         assert_eq!(top_y(-64, 384), 319);
+    }
+
+    #[test]
+    fn beacon_levels_follow_the_game_time_cadence() {
+        let due: Vec<i64> = (0..=240).filter(|&t| levels_due(t)).collect();
+        assert_eq!(due, [0, 80, 160, 240]);
+        assert!(levels_due(-80));
+        let _ = levels_due(i64::MIN);
+    }
+
+    #[test]
+    fn hostile_game_time_cannot_force_a_recount_every_tick() {
+        let mut clock = RecountClock::default();
+        assert!(clock.due(80, 1, true));
+        let forced = (2..400u64)
+            .filter(|&t| clock.due(80 * (t as i64), t, true))
+            .count();
+        assert_eq!(forced, 4, "one recount per 80 client ticks at most");
+
+        let mut stuck = RecountClock::default();
+        assert!(stuck.due(160, 0, true));
+        assert!((1..1000).all(|t| !stuck.due(160, t, true)));
+        assert!(!stuck.due(80, 2000, true));
+
+        let mut frozen = RecountClock::default();
+        assert!(!frozen.due(80, 0, false));
+        assert!(frozen.due(80, 0, true));
     }
 
     #[test]

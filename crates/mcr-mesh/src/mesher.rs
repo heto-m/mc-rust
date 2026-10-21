@@ -212,6 +212,8 @@ pub struct Mesher {
     flood: Vec<u16>,
     pub(crate) fluid_tops: Vec<fluid::FluidTop>,
     sort_keys: Vec<u64>,
+    cube_scratch: Vec<PackedQuad>,
+    model_scratch: Vec<ModelQuad>,
 }
 
 impl std::fmt::Debug for Mesher {
@@ -308,6 +310,8 @@ impl Mesher {
             flood: Vec::new(),
             fluid_tops: Vec::new(),
             sort_keys: Vec::new(),
+            cube_scratch: Vec::new(),
+            model_scratch: Vec::new(),
         }
     }
 
@@ -399,6 +403,7 @@ impl Mesher {
         let tints = out.tints.take();
         self.flush_fluid_tops(tints.as_deref(), out);
         out.tints = tints;
+        out.partition_opaque(&mut self.cube_scratch, &mut self.model_scratch);
         if let Some(cam) = input.camera
             && !out.translucent.is_empty()
         {
@@ -607,6 +612,7 @@ impl Mesher {
                 let bit_index = occ[word].trailing_zeros() as usize;
                 let (u, v) = (bit_index % 16, word * 4 + bit_index / 16);
                 let key = keys[v * 16 + u];
+                let forced = key & KEY_OPAQUE != 0;
                 let (mut w, mut h) = (1, 1);
                 if self.options.greedy {
                     if u_uniform(key) {
@@ -648,7 +654,7 @@ impl Mesher {
                     light: key_light(key),
                     tint: (key >> 32 & 63) as u8,
                     rotation: (key >> 44 & 7) as u8,
-                    opaque: key & KEY_OPAQUE != 0,
+                    opaque: forced || self.cache.layer_opaque((key & 0xffff) as u16),
                 };
                 if let Ok(p) = PackedQuad::encode(&q) {
                     out.faces[face].push(p);
@@ -656,6 +662,7 @@ impl Mesher {
                 let overlay = (key >> 16 & 0xffff) as u16;
                 if overlay != LAYER_NONE {
                     q.layer = overlay;
+                    q.opaque = forced || q.opaque && self.cache.layer_opaque(overlay);
                     q.tint = (key >> 38 & 63) as u8;
                     q.rotation = (key >> 47 & 7) as u8;
                     if let Ok(p) = PackedQuad::encode(&q) {
@@ -691,6 +698,7 @@ impl Mesher {
             visible: [None; 6],
             shaded: [None; 12],
             tinted: false,
+            cutout_seen: false,
         };
         if sm.random != 0 {
             let picks = self.picks(ctx, cell, sm);
@@ -784,17 +792,16 @@ impl Mesher {
                 .sum();
             ao[s] = model_ao(b);
         }
+        let solid = self.forced_opaque(sm)
+            || !qd.translucent && !st.cutout_seen && self.cache.layer_opaque(qd.layer);
+        st.cutout_seen |= !qd.translucent && !solid;
         let desc = ModelQuadDesc {
             corners,
             uvs,
             layer: qd.layer,
             light,
             shade_face: FACE_TO_PACKED[usize::from(qd.shade)],
-            flags: if self.forced_opaque(sm) {
-                MODEL_FLAG_OPAQUE
-            } else {
-                0
-            },
+            flags: if solid { MODEL_FLAG_OPAQUE } else { 0 },
             ao,
             tint: qd.tint,
             cell: [cell[0] as u8, cell[1] as u8, cell[2] as u8],
@@ -833,6 +840,8 @@ struct ModelState<'a, 'b> {
     visible: [Option<bool>; 6],
     shaded: [Option<Shading>; 12],
     tinted: bool,
+    /// An earlier quad of this block needs the alpha test; later ones keep it so they stay drawn after.
+    cutout_seen: bool,
 }
 
 /// Vanilla's `lightCoordsWithEmission`: an emitting element lights both channels to at least its level,
@@ -1057,6 +1066,52 @@ mod tests {
         let mut out = SectionMesh::default();
         m.mesh(&input_from(f), &mut out);
         out
+    }
+
+    #[test]
+    fn opaque_sprites_lead_each_face_list_before_cutout_quads() {
+        let cache = test_cache()
+            .with_opaque_layer(STONE_LAYER)
+            .with_opaque_layer(6);
+        let mut m = Mesher::with_options(
+            Arc::new(cache),
+            Arc::new(crate::tint::BiomeColors::from_climates(
+                &[crate::tint::BiomeClimate::default()],
+                &crate::tint::ColorMaps::flat(0x112233, 0x445566, 0x778899),
+            )),
+            MeshOptions {
+                greedy: false,
+                ..MeshOptions::default()
+            },
+        );
+        let mut out = SectionMesh::default();
+        m.mesh(
+            &input_from(|x, y, z| match (x, y, z) {
+                (3, 3, 3) => LEAVES,
+                (5, 3, 3) => STONE,
+                (7, 3, 3) => GRASS_BLOCK,
+                _ => AIR,
+            }),
+            &mut out,
+        );
+        for face in &out.faces {
+            let flags: Vec<bool> = face.iter().map(|q| q.is_opaque()).collect();
+            assert!(flags.windows(2).all(|w| w[0] || !w[1]), "{flags:?}");
+        }
+        let side = &out.faces[0];
+        let layers: Vec<(u16, bool)> = side
+            .iter()
+            .map(|q| (q.decode().layer, q.is_opaque()))
+            .collect();
+        assert_eq!(
+            layers,
+            [
+                (STONE_LAYER, true),
+                (6, true),
+                (5, false),
+                (OVERLAY_LAYER, false)
+            ]
+        );
     }
 
     #[test]

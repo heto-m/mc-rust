@@ -2,8 +2,8 @@ use super::sky::FxVertex;
 
 pub const MAX_DECALS: usize = 256;
 pub const MAX_BOXES_PER_DECAL: usize = 16;
-/// Quads one decal draws at most, the same budget as its boxes.
-pub const MAX_QUADS_PER_DECAL: usize = MAX_BOXES_PER_DECAL * 6;
+/// Quads one decal draws at most: a block model plus a block entity's model parts.
+pub const MAX_QUADS_PER_DECAL: usize = 128;
 const GROW: f32 = 0.002;
 
 /// A block being broken. `quads` are the block model's quads in block-local coordinates, like vanilla's

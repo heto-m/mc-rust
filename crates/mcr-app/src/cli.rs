@@ -31,6 +31,8 @@ pub struct Options {
     pub bench_frames: u32,
     pub bench_views: Vec<Camera>,
     pub bench_modes: bool,
+    /// World viewer: vanilla's `improvedTransparency`.
+    pub improved_transparency: bool,
     pub bench_timeline: Option<u32>,
     pub frames: u32,
     pub frame_step: Option<Camera>,
@@ -77,6 +79,7 @@ impl Default for Options {
             bench_frames: 0,
             bench_views: Vec::new(),
             bench_modes: false,
+            improved_transparency: false,
             bench_timeline: None,
             frames: 0,
             frame_step: None,
@@ -139,7 +142,7 @@ impl Options {
 
 pub const USAGE: &str = "usage: mcr [--world <save> | --synthetic | --connect host[:port]] [--render-distance N] [--no-vsync] [--no-occlusion] [--no-graph]
            [--jar <client.jar>] [--screenshot out.png [--camera x,y,z,yaw,pitch] [--size WxH] [--frames N [--frame-step dx,dy,dz,dyaw,dpitch]]]
-           [--autofly blocks_per_s] [--bench frames [--bench-view x,y,z,yaw,pitch]... [--bench-modes]]
+           [--autofly blocks_per_s] [--bench frames [--bench-view x,y,z,yaw,pitch]... [--bench-modes]] [--improved-transparency]
        connect mode: [--name <name>] [--game-dir dir] [--assets-dir dir] [--autopilot script]
            [--screenshot out.png [--after-ticks N] [--bench N] [--bench-timeline secs]]
        singleplayer: --singleplayer <saves folder> starts that world's local server and joins it (game dir's saves/)
@@ -187,6 +190,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, String> 
             "--no-occlusion" => opts.occlusion = false,
             "--no-graph" => opts.visibility_graph = false,
             "--bench-modes" => opts.bench_modes = true,
+            "--improved-transparency" => opts.improved_transparency = true,
             "--jar" => {
                 opts.jar = value(&arg, &mut args)?.into();
                 opts.jar_set = true;
