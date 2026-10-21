@@ -59,6 +59,8 @@ pub enum Pipeline {
     /// Alpha-blended over geometry drawn earlier with identical depth (armor trims).
     Decal = 2,
     Additive = 3,
+    /// Depth only, drawn with the opaque parts (`RenderTypes#waterMask`: the boat's water patch).
+    WaterMask = 4,
 }
 
 /// Surface the scene draws into; `reverse_z` selects a `Greater` depth test.
@@ -208,7 +210,7 @@ struct Run {
 pub struct EntityRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipelines: [wgpu::RenderPipeline; 4],
+    pipelines: [wgpu::RenderPipeline; 5],
     outline_pipeline: wgpu::RenderPipeline,
     frame_outlines: usize,
     layout: wgpu::BindGroupLayout,
@@ -313,7 +315,8 @@ impl EntityRenderer {
                          samples: u32,
                          blend: Option<wgpu::BlendState>,
                          depth_write: bool,
-                         equal: bool| {
+                         equal: bool,
+                         write_mask: wgpu::ColorWrites| {
             let compare = match (formats.reverse_z, equal) {
                 (true, false) => wgpu::CompareFunction::Greater,
                 (true, true) => wgpu::CompareFunction::GreaterEqual,
@@ -352,7 +355,7 @@ impl EntityRenderer {
                     targets: &[Some(wgpu::ColorTargetState {
                         format: color,
                         blend,
-                        write_mask: wgpu::ColorWrites::ALL,
+                        write_mask,
                     })],
                 }),
                 multiview_mask: None,
@@ -360,7 +363,7 @@ impl EntityRenderer {
             })
         };
         let samples = formats.sample_count.max(1);
-        let make = |entry: &str, blend, depth_write, equal| {
+        let make_masked = |entry: &str, blend, depth_write, equal, write_mask| {
             make_with(
                 "vs_main",
                 entry,
@@ -370,7 +373,11 @@ impl EntityRenderer {
                 blend,
                 depth_write,
                 equal,
+                write_mask,
             )
+        };
+        let make = |entry: &str, blend, depth_write, equal| {
+            make_masked(entry, blend, depth_write, equal, wgpu::ColorWrites::ALL)
         };
         let outline_pipeline = make_with(
             "vs_outline",
@@ -381,6 +388,7 @@ impl EntityRenderer {
             None,
             true,
             true,
+            wgpu::ColorWrites::ALL,
         );
         let additive = wgpu::BlendState {
             color: wgpu::BlendComponent {
@@ -405,6 +413,7 @@ impl EntityRenderer {
                 true,
             ),
             make("fs_additive", Some(additive), false, true),
+            make_masked("fs_mask", None, true, false, wgpu::ColorWrites::empty()),
         ];
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("entity"),
@@ -752,7 +761,8 @@ impl EntityRenderer {
                 0 => Pipeline::Cutout,
                 1 => Pipeline::Translucent,
                 2 => Pipeline::Decal,
-                _ => Pipeline::Additive,
+                3 => Pipeline::Additive,
+                _ => Pipeline::WaterMask,
             };
             match self.runs.last_mut() {
                 Some(run)
@@ -833,17 +843,22 @@ impl EntityRenderer {
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        self.draw_filtered(pass, |_| true);
+        self.draw_opaque(pass);
+        self.draw_blended(pass);
     }
 
     /// Depth-writing parts only; draw before translucent terrain.
     pub fn draw_opaque(&self, pass: &mut wgpu::RenderPass<'_>) {
-        self.draw_filtered(pass, |p| p == Pipeline::Cutout);
+        self.draw_filtered(pass, |p| {
+            matches!(p, Pipeline::Cutout | Pipeline::WaterMask)
+        });
     }
 
     /// Blended, decal and additive parts; draw after translucent terrain.
     pub fn draw_blended(&self, pass: &mut wgpu::RenderPass<'_>) {
-        self.draw_filtered(pass, |p| p != Pipeline::Cutout);
+        self.draw_filtered(pass, |p| {
+            !matches!(p, Pipeline::Cutout | Pipeline::WaterMask)
+        });
     }
 
     /// Whether any part pushed this frame glows.
@@ -856,7 +871,7 @@ impl EntityRenderer {
         if self.has_outlines() {
             self.draw_runs(
                 pass,
-                |p| p != Pipeline::Additive,
+                |p| !matches!(p, Pipeline::Additive | Pipeline::WaterMask),
                 Some(&self.outline_pipeline),
             );
         }

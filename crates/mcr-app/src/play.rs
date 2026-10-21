@@ -2003,6 +2003,22 @@ impl Play {
         }
     }
 
+    /// `markMessageAsProcessed` for messages `chatDelay` held: once the chat shows them.
+    fn sync_chat_acks(&mut self) {
+        let delayed = crate::hud::chat_delay_ms(&self.options) > 0;
+        let (shown, drained) = self.hud.take_released_chat();
+        self.net(|c| {
+            c.set_chat_delay(delayed)?;
+            for sig in &shown {
+                c.chat_shown(sig)?;
+            }
+            if drained {
+                c.chat_queue_drained()?;
+            }
+            Ok(())
+        });
+    }
+
     /// `PiercingWeapon#makeSound`: the server leaves the stabbing player out of its broadcast.
     fn play_stab(&mut self) {
         let state = &self.world.client.state;
@@ -3722,6 +3738,7 @@ impl Play {
             &self.options,
             self.started.elapsed().as_millis() as u64,
         );
+        self.sync_chat_acks();
         let hidden = self.hud_hidden || self.java_gui;
         let spectator_alpha = self.spectator_menu_alpha();
         let hotbar_keys = self.keys.hotbar.map(|i| self.bindings.input(i));

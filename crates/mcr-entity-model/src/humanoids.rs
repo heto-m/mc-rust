@@ -3,7 +3,7 @@ use mcr_protocol::types::entity_data::{EntityDataValue, Pose};
 use uuid::Uuid;
 
 use crate::catalog::{BuildFn, PlanCx, hitbox};
-use crate::equipment::{add_layers, has_layer, humanoid_armor};
+use crate::equipment::{has_layer, humanoid_armor};
 use crate::hands::{
     HandFamily, arm_items, hand_attach, is_item, is_spear, item_name, player_poses, set_pose,
 };
@@ -728,7 +728,8 @@ fn player(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     attach_head_item(cx, v, plan, "head");
     let prefix = if slim { "player_slim" } else { "player" };
     humanoid_armor(cx, v, plan, prefix, false);
-    wings(cx, v, plan, false);
+    let elytra = cape_texture(cx, v, mask & 1 != 0);
+    wings_with(cx, v, plan, false, elytra.as_deref());
     avatar_layers(cx, v, plan, &texture, slim, mask & 1 != 0);
     plan.post_rot = avatar_rotation(v);
     let _ = hitbox;
@@ -826,14 +827,9 @@ fn avatar_layers(
     let pv = &v.player;
     let chest = v.item(slot::CHEST);
     if !v.invisible
-        && show_cape
-        && let Some(cape) = pv.skin.and_then(|s| s.cape.as_ref())
         && !chest.is_some_and(|c| has_layer(cx, c, "wings"))
+        && let Some(key) = cape_texture(cx, v, show_cape)
     {
-        let key = format!("dyn:cape:{}", cape.key);
-        let (w, h, rgba) = (cape.width, cape.height, &cape.rgba);
-        cx.tex
-            .register(&key, || crate::skin::prepare_cape(w, h, rgba));
         let armored = chest.is_some_and(|c| has_layer(cx, c, "humanoid"));
         let part = plan.push(Part::new("minecraft:player#cape", key).no_hurt());
         if armored {
@@ -925,6 +921,30 @@ pub(crate) fn avatar_rotation(v: &EntityView<'_>) -> Mat4 {
 
 /// `WingsLayer` with `ElytraModel.setupAnim`: 2px behind the body, lowered while crouching.
 fn wings(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan, baby: bool) {
+    wings_with(cx, v, plan, baby, None);
+}
+
+/// The skin's cape as a registered texture while the cape part shows (`WingsLayer` and `CapeLayer`).
+fn cape_texture(cx: &mut PlanCx<'_>, v: &EntityView<'_>, show_cape: bool) -> Option<String> {
+    let cape = v
+        .player
+        .skin
+        .and_then(|s| s.cape.as_ref())
+        .filter(|_| show_cape)?;
+    let key = format!("dyn:cape:{}", cape.key);
+    let (w, h, rgba) = (cape.width, cape.height, &cape.rgba);
+    cx.tex
+        .register(&key, || crate::skin::prepare_cape(w, h, rgba));
+    Some(key)
+}
+
+fn wings_with(
+    cx: &mut PlanCx<'_>,
+    v: &EntityView<'_>,
+    plan: &mut Plan,
+    baby: bool,
+    player_texture: Option<&str>,
+) {
     let Some(chest) = v.item(slot::CHEST) else {
         return;
     };
@@ -934,7 +954,13 @@ fn wings(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan, baby: bool) {
         "minecraft:elytra#main"
     };
     let before = plan.parts.len();
-    if !add_layers(cx, plan, chest, "chest", "wings", model) {
+    if !crate::equipment::add_layers_with(
+        cx,
+        plan,
+        chest,
+        ("chest", "wings", model),
+        player_texture,
+    ) {
         return;
     }
     let y = if v.pose() == Pose::Crouching {

@@ -29,7 +29,10 @@ pub use decode::{Pcm, PcmProducer, StreamSource, decode_ogg, open_stream, pushed
 pub use engine::{AudioEngine, output_devices};
 pub use error::AudioError;
 pub use events::{JavaRandom, ResolvedSound, SoundEvents};
-pub use loops::{ElytraLoop, GuardianBeam, LoopLevel, bee_level, is_angry, nearest, reconcile};
+pub use loops::{
+    ElytraLoop, GuardianBeam, LoopLevel, RiddenVehicle, RidingLoop, bee_level, is_angry, nearest,
+    reconcile,
+};
 pub use manager::SoundManager;
 pub use mixer::{
     AudioHandle, CHUNK_FRAMES, Command, CommandProducer, EXTERNAL_VOICE_BIT, Listener, MAX_VOICES,

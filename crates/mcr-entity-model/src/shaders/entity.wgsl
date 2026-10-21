@@ -165,6 +165,11 @@ fn fs_blend(in: VertexOut) -> @location(0) vec4<f32> {
 }
 
 @fragment
+fn fs_mask(in: VertexOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0);
+}
+
+@fragment
 fn fs_additive(in: VertexOut) -> @location(0) vec4<f32> {
     let c = textureSample(entity_textures, entity_sampler, in.uv, in.layer);
     let f = max(fog_factor(in.fog_dist.x, globals.fog.x, globals.fog.y), fog_factor(in.fog_dist.y, globals.fog.z, globals.fog.w));

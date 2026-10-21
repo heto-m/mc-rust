@@ -2,8 +2,8 @@
 //! sniffer digging.
 
 use mcr_audio::{
-    ElytraLoop, GuardianBeam, LoopLevel, SoundSource, VoiceId, bee_level, is_angry, nearest,
-    reconcile,
+    ElytraLoop, GuardianBeam, LoopLevel, RiddenVehicle, RidingLoop, SoundSource, VoiceId,
+    bee_level, is_angry, nearest, reconcile,
 };
 use mcr_client::ClientState;
 use mcr_data::Version;
@@ -40,8 +40,16 @@ struct GuardianVoice {
     beam: GuardianBeam,
 }
 
+#[derive(Debug)]
+struct RidingVoice {
+    sound: RidingLoop,
+    voice: VoiceId,
+    last: [f64; 3],
+}
+
 #[derive(Debug, Default)]
 pub struct EntityLoops {
+    riding: Option<RidingVoice>,
     bee: Option<i32>,
     guardian: Option<i32>,
     elder_guardian: Option<i32>,
@@ -73,6 +81,9 @@ impl EntityLoops {
     }
 
     pub fn reset(&mut self, audio: &mut Audio) {
+        if let Some(r) = self.riding.take() {
+            audio.stop_voice(r.voice);
+        }
         if let Some(e) = self.elytra.take() {
             audio.stop_voice(e.voice);
         }
@@ -104,6 +115,47 @@ impl EntityLoops {
         self.tick_bees(state, audio);
         self.tick_beams(state, audio);
         self.tick_sniffers(state, audio);
+        self.tick_riding(state, audio);
+    }
+
+    /// `LocalPlayer#startRiding`: the happy ghast and nautilus riding loops.
+    fn tick_riding(&mut self, state: &ClientState, audio: &mut Audio) {
+        let vehicle = state.player.vehicle.and_then(|id| state.entities.get(id));
+        if self.riding.is_none()
+            && let Some(e) = vehicle
+            && let Some(sound) = u32::try_from(e.kind)
+                .ok()
+                .and_then(|k| state.data.entity_type_name(k))
+                .and_then(|name| RidingLoop::for_vehicle(e.id, name))
+            && let Some(voice) =
+                audio.play_voice_looping(sound.event, None, 0.0, 1.0, SoundSource::Neutral, true)
+        {
+            self.riding = Some(RidingVoice {
+                sound,
+                voice,
+                last: e.pos,
+            });
+        }
+        let Some(r) = &mut self.riding else { return };
+        let ridden = vehicle.map(|e| {
+            let moved: f64 = (0..3).map(|i| (e.pos[i] - r.last[i]).powi(2)).sum();
+            r.last = e.pos;
+            RiddenVehicle {
+                id: e.id,
+                underwater: eye_under_water(state, e),
+                speed: moved.sqrt() as f32,
+            }
+        });
+        match r.sound.tick(ridden) {
+            Some(volume) => {
+                let silent = vehicle.is_some_and(|e| flag(&e.data, idx::SILENT));
+                audio.set_voice_volume(r.voice, if silent { 0.0 } else { volume });
+            }
+            None => {
+                audio.stop_voice(r.voice);
+                self.riding = None;
+            }
+        }
     }
 
     /// Vanilla's `SnifferSoundInstance`: one digging sound that follows the sniffer and stops with the dig.
@@ -281,6 +333,22 @@ impl EntityLoops {
             true
         });
     }
+}
+
+/// `Entity#isUnderWater`: the eye is in water.
+fn eye_under_water(state: &ClientState, e: &mcr_client::Entity) -> bool {
+    let eye = u32::try_from(e.kind)
+        .ok()
+        .and_then(|k| state.data.entity_type_info(k))
+        .map_or(0.0, |i| f64::from(i.eye_height));
+    let p = [e.pos[0], e.pos[1] + eye, e.pos[2]].map(|v| v.floor() as i32);
+    state
+        .chunks
+        .block(p[0], p[1], p[2])
+        .and_then(|b| state.data.block_state(b.0))
+        .and_then(|i| i.fluid)
+        .and_then(|f| state.data.fluid_name(f.fluid))
+        .is_some_and(|n| n.ends_with("water"))
 }
 
 fn sniffer_digs(e: &mcr_client::Entity) -> bool {

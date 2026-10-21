@@ -179,6 +179,7 @@ struct BoatTrack {
     bubble_multiplier: f32,
     bubble: f32,
     prev_bubble: f32,
+    under_water: bool,
 }
 
 impl BoatTrack {
@@ -214,6 +215,16 @@ const BOAT_PADDLE_LEFT: u8 = 11;
 const BOAT_PADDLE_RIGHT: u8 = 12;
 const BOAT_BUBBLE_TIME: u8 = 13;
 
+/// `Entity#updateFluidOnEyes`: the eye sits 1/9 block below the eye height for fluid checks.
+fn eye_in_water(state: &ClientState, e: &Entity) -> bool {
+    let eye = u32::try_from(e.kind)
+        .ok()
+        .and_then(|k| state.data.entity_type_info(k))
+        .map_or(0.0, |i| f64::from(i.eye_height));
+    let at = [e.pos[0], e.pos[1] + eye - 0.111_111_11, e.pos[2]];
+    mcr_physics::eye_in_water(&state.chunks, mcr_physics::PhysicsData::v26_3(), at)
+}
+
 fn is_boat(name: &str) -> bool {
     name.ends_with("boat") || name.ends_with("raft")
 }
@@ -245,6 +256,7 @@ fn vehicle_anim(
             t.boat.rowing_time(1, partial),
         ];
         anim.bubble = lerp(t.boat.prev_bubble, t.boat.bubble, partial);
+        anim.under_water = t.boat.under_water;
     }
     anim
 }
@@ -720,6 +732,7 @@ impl EntityLayer {
             }
             if name.is_some_and(is_boat) {
                 t.boat.tick(&e.data, t.age);
+                t.boat.under_water = eye_in_water(state, e);
             }
             if e.kind == self.player_type {
                 let swimming = matches!(

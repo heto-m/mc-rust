@@ -585,7 +585,8 @@ pub fn ghost_pose(camera: (f32, f32), progress: f32, plan: &mut Plan) {
     plan.bright = true;
     plan.scale = 1.0;
     plan.pre_offset = Vec3::ZERO;
-    plan.extra_offset = Vec3::new(0.0, -0.56 * GHOST_SCALE, 3.5 * GHOST_SCALE);
+    // Vanilla translates after its (s, -s, -s) scale, so the offset lands in front of the camera.
+    plan.extra_offset = Vec3::new(0.0, 0.56 * GHOST_SCALE, -3.5 * GHOST_SCALE);
     plan.extra_scale = Vec3::new(-GHOST_SCALE, GHOST_SCALE, -GHOST_SCALE);
     plan.model_y = 0.0;
     plan.tilt = 0.0;
@@ -613,7 +614,7 @@ mod ghost_tests {
         mid.push(Part::new("minecraft:elder_guardian#main", "t"));
         ghost_pose((0.0, 0.0), 0.5, &mut mid);
         assert_eq!(mid.parts[0].tint[3], 140);
-        assert!((mid.extra_offset.z - 1.4894).abs() < 1e-3);
+        assert!((mid.extra_offset.z + 1.4894).abs() < 1e-3, "in front: -Z");
         let mut start = Plan::default();
         start.push(Part::new("minecraft:elder_guardian#main", "t"));
         ghost_pose((0.0, 0.0), 0.0, &mut start);

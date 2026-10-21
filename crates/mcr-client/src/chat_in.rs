@@ -222,6 +222,7 @@ impl ClientState {
             return;
         };
         self.secure.ignore_pending(&sig);
+        self.secure.drop_deferred(&sig);
         for message in &mut self.chat.history {
             if message.signature.as_deref().is_some_and(|s| s.0 == sig) {
                 *message = ChatMessage {

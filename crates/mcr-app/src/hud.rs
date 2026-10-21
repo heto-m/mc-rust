@@ -340,7 +340,7 @@ pub fn chat_options(options: &Options, focused: bool) -> ChatOptions {
 }
 
 /// `chatDelay` in milliseconds.
-fn chat_delay_ms(options: &Options) -> u64 {
+pub(crate) fn chat_delay_ms(options: &Options) -> u64 {
     (options.chat_delay.clamp(0.0, 6.0) * 1000.0) as u64
 }
 
@@ -560,6 +560,11 @@ impl Hud {
         let mut chat = self.chat.borrow_mut();
         chat.process_deletions(ui, tick, &opts);
         chat.tick_queue(ui, tick, &opts, (now_ms, chat_delay_ms(options)));
+    }
+
+    /// Delayed messages the chat showed since the last call and whether its queue ran dry.
+    pub fn take_released_chat(&mut self) -> (Vec<[u8; 256]>, bool) {
+        self.chat.borrow_mut().take_released()
     }
 
     pub fn accept_next_chat(&mut self, ui: &mut Ui, tick: u32, options: &Options, now_ms: u64) {

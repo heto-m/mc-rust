@@ -410,6 +410,14 @@ impl Mount {
         self.dash_cooldown
     }
 
+    /// `AbstractNautilus#onSyncedDataUpdated`: a dash the server reports starts the cooldown if
+    /// none is running.
+    pub fn observe_dash(&mut self) {
+        if self.dash_cooldown == 0 {
+            self.dash_cooldown = NAUTILUS_DASH_COOLDOWN;
+        }
+    }
+
     /// Queues a rider jump (`jump_amount` is the 0-100 charge the client reports).
     pub fn rider_jump(&mut self, jump_amount: i32) {
         if self.mode == MountMode::Camel && (self.dash_cooldown > 0 || !self.body.on_ground) {

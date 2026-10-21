@@ -166,6 +166,8 @@ pub struct VehicleAnim {
     pub rowing: [f32; 2],
     /// `AbstractBoat.getBubbleAngle` in degrees.
     pub bubble: f32,
+    /// `Entity#isUnderWater`: hides the water patch and the bubble wobble.
+    pub under_water: bool,
 }
 
 impl VehicleAnim {

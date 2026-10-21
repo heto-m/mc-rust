@@ -261,7 +261,13 @@ pub struct SecureChat {
     pub local_server: bool,
     warned_insecure: bool,
     pub renderer: Option<TextRenderer>,
+    /// Messages held by `chatDelay`, processed when the chat shows them (`ChatListener#handleMessage`).
+    deferred: VecDeque<(Box<Sig>, bool)>,
+    defer: bool,
 }
+
+/// Messages the delay queue holds before the oldest is processed regardless.
+const MAX_DEFERRED: usize = 1024;
 
 pub fn now_millis() -> i64 {
     std::time::SystemTime::now()
@@ -296,6 +302,8 @@ impl SecureChat {
             local_server: config.local_server,
             warned_insecure: false,
             renderer: config.text_renderer.clone(),
+            deferred: VecDeque::new(),
+            defer: false,
         }
     }
 
@@ -585,13 +593,64 @@ impl SecureChat {
         Validated::Accepted { signed: true }
     }
 
-    /// Vanilla's `markMessageAsProcessed`: an ack once more than 64 are unacknowledged.
+    /// Vanilla's `markMessageAsProcessed`: an ack once more than 64 are unacknowledged. With a chat
+    /// delay the message waits until the chat shows it.
     pub fn mark_processed(&mut self, signature: &Sig, shown: bool) -> Option<sb::ChatAck> {
+        if !self.defer {
+            return self.process(signature, shown);
+        }
+        let mut ack = None;
+        if self.deferred.len() >= MAX_DEFERRED
+            && let Some((sig, shown)) = self.deferred.pop_front()
+        {
+            ack = self.process(&sig, shown);
+        }
+        self.deferred.push_back((Box::new(*signature), shown));
+        ack
+    }
+
+    fn process(&mut self, signature: &Sig, shown: bool) -> Option<sb::ChatAck> {
         if self.tracker.add_pending(signature, shown) && self.tracker.offset() > ACK_AFTER {
             self.take_ack()
         } else {
             None
         }
+    }
+
+    /// `ChatListener#setMessageDelay`: turning the delay off processes everything held.
+    pub fn set_deferred(&mut self, on: bool) -> Vec<sb::ChatAck> {
+        self.defer = on;
+        if on { Vec::new() } else { self.release_all() }
+    }
+
+    pub fn deferred_len(&self) -> usize {
+        self.deferred.len()
+    }
+
+    /// The chat showed a delayed message: it and the hidden ones queued before it are processed.
+    pub fn release_through(&mut self, signature: &Sig) -> Vec<sb::ChatAck> {
+        let Some(i) = self.deferred.iter().position(|(s, _)| **s == *signature) else {
+            return Vec::new();
+        };
+        let done: Vec<_> = self.deferred.drain(..=i).collect();
+        done.into_iter()
+            .filter_map(|(sig, shown)| self.process(&sig, shown))
+            .collect()
+    }
+
+    /// The delay queue ran dry: the hidden messages left in it are processed.
+    pub fn release_all(&mut self) -> Vec<sb::ChatAck> {
+        let done: Vec<_> = self.deferred.drain(..).collect();
+        done.into_iter()
+            .filter_map(|(sig, shown)| self.process(&sig, shown))
+            .collect()
+    }
+
+    /// `removeFromDelayedMessageQueue`: a deleted message that never left the queue is never processed.
+    pub fn drop_deferred(&mut self, signature: &Sig) -> bool {
+        let before = self.deferred.len();
+        self.deferred.retain(|(s, _)| **s != *signature);
+        self.deferred.len() != before
     }
 
     pub fn ignore_pending(&mut self, signature: &Sig) {

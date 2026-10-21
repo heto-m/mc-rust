@@ -16,10 +16,12 @@ use crate::client::Client;
 use crate::error::Result;
 use crate::interaction::{entity_interact_swings, item_use_on_swings, item_use_swings};
 use crate::inventory::OFFHAND_MENU_SLOT;
+use crate::placement::{PlaceContext, Replace};
 use crate::relay::LocalAction;
 
 const LIVING_FLAGS: u8 = 8;
 const MAX_USE_TICKS: i32 = 72_000;
+const MAX_BLOCK_STATE_PROPS: usize = 64;
 /// `BundleItem` and `BrushItem#getUseDuration`.
 const BUNDLE_BRUSH_USE_TICKS: i32 = 200;
 /// How long after the local countdown ends the server's finish event still gets its burst.
@@ -86,15 +88,18 @@ fn short(name: &str) -> &str {
     name.strip_prefix("minecraft:").unwrap_or(name)
 }
 
-fn offset(face: Facing) -> [i32; 3] {
-    match face {
-        Facing::Down => [0, -1, 0],
-        Facing::Up => [0, 1, 0],
-        Facing::North => [0, 0, -1],
-        Facing::South => [0, 0, 1],
-        Facing::West => [-1, 0, 0],
-        Facing::East => [1, 0, 0],
+/// `BlockItem#updateBlockStateFromTag`: the stack's `block_state` properties over the placed state.
+fn apply_block_state_component(data: &mcr_data::Version, mut state: u32, stack: &ItemStack) -> u32 {
+    let props = stack.components.added.iter().find_map(|c| match c {
+        DataComponent::BlockState(p) => Some(p),
+        _ => None,
+    });
+    for p in props.into_iter().flatten().take(MAX_BLOCK_STATE_PROPS) {
+        if let Some(s) = data.with_property(state, &p.name, &p.value) {
+            state = s;
+        }
     }
+    state
 }
 
 /// Blocks whose `useWithoutItem` consumes a bare-handed click in vanilla.
@@ -327,7 +332,7 @@ impl Client {
                 {
                     return Ok(Some(result));
                 }
-                match self.try_place(hand, &held, pos, face) {
+                match self.try_place(hand, &held, pos, face, cursor) {
                     Placement::Placed => return Ok(Some(UseResult::Success)),
                     Placement::Failed => return Ok(Some(UseResult::Consume)),
                     Placement::NotABlock => {}
@@ -474,6 +479,7 @@ impl Client {
         held: &ItemStack,
         pos: BlockPos,
         face: Facing,
+        cursor: [f32; 3],
     ) -> Placement {
         if held.is_empty() || self.state.is_on_cooldown(held) {
             return Placement::NotABlock;
@@ -496,38 +502,65 @@ impl Client {
         let Some(clicked) = self.state.chunks.block(pos.x, pos.y, pos.z) else {
             return Placement::NotABlock;
         };
-        let replaceable = data
-            .block_state(clicked.0)
-            .is_some_and(|i| i.is_replaceable());
-        let at = if replaceable {
-            pos
-        } else {
-            let o = offset(face);
-            BlockPos::new(pos.x + o[0], pos.y + o[1], pos.z + o[2])
+        let physics = &self.state.player.physics;
+        let mut ctx = PlaceContext {
+            clicked: pos,
+            face,
+            hit: std::array::from_fn(|a| {
+                f64::from([pos.x, pos.y, pos.z][a]) + f64::from(cursor[a]).clamp(0.0, 1.0)
+            }),
+            yaw: physics.yaw,
+            pitch: physics.pitch,
+            item_block: block,
+            replace_clicked: true,
         };
+        let replaced_flag = |s: u32| {
+            data.block_state(s)
+                .is_some_and(|i| i.is_air() || i.is_replaceable())
+        };
+        let mut known = true;
+        ctx.replace_clicked = match self.state.can_be_replaced(clicked.0, &ctx) {
+            Replace::Yes => true,
+            Replace::No => false,
+            Replace::Unknown => {
+                known = false;
+                replaced_flag(clicked.0)
+            }
+        };
+        let at = ctx.pos();
         let Some(existing) = self.state.chunks.block(at.x, at.y, at.z) else {
             return Placement::NotABlock;
         };
-        let free = data
-            .block_state(existing.0)
-            .is_some_and(|i| i.is_air() || i.is_replaceable());
-        if !free {
-            return Placement::Failed;
+        if !ctx.replace_clicked {
+            let free = match self.state.can_be_replaced(existing.0, &ctx) {
+                Replace::Yes => true,
+                Replace::No => false,
+                Replace::Unknown => {
+                    known = false;
+                    replaced_flag(existing.0)
+                }
+            };
+            if !free {
+                return Placement::Failed;
+            }
         }
         let Some(info) = data.block_info(block) else {
             return Placement::Placed;
         };
-        let state = info.default_state;
+        let predicted = known
+            .then(|| self.state.placement_state(block, &ctx))
+            .flatten()
+            .map(|s| apply_block_state_component(data, s, held));
+        let state = predicted.unwrap_or(info.default_state);
         if self.state.placement_obstructed(at, state) {
             return Placement::Failed;
         }
-        if data.state_properties(state).count() != 0 {
-            self.combat.placed = Some((at, state));
+        self.combat.placed = Some((at, state));
+        if predicted.is_none() {
             return Placement::Placed;
         }
         let sequence = self.sequence;
         self.state.predict_block(at, BlockState(state), sequence);
-        self.combat.placed = Some((at, state));
         if !self.state.player.instabuild {
             let slot = match hand {
                 Hand::Main => {

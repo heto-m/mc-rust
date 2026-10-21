@@ -92,6 +92,18 @@ pub fn add_layers(
     layer_type: &str,
     model: &str,
 ) -> bool {
+    add_layers_with(cx, plan, stack, (wanted_slot, layer_type, model), None)
+}
+
+/// `EquipmentLayerRenderer#renderLayers`: `player_texture` replaces layers marked
+/// `use_player_texture` (a player's elytra or cape on the wings).
+pub(crate) fn add_layers_with(
+    cx: &mut PlanCx<'_>,
+    plan: &mut Plan,
+    stack: &ItemStack,
+    (wanted_slot, layer_type, model): (&str, &str, &str),
+    player_texture: Option<&str>,
+) -> bool {
     let Some((asset, slot)) = equippable(cx, stack) else {
         return false;
     };
@@ -117,7 +129,10 @@ pub fn add_layers(
             Some(-1)
         };
         let Some(color) = color else { continue };
-        let tex = format!("entity/equipment/{layer_type}/{}", short(&layer.texture));
+        let tex = match player_texture {
+            Some(t) if layer.use_player_texture => t.to_owned(),
+            _ => format!("entity/equipment/{layer_type}/{}", short(&layer.texture)),
+        };
         let mut part = Part::new(model.to_owned(), tex).no_hurt().not_body();
         if layer.dyeable {
             part = part.tint(argb_rgb(color));

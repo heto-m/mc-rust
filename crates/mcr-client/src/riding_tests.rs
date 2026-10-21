@@ -340,3 +340,45 @@ fn an_untamed_nautilus_with_a_saddle_is_not_steered() {
     assert_eq!(c.state.controlled_vehicle, None);
     assert!(vehicle_moves(&c.take_sent()).is_empty());
 }
+
+#[test]
+fn the_synced_dash_flag_gates_the_nautilus_jump_bar() {
+    let mut c = client("minecraft:stone", Some("minecraft:water"));
+    mount(&mut c, "minecraft:nautilus", [8.5, 61.0, 8.5], 0.0);
+    let idle = keys(0.0, 0.0);
+    c.ride_tick(&idle, VEHICLE).unwrap();
+    assert_eq!(c.jump_bar(), Some((0.0, false)), "ready");
+
+    let e = c.state.entities.get_mut(VEHICLE).unwrap();
+    e.data.insert(20, EntityDataValue::Boolean(true));
+    c.ride_tick(&idle, VEHICLE).unwrap();
+    assert_eq!(
+        c.jump_bar(),
+        Some((0.0, true)),
+        "a server dash starts the cooldown"
+    );
+    let jump = PlayerInput { jump: true, ..idle };
+    for _ in 0..5 {
+        c.ride_tick(&jump, VEHICLE).unwrap();
+    }
+    assert_eq!(
+        c.jump_bar().map(|b| b.0),
+        Some(0.0),
+        "no charge while cooling down"
+    );
+
+    let e = c.state.entities.get_mut(VEHICLE).unwrap();
+    e.data.insert(20, EntityDataValue::Boolean(false));
+    for _ in 0..40 {
+        c.ride_tick(&idle, VEHICLE).unwrap();
+    }
+    assert_eq!(
+        c.jump_bar(),
+        Some((0.0, false)),
+        "ready again after 40 ticks"
+    );
+    for _ in 0..5 {
+        c.ride_tick(&jump, VEHICLE).unwrap();
+    }
+    assert!(c.jump_bar().unwrap().0 > 0.0, "charges once ready");
+}

@@ -488,3 +488,90 @@ fn look_at_uses_the_target_eye_and_falls_back_to_the_position() {
     );
     assert!(s.player.physics.yaw.abs() < 1e-3);
 }
+
+#[test]
+fn attached_rockets_sit_at_the_gliding_hand() {
+    use mcr_protocol::types::ItemStack;
+    use mcr_protocol::types::component::EquipmentSlot;
+    use mcr_protocol::types::entity_data::HumanoidArm;
+
+    let mut s = state();
+    let rocket_item = s.data.item_by_name("minecraft:firework_rocket").unwrap() as i32;
+    let player = kind(&s, "player");
+    let rocket = kind(&s, "firework_rocket");
+    handle(&mut s, add(50, player, [0.0, 100.0, 0.0], [0.0; 3]));
+    handle(&mut s, add(51, rocket, [0.0, 100.0, 0.0], [0.0; 3]));
+    handle(
+        &mut s,
+        data(
+            51,
+            vec![(9, EntityDataValue::OptionalUnsignedInt(Some(50)))],
+        ),
+    );
+    let hold = |s: &mut ClientState, main: bool, off: bool| {
+        let e = s.entities.get_mut(50).unwrap();
+        let stack = |held: bool| {
+            if held {
+                ItemStack::new(rocket_item, 1)
+            } else {
+                ItemStack::default()
+            }
+        };
+        e.set_equipment(EquipmentSlot::MainHand, stack(main));
+        e.set_equipment(EquipmentSlot::OffHand, stack(off));
+    };
+
+    s.tick();
+    close(pos(&s, 51), [0.0, 100.0, 0.0]);
+
+    handle(
+        &mut s,
+        data(
+            50,
+            vec![
+                (0, EntityDataValue::Byte(0x80u8 as i8)),
+                (15, EntityDataValue::HumanoidArm(HumanoidArm::Right)),
+            ],
+        ),
+    );
+    hold(&mut s, true, false);
+    s.tick();
+    let right = (-80f32).to_radians();
+    close(
+        pos(&s, 51),
+        [
+            f64::from(right.sin()) * 0.5,
+            100.0,
+            f64::from(right.cos()) * 0.5,
+        ],
+    );
+    assert!(
+        pos(&s, 51)[0] < -0.45,
+        "right hand of a player facing south"
+    );
+
+    hold(&mut s, false, true);
+    s.tick();
+    assert!(
+        pos(&s, 51)[0] > 0.45,
+        "a rocket only in the off hand sits left"
+    );
+
+    s.player.physics.pos = [10.0, 80.0, 10.0];
+    s.player.physics.fall_flying = true;
+    s.player.physics.yaw = 0.0;
+    s.inventory.player.slots[crate::inventory::HOTBAR_START] = ItemStack::new(rocket_item, 1);
+    handle(
+        &mut s,
+        data(
+            51,
+            vec![(9, EntityDataValue::OptionalUnsignedInt(Some(PLAYER as u32)))],
+        ),
+    );
+    s.tick();
+    let at = pos(&s, 51);
+    assert!(
+        (at[0] - 9.5076).abs() < 1e-3 && (at[2] - 10.0868).abs() < 1e-3,
+        "{at:?}"
+    );
+}

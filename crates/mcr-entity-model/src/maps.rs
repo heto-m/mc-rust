@@ -10,6 +10,8 @@ const MAX_MAPS: usize = 256;
 const MAX_DECORATIONS: usize = 256;
 const MAX_LABELED_MAPS: usize = 16;
 const LAYER: f32 = 0.25 / 128.0;
+/// `MapRenderer#render` puts every name at one depth, level with the 36th icon; later icons cover names.
+const LABEL_DEPTH_INDEX: f32 = 35.5;
 
 /// A marker drawn over a map; `x`/`y` are the wire bytes (half-pixels from the centre).
 #[derive(Debug, Clone, PartialEq)]
@@ -195,7 +197,7 @@ impl EntityScene {
         for (sprite, m) in &decorations {
             self.emit_quad_at(sprite, [8.0 / 128.0; 2], *m, light, origin);
         }
-        let top = -LAYER * (2.1 + decorations.len() as f32 * 0.1);
+        let top = -LAYER * (2.0 + LABEL_DEPTH_INDEX * 0.1);
         if let Some(kind) = labels {
             self.emit_quad_with(
                 &format!("dyn:map_labels/{kind}/{id}"),

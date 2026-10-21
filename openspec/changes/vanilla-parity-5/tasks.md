@@ -6,42 +6,42 @@
 
 Scope: mcr-client use_item and adventure.
 
-- [ ] 1.1 L1 (V) Block placement prediction covers property-less blocks only
-- [ ] 1.2 L2 (M) Adventure predicates approximate block entity data
-- [ ] 1.3 Unit tests: stair facing and half from the hit, slab onto slab, log axis, obstruction by an entity with the placement state; NBT and component predicates
-- [ ] 1.4 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 1.1 L1 (V) Block placement prediction covers property-less blocks only
+- [x] 1.2 L2 (M) Adventure predicates approximate block entity data
+- [x] 1.3 Unit tests: stair facing and half from the hit, slab onto slab, log axis, obstruction by an entity with the placement state; NBT and component predicates
+- [x] 1.4 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 2. Command suggestions and chat acknowledgements
 
 Scope: mcr-client commands and secure_chat, mcr-ui chat, mcr-app view.
 
-- [ ] 2.1 L3 (M) Suggestion providers other than ask_server
-- [ ] 2.2 L4 (M) Chat acknowledgements ignore the chat delay
-- [ ] 2.3 Unit tests: sound, entity and post-effect suggestions; a delayed message is acknowledged when shown
-- [ ] 2.4 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 2.1 L3 (M) Suggestion providers other than ask_server
+- [x] 2.2 L4 (M) Chat acknowledgements ignore the chat delay
+- [x] 2.3 Unit tests: sound, entity and post-effect suggestions; a delayed message is acknowledged when shown
+- [x] 2.4 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 3. Riding and projectiles
 
 Scope: mcr-physics body, mcr-client entity and riding, mcr-app entity_loops and ambience.
 
-- [ ] 3.1 L5 (M) Trident loyalty ignores dealt damage and ground time
-- [ ] 3.2 L6 (V) Attached firework rockets have no hand offset
-- [ ] 3.3 L7 (M) Nautilus dash sounds and dash flag
-- [ ] 3.4 L8 (V) Happy ghast and nautilus riding loops
-- [ ] 3.5 Unit tests: trident returns after five ground ticks, rocket at the main and off hand, dash flag gates the bar, riding loop starts and stops with the vehicle
-- [ ] 3.6 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 3.1 L5 (M) Trident loyalty ignores dealt damage and ground time
+- [x] 3.2 L6 (V) Attached firework rockets have no hand offset
+- [x] 3.3 L7 (M) Nautilus dash sounds and dash flag
+- [x] 3.4 L8 (V) Happy ghast and nautilus riding loops
+- [x] 3.5 Unit tests: trident returns after five ground ticks, rocket at the main and off hand, dash flag gates the bar, riding loop starts and stops with the vehicle
+- [x] 3.6 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 4. Entity rendering and particles
 
 Scope: mcr-entity-model humanoids, misc and maps, mcr-app entities, mcr-particles.
 
-- [ ] 4.1 L9 (V) Elder guardian curse effect not drawn
-- [ ] 4.2 L10 (V) Elytra ignore the cape texture
-- [ ] 4.3 L11 (V) Boats show water inside the hull
-- [ ] 4.4 L12 (V) Smoke particles at the camera draw as a dark square
-- [ ] 4.5 L13 (M) Map labels drawn after all icons
-- [ ] 4.6 Offscreen tests: curse model in front of the camera, elytra with a cape, boat on water without water inside, smoke at the eye, label order on a map
-- [ ] 4.7 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
+- [x] 4.1 L9 (V) Elder guardian curse effect not drawn
+- [x] 4.2 L10 (V) Elytra ignore the cape texture
+- [x] 4.3 L11 (V) Boats show water inside the hull
+- [x] 4.4 L12 (V) Smoke particles at the camera draw as a dark square
+- [x] 4.5 L13 (M) Map labels drawn after all icons
+- [x] 4.6 Offscreen tests: curse model in front of the camera, elytra with a cape, boat on water without water inside, smoke at the eye, label order on a map
+- [x] 4.7 fmt, clippy and workspace tests; live check against a vanilla 26.3 server
 
 ## 5. First-person spear feedback and spectator menu
 

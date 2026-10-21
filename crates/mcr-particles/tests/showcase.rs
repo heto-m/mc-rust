@@ -360,3 +360,55 @@ fn new_particle_showcase() {
     save("particles_grid_new.png", &r.read_offscreen().unwrap());
     assert!(e.count() > 100);
 }
+
+#[test]
+fn campfire_smoke_at_the_eye_stays_a_translucent_sprite() {
+    let (Some(mut r), Some(resources)) = (renderer(), jar()) else {
+        return;
+    };
+    let env = Environment::overworld(6000, 0.0, 0.0);
+    let cam = Camera {
+        position: DVec3::new(0.0, 8.0, 14.0),
+        pitch: 0.0,
+        ..Camera::default()
+    };
+    let mut e = engine(jar().unwrap());
+    frame(&mut r, &mut e, &env, &cam);
+    let empty = r.read_offscreen().unwrap();
+    let mut e = engine(resources);
+    e.emit(
+        &particle("campfire_cosy_smoke"),
+        [0.0, 8.0, 13.94],
+        [0.0; 3],
+        0.0,
+        0,
+    );
+    e.tick(&World);
+    frame(&mut r, &mut e, &env, &cam);
+    let px = r.read_offscreen().unwrap();
+    save("particles_smoke_at_eye.png", &px);
+    let covered: Vec<(&[u8; 4], &[u8; 4])> = px
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(empty.as_chunks::<4>().0)
+        .filter(|(a, b)| (0..3).any(|c| a[c].abs_diff(b[c]) > 24))
+        .collect();
+    assert!(
+        covered.len() > 50_000,
+        "the smoke fills the view: {}",
+        covered.len()
+    );
+    let dark = covered
+        .iter()
+        .filter(|(a, _)| a[..3].iter().all(|&v| v < 70))
+        .count();
+    assert_eq!(dark, 0, "no dark texels");
+    let shades: std::collections::HashSet<[u8; 3]> =
+        covered.iter().map(|(a, _)| [a[0], a[1], a[2]]).collect();
+    assert!(
+        shades.len() > 20,
+        "the sky gradient shows through each texel: {}",
+        shades.len()
+    );
+}

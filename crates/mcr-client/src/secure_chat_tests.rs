@@ -221,6 +221,47 @@ fn ack_after_sixty_four_unacknowledged() {
 }
 
 #[test]
+fn a_delayed_message_is_acknowledged_when_shown() {
+    let mut chat = SecureChat::new(&ClientConfig::default(), PROFILE);
+    assert!(chat.set_deferred(true).is_empty());
+    assert_eq!(chat.mark_processed(&sig(1), false), None);
+    assert_eq!(chat.mark_processed(&sig(2), true), None);
+    assert_eq!(chat.mark_processed(&sig(3), true), None);
+    assert_eq!(chat.tracker().offset(), 0, "nothing seen while queued");
+    assert!(chat.release_through(&sig(9)).is_empty());
+    assert_eq!(chat.tracker().offset(), 0);
+    chat.release_through(&sig(2));
+    assert_eq!(chat.tracker().offset(), 2, "the hidden one before it too");
+    assert_eq!(chat.deferred_len(), 1);
+    let u = chat.chat("hi", NOW_MS);
+    assert_eq!(u.last_seen.offset, 2);
+
+    chat.mark_processed(&sig(4), true);
+    assert!(chat.drop_deferred(&sig(4)), "deleted while queued");
+    chat.release_all();
+    assert_eq!(chat.tracker().offset(), 1, "only the third message");
+    assert_eq!(chat.deferred_len(), 0);
+
+    chat.mark_processed(&sig(5), true);
+    chat.set_deferred(false);
+    assert_eq!(chat.tracker().offset(), 2, "turning the delay off flushes");
+    chat.mark_processed(&sig(6), true);
+    assert_eq!(chat.tracker().offset(), 3);
+}
+
+#[test]
+fn the_delay_queue_is_bounded() {
+    let mut chat = SecureChat::new(&ClientConfig::default(), PROFILE);
+    chat.set_deferred(true);
+    for i in 0..2000u32 {
+        let mut s = [0u8; 256];
+        s[..4].copy_from_slice(&i.to_be_bytes());
+        chat.mark_processed(&s, true);
+    }
+    assert!(chat.deferred_len() <= 1024);
+}
+
+#[test]
 fn cache_push_order_and_hostile_ids() {
     let mut cache = SignatureCache::default();
     cache.push(&[sig(1), sig(2)], Some(&sig(3)));

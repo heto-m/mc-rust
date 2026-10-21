@@ -10,8 +10,11 @@ const MAX_NODES: usize = 1 << 16;
 const MAX_STATES: usize = 256;
 const MAX_REDIRECTS: usize = 16;
 pub const MAX_LOCAL_SUGGESTIONS: usize = 1024;
-const ASK_SERVER: &str = "minecraft:ask_server";
 const POST_EFFECTS: &str = "minecraft:post_effects";
+const AVAILABLE_SOUNDS: &str = "minecraft:available_sounds";
+const SUMMONABLE_ENTITIES: &str = "minecraft:summonable_entities";
+/// Entity types built with `noSummon`.
+const NOT_SUMMONABLE: [&str; 2] = ["minecraft:player", "minecraft:fishing_bobber"];
 /// The post chains a vanilla client ships, which `/posteffect` suggests.
 const VANILLA_POST_EFFECTS: [&str; 5] = [
     "minecraft:blur",
@@ -81,6 +84,21 @@ pub trait SuggestSource {
     fn selectors(&self) -> bool {
         true
     }
+
+    /// `SoundManager#getAvailableSounds`.
+    fn sounds(&self) -> Vec<String> {
+        self.registry("minecraft:sound_event")
+    }
+}
+
+/// `SharedSuggestionProvider#filterResources`: the full id when the word has a namespace, else the
+/// namespace or a `minecraft` path.
+fn resource_matches(word: &str, id: &str) -> bool {
+    if word.contains(':') {
+        return matches_sub_str(word, id);
+    }
+    let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
+    matches_sub_str(word, namespace) || namespace == "minecraft" && matches_sub_str(word, path)
 }
 
 impl CommandTree {
@@ -167,16 +185,28 @@ impl CommandTree {
                     suggestions,
                     ..
                 } => {
-                    let values = match suggestions.as_ref().map(|s| s.as_str()) {
-                        Some(ASK_SERVER) => {
-                            out.ask_server = true;
-                            Vec::new()
+                    let resources = match suggestions.as_ref().map(|s| s.as_str()) {
+                        None => None,
+                        Some(POST_EFFECTS) => {
+                            Some(VANILLA_POST_EFFECTS.map(str::to_owned).to_vec())
                         }
-                        Some(POST_EFFECTS) => VANILLA_POST_EFFECTS.map(str::to_owned).to_vec(),
-                        Some(_) => Vec::new(),
-                        None => parser_values(parser, source),
+                        Some(AVAILABLE_SOUNDS) => Some(source.sounds()),
+                        Some(SUMMONABLE_ENTITIES) => {
+                            let mut types = source.registry("minecraft:entity_type");
+                            types.retain(|t| !NOT_SUMMONABLE.contains(&t.as_str()));
+                            Some(types)
+                        }
+                        // `SuggestionProviders#getProvider` falls back to asking the server.
+                        Some(_) => {
+                            out.ask_server = true;
+                            Some(Vec::new())
+                        }
                     };
-                    for s in values {
+                    if let Some(ids) = resources {
+                        found.extend(ids.into_iter().filter(|id| resource_matches(&lower, id)));
+                        continue;
+                    }
+                    for s in parser_values(parser, source) {
                         if s.to_lowercase().starts_with(&lower)
                             || s.strip_prefix("minecraft:")
                                 .is_some_and(|r| r.to_lowercase().starts_with(&lower))
@@ -714,6 +744,81 @@ mod tests {
         assert!(!c.ask_server);
         let c = t.complete("/give in", 8, &NoSource);
         assert_eq!(c.local, ["minecraft:invert"]);
+    }
+
+    struct Registries;
+
+    impl SuggestSource for Registries {
+        fn players(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn registry(&self, id: &str) -> Vec<String> {
+            let names: &[&str] = match id {
+                "minecraft:entity_type" => &[
+                    "minecraft:zombie",
+                    "minecraft:zombie_villager",
+                    "minecraft:zombified_piglin",
+                    "minecraft:cow",
+                    "minecraft:player",
+                    "minecraft:fishing_bobber",
+                ],
+                "minecraft:sound_event" => &[
+                    "minecraft:block.note_block.harp",
+                    "minecraft:entity.zombie.ambient",
+                    "minecraft:ui.button.click",
+                ],
+                _ => &[],
+            };
+            names.iter().map(|n| (*n).to_owned()).collect()
+        }
+    }
+
+    fn with_provider(provider: &str) -> CommandTree {
+        let mut t = tree();
+        let NodeKind::Argument { suggestions, .. } = &mut t.nodes[5].kind else {
+            panic!("targets is an argument");
+        };
+        *suggestions = Some(Identifier::parse(provider).unwrap());
+        t
+    }
+
+    #[test]
+    fn summonable_entities_are_suggested_locally() {
+        let t = with_provider(SUMMONABLE_ENTITIES);
+        let c = t.complete("/give minecraft:zo", 18, &Registries);
+        assert!(!c.ask_server);
+        assert_eq!(
+            c.local,
+            [
+                "minecraft:zombie",
+                "minecraft:zombie_villager",
+                "minecraft:zombified_piglin"
+            ]
+        );
+        let c = t.complete("/give villager", 14, &Registries);
+        assert_eq!(c.local, ["minecraft:zombie_villager"], "path parts match");
+        let c = t.complete("/give pl", 8, &Registries);
+        assert!(c.local.is_empty(), "players cannot be summoned");
+        let c = t.complete("/give fish", 10, &Registries);
+        assert!(c.local.is_empty());
+    }
+
+    #[test]
+    fn available_sounds_are_suggested_locally() {
+        let t = with_provider(AVAILABLE_SOUNDS);
+        let c = t.complete("/give entity.z", 14, &Registries);
+        assert!(!c.ask_server);
+        assert_eq!(c.local, ["minecraft:entity.zombie.ambient"]);
+        let c = t.complete("/give minecraft:", 16, &Registries);
+        assert_eq!(c.local.len(), 3);
+    }
+
+    #[test]
+    fn unknown_providers_ask_the_server() {
+        let c = with_provider("example:custom").complete("/give A", 7, &Registries);
+        assert!(c.ask_server);
+        assert!(c.local.is_empty());
     }
 
     #[test]

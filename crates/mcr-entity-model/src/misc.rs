@@ -701,7 +701,7 @@ fn boat(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
     plan.pre_offset = Vec3::new(0.0, 0.375, 0.0);
     let anim = &v.vehicle;
     let mut post = Mat4::from_rotation_x(anim.wobble().to_radians());
-    if anim.bubble != 0.0 {
+    if !anim.under_water && anim.bubble != 0.0 {
         post *= Mat4::from_axis_angle(
             Vec3::new(1.0, 0.0, 1.0).normalize(),
             anim.bubble.to_radians(),
@@ -714,6 +714,14 @@ fn boat(cx: &mut PlanCx<'_>, v: &EntityView<'_>, plan: &mut Plan) {
         format!("entity/{dir}/{wood}"),
     ))
     .hurt = false;
+    if !anim.under_water && !name.ends_with("raft") {
+        let patch = plan.push(Part::new(
+            "minecraft:boat#water_patch",
+            format!("entity/{dir}/{wood}"),
+        ));
+        patch.pipeline = Pipeline::WaterMask;
+        patch.hurt = false;
+    }
     for (slot, time, right) in [
         (Slot::LeftPaddle, anim.rowing[0], false),
         (Slot::RightPaddle, anim.rowing[1], true),

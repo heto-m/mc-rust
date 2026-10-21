@@ -217,6 +217,8 @@ pub struct ChatHud {
     pending_deletions: Vec<(Box<[u8; 256]>, u32)>,
     queue: VecDeque<Queued>,
     previous_message_ms: u64,
+    released: Vec<[u8; 256]>,
+    drained: bool,
 }
 
 const MAX_RECENT: usize = 100;
@@ -245,6 +247,7 @@ impl ChatHud {
         self.signed.clear();
         self.pending_deletions.clear();
         self.queue.clear();
+        self.drained = true;
         self.scroll = 0;
         self.new_since_scroll = false;
     }
@@ -515,7 +518,7 @@ impl ChatHud {
         if self.queue.len() >= MAX_QUEUED
             && let Some(old) = self.queue.pop_front()
         {
-            self.add_tagged(ui, &old.message, tick, options, old.tag, old.signature);
+            self.show_queued(ui, old, tick, options);
         }
         self.queue.push_back(Queued {
             message: message.clone(),
@@ -534,10 +537,14 @@ impl ChatHud {
     ) {
         if delay_ms == 0 {
             while let Some(q) = self.queue.pop_front() {
-                self.add_tagged(ui, &q.message, tick, options, q.tag, q.signature);
+                self.show_queued(ui, q, tick, options);
             }
             self.previous_message_ms = 0;
+            self.drained = true;
         } else if now_ms >= self.previous_message_ms.saturating_add(delay_ms) {
+            if self.queue.is_empty() {
+                self.drained = true;
+            }
             self.accept_next(ui, tick, options, now_ms);
         }
     }
@@ -545,9 +552,27 @@ impl ChatHud {
     /// Shows the oldest queued message, as clicking the pending-lines line does.
     pub fn accept_next(&mut self, ui: &mut Ui, tick: u32, options: &ChatOptions, now_ms: u64) {
         if let Some(q) = self.queue.pop_front() {
-            self.add_tagged(ui, &q.message, tick, options, q.tag, q.signature);
+            self.show_queued(ui, q, tick, options);
             self.previous_message_ms = now_ms;
         }
+    }
+
+    fn show_queued(&mut self, ui: &mut Ui, q: Queued, tick: u32, options: &ChatOptions) {
+        if let Some(sig) = q.signature
+            && self.released.len() < MAX_QUEUED
+        {
+            self.released.push(sig);
+        }
+        self.add_tagged(ui, &q.message, tick, options, q.tag, q.signature);
+    }
+
+    /// Signatures of delayed messages shown since the last call, in order, and whether the queue
+    /// polled empty, for `markMessageAsProcessed`.
+    pub fn take_released(&mut self) -> (Vec<[u8; 256]>, bool) {
+        (
+            std::mem::take(&mut self.released),
+            std::mem::take(&mut self.drained),
+        )
     }
 
     /// Drops a queued message the server deleted; false when it was not queued.

@@ -661,3 +661,15 @@ fn enchant_particles_fly_from_the_offset_back_to_the_spawn_point() {
     e.tick(&Floor);
     assert_eq!(e.count(), 0);
 }
+
+#[test]
+fn campfire_smoke_starts_translucent() {
+    let mut e = engine();
+    e.emit(&simple("campfire_cosy_smoke"), [0.0; 3], [0.0; 3], 0.0, 0);
+    e.emit(&simple("campfire_signal_smoke"), [0.0; 3], [0.0; 3], 0.0, 0);
+    let alphas: Vec<f32> = e.pools[Pool::Translucent as usize]
+        .iter()
+        .map(|p| p.color[3])
+        .collect();
+    assert_eq!(alphas, [0.9, 0.95]);
+}

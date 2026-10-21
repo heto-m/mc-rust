@@ -45,6 +45,50 @@ impl ElytraLoop {
     }
 }
 
+/// `RidingEntitySoundInstance` for a happy ghast or a nautilus the local player rides: a
+/// non-positional loop, audible only out of water (ghast) or under it (nautilus).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RidingLoop {
+    pub vehicle: i32,
+    pub event: &'static str,
+    underwater_sound: bool,
+}
+
+/// What [`RidingLoop::tick`] sees of the vehicle this tick.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RiddenVehicle {
+    pub id: i32,
+    pub underwater: bool,
+    pub speed: f32,
+}
+
+impl RidingLoop {
+    const VOLUME_AMPLIFIER: f32 = 5.0;
+
+    /// The loop `LocalPlayer#startRiding` starts for an entity type, if any.
+    pub fn for_vehicle(vehicle: i32, entity_type: &str) -> Option<Self> {
+        let (event, underwater_sound) = match entity_type {
+            "minecraft:happy_ghast" => ("entity.happy_ghast.riding", false),
+            "minecraft:nautilus" | "minecraft:zombie_nautilus" => ("entity.nautilus.riding", true),
+            _ => return None,
+        };
+        Some(Self {
+            vehicle,
+            event,
+            underwater_sound,
+        })
+    }
+
+    /// The volume this tick, or `None` once the player left the vehicle or it is gone.
+    pub fn tick(&self, ridden: Option<RiddenVehicle>) -> Option<f32> {
+        let v = ridden.filter(|v| v.id == self.vehicle)?;
+        if self.underwater_sound != v.underwater || v.speed.is_nan() || v.speed < 0.01 {
+            return Some(0.0);
+        }
+        Some(Self::VOLUME_AMPLIFIER * v.speed.clamp(0.0, 1.0))
+    }
+}
+
 /// `BeeSoundInstance` (vanilla feeds the clamped speed straight into `lerp`): louder and higher the faster the bee flies, mute when it hovers.
 pub fn bee_level(horizontal_speed: f32, baby: bool) -> LoopLevel {
     if !horizontal_speed.is_finite() || horizontal_speed < 0.01 {
@@ -249,5 +293,53 @@ mod tests {
             e.tick(1);
         }
         assert!(e.tick(1).volume > a.tick(1).volume);
+    }
+
+    #[test]
+    fn riding_loop_starts_and_stops_with_the_vehicle() {
+        assert!(RidingLoop::for_vehicle(1, "minecraft:horse").is_none());
+        let ghast = RidingLoop::for_vehicle(1, "minecraft:happy_ghast").unwrap();
+        assert_eq!(ghast.event, "entity.happy_ghast.riding");
+        let at = |speed, underwater| {
+            Some(RiddenVehicle {
+                id: 1,
+                underwater,
+                speed,
+            })
+        };
+        assert_eq!(ghast.tick(at(0.0, false)), Some(0.0), "starts silent");
+        assert_eq!(ghast.tick(at(0.1, false)), Some(0.5));
+        assert_eq!(ghast.tick(at(2.0, false)), Some(5.0));
+        assert_eq!(ghast.tick(at(0.1, true)), Some(0.0), "muted under water");
+        assert_eq!(ghast.tick(None), None, "dismounted");
+        assert_eq!(
+            ghast.tick(Some(RiddenVehicle {
+                id: 2,
+                underwater: false,
+                speed: 0.5,
+            })),
+            None,
+            "another vehicle"
+        );
+
+        let nautilus = RidingLoop::for_vehicle(3, "minecraft:zombie_nautilus").unwrap();
+        assert_eq!(nautilus.event, "entity.nautilus.riding");
+        let swim = |underwater| {
+            nautilus.tick(Some(RiddenVehicle {
+                id: 3,
+                underwater,
+                speed: 0.1,
+            }))
+        };
+        assert_eq!(swim(true), Some(0.5));
+        assert_eq!(swim(false), Some(0.0), "only under water");
+        assert_eq!(
+            nautilus.tick(Some(RiddenVehicle {
+                id: 3,
+                underwater: true,
+                speed: f32::NAN,
+            })),
+            Some(0.0)
+        );
     }
 }

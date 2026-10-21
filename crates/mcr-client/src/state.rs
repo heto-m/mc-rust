@@ -629,6 +629,22 @@ impl ClientState {
         self.world.view_distance.max(2) + 3
     }
 
+    /// `getHandHoldingItemAngle(FIREWORK_ROCKET)` for the local player while gliding.
+    fn local_rocket_hand(&self) -> [f64; 3] {
+        use mcr_protocol::types::entity_data::{EntityDataValue, HumanoidArm};
+        if !self.player.physics.fall_flying {
+            return [0.0; 3];
+        }
+        let right = !matches!(
+            self.player.data.get(&15),
+            Some(EntityDataValue::HumanoidArm(HumanoidArm::Left))
+        );
+        let holds = |hand| self.is_item(&self.hand_stack(hand), "firework_rocket");
+        let only_off = holds(mcr_protocol::types::game::Hand::Off)
+            && !holds(mcr_protocol::types::game::Hand::Main);
+        crate::entity::rocket_hand_offset(self.player.physics.yaw, right != only_off)
+    }
+
     pub fn chunk_in_range(&self, x: i32, z: i32) -> bool {
         let r = self.chunk_storage_radius();
         let (cx, cz) = self.world.chunk_center;
@@ -647,6 +663,7 @@ impl ClientState {
         self.titles.tick();
         self.inventory.tick_pop();
         let frozen = !self.world.runs_normally;
+        let local_rocket_hand = self.local_rocket_hand();
         let mut cx = SimContext {
             world: &self.chunks,
             data: PhysicsData::v26_3(),
@@ -661,6 +678,7 @@ impl ClientState {
                 1.0
             },
             local: Some((self.player.entity_id, pos, eye)),
+            local_rocket_hand,
             version: self.data,
         };
         self.entities.tick(&mut cx);

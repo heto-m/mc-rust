@@ -1,6 +1,7 @@
 //! Adventure mode: `Player#blockActionRestricted` and the `can_break` / `can_place_on` predicates.
 
 use mcr_buf::BlockPos;
+use mcr_nbt::{Compound, List, Value};
 use mcr_protocol::types::ItemStack;
 use mcr_protocol::types::component::{
     AdventureModePredicate, BlockPredicate, DataComponent, HolderSet, ValueMatcher,
@@ -77,7 +78,8 @@ impl ClientState {
         }
     }
 
-    /// `BlockPredicate#matches`. Block entity NBT and component checks are left to the server.
+    /// `BlockPredicate#matches(BlockInWorld)`: state and block entity NBT. Like vanilla's adventure
+    /// check it ignores the component matchers.
     fn block_predicate_matches(&self, p: &BlockPredicate, pos: BlockPos) -> bool {
         let Some(state) = self.chunks.block(pos.x, pos.y, pos.z) else {
             return false;
@@ -122,6 +124,88 @@ impl ClientState {
                 }
             }
         }
-        p.nbt.is_none() || self.block_entities.contains_key(&pos)
+        match &p.nbt {
+            None => true,
+            Some(expected) => self.block_entity_nbt_matches(&expected.0, pos),
+        }
+    }
+
+    /// `NbtPredicate#matches` against `BlockEntity#saveWithFullMetadata` of the client's copy: the
+    /// data the server sent plus the type id and position.
+    fn block_entity_nbt_matches(&self, expected: &Compound, pos: BlockPos) -> bool {
+        let Some((kind, data)) = self.block_entities.get(&pos) else {
+            return false;
+        };
+        let mut actual = data.clone();
+        if let Some(id) = u32::try_from(*kind).ok().and_then(|k| {
+            self.data
+                .registry("minecraft:block_entity_type")?
+                .name_of(k)
+        }) {
+            actual.insert("id", Value::String(id.to_owned()));
+        }
+        actual.insert("x", Value::Int(pos.x));
+        actual.insert("y", Value::Int(pos.y));
+        actual.insert("z", Value::Int(pos.z));
+        let mut budget = NBT_COMPARE_BUDGET;
+        compare_compound(expected, &actual, &mut budget)
+    }
+}
+
+/// Element comparisons one predicate may spend; partial list matching is quadratic.
+const NBT_COMPARE_BUDGET: u32 = 1 << 16;
+
+fn spend(budget: &mut u32) -> bool {
+    *budget = budget.saturating_sub(1);
+    *budget > 0
+}
+
+/// `NbtUtils#compareNbt` with partial list matching.
+fn compare_value(expected: &Value, actual: &Value, budget: &mut u32) -> bool {
+    if !spend(budget) {
+        return false;
+    }
+    match (expected, actual) {
+        (Value::Compound(e), Value::Compound(a)) => compare_compound(e, a, budget),
+        (Value::List(e), Value::List(a)) => compare_list(e, a, budget),
+        _ => expected == actual,
+    }
+}
+
+fn compare_compound(expected: &Compound, actual: &Compound, budget: &mut u32) -> bool {
+    actual.len() >= expected.len()
+        && expected
+            .iter()
+            .all(|(k, v)| actual.get(k).is_some_and(|a| compare_value(v, a, budget)))
+}
+
+fn compare_list(expected: &List, actual: &List, budget: &mut u32) -> bool {
+    fn each<T>(e: &[T], a: &[T], budget: &mut u32, eq: impl Fn(&T, &T, &mut u32) -> bool) -> bool {
+        e.iter()
+            .all(|x| a.iter().any(|y| spend(budget) && eq(x, y, budget)))
+    }
+    fn same<T: PartialEq>(x: &T, y: &T, _: &mut u32) -> bool {
+        x == y
+    }
+    if expected.is_empty() {
+        return actual.is_empty();
+    }
+    if actual.len() < expected.len() {
+        return false;
+    }
+    match (expected, actual) {
+        (List::Byte(e), List::Byte(a)) => each(e, a, budget, same),
+        (List::Short(e), List::Short(a)) => each(e, a, budget, same),
+        (List::Int(e), List::Int(a)) => each(e, a, budget, same),
+        (List::Long(e), List::Long(a)) => each(e, a, budget, same),
+        (List::Float(e), List::Float(a)) => each(e, a, budget, same),
+        (List::Double(e), List::Double(a)) => each(e, a, budget, same),
+        (List::String(e), List::String(a)) => each(e, a, budget, same),
+        (List::ByteArray(e), List::ByteArray(a)) => each(e, a, budget, same),
+        (List::IntArray(e), List::IntArray(a)) => each(e, a, budget, same),
+        (List::LongArray(e), List::LongArray(a)) => each(e, a, budget, same),
+        (List::Compound(e), List::Compound(a)) => each(e, a, budget, compare_compound),
+        (List::List(e), List::List(a)) => each(e, a, budget, compare_list),
+        _ => false,
     }
 }

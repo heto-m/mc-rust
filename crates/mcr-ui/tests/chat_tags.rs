@@ -232,6 +232,28 @@ fn delayed_messages_wait_for_the_interval_or_a_click() {
 }
 
 #[test]
+fn shown_delayed_messages_are_released_for_acknowledgement() {
+    let Some(mut ui) = common::ui() else {
+        return;
+    };
+    let options = ChatOptions::default();
+    let mut chat = ChatHud::default();
+    let msg = Component::text("<Alex> hi");
+    chat.add_delayed(&mut ui, &msg, 0, &options, None, Some([3; 256]), (0, 2000));
+    chat.add_delayed(&mut ui, &msg, 0, &options, None, Some([4; 256]), (0, 2000));
+    chat.tick_queue(&mut ui, 1, &options, (1000, 2000));
+    assert_eq!(chat.take_released(), (vec![], false));
+    chat.tick_queue(&mut ui, 2, &options, (2000, 2000));
+    assert_eq!(chat.take_released(), (vec![[3; 256]], false));
+    chat.accept_next(&mut ui, 3, &options, 2500);
+    assert_eq!(chat.take_released(), (vec![[4; 256]], false));
+    chat.tick_queue(&mut ui, 4, &options, (4000, 2000));
+    assert_eq!(chat.take_released(), (vec![], false), "not due yet");
+    chat.tick_queue(&mut ui, 5, &options, (4500, 2000));
+    assert_eq!(chat.take_released(), (vec![], true), "polled empty");
+}
+
+#[test]
 fn commands_persist_in_the_history() {
     let mut chat = ChatHud::default();
     chat.load_command_history("/one\n/two\n");

@@ -36,11 +36,23 @@ pub struct Ride {
     pub(crate) sprinting: bool,
     sprint_trigger: i32,
     was_forward: bool,
+    dash: DashFlag,
 }
+
+/// `AbstractNautilus.DASH`: the last value the server synced and the client's own copy.
+#[derive(Debug, Clone, Copy, Default)]
+struct DashFlag {
+    synced: bool,
+    local: bool,
+}
+
+/// `AbstractNautilus#tick` clears the flag once the cooldown drops below this.
+const DASH_FLAG_UNTIL: i32 = 35;
 
 const BOOST_INDEX: u8 = 18;
 const STRIDER_SUFFOCATING_INDEX: u8 = 19;
 const CAMEL_POSE_TICK_INDEX: u8 = 20;
+const NAUTILUS_DASH_INDEX: u8 = 20;
 /// The tame flags byte of `AbstractHorse` and `TamableAnimal`, after `AgeableMob`'s two flags.
 const TAME_FLAGS_INDEX: u8 = 18;
 const HORSE_TAME_FLAG: i8 = 2;
@@ -193,6 +205,10 @@ impl Client {
                     "horse" | "zombie_horse" | "mule" | "donkey" | "camel" | "camel_husk"
                 )
             })
+    }
+
+    fn bool_data(&self, e: &Entity, index: u8) -> bool {
+        matches!(e.data.get(&index), Some(EntityDataValue::Boolean(true)))
     }
 
     fn int_data(&self, e: &Entity, index: u8) -> i32 {
@@ -366,6 +382,10 @@ impl Client {
                 sprinting: false,
                 sprint_trigger: 0,
                 was_forward: false,
+                dash: DashFlag {
+                    synced: self.bool_data(&entity, NAUTILUS_DASH_INDEX),
+                    local: self.bool_data(&entity, NAUTILUS_DASH_INDEX),
+                },
                 boost: Boost {
                     seen: self.int_data(&entity, BOOST_INDEX),
                     ..Boost::default()
@@ -430,6 +450,16 @@ impl Client {
                     mode,
                     MountMode::Horse | MountMode::Camel | MountMode::Nautilus
                 ) && !(mode == MountMode::Camel && mount.refuse_to_move);
+                if mode == MountMode::Nautilus {
+                    let synced = self.bool_data(&entity, NAUTILUS_DASH_INDEX);
+                    if synced != ride.dash.synced {
+                        ride.dash.synced = synced;
+                        if synced != ride.dash.local {
+                            ride.dash.local = synced;
+                            mount.observe_dash();
+                        }
+                    }
+                }
                 if jumpable && mount.jump_cooldown() == 0 {
                     jump_data = ride.jump.charge(keys.jump);
                     if let Some(amount) = jump_data {
@@ -465,7 +495,15 @@ impl Client {
                         .unwrap_or(0.05) as f32,
                     MountMode::Horse | MountMode::Nautilus => attr_speed,
                 };
+                let cooldown = mount.jump_cooldown();
                 mount.tick(&self.state.chunks, &keys, attr_speed, ridden_speed);
+                if mode == MountMode::Nautilus {
+                    if mount.jump_cooldown() > cooldown {
+                        ride.dash.local = true;
+                    } else if ride.dash.local && mount.jump_cooldown() < DASH_FLAG_UNTIL {
+                        ride.dash.local = false;
+                    }
+                }
                 on_ground = mount.body.on_ground;
                 vehicle_pose = (mount.body.pos, mount.body.yaw, mount.body.pitch);
             }

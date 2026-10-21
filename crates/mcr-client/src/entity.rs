@@ -3,13 +3,17 @@ use mcr_physics::{Body, BodyFlags, BodyKind, BodyScratch, CollisionWorld, Physic
 use mcr_protocol::play::clientbound::entity::{PositionPath, VecDelta};
 use mcr_protocol::types::ItemStack;
 use mcr_protocol::types::component::{AttributeModifier, EquipmentSlot};
-use mcr_protocol::types::entity_data::EntityDataValue;
+use mcr_protocol::types::entity_data::{EntityDataValue, HumanoidArm};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 const NO_GRAVITY: u8 = 5;
 const ARROW_FLAGS: u8 = 8;
 const ARROW_NO_PHYSICS: i8 = 2;
+const ARROW_IN_GROUND: u8 = 10;
+const SHARED_FLAGS: u8 = 0;
+const FALL_FLYING: u8 = 0x80;
+const PLAYER_MAIN_HAND: u8 = 15;
 const TRIDENT_LOYALTY: u8 = 11;
 const WITHER_SKULL_DANGEROUS: u8 = 8;
 const FIREWORK_ATTACHED: u8 = 9;
@@ -250,6 +254,8 @@ pub(crate) struct SimContext<'a, W: CollisionWorld + ?Sized> {
     pub tick_speed: f32,
     /// The local player's id, feet and eye height, which loyal tridents and rockets may follow.
     pub local: Option<(i32, [f64; 3], f64)>,
+    /// Where an attached rocket sits relative to the local player's feet.
+    pub local_rocket_hand: [f64; 3],
     pub version: &'static Version,
 }
 
@@ -429,6 +435,8 @@ pub struct Entity {
     pub acceleration_power: Option<f64>,
     sim_ticks: u32,
     sim_collided: bool,
+    /// `AbstractArrow#inGroundTime`, `ThrownTrident#dealtDamage` and a local `setNoPhysics(true)`.
+    sim_arrow: (u32, bool, bool),
     interpolation_left: u8,
     steps: Option<Box<StepQueue>>,
 }
@@ -466,6 +474,7 @@ impl Entity {
             acceleration_power: None,
             sim_ticks: 0,
             sim_collided: false,
+            sim_arrow: (0, false, false),
             interpolation_left: 0,
             steps: None,
         }
@@ -764,28 +773,49 @@ impl Entity {
         }
     }
 
-    /// The entity a rocket rides with, or the owner a loyal trident with no physics returns to.
+    /// The entity a rocket rides with, or the owner a loyal trident returns to.
     fn followed(&self, kind: BodyKind) -> Option<i32> {
         match kind {
             BodyKind::FireworkRocket => match self.data.get(&FIREWORK_ATTACHED) {
                 Some(EntityDataValue::OptionalUnsignedInt(Some(id))) => i32::try_from(*id).ok(),
                 _ => None,
             },
-            BodyKind::Trident
-                if self.byte(TRIDENT_LOYALTY) > 0
-                    && self.byte(ARROW_FLAGS) & ARROW_NO_PHYSICS != 0 =>
-            {
-                Some(self.object_data)
-            }
+            BodyKind::Trident if self.byte(TRIDENT_LOYALTY) > 0 => Some(self.object_data),
             _ => None,
         }
+    }
+
+    /// `FireworkRocketEntity#tick`: a gliding player holds the rocket at its hand, others at their feet.
+    fn rocket_hand(&self, version: &Version) -> [f64; 3] {
+        if self.byte(SHARED_FLAGS) as u8 & FALL_FLYING == 0
+            || !matches!(
+                self.data.get(&PLAYER_MAIN_HAND),
+                Some(EntityDataValue::HumanoidArm(_))
+            )
+        {
+            return [0.0; 3];
+        }
+        let right = matches!(
+            self.data.get(&PLAYER_MAIN_HAND),
+            Some(EntityDataValue::HumanoidArm(HumanoidArm::Right))
+        );
+        let rocket = version
+            .item_by_name("minecraft:firework_rocket")
+            .map(|i| i as i32);
+        let holds = |slot| {
+            let s = self.equipment_slot(slot);
+            !s.is_empty() && Some(s.item) == rocket
+        };
+        let only_off = holds(EquipmentSlot::OffHand) && !holds(EquipmentSlot::MainHand);
+        rocket_hand_offset(self.yaw, right != only_off)
     }
 
     fn body_flags(&self, kind: BodyKind, anchor: Option<[f64; 3]>) -> BodyFlags {
         let arrow = matches!(kind, BodyKind::Arrow | BodyKind::Trident);
         BodyFlags {
             no_gravity: self.flag(NO_GRAVITY),
-            no_physics: arrow && self.byte(ARROW_FLAGS) & ARROW_NO_PHYSICS != 0,
+            no_physics: arrow
+                && (self.byte(ARROW_FLAGS) & ARROW_NO_PHYSICS != 0 || self.sim_arrow.2),
             dangerous: kind == BodyKind::WitherSkull && self.flag(WITHER_SKULL_DANGEROUS),
             shot_at_angle: kind == BodyKind::FireworkRocket && self.flag(FIREWORK_SHOT_AT_ANGLE),
             loyalty: if kind == BodyKind::Trident {
@@ -793,6 +823,8 @@ impl Entity {
             } else {
                 0
             },
+            in_ground: arrow && self.flag(ARROW_IN_GROUND),
+            dealt_damage: self.sim_arrow.1,
             anchor,
             acceleration: self.acceleration_power,
         }
@@ -815,7 +847,14 @@ impl Entity {
         body.on_ground = self.on_ground;
         body.horizontal_collision = self.sim_collided;
         body.flags = self.body_flags(shape.kind, anchor);
+        body.in_ground_time = self.sim_arrow.0;
+        let synced_no_physics = body.flags.no_physics;
         body.tick(cx.world, cx.data, cx.scratch, cx.follow);
+        self.sim_arrow = (
+            body.in_ground_time,
+            body.flags.dealt_damage,
+            self.sim_arrow.2 || body.flags.no_physics && !synced_no_physics,
+        );
         self.sim_ticks = body.tick_count;
         self.pos = body.pos;
         self.velocity = body.vel;
@@ -850,6 +889,16 @@ impl Entity {
 }
 
 const HEAD_STEPS: u8 = 3;
+
+/// `Entity#getHandHoldingItemAngle`: half a block from the body toward the arm, 80 degrees off the yaw.
+pub(crate) fn rocket_hand_offset(yaw: f32, right_arm: bool) -> [f64; 3] {
+    let angle = -(yaw + if right_arm { 80.0 } else { -80.0 }) * (std::f32::consts::PI / 180.0);
+    [
+        f64::from(angle.sin()) * 0.5,
+        0.0,
+        f64::from(angle.cos()) * 0.5,
+    ]
+}
 
 fn lerp_degrees(from: f32, to: f32, t: f32) -> f32 {
     let diff = (to - from + 180.0).rem_euclid(360.0) - 180.0;
@@ -960,18 +1009,20 @@ impl Entities {
             };
             let rocket = e.sim.is_some_and(|s| s.kind == BodyKind::FireworkRocket);
             let at = match cx.local {
-                Some((id, feet, eye)) if id == followed => {
-                    Some([feet[0], feet[1] + if rocket { 0.0 } else { eye }, feet[2]])
-                }
+                Some((id, feet, eye)) if id == followed => Some(if rocket {
+                    std::array::from_fn(|i| feet[i] + cx.local_rocket_hand[i])
+                } else {
+                    [feet[0], feet[1] + eye, feet[2]]
+                }),
                 _ => self.map.get(&followed).map(|o| {
-                    let eye = if rocket {
-                        0.0
-                    } else {
-                        u32::try_from(o.kind)
-                            .ok()
-                            .and_then(|k| cx.version.entity_type_info(k))
-                            .map_or(0.0, |i| f64::from(i.eye_height))
-                    };
+                    if rocket {
+                        let hand = o.rocket_hand(cx.version);
+                        return std::array::from_fn(|i| o.pos[i] + hand[i]);
+                    }
+                    let eye = u32::try_from(o.kind)
+                        .ok()
+                        .and_then(|k| cx.version.entity_type_info(k))
+                        .map_or(0.0, |i| f64::from(i.eye_height));
                     [o.pos[0], o.pos[1] + eye, o.pos[2]]
                 }),
             };

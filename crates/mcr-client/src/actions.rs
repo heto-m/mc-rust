@@ -70,6 +70,34 @@ impl Client {
         self.send_play(&S::Chat(packet))
     }
 
+    fn send_acks(&mut self, acks: Vec<sb::ChatAck>) -> Result<()> {
+        for ack in acks {
+            self.send_play(&S::ChatAck(ack))?;
+        }
+        Ok(())
+    }
+
+    /// Whether `chatDelay` holds player messages back; signatures then wait for [`Self::chat_shown`].
+    pub fn set_chat_delay(&mut self, on: bool) -> Result<()> {
+        let acks = self.state.secure.set_deferred(on);
+        self.send_acks(acks)
+    }
+
+    /// The chat showed a delayed player message (`ChatListener.Message#accept`).
+    pub fn chat_shown(&mut self, signature: &[u8; 256]) -> Result<()> {
+        let acks = self.state.secure.release_through(signature);
+        self.send_acks(acks)
+    }
+
+    /// The chat's delay queue polled empty: held messages that were never shown are processed.
+    pub fn chat_queue_drained(&mut self) -> Result<()> {
+        if self.state.secure.deferred_len() == 0 {
+            return Ok(());
+        }
+        let acks = self.state.secure.release_all();
+        self.send_acks(acks)
+    }
+
     /// Vanilla's `sendCommand`; `command` has no leading slash. Commands with `minecraft:message`
     /// arguments go signed, everything else as a plain command.
     pub fn send_command(&mut self, command: &str) -> Result<()> {

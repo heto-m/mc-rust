@@ -10,8 +10,8 @@ that state's collision against every entity before predicting.
   answers
 
 ### Requirement: Adventure predicates on block entity data
-`can_break` and `can_place_on` predicates SHALL match block entity NBT and data components as vanilla's
-`BlockPredicate` does.
+`can_break` and `can_place_on` predicates SHALL match block entity NBT as vanilla's adventure check
+(`BlockPredicate#matches(BlockInWorld)`) does, which leaves the component matchers out.
 
 #### Scenario: Named chest only
 - **WHEN** an adventure player holds a pickaxe that may break only chests with a given custom name

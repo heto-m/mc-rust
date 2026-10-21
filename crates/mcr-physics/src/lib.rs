@@ -19,7 +19,7 @@ mod vehicle;
 mod world;
 
 pub use aabb::Aabb;
-pub use body::{Body, BodyFlags, BodyKind, BodyScratch, aim, fluid_height};
+pub use body::{Body, BodyFlags, BodyKind, BodyScratch, aim, eye_in_water, fluid_height};
 pub use collide::BorderBounds;
 pub use data::{PhysicsData, StateInfo, flag};
 pub use fluid::{camera_in_lava, camera_in_water};

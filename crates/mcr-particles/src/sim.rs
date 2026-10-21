@@ -863,6 +863,7 @@ pub(crate) fn construct(s: &Spawn, kind: Kind, atlas: &ParticleAtlas, rng: &mut 
             scale(&mut p, 3.0);
             set_size(&mut p, 0.25, 0.25);
             p.life = rng.below(50) as i32 + if signal { 280 } else { 80 };
+            p.color[3] = if signal { 0.95 } else { 0.9 };
             p.gravity = 3.0e-6;
             p.vel = DVec3::new(aux.x, aux.y + f64::from(rng.f32() / 500.0), aux.z);
             p

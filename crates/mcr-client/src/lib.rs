@@ -53,6 +53,9 @@ mod mounts;
 mod packs;
 mod pickup;
 pub mod piston;
+mod placement;
+#[cfg(test)]
+mod placement_tests;
 mod player;
 mod probe;
 mod registry;

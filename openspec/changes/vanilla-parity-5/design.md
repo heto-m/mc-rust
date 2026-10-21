@@ -46,6 +46,9 @@ are what the batch reports and the re-audit found.
   block entity when the predicate has NBT, and ignores component checks.
 - Impact: an adventure player's `can_break` and `can_place_on` items can be predicted as allowed where the
   server refuses, which flickers the block.
+- Fix note: `AdventureModePredicate#test` calls `BlockPredicate#matches(BlockInWorld)`, which checks the
+  state and NBT only; the component matchers apply to `matches(ServerLevel, BlockPos)`. mcr matches the
+  NBT against the client's block entity data plus `id`, `x`, `y` and `z`, and ignores components too.
 
 ### Commands and chat
 
@@ -81,6 +84,10 @@ are what the batch reports and the re-audit found.
 - Vanilla: the nautilus plays its dash and dash-ready sounds, and the synced dash flag gates the jump bar.
 - mcr: `jumpableVehicle` handling (`crates/mcr-client/src/riding.rs:328-360`) plays neither and does not
   read the server's dash flag.
+- Fix note: both sounds come from the server. `handleStartJump` and the dash-ready countdown run there
+  and `makeSound` broadcasts to every player, the rider included; a client-side `makeSound` plays
+  nothing. The live check hears `entity.nautilus.dash` and `dash_ready_land` from the server, so only the
+  dash flag needed a client change.
 
 #### L8 Happy ghast and nautilus riding loops (V)
 - Vanilla: `LocalPlayer#startRiding` plays `RidingEntitySoundInstance` with `entity.happy_ghast.riding` and
@@ -94,26 +101,38 @@ are what the batch reports and the re-audit found.
 #### L9 Elder guardian curse effect not drawn (V)
 - Vanilla: `ElderGuardianParticle` renders the elder guardian model in front of the camera.
 - mcr: the curse is tracked (`crates/mcr-app/src/entities.rs:555,994`) but nothing appears on screen.
+- Fix note: the ghost's offset had the wrong sign and sat behind the camera. Vanilla translates after its
+  `(s, -s, -s)` scale, so the model lands 1.49 blocks in front.
 
 #### L10 Elytra ignore the cape texture (V)
 - Vanilla: `WingsLayer#getPlayerElytraTexture` uses the skin's elytra texture, else the cape when the cape
   part is shown.
 - mcr: the wings always use the item's equipment texture (`crates/mcr-entity-model/src/humanoids.rs:932`).
+- Fix note: the wings wear the cape while the cape part shows. mcr fetches no `ELYTRA` profile texture, so
+  the skin's own elytra texture is still skipped.
 
 #### L11 Boats show water inside the hull (V)
 - Vanilla: `BoatRenderer` submits the water patch model with the water-mask pipeline, which hides water
   inside the hull.
 - mcr: no water mask (`crates/mcr-entity-model/src/misc.rs:689`).
 - Impact: boats on water look sunk.
+- Fix note: the `boat#water_patch` part draws with a depth-only pipeline in the opaque pass, skipped for
+  rafts and while the boat's eye is under water (which also stops the bubble wobble, as vanilla does).
 
 #### L12 Smoke particles at the camera draw as a dark square (V)
 - Vanilla: smoke and campfire smoke near the camera stay soft translucent sprites.
 - mcr: a smoke particle reaching the camera draws as a dark square (`crates/mcr-particles`).
+- Fix note: campfire smoke started at alpha 1, so one opaque texel filled the view. It now starts at 0.9
+  (cosy) or 0.95 (signal), and translucent particles discard below vanilla's 0.1 alpha. Plain smoke stays
+  dark like vanilla's (`random * 0.3` grey). Particles still ignore fog.
 
 #### L13 Map labels drawn after all icons (M)
 - Vanilla: `MapRenderer#render` draws each decoration and then its name, so later icons cover earlier
   names.
 - mcr: `crates/mcr-entity-model/src/maps.rs` bakes all names over the icons.
+- Fix note: vanilla draws every name at one depth, level with the 36th icon (`-0.02 - 0.003 * 35`
+  against `-0.125`), so names cover the first 36 icons and later icons cover names. mcr keeps the baked
+  label layer and puts it at that depth.
 
 ### First-person spear feedback and spectator menu
 
@@ -219,3 +238,16 @@ are what the batch reports and the re-audit found.
 | Level event and mod-mode sounds | 0 | 0 | 2 | 2 |
 | World rendering | 0 | 1 | 5 | 6 |
 | **Total** | **0** | **9** | **19** | **28** |
+
+## Live checks
+
+Against a vanilla 26.3 server on port 25585 (offline, flat world):
+
+- Batches 1 to 3: `live_place` (12 placements, every predicted state equals the server's), `live_suggest`
+  (local `summon` and `playsound` suggestions) and `live_riding` (server dash and `dash_ready_land` sounds,
+  loyal trident leaves the ground after 5 ticks) pass.
+- Batch 4: an offscreen client run shows the curse ghost fading over the view after
+  `/particle elder_guardian`, oak and chest boats on water with dry hulls, the elytra on a player in
+  third person, and translucent grey campfire smoke with the camera inside a signal fire column. The cape
+  and the 36-icon map order are covered offscreen only: offline players have no cape, and named map
+  markers need 37 banners.

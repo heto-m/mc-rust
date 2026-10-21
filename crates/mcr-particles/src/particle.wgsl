@@ -60,7 +60,7 @@ fn fs_opaque(in: Out) -> @location(0) vec4<f32> {
 @fragment
 fn fs_blend(in: Out) -> @location(0) vec4<f32> {
     let t = textureSample(atlas, smp, in.uv);
-    if t.a < 0.01 {
+    if t.a * in.color.a < 0.1 {
         discard;
     }
     return vec4<f32>(t.rgb * in.color.rgb, t.a * in.color.a);
