@@ -64,3 +64,10 @@ A `block_marker` particle SHALL draw the block's whole particle sprite at 0.5 bl
 #### Scenario: Flight
 - **WHEN** an enchant particle spawns at (10, 20, 30) with velocity (2, 0, -1)
 - **THEN** it starts at (12, 20, 29) and ends at x 10 and y 18.8
+
+### Requirement: Particle fog
+Particles SHALL fade into the environment and render-distance fog by the same distances as terrain.
+
+#### Scenario: Far particles
+- **WHEN** particles are seen near the end of the render distance
+- **THEN** they take the fog colour as terrain at that distance does

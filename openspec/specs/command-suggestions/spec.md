@@ -34,3 +34,11 @@ vanilla: run_command without a prompt when it parses, show_dialog, custom action
 #### Scenario: Trigger link
 - **WHEN** the player clicks a chat link running `/trigger menu`
 - **THEN** the command is sent without a confirm screen
+
+### Requirement: Local suggestion providers
+The client SHALL fill the `available_sounds`, `summonable_entities` and `post_effects` suggestion providers
+locally.
+
+#### Scenario: Summon
+- **WHEN** the player types `/summon minecraft:zo`
+- **THEN** the suggestions list zombie entity types without asking the server

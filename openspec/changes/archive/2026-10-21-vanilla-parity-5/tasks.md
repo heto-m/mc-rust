@@ -89,5 +89,5 @@ Scope: mcr-render, mcr-app overlays and block_entities, mcr-ui renderer, mcr-blo
 
 ## 9. Close out
 
-- [ ] 9.1 Re-audit each batch against the decompiled client after it merges; record leftovers in a follow-up change
-- [ ] 9.2 Validate and archive the change
+- [x] 9.1 Re-audit each batch against the decompiled client after it merges; record leftovers in a follow-up change
+- [x] 9.2 Validate and archive the change

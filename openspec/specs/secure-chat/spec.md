@@ -163,3 +163,11 @@ Player chat and disguised chat SHALL be decorated with the chat type's translati
 #### Scenario: Announcement and team message
 - **WHEN** a player runs `/say hello` or `/teammsg hello`
 - **THEN** the lines use `chat.type.announcement` and the team decorations
+
+### Requirement: Acknowledgement after the chat delay
+With a chat delay, a player chat message SHALL be marked as processed when it leaves the delay queue, not
+when it arrives.
+
+#### Scenario: Delayed message
+- **WHEN** the chat delay is 2 seconds and a signed message arrives
+- **THEN** it joins the last-seen list only once it is shown
