@@ -45,6 +45,7 @@ GPU-driven rendering on wgpu and a custom engine (no Bevy, no OpenGL).
 - Run cargo builds and tests inside a memory-capped scope (`systemd-run --user --scope -q -p MemoryMax=8G
   -p MemorySwapMax=0 cargo …`): systemd-oomd otherwise kills the whole terminal, coordinating session
   included. Hostile-input test fixtures must stay small — `vec![tree; 64]` nested 12 deep is 64^12 nodes.
+- Live checks: send `op <name>` only after the player has joined; before that the vanilla server looks the name up online and stores the wrong UUID.
 - Long-running processes (vanilla server, client runs) from agent shells: start them with the Bash tool's
   `run_in_background`, or fully detached (`setsid nohup … > log 2>&1 &`), never inheriting the tool's
   pipes — otherwise the tool call hangs until the process exits. Never write to a FIFO without a
