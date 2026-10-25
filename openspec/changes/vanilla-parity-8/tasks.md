@@ -37,6 +37,13 @@ Scope: mcr-mesh, mcr-render vertex formats.
 - [x] 5.2 Mesh memory, upload and GPU time before and after; keep vertex formats compact where precision allows
 - [x] 5.3 fmt, clippy and workspace tests
 
-## 6. Close out
+## 6. Meshing leftovers
 
-- [ ] 6.1 Validate and archive the change
+- [ ] 6.1 A1 the model arena grows (or is sized from the render distance) instead of dropping sections; no VRAM regression at render distance 12
+- [ ] 6.2 M9 fluid flow uses the `#blocks_fluid_flow` tag; add harness cases next to signs
+- [ ] 6.3 M10 dark cutout edges on iron bars and door windows; compare with vanilla's sampling and mip generation
+- [ ] 6.4 fmt, clippy, workspace tests, `section_mesh` and `block_model` at 100%
+
+## 7. Close out
+
+- [ ] 7.1 Validate and archive the change

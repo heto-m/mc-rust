@@ -64,6 +64,7 @@ Severity: **G** gameplay-breaking, **V** visible, **M** minor.
 - **C2 (M)** Cape on elytra, which needs the owner's online-mode account.
 - **C3 (M)** The `local_difficulty`, `entity_spawn_counts` and `chunk_generation_stats` F3 entries, which
   need a server level.
+- **A1 (V)** A full model arena drops the section (`RenderError::ArenaFull`, logged once), which leaves a hole in the world. Batch 5 cut the arena to 4M quads, about 1.4x the bench forest at render distance 32. The arena must grow, or be sized from the render distance, instead of dropping sections.
 - **C4 (M)** The language-aware plain string (`to_plain_string_with`) is not yet threaded through the `mcr-app` and `mcr-client` callers: shell, hud, nametags, entities, map, editors, the sign character limit in `mcr-block-entity`, `dialog_screen` option and slider labels, and `tooltip::first_plain`. This affects emptiness checks, the sign limit and logs.
 
 ## Decisions
