@@ -1920,6 +1920,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcr-parity"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mcr-buf",
+ "mcr-protocol",
+ "mcr-ui",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "mcr-particles"
 version = "0.1.0"
 dependencies = [

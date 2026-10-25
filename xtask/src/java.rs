@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use mcr_modmeta::resolve::GAME_VERSION;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 
@@ -52,6 +53,8 @@ pub enum Dep {
     /// `neoforge-launch [optional]`: FML's class path from `.cache/neoforge/launch.json`, plus the module's
     /// `src-neoforge` and `resources-neoforge`; an optional one is skipped when NeoForge was never fetched.
     NeoForgeLaunch { optional: bool },
+    /// `vanilla-client`: the client jar and the libraries its version.json lists, without a loader.
+    VanillaClient,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,7 +100,7 @@ pub fn run(layout: &Layout, out: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn resolve_toolchain(layout: &Layout) -> Result<Toolchain> {
+pub fn resolve_toolchain(layout: &Layout) -> Result<Toolchain> {
     let bin = layout.jdk_dir().join("bin");
     let exe = |name: &str| bin.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     let (javac, jar) = if exe("javac").is_file() && exe("jar").is_file() {
@@ -142,6 +145,7 @@ pub fn parse_deps(text: &str) -> Result<Vec<Dep>> {
             ["fabric-api-module", name] => deps.push(Dep::FabricApiModule(name.to_owned())),
             ["neoforge-launch"] => deps.push(Dep::NeoForgeLaunch { optional: false }),
             ["neoforge-launch", "optional"] => deps.push(Dep::NeoForgeLaunch { optional: true }),
+            ["vanilla-client"] => deps.push(Dep::VanillaClient),
             _ => bail!("bad {DEPS_FILE} line `{line}`"),
         }
     }
@@ -198,7 +202,10 @@ pub fn build_order(modules: Vec<Module>) -> Result<Vec<Module>> {
         let ready = pending.iter().position(|m| {
             m.deps.iter().all(|d| match d {
                 Dep::Module(dep) => ordered.iter().any(|o| &o.name == dep),
-                Dep::FabricLaunch | Dep::FabricApiModule(_) | Dep::NeoForgeLaunch { .. } => true,
+                Dep::FabricLaunch
+                | Dep::FabricApiModule(_)
+                | Dep::NeoForgeLaunch { .. }
+                | Dep::VanillaClient => true,
             })
         });
         match ready {
@@ -348,9 +355,51 @@ fn class_path(module: &Module, dirs: &Dirs) -> Result<(Vec<PathBuf>, Vec<PathBuf
                 inputs.push(launch);
                 neoforge = true;
             }
+            Dep::VanillaClient => {
+                let (jars, version_json) = vanilla_class_path(dirs.cache, GAME_VERSION)?;
+                cp.extend(jars);
+                inputs.push(version_json);
+            }
         }
     }
     Ok((cp, inputs, neoforge))
+}
+
+/// The client jar and its libraries, found where `fetch` and `fabric-fetch` put them, plus the
+/// version.json that pins them all.
+pub fn vanilla_class_path(cache: &Path, version: &str) -> Result<(Vec<PathBuf>, PathBuf)> {
+    let version_dir = cache.join("versions").join(version);
+    let version_json = version_dir.join("version.json");
+    let text = fs::read_to_string(&version_json).with_context(|| {
+        format!(
+            "{} missing; run `cargo xtask fetch` first",
+            version_json.display()
+        )
+    })?;
+    let libs = crate::fabric::parse_vanilla_libraries(&text, crate::fabric::Host::current())?;
+    let mut cp = Vec::with_capacity(libs.class_path.len() + 1);
+    for lib in &libs.class_path {
+        let nested = cache.join("fabric/libraries").join(&lib.path);
+        let flat = Path::new(&lib.path)
+            .file_name()
+            .map(|n| cache.join("libraries").join(n));
+        match std::iter::once(nested).chain(flat).find(|p| p.is_file()) {
+            Some(jar) => cp.push(jar),
+            None => bail!(
+                "library {} missing; run `cargo xtask fabric-fetch` first",
+                lib.name
+            ),
+        }
+    }
+    let client = version_dir.join("client.jar");
+    if !client.is_file() {
+        bail!(
+            "{} missing; run `cargo xtask fetch` first",
+            client.display()
+        );
+    }
+    cp.push(client);
+    Ok((cp, version_json))
 }
 
 /// A launch manifest's class path without its game jar.
@@ -438,6 +487,29 @@ pub fn build_all(dirs: &Dirs, tc: &Toolchain) -> Result<Vec<(Module, Outcome)>> 
         results.push((module, outcome));
     }
     Ok(results)
+}
+
+/// Builds one module and the modules it depends on, leaving the others alone.
+pub fn build_one(dirs: &Dirs, tc: &Toolchain, name: &str) -> Result<PathBuf> {
+    let modules = build_order(discover_modules(dirs.java)?)?;
+    let mut wanted = vec![name.to_owned()];
+    for m in modules.iter().rev() {
+        if wanted.contains(&m.name) {
+            for d in &m.deps {
+                if let Dep::Module(dep) = d {
+                    wanted.push(dep.clone());
+                }
+            }
+        }
+    }
+    if !modules.iter().any(|m| m.name == name) {
+        bail!("no Java module {name} under {}", dirs.java.display());
+    }
+    fs::create_dir_all(dirs.out)?;
+    for module in modules.iter().filter(|m| wanted.contains(&m.name)) {
+        build_module(module, dirs, tc)?;
+    }
+    Ok(dirs.out.join(format!("{name}.jar")))
 }
 
 fn build_module(module: &Module, dirs: &Dirs, tc: &Toolchain) -> Result<Outcome> {
@@ -752,6 +824,68 @@ echo jar > "$out"
         fs::write(java.join("one/deps.txt"), "neoforge-launch\n").unwrap();
         fs::remove_file(cache.join("launch.json")).unwrap();
         assert!(build(&dir, &tc).is_err(), "a required NeoForge dependency");
+    }
+
+    #[test]
+    fn vanilla_client_resolves_libraries_from_either_cache_layout() {
+        assert_eq!(
+            parse_deps("vanilla-client\n").unwrap(),
+            [Dep::VanillaClient]
+        );
+        let cache = tempfile_dir("java-vanilla-client");
+        let ver = cache.join("versions/9.9");
+        fs::create_dir_all(&ver).unwrap();
+        let lib = |name: &str, path: &str| {
+            format!(
+                r#"{{"name": "{name}", "downloads": {{"artifact": {{"path": "{path}", "url": "u", "sha1": "s"}}}}}}"#
+            )
+        };
+        fs::write(
+            ver.join("version.json"),
+            format!(
+                r#"{{"libraries": [{}, {}]}}"#,
+                lib("a:a:1", "a/a/1/a-1.jar"),
+                lib("b:b:1", "b/b/1/b-1.jar")
+            ),
+        )
+        .unwrap();
+        fs::write(ver.join("client.jar"), "jar").unwrap();
+        fs::create_dir_all(cache.join("fabric/libraries/a/a/1")).unwrap();
+        fs::write(cache.join("fabric/libraries/a/a/1/a-1.jar"), "a").unwrap();
+        assert!(vanilla_class_path(&cache, "9.9").is_err(), "b is missing");
+        fs::create_dir_all(cache.join("libraries")).unwrap();
+        fs::write(cache.join("libraries/b-1.jar"), "b").unwrap();
+        let (cp, pin) = vanilla_class_path(&cache, "9.9").unwrap();
+        assert_eq!(
+            cp,
+            [
+                cache.join("fabric/libraries/a/a/1/a-1.jar"),
+                cache.join("libraries/b-1.jar"),
+                ver.join("client.jar")
+            ]
+        );
+        assert_eq!(pin, ver.join("version.json"));
+    }
+
+    #[test]
+    fn build_one_skips_unrelated_modules() {
+        let dir = tempfile_dir("java-build-one");
+        let java = dir.join("java");
+        write_module(&java, "app", "App.java", "class App {}");
+        write_module(&java, "lib", "Lib.java", "class Lib {}");
+        write_module(&java, "other", "Other.java", "class Other {}");
+        fs::write(java.join("app/deps.txt"), "module lib\n").unwrap();
+        let (tc, log) = fake_toolchain(&dir);
+        let (out, cache) = (dir.join("out"), dir.join("cache"));
+        let dirs = Dirs {
+            java: &java,
+            out: &out,
+            cache: &cache,
+        };
+        assert_eq!(build_one(&dirs, &tc, "app").unwrap(), out.join("app.jar"));
+        assert_eq!(javac_runs(&log), 2);
+        assert!(!out.join("other.jar").exists());
+        assert!(build_one(&dirs, &tc, "missing").is_err());
     }
 
     #[test]

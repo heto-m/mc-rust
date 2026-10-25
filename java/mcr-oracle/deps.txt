@@ -1,0 +1,2 @@
+# The vanilla client jar and its libraries from version.json; no loader.
+vanilla-client

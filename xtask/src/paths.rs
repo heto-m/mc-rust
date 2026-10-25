@@ -19,6 +19,22 @@ impl Layout {
         Self { root }
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Cargo's target dir: `CARGO_TARGET_DIR` when set, else `target/` at the root.
+    pub fn target_dir(&self) -> PathBuf {
+        std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .map_or_else(|| self.root.join("target"), |d| self.root.join(d))
+    }
+
+    /// Differential harness cases, cached oracle outputs and `status.json`.
+    pub fn parity_dir(&self) -> PathBuf {
+        self.cache_dir().join("parity")
+    }
+
     pub fn cache_dir(&self) -> PathBuf {
         self.root.join(".cache")
     }

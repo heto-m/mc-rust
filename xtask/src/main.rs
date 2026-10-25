@@ -12,6 +12,7 @@ mod manifest;
 mod modpack;
 mod neoforge;
 mod net;
+mod parity;
 mod paths;
 mod server;
 mod setup;
@@ -171,6 +172,25 @@ enum Command {
         #[arg(long, default_value = "4G")]
         memory: String,
     },
+    /// Run differential harnesses: vanilla's classes (java/mcr-oracle) against our probes (crates/mcr-parity).
+    /// With no names: the harnesses whose inputs changed or that never passed.
+    /// Exit codes: 0 all passed, 1 mismatches, 2 setup or oracle failure.
+    Parity {
+        /// Harnesses to run whatever their state
+        names: Vec<String>,
+        /// Every harness
+        #[arg(long, conflicts_with_all = ["names", "failed"])]
+        all: bool,
+        /// The harnesses that failed last time
+        #[arg(long, conflicts_with = "names")]
+        failed: bool,
+        /// Rerun the vanilla oracle even when its cached output still applies
+        #[arg(long)]
+        fresh: bool,
+        /// Mismatches shown in full per harness
+        #[arg(long, default_value_t = 5)]
+        max: usize,
+    },
     /// Run fetch, jdk, datagen and decompile in order
     Setup {
         #[arg(long)]
@@ -292,6 +312,26 @@ fn main() -> Result<()> {
                     memory,
                 },
             )?;
+        }
+        Command::Parity {
+            names,
+            all,
+            failed,
+            fresh,
+            max,
+        } => {
+            let opts = parity::Options {
+                names,
+                all,
+                failed,
+                fresh,
+                max,
+            };
+            let code = parity::run(&layout, &opts).unwrap_or_else(|e| {
+                eprintln!("[parity] {e:#}");
+                parity::EXIT_ERROR
+            });
+            std::process::exit(code);
         }
         Command::Setup { version, force } => {
             let ver = fetch::resolve_version(version.as_deref())?;

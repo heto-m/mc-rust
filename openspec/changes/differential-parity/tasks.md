@@ -6,11 +6,11 @@
 
 Scope: new `crates/mcr-parity`, new `java/mcr-oracle`, `xtask`.
 
-- [ ] 1.1 Case and result formats, seeded generators, the diff with the first-mismatch report (D1)
-- [ ] 1.2 `java/mcr-oracle` built by `cargo xtask java-build` against the client jar; bootstrap helper (D2)
-- [ ] 1.3 `cargo xtask parity` with selection, oracle caching, `status.json`, `unshare -rn` and the memory scope (D3)
-- [ ] 1.4 First harness end to end: font width and text wrapping over generated strings and styles
-- [ ] 1.5 fmt, clippy and workspace tests
+- [x] 1.1 Case and result formats, seeded generators, the diff with the first-mismatch report (D1)
+- [x] 1.2 `java/mcr-oracle` built by `cargo xtask java-build` against the client jar; bootstrap helper (D2)
+- [x] 1.3 `cargo xtask parity` with selection, oracle caching, `status.json`, `unshare -rn` and the memory scope (D3)
+- [x] 1.4 First harness end to end: font width and text wrapping over generated strings and styles
+- [x] 1.5 fmt, clippy and workspace tests
 
 ## 2. Pure client logic
 
