@@ -1,5 +1,14 @@
+use std::sync::{Mutex, OnceLock};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FontId(pub u8);
+
+const MAX_UNKNOWN_FONTS: usize = 24;
+
+fn unknown_fonts() -> &'static Mutex<Vec<&'static str>> {
+    static NAMES: OnceLock<Mutex<Vec<&'static str>>> = OnceLock::new();
+    NAMES.get_or_init(Mutex::default)
+}
 
 impl FontId {
     pub const DEFAULT: Self = Self(0);
@@ -7,18 +16,46 @@ impl FontId {
     pub const ALT: Self = Self(2);
     pub const ILLAGERALT: Self = Self(3);
     pub const COUNT: usize = 4;
+    /// Every font without a definition; its glyphs are all the missing glyph.
+    pub const MISSING: Self = Self(Self::COUNT as u8);
 
+    /// Names without a definition get distinct ids, up to a bound, so a server cannot grow the table.
     pub fn from_name(name: &str) -> Self {
-        match name.strip_prefix("minecraft:").unwrap_or(name) {
+        let name = name.strip_prefix("minecraft:").unwrap_or(name);
+        match name {
+            "default" => Self::DEFAULT,
             "uniform" => Self::UNIFORM,
             "alt" => Self::ALT,
             "illageralt" => Self::ILLAGERALT,
-            _ => Self::DEFAULT,
+            _ => {
+                let mut names = unknown_fonts().lock().unwrap_or_else(|e| e.into_inner());
+                match names.iter().position(|n| *n == name) {
+                    Some(i) => Self(Self::MISSING.0 + i as u8),
+                    None if names.len() < MAX_UNKNOWN_FONTS && name.len() <= 256 => {
+                        names.push(Box::leak(name.to_owned().into_boxed_str()));
+                        Self(Self::MISSING.0 + (names.len() - 1) as u8)
+                    }
+                    None => Self::MISSING,
+                }
+            }
         }
     }
 
+    pub fn is_missing(self) -> bool {
+        usize::from(self.0) >= Self::COUNT
+    }
+
     pub fn path(self) -> &'static str {
-        ["default", "uniform", "alt", "illageralt"][self.0 as usize % Self::COUNT]
+        match usize::from(self.0) {
+            0 => "default",
+            1 => "uniform",
+            2 => "alt",
+            3 => "illageralt",
+            i => {
+                let names = unknown_fonts().lock().unwrap_or_else(|e| e.into_inner());
+                names.get(i - Self::COUNT).copied().unwrap_or("missing")
+            }
+        }
     }
 }
 

@@ -3,8 +3,8 @@ use std::collections::VecDeque;
 use mcr_protocol::types::text::Component;
 
 use crate::gui::TooltipLines;
-use crate::style::{Cell, with_alpha};
-use crate::text::{ClickSpan, InsertSpan, click_at, flatten_chat, parse_legacy};
+use crate::style::{Cell, Style, with_alpha};
+use crate::text::{ChatText, Chunk, ClickSpan, InsertSpan, Line, click_at, flatten_chat};
 use crate::ui::{Ui, UiFrame};
 use mcr_protocol::types::text::{ClickEvent, Color, NamedColor, Style as TextStyle};
 
@@ -266,8 +266,8 @@ impl ChatHud {
         tag: Option<ChatLineTag>,
         signature: Option<[u8; 256]>,
     ) {
-        let (cells, spans, inserts) = flatten_chat(ui.lang(), message, options.colors);
-        let entry = self.add_cells(ui, &cells, (&spans, &inserts), tick, options, tag);
+        let text = flatten_chat(ui.lang(), message, options.colors);
+        let entry = self.add_flattened(ui, &text, tick, options, tag);
         if let Some(sig) = signature {
             self.signed.push_front((entry, Box::new(sig), tick));
             self.signed.truncate(MAX_STORED_LINES);
@@ -275,15 +275,18 @@ impl ChatHud {
     }
 
     pub fn add_text(&mut self, ui: &mut Ui, message: &str, tick: u32, options: &ChatOptions) {
-        self.add_cells(ui, &parse_legacy(message), (&[], &[]), tick, options, None);
+        let text = ChatText {
+            chunks: vec![Chunk::new(message, Style::default())],
+            ..ChatText::default()
+        };
+        self.add_flattened(ui, &text, tick, options, None);
     }
 
     /// Lines top to bottom; a tag with an icon leaves room for it like vanilla's `splitLines`.
     fn make_lines(
         &mut self,
         ui: &mut Ui,
-        cells: &[Cell],
-        (spans, inserts): (&[ClickSpan], &[InsertSpan]),
+        text: &ChatText,
         tick: u32,
         options: &ChatOptions,
         tag: Option<ChatLineTag>,
@@ -294,32 +297,55 @@ impl ChatHud {
         if tag.as_ref().is_some_and(ChatLineTag::has_icon) {
             width -= ICON_SIZE + ICON_MARGIN + 2;
         }
-        let ranges = ui.wrap(cells, width.max(1) as f32);
-        let count = ranges.len();
-        let lines = ranges
+        let mut split = ui.split_lines(&text.chunks, width.max(1) as f32);
+        if split.is_empty() {
+            split.push(Line {
+                start: 0,
+                cells: Vec::new(),
+                wrapped: false,
+            });
+        }
+        let count = split.len();
+        let lines = split
             .into_iter()
             .enumerate()
-            .map(|(i, range)| {
-                let spans = spans
+            .map(|(i, line)| {
+                let indent = usize::from(line.wrapped);
+                let range = line.start..line.start + line.cells.len();
+                let shift = |r: &std::ops::Range<usize>| {
+                    r.start.max(range.start) - range.start + indent
+                        ..r.end.min(range.end) - range.start + indent
+                };
+                let overlaps =
+                    |r: &std::ops::Range<usize>| r.start < range.end && r.end > range.start;
+                let spans = text
+                    .spans
                     .iter()
-                    .filter(|s| s.range.start < range.end && s.range.end > range.start)
+                    .filter(|s| overlaps(&s.range))
                     .map(|s| ClickSpan {
-                        range: s.range.start.max(range.start) - range.start
-                            ..s.range.end.min(range.end) - range.start,
+                        range: shift(&s.range),
                         event: s.event.clone(),
                     })
                     .collect();
-                let inserts = inserts
+                let inserts = text
+                    .inserts
                     .iter()
-                    .filter(|s| s.range.start < range.end && s.range.end > range.start)
+                    .filter(|s| overlaps(&s.range))
                     .map(|s| InsertSpan {
-                        range: s.range.start.max(range.start) - range.start
-                            ..s.range.end.min(range.end) - range.start,
+                        range: shift(&s.range),
                         text: s.text.clone(),
                     })
                     .collect();
+                let mut cells = Vec::with_capacity(indent + line.cells.len());
+                if line.wrapped {
+                    cells.push(Cell {
+                        ch: ' ',
+                        style: Style::default(),
+                    });
+                }
+                cells.extend(line.cells);
                 let mut x = 0.0;
-                let ends = cells[range.clone()]
+                let ends = cells
                     .iter()
                     .map(|c| {
                         x += ui.width(std::slice::from_ref(c));
@@ -327,7 +353,7 @@ impl ChatHud {
                     })
                     .collect();
                 ChatLine {
-                    cells: cells[range].to_vec(),
+                    cells,
                     added: tick,
                     spans,
                     inserts,
@@ -341,16 +367,15 @@ impl ChatHud {
         (entry, lines)
     }
 
-    fn add_cells(
+    fn add_flattened(
         &mut self,
         ui: &mut Ui,
-        cells: &[Cell],
-        spans: (&[ClickSpan], &[InsertSpan]),
+        text: &ChatText,
         tick: u32,
         options: &ChatOptions,
         tag: Option<ChatLineTag>,
     ) -> u64 {
-        let (entry, lines) = self.make_lines(ui, cells, spans, tick, options, tag);
+        let (entry, lines) = self.make_lines(ui, text, tick, options, tag);
         for line in lines {
             self.lines.push_front(line);
             if self.scroll > 0 {
@@ -408,15 +433,8 @@ impl ChatHud {
             italic: Some(true),
             ..TextStyle::default()
         });
-        let (cells, spans, inserts) = flatten_chat(ui.lang(), &marker, options.colors);
-        let (_, lines) = self.make_lines(
-            ui,
-            &cells,
-            (&spans, &inserts),
-            added,
-            options,
-            Some(ChatLineTag::System),
-        );
+        let text = flatten_chat(ui.lang(), &marker, options.colors);
+        let (_, lines) = self.make_lines(ui, &text, added, options, Some(ChatLineTag::System));
         for line in lines {
             self.lines.insert(first.min(self.lines.len()), line);
         }

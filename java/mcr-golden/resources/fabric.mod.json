@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "mcr_golden",
+  "version": "0.1.0",
+  "name": "mcr golden capture",
+  "description": "Saves a screenshot of vanilla's own title screen (-Dmcr.golden.title=<png>), for comparing mcr's menus against the OpenGL client.",
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["dev.mcr.golden.TitleShot"]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "fabric-lifecycle-events-v1": "*",
+    "minecraft": "26.3"
+  }
+}

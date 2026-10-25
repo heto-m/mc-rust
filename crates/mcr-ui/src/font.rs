@@ -259,6 +259,9 @@ impl Fonts {
     }
 
     pub fn glyph(&mut self, font: FontId, ch: char) -> u32 {
+        if font.is_missing() {
+            return self.missing;
+        }
         let set_index = font.0 as usize % self.sets.len();
         let cp = ch as u32;
         if let Some(&idx) = self.sets[set_index].cache.get(&cp) {
@@ -291,6 +294,9 @@ impl Fonts {
     /// Picks a deterministic pseudo-random glyph whose advance rounds up to the same width.
     pub fn random_glyph(&mut self, font: FontId, ch: char, rng: &mut u32) -> u32 {
         let base = self.glyph(font, ch);
+        if font.is_missing() {
+            return base;
+        }
         let width = self.info(base).advance.ceil() as u32;
         let set_index = font.0 as usize % self.sets.len();
         if self.sets[set_index].by_width.is_none() {

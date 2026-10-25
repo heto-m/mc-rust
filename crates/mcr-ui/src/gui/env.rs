@@ -281,6 +281,10 @@ pub struct RenderCx<'a, 'f> {
     pub mouse: (f32, f32),
     pub now_ms: u64,
     pub tooltip: Option<(TooltipLines, f32, f32)>,
+    /// In: the host can draw the title panorama behind the GUI.
+    pub panorama_loaded: bool,
+    /// Out: the screen relies on that panorama this frame.
+    pub panorama_drawn: bool,
 }
 
 impl<'a, 'f> RenderCx<'a, 'f> {
@@ -298,6 +302,8 @@ impl<'a, 'f> RenderCx<'a, 'f> {
             mouse: (0.0, 0.0),
             now_ms: 0,
             tooltip: None,
+            panorama_loaded: false,
+            panorama_drawn: false,
         }
     }
 

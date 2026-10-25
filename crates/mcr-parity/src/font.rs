@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use mcr_buf::Identifier;
 use mcr_protocol::types::text::{Component, Style as TextStyle};
-use mcr_ui::{Cell, ChatHud, ChatOptions, Flags, FontId, Style, Ui, push_legacy};
+use mcr_ui::{Cell, ChatHud, ChatOptions, Chunk, Flags, FontId, Style, Ui, push_legacy};
 use serde_json::{Value, json};
 
 use crate::{Case, Env, Harness, ParityError, Result, Rng, round};
@@ -224,13 +224,21 @@ fn probe_case(ui: &mut Ui, parts: &[Part], wrap: i32) -> Value {
     let width = ui.text_width(&raw).ceil() as i32;
     let styled_width = round(f64::from(ui.width(&cells)), STEP);
 
-    let lines: Vec<Value> = ui
-        .wrap(&cells, wrap as f32)
-        .into_iter()
-        .map(|r| {
-            let line = &cells[r];
-            json!({"text": plain(line), "width": round(f64::from(ui.width(line)), STEP)})
+    let chunks: Vec<Chunk> = parts
+        .iter()
+        .map(|p| {
+            let mut base = Style::default();
+            base.flags.set(Flags::BOLD, p.bold);
+            if let Some(f) = &p.font {
+                base.font = FontId::from_name(f);
+            }
+            Chunk::new(&p.text, base)
         })
+        .collect();
+    let lines: Vec<Value> = ui
+        .split_lines(&chunks, wrap as f32)
+        .into_iter()
+        .map(|line| json!({"text": plain(&line.cells), "width": round(f64::from(ui.width(&line.cells)), STEP)}))
         .collect();
 
     let mut out = json!({

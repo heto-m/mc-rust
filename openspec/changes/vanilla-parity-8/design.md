@@ -24,6 +24,10 @@ Severity: **G** gameplay-breaking, **V** visible, **M** minor.
 - **S1 (V) No title panorama.** Vanilla's title screen draws the rotating cubemap panorama from
   `textures/gui/title/background/panorama_*.png`, blurred, scrolling at `panoramaScrollSpeed`. Ours
   draws a flat gradient.
+  Findings: the client jar carries 1x1 placeholder faces; the real ones come from the launcher asset
+  index, so `AssetIndexSource` now serves `textures/gui/title/background/`. `CubeMapTexture` stacks the
+  faces with `mirrorY`. The title screen has no blur (`TitleScreen#extractBackground` is empty); only
+  screens opened over the panorama blur it, and those still draw the flat menu background.
 - **S2 (M) Windowed `--size` ignored.** The window opens at 1280x720 whatever the flag says.
   Vanilla's `--width`/`--height` set the initial window size.
 

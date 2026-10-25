@@ -90,7 +90,7 @@ use mcr_render::{Camera, FrameInputs, Renderer, RendererConfig, Target};
 use shell::{Shell, ShellConfig};
 use stats::StatWindow;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Size};
 use winit::event::{DeviceEvent, DeviceId, ElementState, Ime, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -221,11 +221,16 @@ impl App {
     }
 
     fn init(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        let size: Size = if self.opts.size_set {
+            PhysicalSize::new(self.opts.size.0, self.opts.size.1).into()
+        } else {
+            LogicalSize::new(1280, 720).into()
+        };
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
                     .with_title("mc-rust")
-                    .with_inner_size(LogicalSize::new(1280, 720)),
+                    .with_inner_size(size),
             )?,
         );
         if self.mods_app.is_none() {

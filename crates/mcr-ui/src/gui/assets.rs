@@ -18,7 +18,8 @@ const DIRS: [&str; 7] = [
     "advancements/",
     "advancements/backgrounds/",
 ];
-const FILES: [&str; 8] = [
+const FILES: [&str; 9] = [
+    "title/background/panorama_overlay",
     "menu_background",
     "menu_list_background",
     "header_separator",

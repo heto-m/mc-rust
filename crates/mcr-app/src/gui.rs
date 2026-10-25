@@ -3,7 +3,9 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use mcr_assets::ResourceManager;
 use mcr_render::{Overlay, OverlayCtx, wgpu};
-use mcr_ui::{ItemIcons, Lang, ScreenAssets, ToastManager, Ui, UiRenderer};
+use mcr_ui::{
+    ItemIcons, Lang, Panorama, PanoramaTarget, ScreenAssets, ToastManager, Ui, UiRenderer,
+};
 
 use crate::mod_input::UiClipboard;
 
@@ -15,6 +17,7 @@ pub struct Gui {
     pub assets: ScreenAssets,
     pub clipboard: UiClipboard,
     pub toasts: ToastManager,
+    pub panorama: Option<Panorama>,
     resources: Arc<ResourceManager>,
     language: String,
     lang: Arc<RwLock<Arc<Lang>>>,
@@ -44,6 +47,7 @@ impl Gui {
             assets,
             clipboard: UiClipboard::default(),
             toasts: ToastManager::default(),
+            panorama: Panorama::load(&resources),
             resources,
             language: mcr_ui::DEFAULT_LANGUAGE.to_owned(),
         })
@@ -59,6 +63,7 @@ impl Gui {
         self.ui = ui;
         self.icons = icons;
         self.assets = assets;
+        self.panorama = Panorama::load(resources);
         self.ui_renderer.reset_pages();
         self.resources = Arc::clone(resources);
         if let Err(e) = self.ui.set_language(&self.resources, &self.language) {
@@ -142,10 +147,21 @@ pub fn open_url(url: &str) {
 pub struct UiOverlay<'a> {
     pub ui_renderer: &'a mut UiRenderer,
     pub ui: &'a mut Ui,
+    /// The title panorama and its spin in degrees, drawn before the GUI.
+    pub panorama: Option<(&'a mut Panorama, f32)>,
 }
 
 impl Overlay for UiOverlay<'_> {
-    fn record(&mut self, _ctx: &mut OverlayCtx<'_>) {}
+    fn record(&mut self, ctx: &mut OverlayCtx<'_>) {
+        if let Some((panorama, spin)) = &mut self.panorama {
+            let target = PanoramaTarget {
+                view: ctx.color,
+                format: ctx.format,
+                size: ctx.size,
+            };
+            panorama.record(ctx.device, ctx.queue, ctx.encoder, target, *spin);
+        }
+    }
 
     fn record_ui(&mut self, ctx: &mut OverlayCtx<'_>) {
         self.ui_renderer.prepare(ctx.device, ctx.queue, self.ui);

@@ -5,6 +5,7 @@ mod font;
 mod gui;
 mod items;
 mod lang;
+mod panorama;
 mod renderer;
 mod screens;
 mod sprites;
@@ -27,6 +28,7 @@ pub use items::{
     styled_hover_name, tooltip_lines, weight_safe,
 };
 pub use lang::{DEFAULT_LANGUAGE, LanguageInfo, available_languages};
+pub use panorama::{Panorama, PanoramaTarget};
 pub use renderer::{UiRenderer, UiStats};
 pub use screens::{
     AirBubbles, AirState, CHART_SAMPLES, ChatClick, ChatHud, ChatLineTag, ChatOptions,
@@ -38,8 +40,8 @@ pub use sprites::{
 };
 pub use style::{Cell, Flags, FontId, Style};
 pub use text::{
-    ClickSpan, InsertSpan, Lang, click_at, flatten, flatten_chat, flatten_events, parse_legacy,
-    push_legacy, wrap,
+    ChatText, Chunk, ClickSpan, InsertSpan, Lang, Line, click_at, flatten, flatten_chat,
+    flatten_events, parse_legacy, push_legacy, wrap,
 };
 pub use toast::{SystemToastId, Toast, ToastFrame, ToastManager, note_color};
 pub use ui::{

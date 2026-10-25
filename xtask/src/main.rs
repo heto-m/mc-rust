@@ -100,7 +100,11 @@ enum Command {
         out: Option<std::path::PathBuf>,
     },
     /// Render the test mod's GPU parity screen with vanilla OpenGL into .cache/golden/<ver>/gui.png
-    GoldenGui,
+    GoldenGui {
+        /// Capture the title screen (`title.png`, panorama still) instead of the test screen
+        #[arg(long)]
+        title: bool,
+    },
     /// Run `mcr --soak` offscreen against a churned vanilla server and fail on memory or thread growth
     Soak {
         #[arg(long)]
@@ -242,8 +246,8 @@ fn main() -> Result<()> {
         Command::JavaBuild { out } => {
             java::run(&layout, out.as_deref())?;
         }
-        Command::GoldenGui => {
-            golden::run(&layout)?;
+        Command::GoldenGui { title } => {
+            golden::run(&layout, title)?;
         }
         Command::Soak {
             version,

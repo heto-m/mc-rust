@@ -50,7 +50,7 @@ fn join(paths: &[PathBuf]) -> Result<String> {
     Ok(parts.context("non UTF-8 path")?.join(":"))
 }
 
-pub fn run(layout: &Layout) -> Result<()> {
+pub fn run(layout: &Layout, title: bool) -> Result<()> {
     let cache = layout.cache_dir();
     let manifest_path = layout.fabric_launch_json();
     let manifest: Value =
@@ -61,7 +61,11 @@ pub fn run(layout: &Layout) -> Result<()> {
             )
         })?)?;
     let version = string(&manifest, "game_version")?;
-    let testmod = layout.java_out_dir().join("mcr-testmod.jar");
+    let testmod = layout.java_out_dir().join(if title {
+        "mcr-golden.jar"
+    } else {
+        "mcr-testmod.jar"
+    });
     if !testmod.is_file() {
         bail!(
             "{} is missing: run `cargo xtask java-build`",
@@ -73,9 +77,16 @@ pub fn run(layout: &Layout) -> Result<()> {
     std::fs::create_dir_all(&game_dir)?;
     std::fs::write(
         game_dir.join("options.txt"),
-        "onboardAccessibility:false\npreferredGraphicsBackend:\"opengl\"\nnarrator:0\nsoundCategory_master:0.0\n",
+        format!(
+            "onboardAccessibility:false\npreferredGraphicsBackend:\"opengl\"\nnarrator:0\nsoundCategory_master:0.0\n{}",
+            if title {
+                "panoramaScrollSpeed:0.0\n"
+            } else {
+                ""
+            }
+        ),
     )?;
-    let out = dir.join("gui.png");
+    let out = dir.join(if title { "title.png" } else { "gui.png" });
     let _ = std::fs::remove_file(&out);
 
     let in_cache = |p: String| cache.join(p);
@@ -87,6 +98,7 @@ pub fn run(layout: &Layout) -> Result<()> {
     class_path.push(game_jar.clone());
     let mut mods: Vec<PathBuf> = strings(&manifest, "test_mods")?
         .into_iter()
+        .filter(|m| !title || !m.contains("modmenu"))
         .map(in_cache)
         .collect();
     mods.push(testmod);
@@ -105,7 +117,7 @@ pub fn run(layout: &Layout) -> Result<()> {
         "-p",
         "MemorySwapMax=0",
     ])
-    .args(["timeout", &TIMEOUT.as_secs().to_string()]);
+    .args(["timeout", &TIMEOUT.as_secs().to_string(), "unshare", "-rn"]);
     if headless {
         cmd.args(["xvfb-run", "-a", "-s", "-screen 0 1920x1080x24"]);
         cmd.env_remove("WAYLAND_DISPLAY")
@@ -125,6 +137,7 @@ pub fn run(layout: &Layout) -> Result<()> {
         .arg("-Djava.awt.headless=true")
         .arg(format!("-Dmcr.testmod.gui={}", out.display()))
         .arg("-Dmcr.testmod.gui.quit=true")
+        .args(title.then(|| format!("-Dmcr.golden.title={}", out.display())))
         .args(strings(&manifest, "jvm_args")?)
         .arg(string(&manifest, "main_class")?)
         .args([

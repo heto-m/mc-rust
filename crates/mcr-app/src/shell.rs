@@ -88,6 +88,21 @@ pub struct ShellConfig {
     pub mods: crate::mods_ui::ModsApp,
 }
 
+const MAX_FRAME_SECONDS: f32 = 0.25;
+
+/// `Panorama#extractRenderState`: 0.1 degrees per tick at full speed, wrapped to [-180, 180).
+fn advance_panorama(spin: f32, seconds: f32, speed: f64) -> f32 {
+    let turned = spin + seconds * 20.0 * speed as f32 * 0.1;
+    let wrapped = turned % 360.0;
+    if wrapped >= 180.0 {
+        wrapped - 360.0
+    } else if wrapped < -180.0 {
+        wrapped + 360.0
+    } else {
+        wrapped
+    }
+}
+
 pub struct Shell {
     cfg: ShellConfig,
     applied_vsync: Option<bool>,
@@ -104,6 +119,8 @@ pub struct Shell {
     accum: f32,
     started: Instant,
     last_frame: Instant,
+    panorama_spin: f32,
+    frame_seconds: f32,
     pub quit: bool,
     /// The title screen asked for the launcher; the app leaves this shell.
     pub to_launcher: bool,
@@ -262,6 +279,8 @@ impl Shell {
             accum: 0.0,
             started: now,
             last_frame: now,
+            panorama_spin: 0.0,
+            frame_seconds: 0.0,
             quit: false,
             to_launcher: false,
             shot: None,
@@ -1350,6 +1369,7 @@ impl Shell {
         self.update_route();
         let now = Instant::now();
         self.last_frame = now;
+        self.frame_seconds = dt.clamp(0.0, MAX_FRAME_SECONDS);
         self.poll_java_render();
         self.poll_connect();
         self.poll_singleplayer();
@@ -2071,18 +2091,29 @@ impl Shell {
             .gui
             .sync_language(&self.settings.borrow().file.options.language);
         let size = parts.renderer.size();
-        {
+        let panorama_drawn = {
             let gui = &mut parts.gui;
+            let panorama_loaded = gui.panorama.is_some();
             let mut frame = gui.ui.frame_scaled(size.0, size.1, max_scale);
             let mut cx = RenderCx::new(&mut frame, &mut gui.icons, &gui.assets, &NoView);
             cx.mouse = self.mouse;
             cx.now_ms = self.started.elapsed().as_millis() as u64;
+            cx.panorama_loaded = panorama_loaded;
             if !java_gui || self.stack.len() > 1 {
                 self.stack.render(&mut cx);
             }
+            let drawn = cx.panorama_drawn;
             if !gui.toasts.is_empty() {
                 gui.toasts.draw(&mut cx);
             }
+            drawn
+        };
+        if panorama_drawn {
+            self.panorama_spin = advance_panorama(
+                self.panorama_spin,
+                self.frame_seconds,
+                self.settings.borrow().file.options.panorama_scroll_speed,
+            );
         }
         let now_ms = self.started.elapsed().as_millis() as u64;
         let display_time = self
@@ -2093,9 +2124,16 @@ impl Shell {
             .notification_display_time;
         parts.gui.tick_toasts(now_ms, display_time);
         let camera = Camera::default();
+        let spin = -self.panorama_spin;
         let mut overlay = UiOverlay {
             ui_renderer: &mut parts.gui.ui_renderer,
             ui: &mut parts.gui.ui,
+            panorama: parts
+                .gui
+                .panorama
+                .as_mut()
+                .filter(|_| panorama_drawn)
+                .map(|p| (p, spin)),
         };
         parts
             .renderer
@@ -2154,6 +2192,14 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn panorama_turns_two_degrees_a_second_at_full_speed_and_wraps() {
+        let spin = super::advance_panorama(0.0, 1.0, 1.0);
+        assert!((spin - 2.0).abs() < 1e-5);
+        assert_eq!(super::advance_panorama(5.0, 1.0, 0.0), 5.0);
+        assert!((super::advance_panorama(179.0, 1.0, 1.0) + 179.0).abs() < 1e-4);
+    }
+
     use super::{is_local_server, stop_text};
 
     #[test]

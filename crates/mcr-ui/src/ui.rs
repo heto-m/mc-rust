@@ -8,7 +8,7 @@ use crate::font::{FontOptions, Fonts};
 use crate::lang::DEFAULT_LANGUAGE;
 use crate::sprites::{SpriteId, Sprites};
 use crate::style::{Cell, Style, scale_rgb};
-use crate::text::{Lang, flatten, parse_legacy, wrap};
+use crate::text::{Chunk, Lang, Line, flatten, parse_legacy, split_lines, wrap};
 
 pub const LINE_HEIGHT: i32 = 9;
 const MIN_GUI_WIDTH: u32 = 320;
@@ -215,6 +215,13 @@ impl Ui {
     pub fn wrap(&mut self, cells: &[Cell], max_width: f32) -> Vec<Range<usize>> {
         let fonts = &mut self.fonts;
         wrap(cells, max_width, |c| {
+            fonts.advance(c.style.font, c.ch, c.style.bold())
+        })
+    }
+
+    pub fn split_lines(&mut self, chunks: &[Chunk], max_width: f32) -> Vec<Line> {
+        let fonts = &mut self.fonts;
+        split_lines(chunks, max_width, |c| {
             fonts.advance(c.style.font, c.ch, c.style.bold())
         })
     }

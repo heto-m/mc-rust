@@ -961,7 +961,12 @@ impl Screen for TitleScreen {
 
     fn render(&mut self, cx: &mut RenderCx<'_, '_>) {
         let (w, h) = cx.gui_size();
-        cx.frame.fill_gradient(0, 0, w, h, 0xFF16_2433, 0xFF2B_4A3C);
+        if cx.panorama_loaded {
+            cx.panorama_drawn = true;
+            cx.sprite("title/background/panorama_overlay", 0, 0, w, h);
+        } else {
+            cx.frame.fill_gradient(0, 0, w, h, 0xFF16_2433, 0xFF2B_4A3C);
+        }
         let logo_x = self.gui.0 / 2 - 128;
         if let Some(id) = cx.assets.texture("title/minecraft") {
             cx.frame.sprite(id, logo_x, 30, 256, 64);

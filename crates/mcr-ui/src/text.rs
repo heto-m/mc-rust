@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ops::Range;
 
 use mcr_nbt::Value;
@@ -8,28 +9,101 @@ use crate::style::{Cell, Flags, FontId, Style};
 
 /// Decomposes `§` formatting codes; a reset restores `base`.
 pub fn push_legacy(out: &mut Vec<Cell>, text: &str, base: Style) {
-    push_formatted(out, text, base, false);
+    push_prepared(out, &normalize(text), base);
 }
 
-/// `push_legacy`, or with `strip` the `chatColors` off path that drops the codes without applying them.
-fn push_formatted(out: &mut Vec<Cell>, text: &str, base: Style, strip: bool) {
-    let mut style = base;
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '§' {
-            let Some(code) = chars.next() else { break };
-            if strip {
-                continue;
+/// `StringDecomposer#iterateFormatted`: feeds `(byte position, char, style)` to `sink` until it returns
+/// false. `§r` restores `reset`; an unknown code and a trailing `§` change nothing.
+fn decompose(
+    text: &str,
+    mut style: Style,
+    reset: Style,
+    mut sink: impl FnMut(usize, char, Style) -> bool,
+) -> bool {
+    let mut chars = text.char_indices();
+    while let Some((i, ch)) = chars.next() {
+        if ch != '§' {
+            if !sink(i, ch, style) {
+                return false;
             }
-            if code.eq_ignore_ascii_case(&'r') {
-                style = base;
-            } else if let Some(next) = style.apply_legacy(code) {
-                style = next;
-            }
-        } else {
-            out.push(Cell { ch, style });
+            continue;
+        }
+        let Some((_, code)) = chars.next() else { break };
+        if code.eq_ignore_ascii_case(&'r') {
+            style = reset;
+        } else if let Some(next) = style.apply_legacy(code) {
+            style = next;
         }
     }
+    true
+}
+
+/// Vanilla reads a code as one UTF-16 unit, so `§` before a supplementary character swallows its high
+/// half and leaves a replacement character for the low half.
+fn normalize(text: &str) -> Cow<'_, str> {
+    let Some(first) = text.find('§') else {
+        return Cow::Borrowed(text);
+    };
+    let supplementary = |s: &str| {
+        s.chars()
+            .zip(s.chars().skip(1))
+            .any(|(a, b)| a == '§' && b as u32 > 0xFFFF)
+    };
+    if !supplementary(&text[first..]) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        out.push(ch);
+        if ch != '§' {
+            continue;
+        }
+        match chars.next() {
+            Some(code) if code as u32 > 0xFFFF => {
+                out.replace_range(out.len() - '§'.len_utf8().., "\u{FFFD}")
+            }
+            Some(code) => out.push(code),
+            None => {}
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// `ChatFormatting#stripFormatting`: drops `§` followed by a formatting code.
+fn strip_formatting(text: &str) -> Cow<'_, str> {
+    if !text.contains('§') {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '§'
+            && chars
+                .peek()
+                .is_some_and(|c| c.is_ascii_hexdigit() || "klmnorKLMNOR".contains(*c))
+        {
+            chars.next();
+        } else {
+            out.push(ch);
+        }
+    }
+    Cow::Owned(out)
+}
+
+fn prepare(text: &str, strip: bool) -> Cow<'_, str> {
+    match (strip, normalize(text)) {
+        (false, text) => text,
+        (true, Cow::Borrowed(text)) => strip_formatting(text),
+        (true, Cow::Owned(text)) => Cow::Owned(strip_formatting(&text).into_owned()),
+    }
+}
+
+fn push_prepared(out: &mut Vec<Cell>, text: &str, base: Style) {
+    decompose(text, base, base, |_, ch, style| {
+        out.push(Cell { ch, style });
+        true
+    });
 }
 
 pub fn parse_legacy(text: &str) -> Vec<Cell> {
@@ -87,23 +161,29 @@ const MAX_SPANS: usize = 256;
 const MAX_INSERTION: usize = 256;
 
 pub fn flatten_events(lang: &Lang, component: &Component) -> (Vec<Cell>, Vec<ClickSpan>) {
-    let (cells, spans, _) = flatten_chat(lang, component, true);
-    (cells, spans)
+    let chat = flatten_chat(lang, component, true);
+    (chat.cells, chat.spans)
 }
 
-/// A chat message's cells, click spans and insertion spans; `colors` false strips `§` codes like
-/// vanilla's `chatColors` option.
-pub fn flatten_chat(
-    lang: &Lang,
-    component: &Component,
-    colors: bool,
-) -> (Vec<Cell>, Vec<ClickSpan>, Vec<InsertSpan>) {
+/// A chat message flattened: its cells, the text pieces they came from, and the spans over the cells.
+#[derive(Clone, Debug, Default)]
+pub struct ChatText {
+    pub cells: Vec<Cell>,
+    pub chunks: Vec<Chunk>,
+    pub spans: Vec<ClickSpan>,
+    pub inserts: Vec<InsertSpan>,
+}
+
+/// A chat message's cells, text pieces, click spans and insertion spans; `colors` false strips `§`
+/// codes like vanilla's `chatColors` option.
+pub fn flatten_chat(lang: &Lang, component: &Component, colors: bool) -> ChatText {
     let mut out = Vec::new();
     let mut budget = Budget {
         steps: MAX_STEPS,
         depth: 0,
         spans: Some(Vec::new()),
         inserts: Some(Vec::new()),
+        chunks: Some(Vec::new()),
         strip: !colors,
     };
     flatten_bounded(lang, component, Style::default(), &mut out, &mut budget);
@@ -112,7 +192,12 @@ pub fn flatten_chat(
     spans.retain(|s| s.range.start < out.len());
     let mut inserts = budget.inserts.unwrap_or_default();
     inserts.retain(|s| s.range.start < out.len());
-    (out, spans, inserts)
+    ChatText {
+        cells: out,
+        chunks: budget.chunks.unwrap_or_default(),
+        spans,
+        inserts,
+    }
 }
 
 /// The innermost click event covering `index`.
@@ -134,10 +219,21 @@ struct Budget {
     depth: usize,
     spans: Option<Vec<ClickSpan>>,
     inserts: Option<Vec<InsertSpan>>,
+    chunks: Option<Vec<Chunk>>,
     strip: bool,
 }
 
 impl Budget {
+    fn push(&mut self, out: &mut Vec<Cell>, text: &str, style: Style) {
+        let text = prepare(text, self.strip);
+        if let Some(chunks) = &mut self.chunks
+            && !text.is_empty()
+        {
+            chunks.push(Chunk::raw(text.clone().into_owned(), style));
+        }
+        push_prepared(out, &text, style);
+    }
+
     fn enter(&mut self, out: &[Cell]) -> bool {
         if self.steps == 0 || self.depth >= MAX_DEPTH || out.len() >= MAX_CELLS {
             return false;
@@ -163,6 +259,7 @@ pub fn flatten_into(lang: &Lang, component: &Component, parent: Style, out: &mut
         depth: 0,
         spans: None,
         inserts: None,
+        chunks: None,
         strip: false,
     };
     flatten_bounded(lang, component, parent, out, &mut budget);
@@ -184,7 +281,7 @@ fn flatten_bounded(
     match &component.content {
         Content::Text(text) => {
             if budget.charge(text.len(), out) {
-                push_formatted(out, text, style, budget.strip);
+                budget.push(out, text, style);
             }
         }
         Content::Translatable {
@@ -198,12 +295,12 @@ fn flatten_bounded(
                 .unwrap_or(key.as_str());
             expand_template(lang, template, args, style, out, budget);
         }
-        Content::Keybind(key) => push_formatted(out, key, style, budget.strip),
-        Content::Score { name, .. } => push_formatted(out, name, style, budget.strip),
+        Content::Keybind(key) => budget.push(out, key, style),
+        Content::Score { name, .. } => budget.push(out, name, style),
         Content::Selector { selector, .. } => {
-            push_formatted(out, selector, style, budget.strip);
+            budget.push(out, selector, style);
         }
-        Content::Nbt(nbt) => push_formatted(out, &nbt.path, style, budget.strip),
+        Content::Nbt(nbt) => budget.push(out, &nbt.path, style),
         Content::Object { fallback, .. } => {
             if let Some(fallback) = fallback {
                 flatten_bounded(lang, fallback, style, out, budget);
@@ -264,7 +361,7 @@ fn expand_template(
                 rest = &after[1..];
             }
             Some(c @ ('s' | 'd')) => {
-                push_formatted(out, &std::mem::take(&mut literal), style, budget.strip);
+                budget.push(out, &std::mem::take(&mut literal), style);
                 let slot = match index {
                     Some(n) => n.saturating_sub(1),
                     None => {
@@ -288,17 +385,17 @@ fn expand_template(
         }
     }
     literal.push_str(rest);
-    push_formatted(out, &literal, style, budget.strip);
+    budget.push(out, &literal, style);
 }
 
 fn push_arg(lang: &Lang, arg: &Arg, style: Style, out: &mut Vec<Cell>, budget: &mut Budget) {
     match arg {
         Arg::Str(s) => {
             if budget.charge(s.len(), out) {
-                push_formatted(out, s, style, budget.strip);
+                budget.push(out, s, style);
             }
         }
-        Arg::Number(n) => push_formatted(out, &number_text(n), style, budget.strip),
+        Arg::Number(n) => budget.push(out, &number_text(n), style),
         Arg::Component(c) => flatten_bounded(lang, c, style, out, budget),
     }
 }
@@ -366,6 +463,174 @@ pub fn wrap(
     }
     if forced_empty_tail {
         lines.push(cells.len()..cells.len());
+    }
+    lines
+}
+
+/// A piece of message text with the style it starts in, `§` codes still inside: vanilla's wrapping
+/// treats a reset differently from how the piece is drawn, so it needs the raw text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chunk {
+    text: String,
+    pub style: Style,
+}
+
+impl Chunk {
+    pub fn new(text: &str, style: Style) -> Self {
+        Self::raw(normalize(text).into_owned(), style)
+    }
+
+    fn raw(text: String, style: Style) -> Self {
+        Self { text, style }
+    }
+}
+
+/// A line out of [`split_lines`]: its cells styled as vanilla draws them, the index of its first cell among
+/// all the chunks' cells, and whether it continues a line broken for width.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Line {
+    pub start: usize,
+    pub cells: Vec<Cell>,
+    pub wrapped: bool,
+}
+
+struct Piece<'a> {
+    text: &'a str,
+    style: Style,
+}
+
+#[derive(Clone, Copy)]
+struct Break {
+    piece: usize,
+    at: usize,
+    style: Style,
+    ch: char,
+}
+
+struct BreakFinder {
+    max_width: f32,
+    width: f32,
+    seen_width: bool,
+    last_space: Option<Break>,
+    found: Option<Break>,
+}
+
+impl BreakFinder {
+    fn new(max_width: f32) -> Self {
+        Self {
+            max_width: max_width.max(1.0),
+            width: 0.0,
+            seen_width: false,
+            last_space: None,
+            found: None,
+        }
+    }
+
+    fn accept(&mut self, piece: usize, at: usize, ch: char, style: Style, w: f32) -> bool {
+        let here = Break {
+            piece,
+            at,
+            style,
+            ch,
+        };
+        if ch == '\n' {
+            self.found = Some(here);
+            return false;
+        }
+        if ch == ' ' {
+            self.last_space = Some(here);
+        }
+        self.width += w;
+        if self.seen_width && self.width > self.max_width {
+            self.found = Some(self.last_space.unwrap_or(here));
+            return false;
+        }
+        self.seen_width |= w != 0.0;
+        true
+    }
+}
+
+fn piece_cells(piece: &str, style: Style, out: &mut Vec<Cell>) {
+    push_prepared(out, piece, style);
+}
+
+/// `StringSplitter#splitLines` over styled text. Breaks are found with `§r` resetting to the plain style
+/// and each line's remainder starts in the style active at its break, as vanilla does.
+pub fn split_lines(
+    chunks: &[Chunk],
+    max_width: f32,
+    mut width_of: impl FnMut(&Cell) -> f32,
+) -> Vec<Line> {
+    let mut pieces: Vec<Piece> = chunks
+        .iter()
+        .filter(|c| !c.text.is_empty())
+        .map(|c| Piece {
+            text: &c.text,
+            style: c.style,
+        })
+        .collect();
+    let mut lines = Vec::new();
+    let mut first = 0;
+    let mut start = 0;
+    let mut wrapped = false;
+    let mut forced_new_line = false;
+    while first < pieces.len() {
+        let mut finder = BreakFinder::new(max_width);
+        for (k, piece) in pieces.iter().enumerate().skip(first) {
+            let finished = decompose(
+                piece.text,
+                piece.style,
+                Style::default(),
+                |at, ch, style| {
+                    let w = width_of(&Cell { ch, style });
+                    finder.accept(k, at, ch, style, w)
+                },
+            );
+            if !finished {
+                break;
+            }
+        }
+        let Some(split) = finder.found else { break };
+        let mut cells = Vec::new();
+        for piece in &pieces[first..split.piece] {
+            piece_cells(piece.text, piece.style, &mut cells);
+        }
+        let cut = &pieces[split.piece];
+        piece_cells(&cut.text[..split.at], cut.style, &mut cells);
+        let skip = matches!(split.ch, '\n' | ' ');
+        let skipped = usize::from(skip);
+        let count = cells.len();
+        lines.push(Line {
+            start,
+            cells,
+            wrapped,
+        });
+        start += count + skipped;
+        wrapped = split.ch != '\n';
+        forced_new_line = split.ch == '\n';
+        let rest = &cut.text[split.at + skipped..];
+        pieces[split.piece] = Piece {
+            text: rest,
+            style: split.style,
+        };
+        first = split.piece + usize::from(rest.is_empty());
+    }
+    if first < pieces.len() {
+        let mut cells = Vec::new();
+        for piece in &pieces[first..] {
+            piece_cells(piece.text, piece.style, &mut cells);
+        }
+        lines.push(Line {
+            start,
+            cells,
+            wrapped,
+        });
+    } else if forced_new_line {
+        lines.push(Line {
+            start,
+            cells: Vec::new(),
+            wrapped: false,
+        });
     }
     lines
 }
@@ -583,8 +848,10 @@ mod tests {
                 ..Default::default()
             },
         ));
-        let (on, _, inserts) = flatten_chat(&Lang::default(), &message, true);
-        let (off, _, _) = flatten_chat(&Lang::default(), &message, false);
+        let ChatText {
+            cells: on, inserts, ..
+        } = flatten_chat(&Lang::default(), &message, true);
+        let off = flatten_chat(&Lang::default(), &message, false).cells;
         let text = |cells: &[Cell]| cells.iter().map(|c| c.ch).collect::<String>();
         assert_eq!(text(&on), "redblue");
         assert_eq!(text(&off), "redblue");
@@ -598,5 +865,61 @@ mod tests {
                 text: "ins".into()
             }]
         );
+    }
+
+    fn split(chunks: &[(&str, Style)], width: f32) -> Vec<(String, bool)> {
+        let chunks: Vec<Chunk> = chunks.iter().map(|(t, s)| Chunk::new(t, *s)).collect();
+        split_lines(&chunks, width, |_| 1.0)
+            .into_iter()
+            .map(|l| (plain(&l.cells), l.wrapped))
+            .collect()
+    }
+
+    #[test]
+    fn split_lines_flags_wrapped_continuations_only() {
+        let lines = split(&[("aaa bbb\nccc", Style::default())], 3.0);
+        assert_eq!(
+            lines,
+            [
+                ("aaa".into(), false),
+                ("bbb".into(), true),
+                ("ccc".into(), false)
+            ]
+        );
+    }
+
+    #[test]
+    fn split_lines_keeps_a_final_line_for_trailing_codes() {
+        let lines = split(&[("ab §l", Style::default())], 2.0);
+        assert_eq!(lines, [("ab".into(), false), (String::new(), true)]);
+        assert_eq!(
+            split(&[("§l", Style::default())], 5.0),
+            [(String::new(), false)]
+        );
+        assert_eq!(split(&[("ab\n", Style::default())], 5.0).len(), 2);
+        assert!(split(&[("", Style::default())], 5.0).is_empty());
+    }
+
+    #[test]
+    fn split_lines_resets_to_the_style_at_the_break() {
+        let chunks = [Chunk::new("§lab c§rd", Style::default())];
+        let lines = split_lines(&chunks, 3.0, |_| 1.0);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].cells.iter().all(|c| c.style.bold()));
+    }
+
+    #[test]
+    fn section_sign_before_a_supplementary_char_leaves_a_replacement() {
+        assert_eq!(plain(&parse_legacy("a§\u{1F600}b")), "a\u{FFFD}b");
+        assert_eq!(plain(&parse_legacy("§§\u{1F600}")), "\u{1F600}");
+    }
+
+    #[test]
+    fn unknown_fonts_are_missing_but_keep_their_name() {
+        let font = FontId::from_name("minecraft:nonexistent");
+        assert!(font.is_missing());
+        assert_eq!(font.path(), "nonexistent");
+        assert_eq!(FontId::from_name("nonexistent"), font);
+        assert_eq!(FontId::from_name("minecraft:alt"), FontId::ALT);
     }
 }

@@ -1,0 +1,3 @@
+fabric-launch
+fabric-api-module fabric-api-base
+fabric-api-module fabric-lifecycle-events-v1

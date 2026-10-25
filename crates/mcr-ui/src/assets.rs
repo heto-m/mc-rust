@@ -8,9 +8,10 @@ use crate::error::{Result, UiError};
 
 const FONT_PREFIX: &str = "minecraft/font/";
 const LANG_PREFIX: &str = "minecraft/lang/";
+const PANORAMA_PREFIX: &str = "minecraft/textures/gui/title/background/";
 const PACK_META: &str = "pack.mcmeta";
 
-/// Files the client jar omits (`unifont.zip`, other languages, the language list) live in the launcher asset index.
+/// Files the client jar omits (`unifont.zip`, other languages, the language list, the title panorama) live in the launcher asset index.
 #[derive(Debug)]
 pub struct AssetIndexSource {
     objects_dir: PathBuf,
@@ -31,7 +32,10 @@ impl AssetIndexSource {
             .into_iter()
             .flatten()
             .filter(|(key, _)| {
-                key.starts_with(FONT_PREFIX) || key.starts_with(LANG_PREFIX) || *key == PACK_META
+                [FONT_PREFIX, LANG_PREFIX, PANORAMA_PREFIX]
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix))
+                    || *key == PACK_META
             })
             .filter_map(|(key, obj)| Some((key.clone(), obj.get("hash")?.as_str()?.to_owned())))
             .collect();

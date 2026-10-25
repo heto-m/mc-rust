@@ -242,6 +242,7 @@ impl Launcher {
         let mut overlay = UiOverlay {
             ui_renderer: &mut self.gui.ui_renderer,
             ui: &mut self.gui.ui,
+            panorama: None,
         };
         self.renderer
             .render_with_overlay(

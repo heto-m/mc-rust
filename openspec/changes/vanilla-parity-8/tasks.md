@@ -6,14 +6,14 @@
 
 Scope: mcr-ui text, font and chat.
 
-- [ ] 1.1 T1–T6; `cargo xtask parity font` at 100%
-- [ ] 1.2 fmt, clippy and workspace tests
+- [x] 1.1 T1–T6; `cargo xtask parity font` at 100%
+- [x] 1.2 fmt, clippy and workspace tests
 
 ## 2. Title panorama and window size
 
-- [ ] 2.1 S1 panorama cubemap with blur and scroll speed; screenshot against vanilla
-- [ ] 2.2 S2 `--size` sets the initial window size
-- [ ] 2.3 fmt, clippy and workspace tests
+- [x] 2.1 S1 panorama cubemap at the scroll speed; screenshot against vanilla (`cargo xtask golden-gui --title`)
+- [x] 2.2 S2 `--size` sets the initial window size
+- [x] 2.3 fmt, clippy and workspace tests
 
 ## 3. Carried
 

@@ -5,7 +5,7 @@
 
 use mcr_nbt::{Compound, List, Value as Nbt};
 use mcr_protocol::types::text::{ClickEvent, Component};
-use mcr_ui::{Cell, ClickSpan, InsertSpan, Lang, click_at, flatten_chat};
+use mcr_ui::{Cell, InsertSpan, Lang, click_at, flatten_chat};
 use serde_json::{Map, Value, json};
 
 use crate::{Case, Env, Harness, ParityError, Result, Rng};
@@ -359,12 +359,15 @@ fn probe_case(lang: &Lang, case: &Case) -> Result<Value> {
         Err(e) => return Ok(json!({"error": e.to_string()})),
     };
     let runs = crate::guarded(|| {
-        let (cells, clicks, inserts): (Vec<Cell>, Vec<ClickSpan>, Vec<InsertSpan>) =
-            flatten_chat(lang, &component, true);
-        runs(cells.iter().enumerate().map(|(i, cell)| {
+        let chat = flatten_chat(lang, &component, true);
+        runs(chat.cells.iter().enumerate().map(|(i, cell)| {
             (
                 cell.ch,
-                run_style(cell, click_at(&clicks, i), insertion_at(&inserts, i)),
+                run_style(
+                    cell,
+                    click_at(&chat.spans, i),
+                    insertion_at(&chat.inserts, i),
+                ),
             )
         }))
     });
