@@ -280,6 +280,8 @@ pub struct ModelCache {
     /// Bit per packed texture layer whose sprite has no transparent texel in any frame.
     opaque_layers: Vec<u64>,
     pub missing_sprites: Vec<String>,
+    /// The sprite each packed texture layer was first given to, for tools that name a quad's texture.
+    pub layer_sprites: HashMap<u16, String>,
     pub unbaked_states: usize,
     /// The first few blocks with unbaked states.
     pub unbaked_blocks: Vec<String>,
@@ -596,6 +598,7 @@ impl ModelCache {
             textures: TextureArrays::default(),
             opaque_layers: Vec::new(),
             missing_sprites: Vec::new(),
+            layer_sprites: HashMap::new(),
             unbaked_states: 0,
             unbaked_blocks: Vec::new(),
             java_requests: Vec::new(),
@@ -1024,10 +1027,17 @@ impl ModelCache {
             cache.states.push(sm);
         }
 
+        let mut layer_sprites = HashMap::new();
+        for (id, name) in sprites.iter() {
+            layer_sprites
+                .entry(layer_of(id))
+                .or_insert_with(|| name.to_string());
+        }
         cache.fluid_sprites = fluid_sprites;
         cache.opaque_layers = opaque_layers(&textures);
         cache.textures = textures;
         cache.missing_sprites = missing_sprites;
+        cache.layer_sprites = layer_sprites;
         cache.unbaked_states = unbaked;
         cache.unbaked_blocks = unbaked_blocks;
         cache.java_requests = java_requests;

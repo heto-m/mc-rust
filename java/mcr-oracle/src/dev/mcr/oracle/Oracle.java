@@ -6,6 +6,9 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import dev.mcr.oracle.font.FontHarness;
+import dev.mcr.oracle.mesh.SectionMeshHarness;
+import dev.mcr.oracle.model.BlockModelHarness;
+import dev.mcr.oracle.text.TextHarness;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.FileInputStream;
@@ -26,7 +29,11 @@ import java.util.function.Function;
  * with an {@code {"id", "out"}} line. Exit codes: 0 done, 2 usage or setup error.
  */
 public final class Oracle {
-    private static final Map<String, Function<Boot, Harness>> HARNESSES = Map.of("font", FontHarness::new);
+    private static final Map<String, Function<Boot, Harness>> HARNESSES = Map.of(
+            "block_model", BlockModelHarness::new,
+            "font", FontHarness::new,
+            "section_mesh", SectionMeshHarness::new,
+            "text", TextHarness::new);
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
     private Oracle() {

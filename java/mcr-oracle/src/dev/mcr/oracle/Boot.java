@@ -5,7 +5,11 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import net.minecraft.SharedConstants;
+import net.minecraft.client.ClientBootstrap;
 import net.minecraft.client.resources.IndexedAssetSource;
+import net.minecraft.core.Registry;
+import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.packs.PackLocationInfo;
@@ -16,10 +20,14 @@ import net.minecraft.server.packs.VanillaPackResourcesBuilder;
 import net.minecraft.server.packs.repository.PackSource;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.server.packs.resources.ResourceManager;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.TagLoader;
+import net.minecraft.world.level.block.Blocks;
 
-/** Brings up just enough of vanilla for a harness: registries, and the client jar's default pack on demand. */
+/** Brings up just enough of vanilla for a harness: registries (common and client), and the client jar's default pack on demand. */
 public final class Boot {
     private static boolean registries;
+    private static boolean tags;
 
     private final Path assets;
     private final String assetIndex;
@@ -35,7 +43,26 @@ public final class Boot {
         if (!registries) {
             SharedConstants.tryDetectVersion();
             Bootstrap.bootStrap();
+            ClientBootstrap.bootstrap();
             registries = true;
+        }
+    }
+
+    /** Binds the jar's data-pack tags to the built-in registries, for vanilla code that asks {@code state.is(tag)}. */
+    public static synchronized void tags() {
+        if (!tags) {
+            PackLocationInfo location =
+                    new PackLocationInfo("vanilla", Component.literal("vanilla"), PackSource.BUILT_IN, Optional.empty());
+            VanillaPackResources pack = new VanillaPackResourcesBuilder().exposeNamespace("minecraft").pushJarResources().build(location);
+            List<PackResources> layers = pack.asResourcesSupplier().openResources(location, null).toList();
+            try (MultiPackResourceManager data = new MultiPackResourceManager(PackType.SERVER_DATA, layers)) {
+                TagLoader.loadTagsForExistingRegistries(data, RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY))
+                        .forEach(Registry.PendingTags::apply);
+            }
+            if (!Blocks.OAK_LEAVES.defaultBlockState().is(BlockTags.LEAVES)) {
+                throw new IllegalStateException("block tags did not bind");
+            }
+            tags = true;
         }
     }
 

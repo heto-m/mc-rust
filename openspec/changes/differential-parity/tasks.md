@@ -16,9 +16,9 @@ Scope: new `crates/mcr-parity`, new `java/mcr-oracle`, `xtask`.
 
 One harness each; record case count and pass rate. Failures are filed, not fixed here.
 
-- [ ] 2.1 Text components: style merge, legacy codes, translation with arguments, component to plain and to draw runs
-- [ ] 2.2 Block model baking: quads per block state (faces, UV, rotation, tint index, shade, cullface)
-- [ ] 2.3 Section meshing: generated sections incl. fluids, AO, smooth lighting, culling, tint
+- [x] 2.1 Text components: style merge, legacy codes, translation with arguments, component to plain and to draw runs (4000 cases, 58.5%)
+- [x] 2.2 Block model baking: quads per block state (faces, UV, rotation, tint index, shade, cullface) (35723 states, 100%)
+- [x] 2.3 Section meshing: generated sections incl. fluids, AO, smooth lighting, culling, tint (400 cases, 2.75%)
 - [ ] 2.4 Item models: model selection and layers over generated stacks with components
 - [ ] 2.5 Tooltips: lines and styles for generated stacks with components, advanced tooltips on and off
 - [ ] 2.6 options.txt and key mappings: parse, defaults, round-trip

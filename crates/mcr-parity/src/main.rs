@@ -82,6 +82,8 @@ fn run() -> Result<ExitCode> {
         }
         Some("probe") => {
             let h = args.harness()?;
+            // Panics inside `guarded` become outputs; the default hook would print each one.
+            std::panic::set_hook(Box::new(|_| {}));
             let cases = jsonl::read_cases(&args.path("cases")?)?;
             let env = Env {
                 client_jar: args.path("client-jar")?,
@@ -100,7 +102,7 @@ fn run() -> Result<ExitCode> {
             let vanilla = jsonl::read_outputs(&args.path("vanilla")?)?;
             let mcr = jsonl::read_outputs(&args.path("mcr")?)?;
             let max = args.opt("max").map_or(Ok(5), str::parse)?;
-            let report = diff::diff(&cases, &vanilla, &mcr);
+            let report = diff::diff_with(&cases, &vanilla, &mcr, &|field| h.tolerance(field));
             print!("{}", report.render(h.name(), &cases, &vanilla, &mcr, max));
             if let Some(path) = args.opt("summary") {
                 let summary = json!({

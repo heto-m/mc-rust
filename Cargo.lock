@@ -1924,9 +1924,15 @@ name = "mcr-parity"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "mcr-assets",
  "mcr-buf",
+ "mcr-data",
+ "mcr-mesh",
+ "mcr-nbt",
  "mcr-protocol",
+ "mcr-render",
  "mcr-ui",
+ "mcr-world",
  "serde_json",
  "thiserror 2.0.21",
 ]

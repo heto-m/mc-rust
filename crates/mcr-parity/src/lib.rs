@@ -1,16 +1,19 @@
 //! Differential harnesses: seeded cases that vanilla's classes (through `java/mcr-oracle`) and our
 //! probes both answer, and the diff between the two. Driven by `cargo xtask parity`.
 
+pub mod block_model;
 pub mod diff;
 pub mod font;
 pub mod jsonl;
 pub mod rng;
+pub mod section_mesh;
+pub mod text;
 
 use std::path::PathBuf;
 
 use serde_json::Value;
 
-pub use diff::{Mismatch, Report, first_difference};
+pub use diff::{Mismatch, Report, Tolerance, first_difference};
 pub use jsonl::Case;
 pub use rng::Rng;
 
@@ -29,6 +32,8 @@ pub enum ParityError {
     },
     #[error(transparent)]
     Ui(#[from] mcr_ui::UiError),
+    #[error(transparent)]
+    Assets(#[from] mcr_assets::AssetError),
     #[error("{0}")]
     Invalid(String),
 }
@@ -51,13 +56,24 @@ pub trait Harness: Sync {
 
     fn count(&self) -> usize;
 
-    fn case(&self, rng: &mut Rng) -> Value;
+    /// Case `id`; `rng` is shared by the cases in id order.
+    fn case(&self, id: usize, rng: &mut Rng) -> Value;
+
+    /// Absolute tolerance for numbers under object key `field`; exact by default.
+    fn tolerance(&self, _field: &str) -> f64 {
+        0.0
+    }
 
     /// One normalized output per case, in case order.
     fn probe(&self, env: &Env, cases: &[Case]) -> Result<Vec<Value>>;
 }
 
-pub static HARNESSES: &[&dyn Harness] = &[&font::FontHarness];
+pub static HARNESSES: &[&dyn Harness] = &[
+    &font::FontHarness,
+    &text::TextHarness,
+    &block_model::BlockModelHarness,
+    &section_mesh::SectionMeshHarness,
+];
 
 pub fn harness(name: &str) -> Option<&'static dyn Harness> {
     HARNESSES.iter().copied().find(|h| h.name() == name)
@@ -69,9 +85,21 @@ pub fn generate(harness: &dyn Harness) -> Vec<Case> {
     (0..harness.count())
         .map(|id| Case {
             id: id as u32,
-            case: harness.case(&mut rng),
+            case: harness.case(id, &mut rng),
         })
         .collect()
+}
+
+/// `f`'s value, or `{"panic": message}` when our code panics on the case.
+pub fn guarded(f: impl FnOnce() -> Value) -> Value {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("panic");
+        serde_json::json!({"panic": message})
+    })
 }
 
 /// Rounds to a fixed grid so float formatting never shows up as a mismatch.

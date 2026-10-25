@@ -7,8 +7,14 @@ publish.workspace = true
 
 [dependencies]
 mcr-buf.workspace = true
+mcr-assets = { path = "../mcr-assets" }
+mcr-data = { path = "../mcr-data" }
+mcr-mesh = { path = "../mcr-mesh" }
+mcr-nbt = { path = "../mcr-nbt" }
 mcr-protocol = { path = "../mcr-protocol" }
+mcr-render = { path = "../mcr-render" }
 mcr-ui = { path = "../mcr-ui" }
+mcr-world = { path = "../mcr-world" }
 anyhow = "1"
 serde_json.workspace = true
 thiserror.workspace = true

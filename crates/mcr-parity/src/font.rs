@@ -274,7 +274,7 @@ impl Harness for FontHarness {
         CASES
     }
 
-    fn case(&self, rng: &mut Rng) -> Value {
+    fn case(&self, _id: usize, rng: &mut Rng) -> Value {
         generate(rng)
     }
 

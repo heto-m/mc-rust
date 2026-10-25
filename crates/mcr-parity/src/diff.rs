@@ -23,10 +23,20 @@ pub struct Report {
     pub mismatches: Vec<Mismatch>,
 }
 
-fn numbers_equal(a: &serde_json::Number, b: &serde_json::Number) -> bool {
+/// Absolute tolerance for numbers by the name of the innermost object key holding them.
+pub type Tolerance<'a> = &'a dyn Fn(&str) -> f64;
+
+fn exact(_: &str) -> f64 {
+    0.0
+}
+
+fn numbers_equal(a: &serde_json::Number, b: &serde_json::Number, tolerance: f64) -> bool {
     match (a.as_i64(), b.as_i64()) {
-        (Some(x), Some(y)) => x == y,
-        _ => a.as_f64() == b.as_f64(),
+        (Some(x), Some(y)) if tolerance == 0.0 => x == y,
+        _ => match (a.as_f64(), b.as_f64()) {
+            (Some(x), Some(y)) => x == y || (x - y).abs() <= tolerance,
+            _ => false,
+        },
     }
 }
 
@@ -42,12 +52,14 @@ fn key(path: &str, k: &str) -> String {
     }
 }
 
-fn walk(a: &Value, b: &Value, path: &str) -> Option<String> {
+fn walk(a: &Value, b: &Value, path: &str, field: &str, tol: Tolerance) -> Option<String> {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => (!numbers_equal(x, y)).then(|| path.to_owned()),
+        (Value::Number(x), Value::Number(y)) => {
+            (!numbers_equal(x, y, tol(field))).then(|| path.to_owned())
+        }
         (Value::Array(x), Value::Array(y)) => {
             for (i, (u, v)) in x.iter().zip(y).enumerate() {
-                if let Some(p) = walk(u, v, &index(path, i)) {
+                if let Some(p) = walk(u, v, &index(path, i), field, tol) {
                     return Some(p);
                 }
             }
@@ -56,7 +68,7 @@ fn walk(a: &Value, b: &Value, path: &str) -> Option<String> {
         (Value::Object(x), Value::Object(y)) => {
             let keys: BTreeSet<&String> = x.keys().chain(y.keys()).collect();
             keys.into_iter().find_map(|k| match (x.get(k), y.get(k)) {
-                (Some(u), Some(v)) => walk(u, v, &key(path, k)),
+                (Some(u), Some(v)) => walk(u, v, &key(path, k), k, tol),
                 _ => Some(key(path, k)),
             })
         }
@@ -66,7 +78,7 @@ fn walk(a: &Value, b: &Value, path: &str) -> Option<String> {
 
 /// The first differing field, depth first, object keys in sorted order; numbers compare by value.
 pub fn first_difference(vanilla: &Value, mcr: &Value) -> Option<String> {
-    walk(vanilla, mcr, "$")
+    walk(vanilla, mcr, "$", "", &exact)
 }
 
 /// The value at a path [`first_difference`] produced, if both sides have it.
@@ -94,7 +106,8 @@ pub fn at<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
     Some(v)
 }
 
-/// `$.lines[3].text` becomes `$.lines[].text`, to count mismatches by field.
+/// `$.lines[3].text` becomes `$.lines[].text` (and `$["a b"]` becomes `$[*]`), to count mismatches by
+/// field.
 pub fn field_class(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     let mut rest = path;
@@ -104,35 +117,50 @@ pub fn field_class(path: &str) -> String {
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
         if digits > 0 && rest[digits..].starts_with(']') {
             rest = &rest[digits..];
+        } else if rest.starts_with('"')
+            && let Some(end) = rest.find("\"]")
+        {
+            out.push('*');
+            rest = &rest[end + 1..];
         }
     }
     out.push_str(rest);
     out
 }
 
-fn per_field(vanilla: &Value, mcr: &Value) -> Vec<String> {
+fn per_field(vanilla: &Value, mcr: &Value, tol: Tolerance) -> Vec<String> {
     match (vanilla, mcr) {
         (Value::Object(v), Value::Object(m)) => {
             let keys: BTreeSet<&String> = v.keys().chain(m.keys()).collect();
             keys.into_iter()
                 .filter_map(|k| match (v.get(k), m.get(k)) {
-                    (Some(a), Some(b)) => walk(a, b, &key("$", k)),
+                    (Some(a), Some(b)) => walk(a, b, &key("$", k), k, tol),
                     _ => Some(key("$", k)),
                 })
                 .collect()
         }
-        _ => first_difference(vanilla, mcr).into_iter().collect(),
+        _ => walk(vanilla, mcr, "$", "", tol).into_iter().collect(),
     }
 }
 
 pub fn diff(cases: &[Case], vanilla: &BTreeMap<u32, Value>, mcr: &BTreeMap<u32, Value>) -> Report {
+    diff_with(cases, vanilla, mcr, &exact)
+}
+
+/// [`diff`], with numbers under some keys allowed to differ by up to `tol(key)`.
+pub fn diff_with(
+    cases: &[Case],
+    vanilla: &BTreeMap<u32, Value>,
+    mcr: &BTreeMap<u32, Value>,
+    tol: Tolerance,
+) -> Report {
     let mut report = Report {
         cases: cases.len(),
         ..Report::default()
     };
     for case in cases {
         let fields = match (vanilla.get(&case.id), mcr.get(&case.id)) {
-            (Some(v), Some(m)) => per_field(v, m),
+            (Some(v), Some(m)) => per_field(v, m, tol),
             _ => vec!["$".to_owned()],
         };
         match fields.first() {
@@ -261,6 +289,21 @@ mod tests {
     }
 
     #[test]
+    fn tolerance_applies_by_innermost_key() {
+        let cases = vec![Case {
+            id: 0,
+            case: json!({}),
+        }];
+        let vanilla: BTreeMap<u32, Value> = [(0, json!({"q": [{"c": [10, 20]}]}))].into();
+        let near: BTreeMap<u32, Value> = [(0, json!({"q": [{"c": [12.5, 17]}]}))].into();
+        let far: BTreeMap<u32, Value> = [(0, json!({"q": [{"c": [16, 20]}]}))].into();
+        let tol = |k: &str| if k == "c" { 3.0 } else { 0.0 };
+        assert!(diff_with(&cases, &vanilla, &near, &tol).passed());
+        assert!(!diff_with(&cases, &vanilla, &far, &tol).passed());
+        assert!(!diff(&cases, &vanilla, &near).passed());
+    }
+
+    #[test]
     fn every_differing_field_is_counted() {
         let cases = vec![Case {
             id: 0,
@@ -320,6 +363,7 @@ mod tests {
         assert!(!r.passed());
         assert_eq!(r.classes()[0].1, 1);
         assert_eq!(field_class("$.lines[12].text[3]"), "$.lines[].text[]");
+        assert_eq!(field_class("$.solid[\"1,2 +y\"][0].c"), "$.solid[*][].c");
         let text = r.render("t", &cases, &vanilla, &mcr, 5);
         assert!(text.contains("case 1 differs at $.w[1]"), "{text}");
         assert!(text.contains("vanilla 2 / mcr 3"), "{text}");
