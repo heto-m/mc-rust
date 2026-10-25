@@ -361,7 +361,11 @@ fn format_translation(pattern: &str, args: &[Arg], out: &mut String) {
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
         let (index, spec_at) = if digits > 0 && rest[digits..].starts_with('$') {
             (
-                rest[..digits].parse::<usize>().ok().map(|n| n - 1),
+                rest[..digits]
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| n.checked_sub(1))
+                    .or(Some(usize::MAX)),
                 digits + 1,
             )
         } else {
@@ -1268,6 +1272,16 @@ mod tests {
             Component::translatable("chat.x", vec![]).to_plain_string(),
             "chat.x"
         );
+    }
+
+    #[test]
+    fn positional_zero_and_huge_indices_do_not_panic() {
+        let c = Component::from_content(Content::Translatable {
+            key: "x".into(),
+            fallback: Some("a%0$sb%99999999999999999999$sc".into()),
+            args: vec![Arg::Str("Bob".into())],
+        });
+        assert_eq!(c.to_plain_string(), "abc");
     }
 
     #[test]
