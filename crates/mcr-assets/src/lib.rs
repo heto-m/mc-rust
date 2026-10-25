@@ -17,7 +17,8 @@ mod texture;
 mod testutil;
 
 pub use bake::{
-    BakedModel, BakedQuad, BakedVariant, ModelBaker, ModelPart, SpriteId, SpriteTable, Vertex,
+    BakedModel, BakedQuad, BakedVariant, FACE_VERTICES, ModelBaker, ModelPart, SpriteId,
+    SpriteTable, Vertex,
 };
 pub use blockstate::{BlockStateDef, Condition, Properties, Selector, Term, Variant};
 pub use error::{AssetError, Result};

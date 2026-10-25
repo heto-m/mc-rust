@@ -85,6 +85,10 @@ impl BlockStateInfo {
         self.flags & flag::REDSTONE_CONDUCTOR != 0
     }
 
+    pub fn is_legacy_solid(&self) -> bool {
+        self.flags & flag::LEGACY_SOLID != 0
+    }
+
     /// Face order follows `Direction.ordinal()`: down, up, north, south, west, east.
     pub fn is_face_sturdy(&self, face: usize) -> bool {
         self.sturdy_faces >> face & 1 != 0

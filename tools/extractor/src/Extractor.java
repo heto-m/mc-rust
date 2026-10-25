@@ -126,6 +126,7 @@ public final class Extractor {
         b.append(",\"replaceable\":").append(s.canBeReplaced());
         b.append(",\"has_block_entity\":").append(s.hasBlockEntity());
         b.append(",\"redstone_conductor\":").append(s.isRedstoneConductor(g, z));
+        b.append(",\"legacy_solid\":").append(s.isSolid());
         b.append(",\"map_color\":").append(s.getMapColor(g, z).id);
         b.append(",\"fluid\":").append(fluid);
         b.append("}");

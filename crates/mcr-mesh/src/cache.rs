@@ -156,6 +156,8 @@ pub struct StateModel {
     /// From this cell to the one whose position seeds the variant pick (the lower half of doors and
     /// tall plants, the head of beds).
     pub seed_offset: [i8; 3],
+    /// Full-support sturdy faces by vanilla ordinal, as falling fluids test them: none for ice.
+    pub sturdy: u8,
 }
 
 impl StateModel {
@@ -179,6 +181,7 @@ impl StateModel {
         skip: SkipRule::None,
         conn: 0,
         seed_offset: [0; 3],
+        sturdy: 0,
     };
 }
 
@@ -217,6 +220,8 @@ pub struct QuadDef {
     pub normal: u8,
     pub shade: u8,
     pub translucent: bool,
+    /// Vanilla bakes it `SOLID`: no texel under its UV rectangle is transparent.
+    pub solid: bool,
     /// Flat on a block boundary plane along its normal.
     pub boundary: bool,
     /// Flat along its normal axis.
@@ -498,12 +503,13 @@ impl ModelCache {
         }
     }
 
-    /// Vanilla `Block.shouldRenderFace` on occlusion shapes, without the same-block skip rule.
+    /// Vanilla `Block.shouldRenderFace` on occlusion shapes, without the same-block skip rule; only a
+    /// neighbour face that is `Shapes.block()` itself also hides faces with no occlusion shape.
     pub fn face_visible(&self, state: u32, neighbor: u32, face: usize) -> bool {
-        let occluder = self.face_mask(neighbor, face ^ 1);
-        if occluder == MASK_FULL {
+        if self.occlusion(neighbor) >> (face ^ 1) & 1 != 0 {
             return false;
         }
+        let occluder = self.face_mask(neighbor, face ^ 1);
         if occluder == MASK_EMPTY {
             return true;
         }
@@ -759,11 +765,6 @@ impl ModelCache {
             };
             pack(id).or_else(|| pack(missing_id)).unwrap_or(0)
         };
-        let transparency_of = |id: SpriteId| {
-            textures
-                .slot(id)
-                .map_or(Transparency::Opaque, |s| s.transparency)
-        };
         let fluid_sprites = FluidSprites {
             water_still: layer_of(fluid_ids[0]),
             water_flow: layer_of(fluid_ids[1]),
@@ -819,7 +820,7 @@ impl ModelCache {
                     attr |= ATTR_FULL_COLLISION;
                     full_collision = true;
                 }
-                if is_legacy_solid(version.collision_shape(id)) {
+                if info.is_legacy_solid() {
                     attr |= ATTR_SOLID;
                 }
                 if info.is_air() {
@@ -881,7 +882,7 @@ impl ModelCache {
             }
             let dark = class.shade_dark.unwrap_or(full_collision);
             let partial = (0..6).fold(0u8, |acc, f| {
-                acc | u8::from(face_ids[f] != MASK_EMPTY && face_ids[f] != MASK_FULL) << f
+                acc | u8::from(face_ids[f] != MASK_EMPTY && occ >> f & 1 == 0) << f
             });
             cache.attrs.push(attr);
             cache.occlusion.push(occ);
@@ -898,6 +899,9 @@ impl ModelCache {
             sm.fluid = fluid;
             sm.emission = emission;
             sm.offset = offset_spec(name);
+            if !matches!(short, "ice" | "frosted_ice") {
+                sm.sturdy = info.map_or(0, |i| i.sturdy_faces);
+            }
             if let Some(model) = model {
                 let kinds = match java_tints.get(&id) {
                     Some(t) => [cache.java_tint_kind(t[0]), cache.java_tint_kind(t[1])],
@@ -909,7 +913,10 @@ impl ModelCache {
                     _ => TINT_NONE,
                 };
                 let quad_layer = |q: &BakedQuad| {
-                    RenderLayer::from_transparency(transparency_of(q.sprite), q.force_translucent)
+                    RenderLayer::from_transparency(
+                        region_transparency(&textures, q.sprite, q.uv_rect),
+                        q.force_translucent,
+                    )
                 };
                 let first: Vec<_> = model.parts.iter().map(|p| &p.variants[0]).collect();
                 sm.particle = first
@@ -1177,6 +1184,7 @@ fn java_model(baker: &mut ModelBaker, state: &JavaState) -> BakedModel {
             shade_dir: q.shade,
             light_emission: q.emission,
             force_translucent: q.translucent,
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
         })
         .collect();
     let particle = state
@@ -1196,19 +1204,37 @@ fn java_model(baker: &mut ModelBaker, state: &JavaState) -> BakedModel {
     }
 }
 
-fn is_legacy_solid(boxes: &[mcr_data::Aabb]) -> bool {
-    if boxes.is_empty() {
-        return false;
+/// Vanilla `SpriteContents.computeTransparency`: the texels under a face's UV rectangle, in every frame.
+fn region_transparency(textures: &TextureArrays, id: SpriteId, rect: [f32; 4]) -> Transparency {
+    let Some(slot) = textures.slot(id) else {
+        return Transparency::Opaque;
+    };
+    if slot.transparency == Transparency::Opaque || rect == [0.0, 0.0, 1.0, 1.0] {
+        return slot.transparency;
     }
-    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-    for b in boxes {
-        for a in 0..3 {
-            lo[a] = lo[a].min(b.min[a]);
-            hi[a] = hi[a].max(b.max[a]);
+    let Some(group) = textures.groups.get(slot.group as usize) else {
+        return slot.transparency;
+    };
+    let (w, h) = (group.width, group.height);
+    let texel = |f: f32, size: u32, round: fn(f32) -> f32| {
+        round(f * size as f32).clamp(0.0, size as f32) as u32
+    };
+    let (x0, y0) = (texel(rect[0], w, f32::floor), texel(rect[1], h, f32::floor));
+    let (x1, y1) = (texel(rect[2], w, f32::ceil), texel(rect[3], h, f32::ceil));
+    let mut result = Transparency::Opaque;
+    for layer in slot.first_layer..slot.first_layer + slot.layer_count {
+        let texels = group.layer_bytes(0, layer);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                match texels[((y * w + x) * 4 + 3) as usize] {
+                    255 => {}
+                    0 => result = Transparency::Cutout,
+                    _ => return Transparency::Translucent,
+                }
+            }
         }
     }
-    let size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-    (size[0] + size[1] + size[2]) / 3.0 >= 0.729_166_7 || size[1] >= 1.0
+    result
 }
 
 /// Coverage of one occlusion face by `boxes` (vanilla `VoxelShape.getFaceShape`) on a 16x16 grid.
@@ -1337,6 +1363,7 @@ fn quad_bits(q: &QuadDef) -> [u32; 22] {
     bits[20] = u32::from(q.layer) << 16 | u32::from(q.tint) << 8 | u32::from(q.cull);
     bits[21] = u32::from(q.normal) << 16
         | u32::from(q.shade) << 8
+        | u32::from(q.solid) << 7
         | u32::from(q.emission) << 3
         | u32::from(q.translucent) << 2
         | u32::from(q.boundary) << 1
@@ -1400,6 +1427,7 @@ fn compile_quad(q: &BakedQuad, layer: u16, tint: u8, rl: RenderLayer) -> QuadDef
         normal: normal as u8,
         shade: faces::render_face_from_vanilla(q.shade_dir) as u8,
         translucent: rl == RenderLayer::Translucent,
+        solid: rl == RenderLayer::Solid,
         boundary,
         flat,
         emission: q.light_emission.min(15),
@@ -1549,6 +1577,7 @@ mod tests {
                 shade_dir: Face::Up,
                 light_emission: 0,
                 force_translucent: false,
+                uv_rect: [0.0, 0.0, 1.0, 1.0],
             }
         };
         for k in 0..8 {

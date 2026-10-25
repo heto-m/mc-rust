@@ -68,6 +68,9 @@ pub struct BakedQuad {
     pub shade_dir: Face,
     pub light_emission: u8,
     pub force_translucent: bool,
+    /// The face's `uv` rectangle in sprite fractions (min u, min v, max u, max v), before rotation and
+    /// uvlock: vanilla's render layer comes from the sprite's texels inside it.
+    pub uv_rect: [f32; 4],
 }
 
 #[derive(Clone, Debug)]
@@ -111,7 +114,8 @@ impl BakedModel {
     }
 }
 
-const FACE_VERTICES: [[[u8; 3]; 4]; 6] = [
+/// Vanilla's `FaceInfo`: the bound (0 min, 1 max) each vertex of a face takes on each axis.
+pub const FACE_VERTICES: [[[u8; 3]; 4]; 6] = [
     [[0, 0, 1], [0, 0, 0], [1, 0, 0], [1, 0, 1]],
     [[0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0]],
     [[1, 1, 0], [1, 0, 0], [0, 0, 0], [0, 1, 0]],
@@ -248,6 +252,12 @@ pub(crate) fn bake_face(
         shade_dir: element.shade_dir.unwrap_or(normal),
         light_emission: element.light_emission,
         force_translucent: material.force_translucent,
+        uv_rect: [
+            uv[0].min(uv[2]) / 16.0,
+            uv[1].min(uv[3]) / 16.0,
+            uv[0].max(uv[2]) / 16.0,
+            uv[1].max(uv[3]) / 16.0,
+        ],
     }
 }
 

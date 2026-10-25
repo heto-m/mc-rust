@@ -10,7 +10,7 @@
 @group(0) @binding(7) var<storage, read> anim: array<vec2<u32>>;
 
 @group(1) @binding(0) var<storage, read> cube_quads: array<vec4<u32>>;
-@group(1) @binding(1) var<storage, read> model_quads: array<array<u32, 10>>;
+@group(1) @binding(1) var<storage, read> model_quads: array<ModelQuad>;
 @group(1) @binding(2) var<storage, read> cube_draws: array<DrawData>;
 @group(1) @binding(3) var<storage, read> model_draws: array<DrawData>;
 @group(1) @binding(4) var<storage, read> tints: array<u32>;
@@ -160,7 +160,7 @@ fn cube_corner(vi: u32, slot: u32) -> Corner {
 
 fn model_corner(vi: u32, slot: u32) -> Corner {
     let draw = model_draws[slot];
-    let q = model_quads[draw.first_quad + (vi >> 2u)];
+    let q = draw.first_quad + (vi >> 2u);
     let c = vi & 3u;
     let p = decode_model_corner(q, c);
     let shade_face = decode_model_shade_face(q);

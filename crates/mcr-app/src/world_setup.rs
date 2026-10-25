@@ -16,7 +16,7 @@ pub fn renderer_config(opts: &Options, base: RendererConfig) -> RendererConfig {
         occlusion_culling: opts.occlusion,
         visibility_graph: opts.visibility_graph,
         cube_arena_quads: 32 << 20,
-        model_arena_quads: 8 << 20,
+        model_arena_quads: 4 << 20,
         tint_tables: 32768,
         ..base
     }

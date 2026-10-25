@@ -50,6 +50,7 @@ pub fn run(opts: &crate::cli::Options, out: &Path, launched: Instant) -> Result<
         std::thread::sleep(Duration::from_millis(1));
     }
     let p = engine.pipeline_stats();
+    let mem = engine.render.renderer.memory_stats();
     println!(
         "settled: {} columns, {} sections meshed, {:.2}M quads, {:.2}s streaming ({:.2}s since launch), peak rss {} MB, gpu {} MB",
         engine.game.store.len(),
@@ -58,7 +59,14 @@ pub fn run(opts: &crate::cli::Options, out: &Path, launched: Instant) -> Result<
         streaming.elapsed().as_secs_f32(),
         launched.elapsed().as_secs_f32(),
         world_setup::peak_rss_mb(),
-        engine.render.renderer.memory_stats().total_bytes() >> 20,
+        mem.total_bytes() >> 20,
+    );
+    println!(
+        "meshes: cube {:.2} MB, model {:.2} MB in {} uploads, {:.1} ms uploading",
+        mem.cube_used_bytes as f64 / 1e6,
+        mem.model_used_bytes as f64 / 1e6,
+        p.uploaded,
+        p.upload.as_secs_f64() * 1000.0,
     );
     for _ in 0..SETTLE_FRAMES {
         engine.draw();

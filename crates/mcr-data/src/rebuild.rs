@@ -366,7 +366,7 @@ fn blocks(
         b.first_state.push(first + block.states.len() as u32);
         for s in &block.states {
             st.block.push(bid);
-            st.flags.push(s.flags & 0x3ff);
+            st.flags.push(s.flags & 0x7ff);
             st.light_emission.push(s.light_emission.min(15));
             st.light_block.push(s.light_block.min(15));
             st.collision.push(shape_index(s.collision)?);

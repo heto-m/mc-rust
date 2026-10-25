@@ -716,5 +716,6 @@ mod tests {
             flag::PROPAGATES_SKYLIGHT_DOWN
         );
         assert_eq!(get("REDSTONE_CONDUCTOR"), flag::REDSTONE_CONDUCTOR);
+        assert_eq!(get("LEGACY_SOLID"), flag::LEGACY_SOLID);
     }
 }

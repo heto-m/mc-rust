@@ -104,6 +104,7 @@ fn quad(vertices: [Vertex; 4], sprite: SpriteId, normal: Face) -> BakedQuad {
         shade_dir: normal,
         light_emission: 0,
         force_translucent: false,
+        uv_rect: [0.0, 0.0, 1.0, 1.0],
     }
 }
 

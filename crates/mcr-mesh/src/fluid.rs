@@ -1,7 +1,8 @@
 //! Water and lava surfaces, following vanilla's fluid renderer.
 
 use mcr_render::{
-    Face, MODEL_FLAG_UP_SHADE, ModelQuadDesc, SectionMesh, model_ao, pack_light, tint_at,
+    Face, MODEL_FLAG_OPAQUE, MODEL_FLAG_UP_SHADE, ModelQuadDesc, SectionMesh, model_ao, pack_light,
+    tint_at,
 };
 
 use crate::cache::{
@@ -82,18 +83,18 @@ fn average_height(own: f32, a: f32, b: f32, corner: impl FnOnce() -> f32) -> f32
     acc[0] / acc[1]
 }
 
-/// Vanilla `FlowingFluid.getFlow` horizontal part; only its direction matters for texturing.
-pub(crate) fn flow_vector(ctx: &Ctx, kind: FluidKind, cell: [i32; 3]) -> [f32; 2] {
+/// Vanilla `FlowingFluid.getFlow` normalised: its x and z, in `f64` like vanilla's `Vec3`.
+pub(crate) fn flow_vector(ctx: &Ctx, kind: FluidKind, cell: [i32; 3], falling: bool) -> [f64; 2] {
     let own = own_height(ctx, cell);
-    let mut flow = [0.0f32; 2];
-    for (dx, dz) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+    let (mut fx, mut fz) = (0.0f64, 0.0f64);
+    for (dx, dz) in HORIZONTAL {
         let n = add(cell, [dx, 0, dz]);
         let nk = kind_at(ctx, n);
         if nk != FluidKind::None && nk != kind {
             continue;
         }
         let mut height = if nk == kind { own_height(ctx, n) } else { 0.0 };
-        let mut distance = 0.0;
+        let mut distance = 0.0f32;
         if height == 0.0 {
             if ctx.attr(n) & ATTR_SOLID == 0 {
                 let below = add(n, DOWN);
@@ -113,26 +114,111 @@ pub(crate) fn flow_vector(ctx: &Ctx, kind: FluidKind, cell: [i32; 3]) -> [f32; 2
             distance = own - height;
         }
         if distance != 0.0 {
-            flow[0] += dx as f32 * distance;
-            flow[1] += dz as f32 * distance;
+            fx += f64::from(dx as f32 * distance);
+            fz += f64::from(dz as f32 * distance);
         }
     }
-    let len = (flow[0] * flow[0] + flow[1] * flow[1]).sqrt();
-    if len > 0.0 {
-        [flow[0] / len, flow[1] / len]
+    let mut fy = 0.0f64;
+    let wall = |c: [i32; 3], face: usize| {
+        kind_at(ctx, c) != kind && ctx.cache.state(ctx.state(c)).sturdy >> face & 1 != 0
+    };
+    if falling
+        && HORIZONTAL
+            .iter()
+            .zip(HORIZONTAL_FACES)
+            .any(|(&(dx, dz), face)| {
+                let n = add(cell, [dx, 0, dz]);
+                wall(n, face) || wall(add(n, UP), face)
+            })
+    {
+        [fx, fy, fz] = normalize([fx, 0.0, fz]);
+        fy -= 6.0;
+    }
+    let [x, _, z] = normalize([fx, fy, fz]);
+    [x, z]
+}
+
+/// The horizontal directions in vanilla's `Direction.Plane.HORIZONTAL` order, and their vanilla ordinals.
+const HORIZONTAL: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+const HORIZONTAL_FACES: [usize; 4] = [2, 5, 3, 4];
+
+/// `Vec3.normalize`.
+fn normalize(v: [f64; 3]) -> [f64; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len < f64::from(1.0e-5f32) {
+        [0.0; 3]
     } else {
-        [0.0; 2]
+        v.map(|c| c / len)
     }
 }
 
+/// `Mth.sin`: vanilla samples a 65536-step table rather than the true sine.
+fn mth_sin(x: f32) -> f32 {
+    sin_step((f64::from(x) * SIN_SCALE) as i64)
+}
+
+fn mth_cos(x: f32) -> f32 {
+    sin_step((f64::from(x) * SIN_SCALE + 16384.0) as i64)
+}
+
+const SIN_SCALE: f64 = 10430.378350470453;
+
+fn sin_step(i: i64) -> f32 {
+    ((i & 65535) as f64 / SIN_SCALE).sin() as f32
+}
+
+/// `Mth.atan2`, vanilla's table-assisted approximation.
+fn mth_atan2(mut y: f64, mut x: f64) -> f64 {
+    let d2 = x * x + y * y;
+    if d2.is_nan() {
+        return f64::NAN;
+    }
+    let neg_y = y < 0.0;
+    if neg_y {
+        y = -y;
+    }
+    let neg_x = x < 0.0;
+    if neg_x {
+        x = -x;
+    }
+    let steep = y > x;
+    if steep {
+        std::mem::swap(&mut x, &mut y);
+    }
+    let half = 0.5 * d2;
+    let guess = f64::from_bits(0x5FE6_EB50_C7B5_37AA_u64.wrapping_sub(d2.to_bits() >> 1));
+    let rinv = guess * (1.5 - half * guess * guess);
+    x *= rinv;
+    y *= rinv;
+    let frac_bias = f64::from_bits(0x42B0_0000_0000_0000);
+    let yp = frac_bias + y;
+    let index = f64::from(yp.to_bits() as u32 as i32).clamp(0.0, 256.0);
+    let phi = (index / 256.0).asin();
+    let c_phi = phi.cos();
+    let s_phi = yp - frac_bias;
+    let sd = y * c_phi - x * s_phi;
+    let d = (6.0 + sd * sd) * sd * (1.0 / 6.0);
+    let mut theta = phi + d;
+    if steep {
+        theta = std::f64::consts::FRAC_PI_2 - theta;
+    }
+    if neg_x {
+        theta = std::f64::consts::PI - theta;
+    }
+    if neg_y {
+        theta = -theta;
+    }
+    theta
+}
+
 /// UVs of the top face corners (nw, sw, se, ne) for a flow direction, in sprite fractions.
-pub(crate) fn top_uvs(flow: [f32; 2]) -> [[f32; 2]; 4] {
+pub(crate) fn top_uvs(flow: [f64; 2]) -> [[f32; 2]; 4] {
     if flow == [0.0; 2] {
         return [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
     }
-    let angle = flow[1].atan2(flow[0]) - std::f32::consts::FRAC_PI_2;
-    let s = angle.sin() * 0.25;
-    let c = angle.cos() * 0.25;
+    let angle = mth_atan2(flow[1], flow[0]) as f32 - std::f64::consts::FRAC_PI_2 as f32;
+    let s = mth_sin(angle) * 0.25;
+    let c = mth_cos(angle) * 0.25;
     [
         [0.5 + (-c - s), 0.5 + (-c + s)],
         [0.5 + (-c + s), 0.5 + (c + s)],
@@ -151,7 +237,7 @@ fn occluded(ctx: &Ctx, face: usize, height: f32, neighbor: [i32; 3]) -> bool {
         _ if face == 2 || face == 3 => false,
         _ => {
             let grid = ctx.cache.mask(mask);
-            let rows = (0..16usize).filter(|&v| (v as f32 + 0.5) / 16.0 < height);
+            let rows = (0..16usize).filter(|&v| (v as f32) / 16.0 < height);
             rows.into_iter()
                 .all(|v| (0..16usize).all(|u| grid[v / 4] >> ((v % 4) * 16 + u) & 1 != 0))
         }
@@ -193,6 +279,11 @@ pub(crate) fn mesh_fluid(
             TINT_NONE,
         ),
     };
+    // Vanilla's fluid layer comes from its sprites: lava is solid.
+    let solid = !translucent
+        && [still, flow_sprite, overlay_sprite]
+            .iter()
+            .all(|&l| l == LAYER_NONE || ctx.cache.layer_opaque(l));
     let neighbor = |d: [i32; 3]| add(cell, d);
     let up_cell = neighbor(UP);
     let down_cell = neighbor(DOWN);
@@ -253,7 +344,7 @@ pub(crate) fn mesh_fluid(
                     MODEL_FLAG_UP_SHADE
                 } else {
                     0
-                },
+                } | if solid { MODEL_FLAG_OPAQUE } else { 0 },
                 back,
                 translucent,
                 tint,
@@ -272,11 +363,7 @@ pub(crate) fn mesh_fluid(
             sw = lower(b);
             se = lower(c);
             ne = lower(d);
-            let uvs = if flow_vector(ctx, kind, cell) == [0.0; 2] {
-                top_uvs([0.0; 2])
-            } else {
-                top_uvs(flow_vector(ctx, kind, cell))
-            };
+            let uvs = top_uvs(flow_vector(ctx, kind, cell, sm.fluid.falling));
             let moving = uvs != top_uvs([0.0; 2]);
             let layer = if moving { flow_sprite } else { still };
             let backward = (-1..=1).any(|dx| {
@@ -294,6 +381,7 @@ pub(crate) fn mesh_fluid(
                         light: light_here_up,
                         back: backward,
                         translucent,
+                        solid,
                         tint,
                     },
                     x: cell[0] as u8,
@@ -385,6 +473,7 @@ pub(crate) struct TopKey {
     light: u16,
     back: bool,
     translucent: bool,
+    solid: bool,
     tint: u8,
 }
 
@@ -526,7 +615,7 @@ impl Mesher {
                     layer: k.layer,
                     light: k.light,
                     shade: Face::PosY,
-                    flags: 0,
+                    flags: if k.solid { MODEL_FLAG_OPAQUE } else { 0 },
                     back: k.back,
                     translucent: k.translucent,
                     tint: k.tint,
@@ -761,6 +850,7 @@ mod tests {
                 light: 0xf000,
                 back: false,
                 translucent: true,
+                solid: false,
                 tint: 4,
             },
             x,

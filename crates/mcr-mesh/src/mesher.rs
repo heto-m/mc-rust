@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use mcr_assets::FACE_VERTICES;
 use mcr_render::{
     CubeQuad, Face, MODEL_FLAG_OPAQUE, ModelQuad, ModelQuadDesc, PackedQuad, SectionMesh,
     cube_ao_brightness, model_ao,
@@ -52,6 +53,9 @@ const VANILLA_ADJACENT: [[usize; 4]; 6] = [
 
 const FACE_TO_PACKED: [Face; 6] = Face::ALL;
 
+/// Corner pairs (indices into the face's `VANILLA_ADJACENT`) in the order vanilla sums them.
+const VANILLA_PAIRS: [[usize; 2]; 4] = [[0, 3], [0, 2], [1, 2], [1, 3]];
+
 /// Faces whose vanilla quad diagonal runs between corners 0 and 3; the others use 1-2.
 pub(crate) const DIAG03: [bool; 6] = [true, false, true, false, false, true];
 
@@ -76,6 +80,16 @@ fn corner_table() -> [[[usize; 2]; 4]; 6] {
         }
     }
     table
+}
+
+fn pair_corners(corners: &[[[usize; 2]; 4]; 6]) -> [[usize; 4]; 6] {
+    std::array::from_fn(|face| {
+        std::array::from_fn(|t| {
+            (0..4)
+                .find(|&c| corners[face][c] == VANILLA_PAIRS[t])
+                .expect("every corner pair")
+        })
+    })
 }
 
 /// Light and ambient occlusion of the four corners of a face. `ao` counts the unoccluded shade terms
@@ -150,6 +164,16 @@ impl Ctx<'_> {
         (l >> 4, (l & 15).max(emission))
     }
 
+    /// Sky and block light stored at `c`, without any block's emission.
+    #[inline]
+    fn raw_light(&self, c: [i32; 3]) -> (u8, u8) {
+        if !in_pad(c) {
+            return (15, 0);
+        }
+        let l = self.light[pidx(c[0], c[1], c[2])];
+        (l >> 4, l & 15)
+    }
+
     fn permeable(&self, c: [i32; 3]) -> bool {
         self.attr(c) & ATTR_LIGHT_OPAQUE == 0
     }
@@ -204,6 +228,8 @@ pub struct Mesher {
     colors: Arc<BiomeColors>,
     options: MeshOptions,
     corners: [[[usize; 2]; 4]; 6],
+    /// `[face][pair]`: the corner of `corners` that each of `VANILLA_PAIRS` is.
+    pair_corner: [[usize; 4]; 6],
     keys: Vec<u128>,
     occupied: Vec<[u64; 4]>,
     overlays: [Vec<PackedQuad>; 6],
@@ -302,6 +328,7 @@ impl Mesher {
             colors,
             options,
             corners: corner_table(),
+            pair_corner: pair_corners(&corner_table()),
             keys: vec![0; 6 * 16 * 256],
             occupied: vec![[0; 4]; 6 * 16],
             overlays: Default::default(),
@@ -476,12 +503,13 @@ impl Mesher {
         out
     }
 
-    /// Flat lighting: one light value, no corner occlusion.
+    /// Flat lighting: one light value, no corner occlusion. Vanilla reads the light at `light_cell` with
+    /// the drawn block's own emission, not the neighbour's.
     fn flat(ctx: &Ctx, light_cell: [i32; 3], own: &StateModel, own_attr: u8) -> Shading {
         if own_attr & ATTR_EMISSIVE != 0 {
             return Shading::uniform(15, 15);
         }
-        let (sky, block) = ctx.light(light_cell);
+        let (sky, block) = ctx.raw_light(light_cell);
         Shading::uniform(sky, block.max(own.emission))
     }
 
@@ -698,7 +726,6 @@ impl Mesher {
             visible: [None; 6],
             shaded: [None; 12],
             tinted: false,
-            cutout_seen: false,
         };
         if sm.random != 0 {
             let picks = self.picks(ctx, cell, sm);
@@ -764,45 +791,33 @@ impl Mesher {
             };
             Self::flat(ctx, light_cell, sm, own)
         };
-        let [ua, va] = TANGENTS[axis(face)];
+        let (light, ao) = if self.smooth(sm) {
+            self.vertex_shading(face, qd, &shading)
+        } else {
+            (shading.light, [1.0; 4])
+        };
         let slot_of = [1usize, 3, 2, 0];
         let mut corners = [[0.0f32; 3]; 4];
         let mut uvs = [[0.0f32; 2]; 4];
-        let mut light = [0u16; 4];
-        let mut ao = [0u8; 4];
+        let mut vertex_light = [0u16; 4];
+        let mut vertex_ao = [0u8; 4];
+        let base = [0, 1, 2].map(|a| cell[a] as f32 + st.offset[a]);
         for (i, &s) in slot_of.iter().enumerate() {
             let p = qd.pos[i];
-            corners[s] = [
-                cell[0] as f32 + p[0] + st.offset[0],
-                cell[1] as f32 + p[1] + st.offset[1],
-                cell[2] as f32 + p[2] + st.offset[2],
-            ];
+            corners[s] = [p[0] + base[0], p[1] + base[1], p[2] + base[2]];
             uvs[s] = qd.uv[i];
-            let (u, v) = (p[ua].clamp(0.0, 1.0), p[va].clamp(0.0, 1.0));
-            let w = [(1.0 - u) * (1.0 - v), u * (1.0 - v), (1.0 - u) * v, u * v];
-            let sky: f32 = (0..4)
-                .map(|c| w[c] * f32::from(mcr_render::light_sky(shading.light[c])))
-                .sum();
-            let block: f32 = (0..4)
-                .map(|c| w[c] * f32::from(mcr_render::light_block(shading.light[c])))
-                .sum();
-            light[s] = with_emission(mcr_render::pack_light(sky as u8, block as u8), qd.emission);
-            let b: f32 = (0..4)
-                .map(|c| w[c] * cube_ao_brightness(shading.ao[c]))
-                .sum();
-            ao[s] = model_ao(b);
+            vertex_light[s] = with_emission(light[i], qd.emission);
+            vertex_ao[s] = model_ao(ao[i]);
         }
-        let solid = self.forced_opaque(sm)
-            || !qd.translucent && !st.cutout_seen && self.cache.layer_opaque(qd.layer);
-        st.cutout_seen |= !qd.translucent && !solid;
+        let solid = self.forced_opaque(sm) || qd.solid;
         let desc = ModelQuadDesc {
             corners,
             uvs,
             layer: qd.layer,
-            light,
+            light: vertex_light,
             shade_face: FACE_TO_PACKED[usize::from(qd.shade)],
             flags: if solid { MODEL_FLAG_OPAQUE } else { 0 },
-            ao,
+            ao: vertex_ao,
             tint: qd.tint,
             cell: [cell[0] as u8, cell[1] as u8, cell[2] as u8],
         };
@@ -813,6 +828,54 @@ impl Mesher {
                 out.model.push(q);
             }
         }
+    }
+
+    /// Vanilla's per-vertex smooth light and shade of a model quad (`BlockModelLighter`): a quad that
+    /// leaves part of its face uncovered weighs the four corner values by its bounds, summed in vanilla's
+    /// order so the light truncates the same way.
+    fn vertex_shading(&self, face: usize, qd: &QuadDef, shading: &Shading) -> ([u16; 4], [f32; 4]) {
+        let (mut lo, mut hi) = ([32.0f32; 3], [-32.0f32; 3]);
+        for p in &qd.pos {
+            for a in 0..3 {
+                lo[a] = lo[a].min(p[a]);
+                hi[a] = hi[a].max(p[a]);
+            }
+        }
+        let partial = TANGENTS[axis(face)]
+            .iter()
+            .any(|&a| lo[a] >= 1.0e-4 || hi[a] <= 0.9999);
+        let v = RENDER_TO_VANILLA[face];
+        let sides: [(usize, bool); 4] = std::array::from_fn(|d| {
+            let off = VANILLA_OFFSET[VANILLA_ADJACENT[v][d]];
+            let a = (0..3).find(|&a| off[a] != 0).expect("axis direction");
+            (a, off[a] > 0)
+        });
+        let mut light = [0u16; 4];
+        let mut shade = [0.0f32; 4];
+        for (k, sel) in FACE_VERTICES[v].iter().enumerate() {
+            let factor = |d: usize| {
+                let (a, positive) = sides[d];
+                let at = match (partial, sel[a]) {
+                    (false, s) => f32::from(s),
+                    (true, 0) => lo[a],
+                    (true, _) => hi[a],
+                };
+                if positive { at } else { 1.0 - at }
+            };
+            let (mut sky, mut block, mut ao) = (0.0f32, 0.0f32, 0.0f32);
+            for (t, &[i, j]) in VANILLA_PAIRS.iter().enumerate() {
+                let w = factor(i) * factor(j);
+                let c = self.pair_corner[face][t];
+                let l = shading.light[c];
+                sky += f32::from(mcr_render::light_sky(l)) * w;
+                block += f32::from(mcr_render::light_block(l)) * w;
+                ao += cube_ao_brightness(shading.ao[c]) * w;
+            }
+            light[k] =
+                mcr_render::pack_light((sky as i32 & 0xff) as u8, (block as i32 & 0xff) as u8);
+            shade[k] = ao.clamp(0.0, 1.0);
+        }
+        (light, shade)
     }
 
     pub(crate) fn push_fluid_quad(
@@ -840,8 +903,6 @@ struct ModelState<'a, 'b> {
     visible: [Option<bool>; 6],
     shaded: [Option<Shading>; 12],
     tinted: bool,
-    /// An earlier quad of this block needs the alpha test; later ones keep it so they stay drawn after.
-    cutout_seen: bool,
 }
 
 /// Vanilla's `lightCoordsWithEmission`: an emitting element lights both channels to at least its level,

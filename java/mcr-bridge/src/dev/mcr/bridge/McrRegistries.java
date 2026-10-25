@@ -259,6 +259,7 @@ public final class McrRegistries {
             if (s.isCollisionShapeFullBlock(g, z)) flags |= BridgeAbi.REG_FLAG_FULL_COLLISION;
             if (s.propagatesSkylightDown()) flags |= BridgeAbi.REG_FLAG_PROPAGATES_SKYLIGHT_DOWN;
             if (s.isRedstoneConductor(g, z)) flags |= BridgeAbi.REG_FLAG_REDSTONE_CONDUCTOR;
+            if (s.isSolid()) flags |= BridgeAbi.REG_FLAG_LEGACY_SOLID;
             mapColor = s.getMapColor(g, z).id;
         } catch (RuntimeException e) {
             problem(problems, name + ": " + e);

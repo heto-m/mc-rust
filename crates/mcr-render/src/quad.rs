@@ -10,13 +10,13 @@
 //!   texture without alpha cutout.
 //! - `w2`, `w3`: corner light, corners 0,1 and 2,3, 16 bits each.
 //!
-//! Model quad, 40 bytes (ten `u32`):
-//! - `w0..w3`: corner offsets from the base cell, `x[0,9) y[9,18) z[18,27)` in 1/128 block with a -1 block
-//!   bias; the spare top bits of `w0..w2` hold the base cell x, y, z (4 bits each, `[27,31)`).
-//! - `w4,w5`: corner UVs, 16 bits each (`u[0,8) v[8,16)`, 1/16 tile units), corners 0,1 and 2,3.
-//! - `w6`: layer `[0,16)`, shading face `[16,19)`, flags `[19,24)` (`MODEL_FLAG_*`), tint kind `[24,30)`.
-//! - `w7,w8`: corner light, corners 0,1 and 2,3, 16 bits each.
-//! - `w9`: AO as four 6-bit brightness values (`v / 63`) `[0,24)`.
+//! Model quad, 96 bytes (24 `u32`):
+//! - `w0..w11`: corner positions as section-local `f32`, x y z per corner, the values vanilla computes.
+//! - `w12..w19`: corner UVs as `f32` tile units, u v per corner.
+//! - `w20`: layer `[0,16)`, shading face `[16,19)`, flags `[19,22)` (`MODEL_FLAG_*`), tint kind `[22,28)`,
+//!   base cell y `[28,32)`.
+//! - `w21,w22`: corner light, corners 0,1 and 2,3, 16 bits each.
+//! - `w23`: AO as four 6-bit brightness values (`v / 63`) `[0,24)`, base cell x `[24,28)`, z `[28,32)`.
 //!
 //! Cube corners are ordered (0,0), (1,0), (0,1), (1,1) in (u, v). Model corners are in drawing order: the
 //! shader emits triangles `(0, 1, 2)` and `(2, 1, 3)`.
@@ -208,112 +208,89 @@ pub struct ModelQuadDesc {
     pub cell: [u8; 3],
 }
 
+pub const MODEL_QUAD_WORDS: usize = 24;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
 #[repr(C)]
-pub struct ModelQuad(pub [u32; 10]);
+pub struct ModelQuad(pub [u32; MODEL_QUAD_WORDS]);
 
-const POS_SCALE: f32 = 128.0;
-const UV_SCALE: f32 = 16.0;
-
-fn quantize(
-    field: &'static str,
-    v: f32,
-    scale: f32,
-    bias: f32,
-    max: u32,
-) -> Result<u32, QuadError> {
-    let q = ((v + bias) * scale).round();
-    if !(0.0..=max as f32).contains(&q) {
-        return Err(QuadError::OutOfRange {
-            field,
-            value: f64::from(v),
-        });
-    }
-    Ok(q as u32)
-}
+/// Merged fluid tops repeat their sprite a few times; nothing else leaves the tile.
+const MAX_UV: f32 = 16.0;
 
 impl ModelQuad {
-    pub const SIZE: usize = 40;
+    pub const SIZE: usize = MODEL_QUAD_WORDS * 4;
 
     pub fn is_opaque(&self) -> bool {
-        self.0[6] >> 19 & u32::from(MODEL_FLAG_OPAQUE) != 0
+        self.0[20] >> 19 & u32::from(MODEL_FLAG_OPAQUE) != 0
     }
 
     pub fn encode(q: &ModelQuadDesc) -> Result<Self, QuadError> {
-        let mut w = [0u32; 10];
+        let mut w = [0u32; MODEL_QUAD_WORDS];
+        for cell in q.cell {
+            check("cell", cell.into(), 15)?;
+        }
         for (i, c) in q.corners.iter().enumerate() {
-            let rel = |axis: usize| c[axis] - f32::from(q.cell[axis]);
-            w[i] = quantize("corner x", rel(0), POS_SCALE, 1.0, 511)?
-                | quantize("corner y", rel(1), POS_SCALE, 1.0, 511)? << 9
-                | quantize("corner z", rel(2), POS_SCALE, 1.0, 511)? << 18;
-        }
-        for (axis, word) in w.iter_mut().take(3).enumerate() {
-            *word |= check("cell", q.cell[axis].into(), 15)? << 27;
-        }
-        for pair in 0..2 {
-            for half in 0..2 {
-                let uv = q.uvs[pair * 2 + half];
-                let packed = quantize("u", uv[0], UV_SCALE, 0.0, 255)?
-                    | quantize("v", uv[1], UV_SCALE, 0.0, 255)? << 8;
-                w[4 + pair] |= packed << (16 * half);
+            for (axis, &v) in c.iter().enumerate() {
+                if !(-1.0..=3.0).contains(&(v - f32::from(q.cell[axis]))) {
+                    return Err(QuadError::OutOfRange {
+                        field: "corner",
+                        value: f64::from(v),
+                    });
+                }
+                w[i * 3 + axis] = v.to_bits();
             }
         }
-        w[6] = u32::from(q.layer)
+        for (i, uv) in q.uvs.iter().enumerate() {
+            for (k, &v) in uv.iter().enumerate() {
+                if !(0.0..=MAX_UV).contains(&v) {
+                    return Err(QuadError::OutOfRange {
+                        field: "uv",
+                        value: f64::from(v),
+                    });
+                }
+                w[12 + i * 2 + k] = v.to_bits();
+            }
+        }
+        w[20] = u32::from(q.layer)
             | (q.shade_face as u32) << 16
-            | check("flags", q.flags.into(), 31)? << 19
-            | check("tint", q.tint.into(), 63)? << 24;
+            | check("flags", q.flags.into(), 7)? << 19
+            | check("tint", q.tint.into(), 63)? << 22
+            | u32::from(q.cell[1]) << 28;
         for pair in 0..2 {
-            w[7 + pair] = u32::from(q.light[pair * 2]) | u32::from(q.light[pair * 2 + 1]) << 16;
+            w[21 + pair] = u32::from(q.light[pair * 2]) | u32::from(q.light[pair * 2 + 1]) << 16;
         }
         for (i, a) in q.ao.iter().enumerate() {
-            w[9] |= check("ao", (*a).into(), 63)? << (6 * i);
+            w[23] |= check("ao", (*a).into(), 63)? << (6 * i);
         }
+        w[23] |= u32::from(q.cell[0]) << 24 | u32::from(q.cell[2]) << 28;
         Ok(Self(w))
     }
 
     pub fn decode(self) -> ModelQuadDesc {
         let w = self.0;
-        let cell = [
-            (w[0] >> 27 & 15) as u8,
-            (w[1] >> 27 & 15) as u8,
-            (w[2] >> 27 & 15) as u8,
-        ];
-        let unq = |bits: u32, axis: usize| bits as f32 / POS_SCALE - 1.0 + f32::from(cell[axis]);
         ModelQuadDesc {
-            corners: std::array::from_fn(|i| {
-                [
-                    unq(w[i] & 511, 0),
-                    unq(w[i] >> 9 & 511, 1),
-                    unq(w[i] >> 18 & 511, 2),
-                ]
-            }),
+            corners: std::array::from_fn(|i| std::array::from_fn(|a| f32::from_bits(w[i * 3 + a]))),
             uvs: std::array::from_fn(|i| {
-                let p = w[4 + i / 2] >> (16 * (i % 2));
-                [
-                    (p & 255) as f32 / UV_SCALE,
-                    (p >> 8 & 255) as f32 / UV_SCALE,
-                ]
+                std::array::from_fn(|k| f32::from_bits(w[12 + i * 2 + k]))
             }),
-            layer: (w[6] & 0xffff) as u16,
-            light: std::array::from_fn(|i| (w[7 + i / 2] >> (16 * (i % 2))) as u16),
-            shade_face: Face::ALL[(w[6] >> 16 & 7).min(5) as usize],
-            flags: (w[6] >> 19 & 31) as u8,
-            ao: std::array::from_fn(|i| (w[9] >> (6 * i) & 63) as u8),
-            tint: (w[6] >> 24 & 63) as u8,
-            cell,
+            layer: (w[20] & 0xffff) as u16,
+            light: std::array::from_fn(|i| (w[21 + i / 2] >> (16 * (i % 2))) as u16),
+            shade_face: Face::ALL[(w[20] >> 16 & 7).min(5) as usize],
+            flags: (w[20] >> 19 & 7) as u8,
+            ao: std::array::from_fn(|i| (w[23] >> (6 * i) & 63) as u8),
+            tint: (w[20] >> 22 & 63) as u8,
+            cell: [
+                (w[23] >> 24 & 15) as u8,
+                (w[20] >> 28) as u8,
+                (w[23] >> 28) as u8,
+            ],
         }
     }
 }
 
 /// Section-local centre of a model quad, the point vanilla's translucent sort measures from.
 pub fn model_centroid(q: &ModelQuad) -> [f32; 3] {
-    let mut sum = [0u32; 3];
-    for w in &q.0[..4] {
-        sum[0] += w & 511;
-        sum[1] += w >> 9 & 511;
-        sum[2] += w >> 18 & 511;
-    }
-    std::array::from_fn(|a| sum[a] as f32 / (4.0 * POS_SCALE) - 1.0 + (q.0[a] >> 27 & 15) as f32)
+    std::array::from_fn(|a| (0..4).map(|c| f32::from_bits(q.0[c * 3 + a])).sum::<f32>() / 4.0)
 }
 
 /// Orders translucent quads back to front from `eye` (section-local), like vanilla's
@@ -396,7 +373,7 @@ mod tests {
             layer: 65535,
             light: [0x3c3c, 0xf000, 0x00f0, 0x0102],
             shade_face: Face::NegZ,
-            flags: 17,
+            flags: 5,
             ao: [63, 32, 1, 0],
             tint: 9,
             cell: [15, 3, 4],
@@ -410,11 +387,11 @@ mod tests {
     }
 
     #[test]
-    fn model_positions_resolve_to_a_128th() {
+    fn model_positions_and_uvs_keep_every_bit() {
         let mut q = sample_model();
-        q.corners[0] = [14.3333, 3.0, 3.5];
-        let back = ModelQuad::encode(&q).unwrap().decode();
-        assert!((back.corners[0][0] - 14.3333).abs() <= 1.0 / 256.0 + 1e-6);
+        q.corners[0] = [14.999, 3.887_889, 3.0703125];
+        q.uvs[2] = [0.129_9, 0.853_553_4];
+        assert_eq!(ModelQuad::encode(&q).unwrap().decode(), q);
     }
 
     #[test]
@@ -426,7 +403,13 @@ mod tests {
         q.corners[0][0] = 12.9;
         assert!(ModelQuad::encode(&q).is_err());
         let mut q = sample_model();
-        q.uvs[1][0] = 16.0;
+        q.uvs[1][0] = -0.25;
+        assert!(ModelQuad::encode(&q).is_err());
+        let mut q = sample_model();
+        q.uvs[1][0] = f32::NAN;
+        assert!(ModelQuad::encode(&q).is_err());
+        let mut q = sample_model();
+        q.corners[3][2] = f32::INFINITY;
         assert!(ModelQuad::encode(&q).is_err());
         let mut q = sample_model();
         q.ao[0] = 64;

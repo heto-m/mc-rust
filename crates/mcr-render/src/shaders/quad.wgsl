@@ -26,44 +26,46 @@ fn decode_cube(q: vec4<u32>) -> CubeQuad {
     return d;
 }
 
-alias ModelQuad = array<u32, 10>;
+alias ModelQuad = array<u32, 24>;
 
-fn model_cell(q: ModelQuad) -> vec3<f32> {
-    return vec3<f32>(f32((q[0] >> 27u) & 15u), f32((q[1] >> 27u) & 15u), f32((q[2] >> 27u) & 15u));
+// Model quads read straight from `model_quads` by quad index, so a corner loads only its own words.
+fn model_cell(i: u32) -> vec3<f32> {
+    let w20 = model_quads[i][20];
+    let w23 = model_quads[i][23];
+    return vec3<f32>(f32((w23 >> 24u) & 15u), f32(w20 >> 28u), f32(w23 >> 28u));
 }
 
-// Block units inside the section: base cell plus 1/128 block offsets biased by -1 block.
-fn decode_model_corner(q: ModelQuad, c: u32) -> vec3<f32> {
-    let w = q[c];
-    let bits = vec3<u32>(w & 511u, (w >> 9u) & 511u, (w >> 18u) & 511u);
-    return vec3<f32>(bits) / 128.0 - vec3<f32>(1.0) + model_cell(q);
+// Section-local block units.
+fn decode_model_corner(i: u32, c: u32) -> vec3<f32> {
+    let k = c * 3u;
+    return vec3<f32>(bitcast<f32>(model_quads[i][k]), bitcast<f32>(model_quads[i][k + 1u]), bitcast<f32>(model_quads[i][k + 2u]));
 }
 
-fn decode_model_uv(q: ModelQuad, c: u32) -> vec2<f32> {
-    let p = q[4u + (c >> 1u)] >> (16u * (c & 1u));
-    return vec2<f32>(f32(p & 255u), f32((p >> 8u) & 255u)) / 16.0;
+fn decode_model_uv(i: u32, c: u32) -> vec2<f32> {
+    let k = 12u + c * 2u;
+    return vec2<f32>(bitcast<f32>(model_quads[i][k]), bitcast<f32>(model_quads[i][k + 1u]));
 }
 
-fn decode_model_layer(q: ModelQuad) -> u32 {
-    return q[6] & 0xffffu;
+fn decode_model_layer(i: u32) -> u32 {
+    return model_quads[i][20] & 0xffffu;
 }
 
-fn decode_model_shade_face(q: ModelQuad) -> u32 {
-    return (q[6] >> 16u) & 7u;
+fn decode_model_shade_face(i: u32) -> u32 {
+    return (model_quads[i][20] >> 16u) & 7u;
 }
 
-fn decode_model_flags(q: ModelQuad) -> u32 {
-    return (q[6] >> 19u) & 31u;
+fn decode_model_flags(i: u32) -> u32 {
+    return (model_quads[i][20] >> 19u) & 7u;
 }
 
-fn decode_model_tint(q: ModelQuad) -> u32 {
-    return (q[6] >> 24u) & 63u;
+fn decode_model_tint(i: u32) -> u32 {
+    return (model_quads[i][20] >> 22u) & 63u;
 }
 
-fn decode_model_light(q: ModelQuad, c: u32) -> u32 {
-    return (q[7u + (c >> 1u)] >> (16u * (c & 1u))) & 0xffffu;
+fn decode_model_light(i: u32, c: u32) -> u32 {
+    return (model_quads[i][21u + (c >> 1u)] >> (16u * (c & 1u))) & 0xffffu;
 }
 
-fn decode_model_ao(q: ModelQuad, c: u32) -> u32 {
-    return (q[9] >> (6u * c)) & 63u;
+fn decode_model_ao(i: u32, c: u32) -> u32 {
+    return (model_quads[i][23] >> (6u * c)) & 63u;
 }

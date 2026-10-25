@@ -24,6 +24,8 @@ pub struct PipelineStats {
     pub uploaded: u64,
     pub queued: usize,
     pub quads: u32,
+    /// Time spent handing section meshes to the renderer.
+    pub upload: Duration,
 }
 
 /// Turns dirty sections of a [`MeshWorld`] into GPU geometry and keeps the renderer in step with it.
@@ -44,6 +46,7 @@ pub struct RenderSystem {
     ready: VecDeque<MeshResult>,
     meshed: u64,
     uploaded: u64,
+    upload_time: Duration,
     arena_full_reported: bool,
     view: Option<(ChunkPos, i32)>,
 }
@@ -146,6 +149,7 @@ impl RenderSystem {
             ready: VecDeque::new(),
             meshed: 0,
             uploaded: 0,
+            upload_time: Duration::ZERO,
             arena_full_reported: false,
         }
     }
@@ -251,6 +255,7 @@ impl RenderSystem {
                     .map(|m| m.count_ones() as usize)
                     .sum::<usize>(),
             quads: self.renderer.cube_quads_used() + self.renderer.model_quads_used(),
+            upload: self.upload_time,
         }
     }
 
@@ -515,6 +520,7 @@ impl RenderSystem {
                 break;
             }
         }
+        self.upload_time += start.elapsed();
     }
 }
 

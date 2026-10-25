@@ -1,5 +1,5 @@
 @group(0) @binding(0) var<storage, read> cube_in: array<vec4<u32>>;
-@group(0) @binding(1) var<storage, read> model_in: array<array<u32, 10>>;
+@group(0) @binding(1) var<storage, read> model_quads: array<ModelQuad>;
 @group(0) @binding(2) var<storage, read_write> cube_out: array<array<u32, 20>>;
 @group(0) @binding(3) var<storage, read_write> model_out: array<array<i32, 40>>;
 
@@ -12,17 +12,17 @@ fn decode(@builtin(global_invocation_id) gid: vec3<u32>) {
             d.ao.x, d.ao.y, d.ao.z, d.ao.w, d.light.x, d.light.y, d.light.z, d.light.w, d.tint, d.rotation,
             0u, 0u, 0u);
     }
-    if i < arrayLength(&model_in) {
-        let q = model_in[i];
+    if i < arrayLength(&model_quads) {
+        let q = i;
         var o: array<i32, 40>;
         for (var c = 0u; c < 4u; c++) {
-            let p = decode_model_corner(q, c) * 128.0;
-            o[c * 3u] = i32(round(p.x));
-            o[c * 3u + 1u] = i32(round(p.y));
-            o[c * 3u + 2u] = i32(round(p.z));
-            let uv = decode_model_uv(q, c) * 16.0;
-            o[12u + c * 2u] = i32(round(uv.x));
-            o[13u + c * 2u] = i32(round(uv.y));
+            let p = decode_model_corner(q, c);
+            o[c * 3u] = bitcast<i32>(p.x);
+            o[c * 3u + 1u] = bitcast<i32>(p.y);
+            o[c * 3u + 2u] = bitcast<i32>(p.z);
+            let uv = decode_model_uv(q, c);
+            o[12u + c * 2u] = bitcast<i32>(uv.x);
+            o[13u + c * 2u] = bitcast<i32>(uv.y);
             o[24u + c] = i32(decode_model_light(q, c));
             o[28u + c] = i32(decode_model_ao(q, c));
         }

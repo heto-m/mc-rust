@@ -94,6 +94,7 @@ pub fn test_cache() -> ModelCache {
         normal: face,
         shade: face,
         translucent: false,
+        solid: false,
         boundary: cull,
         flat: true,
         emission: 0,

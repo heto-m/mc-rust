@@ -62,6 +62,7 @@ struct ExtractedState {
     replaceable: bool,
     has_block_entity: bool,
     redstone_conductor: bool,
+    legacy_solid: bool,
     map_color: u8,
     fluid: Option<ExtractedFluid>,
 }
@@ -452,6 +453,7 @@ fn push_state(
         (s.full_collision, flag::FULL_COLLISION),
         (s.propagates_skylight_down, flag::PROPAGATES_SKYLIGHT_DOWN),
         (s.redstone_conductor, flag::REDSTONE_CONDUCTOR),
+        (s.legacy_solid, flag::LEGACY_SOLID),
     ] {
         if on {
             flags |= bit;

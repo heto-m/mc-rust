@@ -52,6 +52,11 @@ Severity: **G** gameplay-breaking, **V** visible, **M** minor.
 - **M6 (V)** Faces against stairs never cull. Vanilla's `Block.shouldRenderFace` culls them against a stair's full faces. 335 quads.
 - **M7 (V)** Legacy solidity ignores `forceSolidOn`/`forceSolidOff` and the rule that `dynamicShape` blocks are not solid. This changes fluid corner heights next to lanterns, ladders, snow and scaffolding. 322 quads.
 - **M8 (M)** Snow smooth light: one vertex differs by one unit. Not traced.
+- **M9 (V, open)** `FlowingFluid.getFlow` tests the server tag `#blocks_fluid_flow` (`blocks_motion` plus
+  all signs); ours approximates it with legacy solidity, so flow direction can differ next to signs. No
+  harness case covers it.
+- **M10 (V, open)** Iron bars and door windows show dark texels along cutout edges that vanilla does not
+  (live screenshot, same before and after this batch). Texture sampling, not meshing.
 
 ### Carried from vanilla-parity-7
 
@@ -60,3 +65,33 @@ Severity: **G** gameplay-breaking, **V** visible, **M** minor.
 - **C3 (M)** The `local_difficulty`, `entity_spawn_counts` and `chunk_generation_stats` F3 entries, which
   need a server level.
 - **C4 (M)** The language-aware plain string (`to_plain_string_with`) is not yet threaded through the `mcr-app` and `mcr-client` callers: shell, hud, nametags, entities, map, editors, the sign character limit in `mcr-block-entity`, `dialog_screen` option and slider labels, and `tooltip::first_plain`. This affects emptiness checks, the sign limit and logs.
+
+## Decisions
+
+### Section meshing
+
+- **Model quads carry `f32` positions and UVs (96 B, was 40 B).** Vanilla's positions are `f32` with bits
+  below 2^-20 (rotated elements, the fluid renderer's 0.001 insets), so no fixed grid is bit-exact.
+  Measured on the harness with section-local fixed grids: positions at 2^-12, 2^-14 and 2^-16 pass 6%,
+  13.5% and 14.25% of cases, 2^-18 and finer pass all; UVs at 2^-12 pass 85%, 2^-14 99.5%, 2^-16 all.
+  The cheapest passing grid would pack into 64 B, but it passes only because the harness rounds to
+  1/1024 (a 1/1024 grid also passes, trivially), so it is not exact. `f32` is exact and costs no GPU
+  time, so the format follows vanilla. Cube quads stay 16 B. Harness tolerances are unchanged.
+- **Cost**, bench world at 1920x1080, render distance 16, 600 frames, median of 3 interleaved idle runs
+  (main vs this batch): GPU frame 0.203 / 0.169 ms vs 0.204 / 0.169 ms on the two views; model meshes
+  28.8 MB vs 69.2 MB (about 2.2 KB vs 5.4 KB per meshed section), cube meshes 41.0 MB both; upload
+  21.5 ms vs 25.6 ms for a full load. Single-thread meshing (criterion `mesh_surface_sections`)
+  7.9 ms vs 7.5 ms. The world model arena drops from 8M to 4M quads so its preallocation stays near the
+  old size (384 MB vs 320 MB); render distance 32 over the bench forest needs about 2.9M.
+- **Per-face render layer** (M2) judges the face's UV rectangle on the sprite's alpha across all frames,
+  like `FaceBakery.computeMaterialTransparency`. Fluids (M4) take their layer from their sprites.
+- **Legacy solidity** (M7) comes from vanilla: the extractor and the bridge registry export
+  `BlockState.isSolid()` as `LEGACY_SOLID` (bit 10, no ABI bump). The shared
+  `.cache/versions/26.3/extracted/blocks.json` was regenerated with the new field.
+- **Smooth light and fluid flow** follow vanilla's arithmetic: `BlockModelLighter`'s weighted blend in
+  its summation order with integer truncation (M8), flat light from the raw neighbour value plus own
+  emission (M5), and `getFlow` in `f64` with `Mth.atan2` and the `Mth.sin` table for flowing UVs.
+- Live check against the vanilla client (lanterns, doors, iron bars, lava, water; day and night): mean
+  pixel difference outside the animated fluids 0.45 (main: 1.23) by day and 0.51 at night; what remains
+  is M10.
+

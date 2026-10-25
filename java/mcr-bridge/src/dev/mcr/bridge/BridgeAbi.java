@@ -189,6 +189,7 @@ public final class BridgeAbi {
     public static final int REG_FLAG_FULL_COLLISION = 128;
     public static final int REG_FLAG_PROPAGATES_SKYLIGHT_DOWN = 256;
     public static final int REG_FLAG_REDSTONE_CONDUCTOR = 512;
+    public static final int REG_FLAG_LEGACY_SOLID = 1024;
 
     public static final int PHASE_LOGIN = 1;
     public static final int PHASE_CONFIGURATION = 2;

@@ -127,7 +127,7 @@ fn shader_decoder_matches_rust_encoder() {
         layer: 65535,
         light: [0x3c3c, 0xf000, 0x00f0, 0x0102],
         shade_face: Face::NegZ,
-        flags: 17,
+        flags: 5,
         ao: [63, 32, 1, 0],
         tint: 9,
         cell: [15, 3, 4],
@@ -247,10 +247,10 @@ fn shader_decoder_matches_rust_encoder() {
     let d = models[0].decode();
     let mut expect = Vec::new();
     for c in d.corners {
-        expect.extend(c.map(|v| (v * 128.0).round() as i32));
+        expect.extend(c.map(|v| v.to_bits() as i32));
     }
     for uv in d.uvs {
-        expect.extend(uv.map(|v| (v * 16.0).round() as i32));
+        expect.extend(uv.map(|v| v.to_bits() as i32));
     }
     expect.extend([
         d.layer.into(),

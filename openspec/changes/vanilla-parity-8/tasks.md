@@ -33,9 +33,9 @@ Scope: mcr-protocol text, mcr-ui text.
 
 Scope: mcr-mesh, mcr-render vertex formats.
 
-- [ ] 5.1 M1–M8; `cargo xtask parity section_mesh` at 100%, `block_model` still 100%
-- [ ] 5.2 Mesh memory, upload and GPU time before and after; keep vertex formats compact where precision allows
-- [ ] 5.3 fmt, clippy and workspace tests
+- [x] 5.1 M1–M8; `cargo xtask parity section_mesh` at 100%, `block_model` still 100%
+- [x] 5.2 Mesh memory, upload and GPU time before and after; keep vertex formats compact where precision allows
+- [x] 5.3 fmt, clippy and workspace tests
 
 ## 6. Close out
 

@@ -399,6 +399,8 @@ pub mod flag {
     pub const FULL_COLLISION: u16 = 1 << 7;
     pub const PROPAGATES_SKYLIGHT_DOWN: u16 = 1 << 8;
     pub const REDSTONE_CONDUCTOR: u16 = 1 << 9;
+    /// `BlockStateBase.isSolid`: forced on or off per block, else from the collision bounds.
+    pub const LEGACY_SOLID: u16 = 1 << 10;
 }
 
 pub mod fluid_bits {
