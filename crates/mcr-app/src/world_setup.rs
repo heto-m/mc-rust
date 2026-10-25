@@ -9,15 +9,15 @@ use crate::cli::Options;
 use crate::engine::Engine;
 use crate::source::WorldSource;
 
-/// Arenas sized for render distance 32 over typical terrain.
+/// Arenas start sized for render distance 16 over typical terrain and grow on demand.
 pub fn renderer_config(opts: &Options, base: RendererConfig) -> RendererConfig {
     RendererConfig {
         vsync: opts.vsync,
         occlusion_culling: opts.occlusion,
         visibility_graph: opts.visibility_graph,
-        cube_arena_quads: 32 << 20,
-        model_arena_quads: 4 << 20,
-        tint_tables: 32768,
+        cube_arena_quads: 4 << 20,
+        model_arena_quads: 1 << 20,
+        tint_tables: 8192,
         ..base
     }
 }

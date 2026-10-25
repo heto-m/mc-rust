@@ -38,6 +38,8 @@ pub const META_PARTIAL_SHIFT: u32 = 16;
 pub const META_EMISSION_SHIFT: u32 = 24;
 /// Vanilla's `getShadeBrightness` is 0.2 rather than 1.0: smooth lighting darkens corners next to it.
 pub const META_SHADE_DARK: u32 = 1 << 28;
+/// In vanilla's `#blocks_fluid_flow` tag (`blocks_motion` and every sign).
+pub const META_BLOCKS_FLUID_FLOW: u32 = 1 << 29;
 
 pub const MASK_EMPTY: u16 = 0;
 pub const MASK_FULL: u16 = 1;
@@ -307,12 +309,17 @@ fn opaque_layers(textures: &TextureArrays) -> Vec<u64> {
     bits
 }
 
-fn compute_meta(attr: u8, occ: u8, partial: u8, emission: u8, dark: bool) -> u32 {
+fn compute_meta(attr: u8, occ: u8, partial: u8, emission: u8, dark: bool, fluid_flow: bool) -> u32 {
     u32::from(attr)
         | u32::from(occ) << META_FULL_SHIFT
         | u32::from(partial) << META_PARTIAL_SHIFT
         | u32::from(emission.min(15)) << META_EMISSION_SHIFT
         | if dark { META_SHADE_DARK } else { 0 }
+        | if fluid_flow {
+            META_BLOCKS_FLUID_FLOW
+        } else {
+            0
+        }
 }
 
 impl ModelCache {
@@ -584,7 +591,15 @@ impl ModelCache {
             .map(|i| {
                 let dark =
                     attrs[i] & ATTR_FULL_COLLISION != 0 && attrs[i] & ATTR_HALF_TRANSPARENT == 0;
-                compute_meta(attrs[i], occlusion[i], 0, states[i].emission, dark)
+                let fluid_flow = attrs[i] & ATTR_SOLID != 0;
+                compute_meta(
+                    attrs[i],
+                    occlusion[i],
+                    0,
+                    states[i].emission,
+                    dark,
+                    fluid_flow,
+                )
             })
             .collect();
         Self {
@@ -633,6 +648,14 @@ impl ModelCache {
     pub fn with_shade(mut self, id: u32, dark: bool) -> Self {
         if let Some(m) = self.meta.get_mut(id as usize) {
             *m = *m & !META_SHADE_DARK | if dark { META_SHADE_DARK } else { 0 };
+        }
+        self
+    }
+
+    /// Sets whether a hand-built cache's state is in `#blocks_fluid_flow` (default: its legacy solidity).
+    pub fn with_fluid_flow(mut self, id: u32, blocks: bool) -> Self {
+        if let Some(m) = self.meta.get_mut(id as usize) {
+            *m = *m & !META_BLOCKS_FLUID_FLOW | if blocks { META_BLOCKS_FLUID_FLOW } else { 0 };
         }
         self
     }
@@ -807,6 +830,7 @@ impl ModelCache {
             let mut emission = 0;
             let mut face_ids = [MASK_EMPTY; 6];
             let mut full_collision = false;
+            let fluid_flow = info.is_some_and(|i| i.blocks_fluid_flow());
             if let Some(info) = info {
                 block = info.block as u16;
                 emission = info.light_emission;
@@ -888,7 +912,7 @@ impl ModelCache {
             cache.occlusion.push(occ);
             cache
                 .meta
-                .push(compute_meta(attr, occ, partial, emission, dark));
+                .push(compute_meta(attr, occ, partial, emission, dark, fluid_flow));
             cache.face_masks.push(face_ids);
 
             let mut sm = StateModel::EMPTY;
@@ -1409,7 +1433,8 @@ fn compile_quad(q: &BakedQuad, layer: u16, tint: u8, rl: RenderLayer) -> QuadDef
     let normal = faces::render_face_from_vanilla(q.normal);
     let ax = faces::axis(normal);
     let coord = q.vertices[0].pos[ax];
-    let flat = q.vertices.iter().all(|v| (v.pos[ax] - coord).abs() < 1e-5);
+    // Exact like vanilla's `faceCubic`: rotated elements leave sub-ulp tilts that light from the own cell.
+    let flat = q.vertices.iter().all(|v| v.pos[ax] == coord);
     let boundary = flat
         && if faces::is_positive(normal) {
             coord > 1.0 - 1e-4

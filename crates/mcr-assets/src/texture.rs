@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
+use std::sync::LazyLock;
 
 use serde::Deserialize;
 
@@ -526,36 +527,70 @@ struct CutoutMip {
     dark: bool,
 }
 
-/// Alpha-weighted 2x2 box filter; odd edges clamp.
+/// `ARGB.meanLinear` over 2x2 blocks: alpha averaged, colour averaged in linear light through
+/// vanilla's 10-bit tables; odd edges clamp.
 pub fn downsample(src: &[u8], width: u32, height: u32) -> (u32, u32, Vec<u8>) {
     let (nw, nh) = ((width / 2).max(1), (height / 2).max(1));
     let mut out = Vec::with_capacity((nw * nh * 4) as usize);
     for y in 0..nh {
         for x in 0..nw {
-            let mut sum = [0u32; 3];
-            let mut plain = [0u32; 3];
+            let mut linear = [0u32; 3];
             let mut alpha = 0u32;
             for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                 let sx = (x * 2 + dx).min(width - 1);
                 let sy = (y * 2 + dy).min(height - 1);
                 let i = ((sy * width + sx) * 4) as usize;
-                let a = u32::from(src[i + 3]);
-                for c in 0..3 {
-                    sum[c] += u32::from(src[i + c]) * a;
-                    plain[c] += u32::from(src[i + c]);
+                for (c, sum) in linear.iter_mut().enumerate() {
+                    *sum += u32::from(SRGB_TO_LINEAR[usize::from(src[i + c])]);
                 }
-                alpha += a;
+                alpha += u32::from(src[i + 3]);
             }
-            for c in 0..3 {
-                let v = (sum[c] + alpha / 2)
-                    .checked_div(alpha)
-                    .unwrap_or(plain[c] / 4);
-                out.push(v as u8);
-            }
-            out.push(((alpha + 2) / 4) as u8);
+            out.extend(linear.map(|l| LINEAR_TO_SRGB[(l / 4) as usize]));
+            out.push((alpha / 4) as u8);
         }
     }
     (nw, nh, out)
+}
+
+/// `TextureUtil.solidify`: empty texels take the colour of the nearest non-empty one (breadth-first
+/// in vanilla's column-major order), so filtering at cutout edges does not pull in black.
+fn solidify(rgba: &mut [u8], width: u32, height: u32) {
+    const DIRECTIONS: [(i64, i64); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+    let (w, h) = (i64::from(width), i64::from(height));
+    let at = |x: i64, y: i64| (y * w + x) as usize;
+    let mut distance = vec![u32::MAX; (width * height) as usize];
+    let mut nearest = vec![[0u8; 3]; distance.len()];
+    let mut queue = VecDeque::new();
+    for x in 0..w {
+        for y in 0..h {
+            let i = at(x, y);
+            if rgba[i * 4 + 3] != 0 {
+                distance[i] = 0;
+                nearest[i].copy_from_slice(&rgba[i * 4..i * 4 + 3]);
+                queue.push_back((x, y));
+            }
+        }
+    }
+    while let Some((x, y)) = queue.pop_front() {
+        let i = at(x, y);
+        for (dx, dy) in DIRECTIONS {
+            let (nx, ny) = (x + dx, y + dy);
+            if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                continue;
+            }
+            let n = at(nx, ny);
+            if distance[n] > distance[i] + 1 {
+                distance[n] = distance[i] + 1;
+                nearest[n] = nearest[i];
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+    for (p, fill) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(nearest) {
+        if p[3] == 0 {
+            p[..3].copy_from_slice(&fill);
+        }
+    }
 }
 
 /// `TextureUtil.fillEmptyAreasWithDarkColor`: transparent texels take 3/4 of the darkest opaque colour.
@@ -575,23 +610,43 @@ fn darken_empty_texels(rgba: &mut [u8]) {
     }
 }
 
+/// `ARGB.SRGB_TO_LINEAR`: sRGB bytes to linear light in 1/1023 steps.
+static SRGB_TO_LINEAR: LazyLock<[u16; 256]> = LazyLock::new(|| {
+    std::array::from_fn(|i| {
+        let x = i as f32 / 255.0;
+        let linear = if x >= 0.04045 {
+            ((f64::from(x) + 0.055) / 1.055).powf(2.4) as f32
+        } else {
+            x / 12.92
+        };
+        java_round(linear * 1023.0) as u16
+    })
+});
+
+/// `ARGB.LINEAR_TO_SRGB`.
+static LINEAR_TO_SRGB: LazyLock<[u8; 1024]> = LazyLock::new(|| {
+    std::array::from_fn(|i| {
+        let x = i as f32 / 1023.0;
+        let srgb = if x >= 0.0031308 {
+            (1.055 * f64::from(x).powf(0.4166666666666667) - 0.055) as f32
+        } else {
+            12.92 * x
+        };
+        java_round(srgb * 255.0) as u8
+    })
+});
+
+/// `Math.round(float)`.
+fn java_round(x: f32) -> i32 {
+    (f64::from(x) + 0.5).floor() as i32
+}
+
 fn srgb_to_linear(c: u8) -> f32 {
-    let c = f32::from(c) / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
+    f32::from(SRGB_TO_LINEAR[usize::from(c)]) / 1023.0
 }
 
 fn linear_to_srgb(l: f32) -> u8 {
-    let l = l.clamp(0.0, 1.0);
-    let c = if l <= 0.0031308 {
-        l * 12.92
-    } else {
-        1.055 * l.powf(1.0 / 2.4) - 0.055
-    };
-    (c * 255.0 + 0.5) as u8
+    LINEAR_TO_SRGB[((l * 1023.0).floor() as usize).min(1023)]
 }
 
 /// `MipmapGenerator.darkenedAlphaBlend`: sums the linear channels of the non-empty texels and
@@ -714,6 +769,11 @@ impl TextureArrayBuilder {
     }
 
     pub fn add(&mut self, id: SpriteId, sprite: &Sprite) -> SpriteSlot {
+        self.add_with(id, sprite, true)
+    }
+
+    /// `fill_empty`: vanilla fills a cutout sprite's empty texels before mipping, except under `item/`.
+    fn add_with(&mut self, id: SpriteId, sprite: &Sprite, fill_empty: bool) -> SpriteSlot {
         let key = (sprite.width, sprite.height);
         let group_idx = *self.by_size.entry(key).or_insert_with(|| {
             self.groups.push(GroupBuilder {
@@ -734,13 +794,20 @@ impl TextureArrayBuilder {
         for frame in &sprite.frames {
             let start = group.data.len();
             group.data.extend_from_slice(frame);
-            if dark {
+            if dark && fill_empty {
                 darken_empty_texels(&mut group.data[start..]);
             }
             group.layers += 1;
             transparency = transparency.max(classify(frame));
         }
         let frames = sprite.frames.len() as u32;
+        if alpha_ref.is_some() && !dark && fill_empty {
+            solidify(
+                &mut group.data[sheet_start..],
+                sprite.width,
+                sprite.height * frames,
+            );
+        }
         // Vanilla mips the whole animation strip with one coverage, so no frame thins out on its own.
         let cut = alpha_ref.map(|alpha_ref| CutoutMip {
             alpha_ref,
@@ -803,7 +870,8 @@ impl TextureArrayBuilder {
                 sprite = resample(sprite, to);
                 self.resized += 1;
             }
-            self.add(id, &sprite);
+            let fill_empty = !sprites.get(id).path().starts_with("item/");
+            self.add_with(id, &sprite, fill_empty);
         }
         Ok(missing)
     }
@@ -1060,7 +1128,8 @@ mod tests {
         let g = &arrays.groups[s0.group as usize];
         assert_eq!(g.mips.len(), 5);
         assert_eq!(g.mip_size(4), (1, 1));
-        assert_eq!(g.layer_bytes(4, 0), [9, 9, 9, 255]);
+        // Vanilla's 10-bit linear tables round 9 up to 10.
+        assert_eq!(g.layer_bytes(4, 0), [10, 10, 10, 255]);
     }
 
     #[test]
@@ -1072,8 +1141,9 @@ mod tests {
         holey[4..16].fill(0);
         let (_, _, out) = downsample_dark(&holey, 2, 2);
         assert!(out[0] < 120 && out[1] < 70 && out[3] < 150, "{out:?}");
+        solidify(&mut holey, 2, 2);
         let (_, _, plain) = downsample(&holey, 2, 2);
-        assert_eq!(plain[0], 200);
+        assert!(plain[0].abs_diff(200) <= 1, "{plain:?}");
     }
 
     #[test]
@@ -1086,10 +1156,45 @@ mod tests {
     }
 
     #[test]
-    fn mip_filter_is_alpha_weighted() {
-        let src = [200, 100, 50, 255, 0, 255, 0, 0, 0, 255, 0, 0, 255, 0, 0, 0];
+    fn mip_filter_is_vanilla_mean_linear() {
+        let src = [
+            255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         let (w, h, out) = downsample(&src, 2, 2);
         assert_eq!((w, h), (1, 1));
-        assert_eq!(out, [200, 100, 50, 64]);
+        assert_eq!(out, [187, 187, 187, 127]);
+    }
+
+    #[test]
+    fn solidify_fills_empty_texels_from_the_nearest_in_column_order() {
+        let mut px = vec![200, 0, 0, 255, 9, 9, 9, 0, 0, 0, 200, 255, 0, 0, 0, 0];
+        solidify(&mut px, 4, 1);
+        assert_eq!(px[4..8], [200, 0, 0, 0]);
+        assert_eq!(px[12..16], [0, 0, 200, 0]);
+        assert_eq!(px[..4], [200, 0, 0, 255]);
+    }
+
+    #[test]
+    fn cutout_sprites_mip_without_dark_edges() {
+        let mut frame = vec![0u8; 4 * 4 * 4];
+        for p in frame.as_chunks_mut::<4>().0.iter_mut().step_by(2) {
+            *p = [180, 180, 180, 255];
+        }
+        let sprite = Sprite {
+            width: 4,
+            height: 4,
+            frames: vec![frame],
+            animation: None,
+            mip: MipSettings::default(),
+        };
+        let mut b = TextureArrayBuilder::new(2);
+        let slot = b.add(SpriteId(0), &sprite);
+        let arrays = b.build();
+        let g = &arrays.groups[slot.group as usize];
+        for level in 0..g.mips.len() {
+            for p in g.layer_bytes(level, slot.first_layer).as_chunks::<4>().0 {
+                assert!(p[0].abs_diff(180) <= 1, "level {level}: {p:?}");
+            }
+        }
     }
 }

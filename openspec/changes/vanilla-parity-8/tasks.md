@@ -39,10 +39,10 @@ Scope: mcr-mesh, mcr-render vertex formats.
 
 ## 6. Meshing leftovers
 
-- [ ] 6.1 A1 the model arena grows (or is sized from the render distance) instead of dropping sections; no VRAM regression at render distance 12
-- [ ] 6.2 M9 fluid flow uses the `#blocks_fluid_flow` tag; add harness cases next to signs
-- [ ] 6.3 M10 dark cutout edges on iron bars and door windows; compare with vanilla's sampling and mip generation
-- [ ] 6.4 fmt, clippy, workspace tests, `section_mesh` and `block_model` at 100%
+- [x] 6.1 A1 the model arena grows (or is sized from the render distance) instead of dropping sections; no VRAM regression at render distance 12
+- [x] 6.2 M9 fluid flow uses the `#blocks_fluid_flow` tag; add harness cases next to signs
+- [x] 6.3 M10 dark cutout edges on iron bars and door windows; compare with vanilla's sampling and mip generation
+- [x] 6.4 fmt, clippy, workspace tests, `section_mesh` and `block_model` at 100%
 
 ## 7. Close out
 

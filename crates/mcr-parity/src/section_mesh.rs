@@ -1,8 +1,8 @@
 //! Section meshing: generated 16^3 sections with their one-block border, meshed by vanilla's
 //! `ModelBlockRenderer` and `FluidRenderer` over a level built from the case, and by `mcr-mesh`'s
 //! `Mesher`. Quads compare per render layer as multisets: each layer maps a quad's centre (1/8 block)
-//! to the quads there, sorted, with positions, sprite-local UVs, the vertex colour (tint times
-//! directional shade times AO), packed light and the normal of the winding.
+//! to the quads there, sorted, with positions, sprite-local UVs (within one step), the vertex colour
+//! (tint times directional shade times AO), packed light and the normal of the winding.
 //!
 //! Our quads are decoded the way `terrain.wgsl` expands them; merged fluid tops are split back into
 //! one quad per block. Vanilla's terrain vertex format has no normal, so the facing compared is the
@@ -28,6 +28,9 @@ const STEP: f64 = 1.0 / 1024.0;
 /// Vanilla rounds down at each `ARGB` step (gray, scale, multiply); the shader multiplies floats, and
 /// model quads keep AO in six bits.
 const COLOR_TOLERANCE: f64 = 5.0;
+/// Vanilla's UVs pass through `f32` atlas coordinates (`getU` from `u0`), a few millionths of a sprite
+/// off, which tips values on a rounding boundary one step.
+const UV_TOLERANCE: f64 = STEP;
 /// Sub-pixel offsets on tiny or sloped quads tip one eighth of the winding normal.
 const NORMAL_TOLERANCE: f64 = 1.0;
 /// Keeps pixel-aligned centroids (1/64 steps) off bucket boundaries, so sub-pixel offsets stay paired.
@@ -105,6 +108,27 @@ const BLOCKS: &[(&str, u32)] = &[
     ("seagrass", 2),
     ("kelp", 1),
     ("bubble_column", 1),
+    ("oak_sign", 1),
+    ("spruce_wall_sign", 1),
+    ("cobweb", 1),
+    ("bamboo_sapling", 1),
+];
+
+/// Blocks beside flowing water over water: in `#blocks_fluid_flow` or not (signs, cobweb and the
+/// bamboo sapling are where it and legacy solidity disagree).
+const FLOW_WALLS: &[&str] = &[
+    "oak_sign",
+    "spruce_wall_sign",
+    "birch_hanging_sign",
+    "jungle_wall_hanging_sign",
+    "cobweb",
+    "bamboo_sapling",
+    "torch",
+    "scaffolding",
+    "stone",
+    "oak_fence",
+    "rail",
+    "short_grass",
 ];
 
 #[derive(Debug)]
@@ -161,7 +185,18 @@ fn generate(rng: &mut Rng) -> Value {
     palette.extend(random_state(rng, ground));
     let pick = |rng: &mut Rng| rng.range(1, floor as i64 - 1) as usize;
     let mut cells = vec![0usize; PAD * PAD * PAD];
-    let scene = rng.below(3);
+    let scene = rng.below(4);
+    let water = palette.len();
+    let walls = water + 3;
+    if scene == 3 {
+        for _ in 0..3 {
+            palette.extend(random_state(rng, "water"));
+        }
+        for _ in 0..4 {
+            let wall = *rng.pick(FLOW_WALLS);
+            palette.extend(random_state(rng, wall));
+        }
+    }
     let per_mille = rng.range(3, 25) as u64;
     let height = rng.range(-1, 4) as i32;
     let lo: [i32; 3] = std::array::from_fn(|_| rng.range(-1, 12) as i32);
@@ -173,6 +208,10 @@ fn generate(rng: &mut Rng) -> Value {
         *slot = match scene {
             1 if c[1] < height => floor,
             1 if c[1] == height && rng.chance(8) => pick(rng),
+            3 if c[1] < height - 1 => floor,
+            3 if c[1] == height - 1 => water + rng.below(3),
+            3 if c[1] == height && rng.chance(50) => water + rng.below(3),
+            3 if c[1] == height => walls + rng.below(4),
             2 if inside && rng.chance(70) => pick(rng),
             _ if sprinkle => pick(rng),
             _ => 0,
@@ -466,7 +505,8 @@ pub(crate) fn normalize<'a>(
         let quad = json!({
             "sprite": sprite,
             "n": n,
-            "p": v.iter().map(|x| x[..5].to_vec()).collect::<Vec<_>>(),
+            "p": v.iter().map(|x| x[..3].to_vec()).collect::<Vec<_>>(),
+            "uv": v.iter().map(|x| x[3..5].to_vec()).collect::<Vec<_>>(),
             "c": v.iter().map(|x| x[5..8].to_vec()).collect::<Vec<_>>(),
             "l": v.iter().map(|x| x[8..].to_vec()).collect::<Vec<_>>(),
         });
@@ -582,6 +622,7 @@ impl Harness for SectionMeshHarness {
         match field {
             "c" => COLOR_TOLERANCE,
             "n" => NORMAL_TOLERANCE,
+            "uv" => UV_TOLERANCE,
             _ => 0.0,
         }
     }
@@ -629,7 +670,7 @@ mod tests {
     #[test]
     fn every_listed_block_exists() {
         let version = mcr_data::v26_3();
-        for (name, _) in BLOCKS {
+        for name in BLOCKS.iter().map(|b| b.0).chain(FLOW_WALLS.iter().copied()) {
             assert!(
                 version
                     .block_by_name(&format!("minecraft:{name}"))

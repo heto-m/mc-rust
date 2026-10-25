@@ -5,7 +5,8 @@
 use std::collections::HashMap;
 
 use crate::tables::{
-    Aabb, BlockTable, EntityTable, ItemTable, PropDef, Registry, StateTable, Tables, fluid_bits,
+    Aabb, BlockTable, EntityTable, ItemTable, PropDef, Registry, StateTable, Tables, flag,
+    fluid_bits,
 };
 
 pub const MAX_REGISTRIES: usize = 1024;
@@ -286,6 +287,12 @@ fn fluid_codes(export: &Export, fluid_names: &[String]) -> Result<Vec<u16>, Rebu
         .collect()
 }
 
+/// Tag membership is per block and Java cannot read tags before joining: a base block keeps its own.
+fn base_fluid_flow(base: &Tables, block: u16) -> Option<bool> {
+    let first = *base.blocks.first_state.get(usize::from(block))?;
+    Some(base.states.flags.get(first as usize)? & flag::BLOCKS_FLUID_FLOW != 0)
+}
+
 fn blocks(
     t: &mut Tables,
     export: &Export,
@@ -364,9 +371,23 @@ fn blocks(
         b.prop_start.push(b.props.len() as u32);
         b.default_state.push(first + block.default_state);
         b.first_state.push(first + block.states.len() as u32);
+        let fluid_flow = match base_fluid_flow(t, bid) {
+            Some(tagged) => tagged,
+            None => block
+                .states
+                .iter()
+                .any(|s| s.flags & flag::LEGACY_SOLID != 0),
+        };
         for s in &block.states {
             st.block.push(bid);
-            st.flags.push(s.flags & 0x7ff);
+            st.flags.push(
+                s.flags & 0x7ff
+                    | if fluid_flow {
+                        flag::BLOCKS_FLUID_FLOW
+                    } else {
+                        0
+                    },
+            );
             st.light_emission.push(s.light_emission.min(15));
             st.light_block.push(s.light_block.min(15));
             st.collision.push(shape_index(s.collision)?);
@@ -705,6 +726,38 @@ mod tests {
         let v = base.rebuild(&base.export()).unwrap();
         assert_eq!(v.export(), base.export());
         assert_eq!(v.state_count(), base.state_count());
+    }
+
+    #[test]
+    fn fluid_flow_tag_without_java_tags() {
+        let base = vanilla_26_3();
+        let blocks = |v: &Version, name: &str| {
+            let id = v.block_info(v.block_by_name(name).unwrap()).unwrap();
+            v.block_state(id.default_state).unwrap().blocks_fluid_flow()
+        };
+        let mut e = sample();
+        for b in &mut e.blocks {
+            for s in &mut b.states {
+                s.flags &= !crate::flag::BLOCKS_FLUID_FLOW;
+            }
+        }
+        e.blocks.last_mut().unwrap().states[0].flags |= crate::flag::LEGACY_SOLID;
+        let v = base.rebuild(&e).unwrap();
+        for (name, tagged) in [
+            ("minecraft:stone", true),
+            ("minecraft:oak_sign", true),
+            ("minecraft:cherry_wall_hanging_sign", true),
+            ("minecraft:oak_leaves", true),
+            ("minecraft:scaffolding", false),
+            ("minecraft:torch", false),
+            ("minecraft:air", false),
+            ("test:lamp", true),
+        ] {
+            if base.block_by_name(name).is_some() {
+                assert_eq!(blocks(base, name), tagged, "{name}");
+            }
+            assert_eq!(blocks(&v, name), tagged, "{name}");
+        }
     }
 
     #[test]

@@ -20,7 +20,8 @@ pub mod flag {
     pub const FENCE_GATE: u32 = 1 << 14;
     pub const BUBBLE_COLUMN: u32 = 1 << 15;
     pub const ICE: u32 = 1 << 16;
-    pub const SIGN: u32 = 1 << 17;
+    /// In vanilla's `#blocks_fluid_flow` tag: fluid flow does not look past it.
+    pub const BLOCKS_FLUID_FLOW: u32 = 1 << 17;
     pub const FLUID_FALLING: u32 = 1 << 18;
     pub const FLUID_SOURCE: u32 = 1 << 19;
     pub const WATER_BLOCK: u32 = 1 << 20;
@@ -219,8 +220,8 @@ impl PhysicsData {
                     flags |= flag::SCAFFOLDING_UNSTABLE;
                 }
             }
-            if short.ends_with("_sign") || short.ends_with("_wall_sign") {
-                flags |= flag::SIGN;
+            if info.blocks_fluid_flow() {
+                flags |= flag::BLOCKS_FLUID_FLOW;
             }
             let mut facing = 0u8;
             if short.ends_with("trapdoor") || short == "ladder" {

@@ -96,3 +96,37 @@ Severity: **G** gameplay-breaking, **V** visible, **M** minor.
   pixel difference outside the animated fluids 0.45 (main: 1.23) by day and 0.51 at night; what remains
   is M10.
 
+### Meshing leftovers (batch 6)
+
+- **Arenas grow (A1).** A cube, model or tint allocation that does not fit reallocates that pool at twice
+  its size (at least the request), copies the old buffer on the GPU in its own submit and rebuilds the two
+  geometry bind groups; offsets stay valid, so nothing is re-uploaded. Only the adapter's storage-binding
+  limit (and the tint offset's flag bit) still return `ArenaFull`. Writes already queued for the old buffer
+  land before the copy because the queue flushes them at that submit. No per-frame cost. The app now
+  starts at 4M cube quads, 1M model quads and 8192 tint tables (sized for render distance 16) instead of
+  32M, 4M and 32768. Total GPU memory (`MemoryStats`, 1920x1080, bench world): render distance 12 and 16
+  1155 MB to 323 MB; 32 1155 MB to 899 MB after growing cube twice, model twice and tints twice. GPU
+  frame on the two bench views (render distance 16, 600 frames, median of 3 interleaved runs) 0.203 /
+  0.162 ms before and after.
+- **Fluid flow tag (M9).** `mcr-data-gen` resolves vanilla's `#blocks_fluid_flow` from the data
+  generator's tags into state flag `BLOCKS_FLUID_FLOW` (bit 11); the mesher (`META_BLOCKS_FLUID_FLOW`) and
+  player physics read it. Against legacy solidity it differs on cobweb and the bamboo sapling. Rebuilt
+  (modded) tables keep a vanilla block's bit by id, because the bridge exports registries before tags are
+  bound; modded blocks fall back to legacy solidity. Server-sent tag changes (datapacks) are not applied.
+  The harness gained a scene of flowing water over water beside signs, hanging signs, cobweb, bamboo
+  saplings and other walls; with legacy solidity it drops to 87.25%. Adding signs exposed two more gaps,
+  both fixed: model quads are flat only when exactly coplanar, like `faceCubic` (sign boards light from
+  their own cell), and vanilla's UVs pass through `f32` atlas coordinates, so the section harness compares
+  UVs in a separate `uv` field within one 1/1024 step (positions stay exact).
+- **Cutout edges (M10).** Vanilla `solidify`s cutout sprites before mipping (empty texels take the nearest
+  opaque colour, breadth-first in column order; not under `item/`) and mips with `ARGB.meanLinear`
+  through its 10-bit linear tables. We kept black in empty texels and averaged alpha-weighted sRGB, so
+  where trilinear filtering blends level 0 into level 1 (grazing faces like the iron bars' caps, distant
+  cutouts) the passing samples pulled in black. Both now follow vanilla, and the dark-cutout mips use the
+  same tables. Live check against the vanilla client (headless gamescope, private network namespace,
+  flat world with an iron bars wall and six doors over white concrete, same server camera): close up,
+  702 pixels changed, all toward vanilla (mean gray error on them 25.3 to 7.2), the dark broken seams
+  along the bars' caps are gone; at 21, 57 and 75 blocks the pictures are unchanged to within 16 pixels.
+  From a grazing angle 301 pixels changed, about half toward vanilla; the differences left there and on
+  the door windows are sampling (vanilla's `sampleNearest` on a linear sampler against our hardware
+  nearest, L25), not colour.

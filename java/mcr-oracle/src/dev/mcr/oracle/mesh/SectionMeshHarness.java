@@ -150,18 +150,20 @@ public final class SectionMeshHarness implements Harness {
                 StringBuilder sort = new StringBuilder(spriteName).append(';').append(facing[0]).append(',').append(facing[1])
                         .append(',').append(facing[2]).append(';');
                 JsonArray positions = new JsonArray();
+                JsonArray uvs = new JsonArray();
                 JsonArray colors = new JsonArray();
                 JsonArray lights = new JsonArray();
                 boolean first = true;
                 for (double[] x : r) {
                     JsonArray p = new JsonArray();
+                    JsonArray uv = new JsonArray();
                     for (int c = 0; c < 5; c++) {
                         if (!first) {
                             sort.append(',');
                         }
                         first = false;
                         sort.append((long) (x[c] * 1024.0));
-                        p.add(x[c]);
+                        (c < 3 ? p : uv).add(x[c]);
                     }
                     JsonArray color = new JsonArray();
                     for (int c = 5; c < 8; c++) {
@@ -171,6 +173,7 @@ public final class SectionMeshHarness implements Harness {
                     l.add((int) x[8]);
                     l.add((int) x[9]);
                     positions.add(p);
+                    uvs.add(uv);
                     colors.add(color);
                     lights.add(l);
                 }
@@ -182,6 +185,7 @@ public final class SectionMeshHarness implements Harness {
                 }
                 quad.add("n", normal);
                 quad.add("p", positions);
+                quad.add("uv", uvs);
                 quad.add("c", colors);
                 quad.add("l", lights);
                 layers.computeIfAbsent(recorder.layer, k -> new TreeMap<>()).computeIfAbsent(key, k -> new ArrayList<>())

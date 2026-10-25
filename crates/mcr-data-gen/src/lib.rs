@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -155,6 +155,8 @@ pub struct Inputs {
     pub reports: PathBuf,
     pub extracted: PathBuf,
     pub version_json: PathBuf,
+    /// The data generator's block tags.
+    pub block_tags: PathBuf,
 }
 
 impl Inputs {
@@ -164,8 +166,41 @@ impl Inputs {
             reports: root.join("generated/reports"),
             extracted: root.join("extracted"),
             version_json: root.join("src/version.json"),
+            block_tags: root.join("generated/data/minecraft/tags/block"),
         }
     }
+}
+
+/// The blocks of vanilla tag `name`, nested tags expanded.
+fn block_tag(dir: &Path, name: &str) -> Result<HashSet<String>> {
+    fn walk(
+        dir: &Path,
+        name: &str,
+        seen: &mut HashSet<String>,
+        out: &mut HashSet<String>,
+    ) -> Result<()> {
+        if !seen.insert(name.to_owned()) {
+            return Ok(());
+        }
+        let short = name.strip_prefix("minecraft:").context("non-vanilla tag")?;
+        let tag: Value = read_json(&dir.join(format!("{short}.json")))?;
+        for entry in tag["values"].as_array().context("tag values")? {
+            let id = entry
+                .as_str()
+                .or_else(|| entry["id"].as_str())
+                .context("tag entry")?;
+            match id.strip_prefix('#') {
+                Some(nested) => walk(dir, nested, seen, out)?,
+                None => {
+                    out.insert(id.to_owned());
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut out = HashSet::new();
+    walk(dir, name, &mut HashSet::new(), &mut out)?;
+    Ok(out)
 }
 
 pub fn generate(inputs: &Inputs) -> Result<Vec<u8>> {
@@ -229,6 +264,7 @@ pub fn generate(inputs: &Inputs) -> Result<Vec<u8>> {
         .collect();
 
     let report: Map<String, Value> = read_json(&inputs.reports.join("blocks.json"))?;
+    let fluid_flow = block_tag(&inputs.block_tags, "minecraft:blocks_fluid_flow")?;
     let extracted: ExtractedBlocks = read_json(&inputs.extracted.join("blocks.json"))?;
     ensure!(
         extracted.blocks.len() == block_names.len(),
@@ -308,7 +344,12 @@ pub fn generate(inputs: &Inputs) -> Result<Vec<u8>> {
                 default = Some(s.id);
             }
             check_properties(&block.name, rs, &t, &strings, bid, k as u32)?;
-            push_state(&mut t, &mut shapes, bid as u16, s, &fluid_names)?;
+            let tagged = if fluid_flow.contains(&block.name) {
+                flag::BLOCKS_FLUID_FLOW
+            } else {
+                0
+            };
+            push_state(&mut t, &mut shapes, bid as u16, s, tagged, &fluid_names)?;
             next_state += 1;
         }
         t.blocks
@@ -434,11 +475,12 @@ fn push_state(
     shapes: &mut ShapePool,
     block: u16,
     s: &ExtractedState,
+    tags: u16,
     fluid_names: &[String],
 ) -> Result<()> {
     let st = &mut t.states;
     st.block.push(block);
-    let mut flags = 0;
+    let mut flags = tags;
     for (on, bit) in [
         (s.air, flag::AIR),
         (s.liquid, flag::LIQUID),

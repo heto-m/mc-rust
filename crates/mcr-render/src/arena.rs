@@ -58,6 +58,23 @@ impl Arena {
         Some(offset)
     }
 
+    /// Extends the range to `[0, capacity)`; live offsets stay valid.
+    pub fn grow(&mut self, capacity: u32) {
+        if capacity <= self.capacity {
+            return;
+        }
+        let (mut start, mut len) = (self.capacity, capacity - self.capacity);
+        if let Some((&prev, &prev_len)) = self.by_offset.range(..start).next_back()
+            && prev + prev_len == start
+        {
+            self.remove_free(prev, prev_len);
+            start = prev;
+            len += prev_len;
+        }
+        self.capacity = capacity;
+        self.insert_free(start, len);
+    }
+
     pub fn free(&mut self, offset: u32, size: u32) {
         debug_assert!(offset + size <= self.capacity);
         self.used -= size;
@@ -122,6 +139,25 @@ mod tests {
         assert_eq!(arena.used(), 0);
         assert_eq!(arena.largest_free(), cap);
         assert_eq!(arena.alloc(cap), Some(0));
+    }
+
+    #[test]
+    fn grow_extends_the_trailing_free_range() {
+        let mut arena = Arena::new(10);
+        assert_eq!(arena.alloc(4), Some(0));
+        assert_eq!(arena.alloc(7), None);
+        arena.grow(20);
+        assert_eq!(arena.capacity(), 20);
+        assert_eq!(arena.largest_free(), 16);
+        assert_eq!(arena.alloc(16), Some(4));
+        arena.grow(20);
+        assert_eq!(arena.alloc(1), None);
+        arena.grow(24);
+        assert_eq!(arena.alloc(4), Some(20));
+        arena.free(0, 4);
+        arena.free(4, 16);
+        arena.free(20, 4);
+        assert_eq!(arena.largest_free(), 24);
     }
 
     #[test]

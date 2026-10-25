@@ -380,24 +380,80 @@ fn culling_skips_back_faces_and_offscreen_sections() {
 }
 
 #[test]
-fn arena_exhaustion_keeps_existing_sections() {
-    let Some(mut r) = renderer_with(
-        32,
-        32,
+fn full_arenas_grow_and_keep_every_section() {
+    let (w, h) = (320, 180);
+    let Some(mut roomy) = renderer(w, h) else {
+        return;
+    };
+    let mut tiny = renderer_with(
+        w,
+        h,
         RendererConfig {
             cube_arena_quads: 8,
+            model_arena_quads: 8,
+            ..RendererConfig::default()
+        },
+    )
+    .unwrap();
+    let cam = terrain_camera(DVec3::ZERO);
+    upload_world(&mut roomy, 5, [0; 3]);
+    frame(&mut roomy, &cam);
+    for (i, (k, mesh)) in generate_world(&Terrain { seed: 11 }, 5, 4)
+        .into_iter()
+        .enumerate()
+    {
+        tiny.set_section(k, &mesh).expect("arena grows");
+        if i % 16 == 0 {
+            frame(&mut tiny, &cam);
+        }
+    }
+    frame(&mut tiny, &cam);
+    assert_eq!(tiny.cube_quads_used(), roomy.cube_quads_used());
+    assert_eq!(tiny.model_quads_used(), roomy.model_quads_used());
+    assert!(tiny.memory_stats().model_arena_bytes < roomy.memory_stats().model_arena_bytes);
+    assert!(tiny.read_offscreen().unwrap() == roomy.read_offscreen().unwrap());
+}
+
+#[test]
+fn full_tint_arena_grows_and_keeps_its_tables() {
+    let Some(mut r) = renderer_with(
+        64,
+        64,
+        RendererConfig {
+            tint_tables: 1,
             ..RendererConfig::default()
         },
     ) else {
         return;
     };
-    r.set_section([0, 0, 0], &one_quad_per_face()).unwrap();
-    let err = r.set_section([1, 0, 0], &one_quad_per_face()).unwrap_err();
-    assert!(matches!(err, RenderError::ArenaFull("cube")));
-    assert_eq!(r.cube_quads_used(), 6);
-    r.set_section([0, 0, 0], &SectionMesh::default()).unwrap();
-    assert_eq!(r.cube_quads_used(), 0);
-    r.set_section([1, 0, 0], &one_quad_per_face()).unwrap();
+    r.set_texture_groups(&[flat_group(&[[255, 255, 255, 255]])]);
+    let tinted = |rgb: u32| {
+        let mut table = Box::new([0u32; mcr_render::TINT_TABLE_WORDS]);
+        table[..256].fill(rgb);
+        let mut m = wall(0, 1);
+        m.tints = Some(table);
+        m
+    };
+    let looking_at = |section: f64| Camera {
+        position: DVec3::new(8.0, 8.0, 20.0) + DVec3::splat(section * 16.0),
+        ..Camera::default()
+    };
+    let center = |r: &mut Renderer, section: f64| {
+        frame(r, &looking_at(section));
+        let px = r.read_offscreen().unwrap();
+        let i = (32 * 64 + 32) * 4;
+        [px[i], px[i + 1], px[i + 2]]
+    };
+    r.set_section([0, 0, 0], &tinted(0x00ff00)).unwrap();
+    assert!(center(&mut r, 0.0)[1] > 150);
+    r.set_section([5, 5, 5], &tinted(0xff0000)).unwrap();
+    let first = center(&mut r, 0.0);
+    assert!(
+        first[1] > 150 && first[0] < 10 && first[2] < 10,
+        "{first:?}"
+    );
+    let second = center(&mut r, 5.0);
+    assert!(second[2] > 150 && second[1] < 10, "{second:?}");
 }
 
 #[test]

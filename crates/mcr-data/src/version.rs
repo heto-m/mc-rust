@@ -89,6 +89,10 @@ impl BlockStateInfo {
         self.flags & flag::LEGACY_SOLID != 0
     }
 
+    pub fn blocks_fluid_flow(&self) -> bool {
+        self.flags & flag::BLOCKS_FLUID_FLOW != 0
+    }
+
     /// Face order follows `Direction.ordinal()`: down, up, north, south, west, east.
     pub fn is_face_sturdy(&self, face: usize) -> bool {
         self.sturdy_faces >> face & 1 != 0

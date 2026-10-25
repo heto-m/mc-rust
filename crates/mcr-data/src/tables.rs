@@ -401,6 +401,8 @@ pub mod flag {
     pub const REDSTONE_CONDUCTOR: u16 = 1 << 9;
     /// `BlockStateBase.isSolid`: forced on or off per block, else from the collision bounds.
     pub const LEGACY_SOLID: u16 = 1 << 10;
+    /// In vanilla's `#blocks_fluid_flow` tag: `FlowingFluid.getFlow` does not look past it.
+    pub const BLOCKS_FLUID_FLOW: u16 = 1 << 11;
 }
 
 pub mod fluid_bits {

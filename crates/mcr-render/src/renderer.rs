@@ -297,6 +297,49 @@ fn surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat
     .find(|f| formats.contains(f))
 }
 
+/// The geometry pools that grow on demand, with their units' byte sizes.
+#[derive(Debug, Clone, Copy)]
+enum Pool {
+    Cube,
+    Model,
+    Tint,
+}
+
+impl Pool {
+    fn bytes(self, units: u32) -> u64 {
+        let units = u64::from(units);
+        match self {
+            Pool::Cube => units * PackedQuad::SIZE as u64,
+            Pool::Model => units * ModelQuad::SIZE as u64,
+            Pool::Tint => (TINT_PALETTE_WORDS as u64 + units * TINT_TABLE_WORDS as u64) * 4,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Pool::Cube => "cube",
+            Pool::Model => "model",
+            Pool::Tint => "tint",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Pool::Cube => "cube arena",
+            Pool::Model => "model arena",
+            Pool::Tint => "tints",
+        }
+    }
+}
+
+/// The largest capacity each pool may grow to: one storage binding, and tint offsets below the flag bit.
+#[derive(Debug, Clone, Copy)]
+struct ArenaLimits {
+    cube: u32,
+    model: u32,
+    tint: u32,
+}
+
 struct Geometry {
     sections: wgpu::Buffer,
     cube_arena: wgpu::Buffer,
@@ -361,6 +404,7 @@ pub struct Renderer {
     textures: Vec<wgpu::Texture>,
     dummy_texture: wgpu::Texture,
     tint_arena: Arena,
+    arena_limits: ArenaLimits,
     lightmap: wgpu::Buffer,
     anim_buffer: wgpu::Buffer,
     animations: AnimationTable,
@@ -847,12 +891,16 @@ impl Renderer {
         let adapter_info = adapter.get_info();
 
         let max_binding = al.max_storage_buffer_binding_size.min(al.max_buffer_size);
-        let cube_quads = config
-            .cube_arena_quads
-            .min((max_binding / PackedQuad::SIZE as u64) as u32);
-        let model_quads = config
-            .model_arena_quads
-            .min((max_binding / ModelQuad::SIZE as u64) as u32);
+        let limits = ArenaLimits {
+            cube: (max_binding / PackedQuad::SIZE as u64).min(u64::from(u32::MAX)) as u32,
+            model: (max_binding / ModelQuad::SIZE as u64).min(u64::from(u32::MAX)) as u32,
+            tint: (((max_binding / 4).min(u64::from(MULTI_TINT_TABLES))
+                - TINT_PALETTE_WORDS as u64)
+                / TINT_TABLE_WORDS as u64) as u32,
+        };
+        let cube_quads = config.cube_arena_quads.min(limits.cube);
+        let model_quads = config.model_arena_quads.min(limits.model);
+        let tint_tables = config.tint_tables.min(limits.tint);
 
         let surface = surface_raw.map(|surface| {
             let mut cfg = surface
@@ -904,15 +952,15 @@ impl Renderer {
             ),
             cube_arena: storage_buffer(
                 &device,
-                "cube arena",
-                u64::from(cube_quads) * PackedQuad::SIZE as u64,
-                wgpu::BufferUsages::empty(),
+                Pool::Cube.label(),
+                Pool::Cube.bytes(cube_quads),
+                wgpu::BufferUsages::COPY_SRC,
             ),
             model_arena: storage_buffer(
                 &device,
-                "model arena",
-                u64::from(model_quads) * ModelQuad::SIZE as u64,
-                wgpu::BufferUsages::empty(),
+                Pool::Model.label(),
+                Pool::Model.bytes(model_quads),
+                wgpu::BufferUsages::COPY_SRC,
             ),
             cube_cmds: storage_buffer(
                 &device,
@@ -963,11 +1011,9 @@ impl Renderer {
             ),
             tints: storage_buffer(
                 &device,
-                "tints",
-                (TINT_PALETTE_WORDS as u64
-                    + u64::from(config.tint_tables) * TINT_TABLE_WORDS as u64)
-                    * 4,
-                wgpu::BufferUsages::empty(),
+                Pool::Tint.label(),
+                Pool::Tint.bytes(tint_tables),
+                wgpu::BufferUsages::COPY_SRC,
             ),
             trans_cmds: storage_buffer(
                 &device,
@@ -1106,28 +1152,7 @@ impl Renderer {
                 storage_entry(4, vs | wgpu::ShaderStages::FRAGMENT, true),
             ],
         });
-        let geom_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("geometry"),
-            layout: &geom_bgl,
-            entries: &[
-                bind(0, &geo.cube_arena),
-                bind(1, &geo.model_arena),
-                bind(2, &geo.cube_draws),
-                bind(3, &geo.model_draws),
-                bind(4, &geo.tints),
-            ],
-        });
-        let trans_geom_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("translucent geometry"),
-            layout: &geom_bgl,
-            entries: &[
-                bind(0, &geo.cube_arena),
-                bind(1, &geo.model_arena),
-                bind(2, &geo.trans_draws),
-                bind(3, &geo.trans_draws),
-                bind(4, &geo.tints),
-            ],
-        });
+        let [geom_bg, trans_geom_bg] = geometry_bind_groups(&device, &geom_bgl, &geo);
         let sampler = block_sampler(&device, TextureFilter::default());
         let dummy_texture =
             create_group_texture(&device, &queue, &TextureGroupData::single_pixel());
@@ -1322,7 +1347,8 @@ impl Renderer {
         Ok(Self {
             draw_count_supported: config.allow_draw_count
                 && features.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
-            tint_arena: Arena::new(config.tint_tables),
+            tint_arena: Arena::new(tint_tables),
+            arena_limits: limits,
             lightmap,
             anim_buffer,
             animations: AnimationTable::new(),
@@ -1883,12 +1909,7 @@ impl Renderer {
         let model_total = model_main + translucent_total;
 
         let cube = if cube_total > 0 {
-            Some((
-                self.cube_arena
-                    .alloc(cube_total)
-                    .ok_or(RenderError::ArenaFull("cube"))?,
-                cube_total,
-            ))
+            Some((self.alloc(Pool::Cube, cube_total)?, cube_total))
         } else {
             None
         };
@@ -1898,11 +1919,11 @@ impl Renderer {
             }
         };
         let model = if model_total > 0 {
-            match self.model_arena.alloc(model_total) {
-                Some(o) => Some((o, model_total)),
-                None => {
+            match self.alloc(Pool::Model, model_total) {
+                Ok(o) => Some((o, model_total)),
+                Err(e) => {
                     free_cube(self);
-                    return Err(RenderError::ArenaFull("model"));
+                    return Err(e);
                 }
             }
         } else {
@@ -1912,14 +1933,14 @@ impl Renderer {
             (t.len() / TINT_TABLE_WORDS).clamp(1, MAX_TINT_UNITS) as u32
         });
         let tint = match &mesh.tints {
-            Some(_) => match self.tint_arena.alloc(tint_units) {
-                Some(i) => Some((i, tint_units)),
-                None => {
+            Some(_) => match self.alloc(Pool::Tint, tint_units) {
+                Ok(i) => Some((i, tint_units)),
+                Err(e) => {
                     free_cube(self);
                     if let Some((o, n)) = model {
                         self.model_arena.free(o, n);
                     }
-                    return Err(RenderError::ArenaFull("tint"));
+                    return Err(e);
                 }
             },
             None => None,
@@ -2047,6 +2068,72 @@ impl Renderer {
             },
         );
         Ok(())
+    }
+
+    fn alloc(&mut self, pool: Pool, units: u32) -> Result<u32, RenderError> {
+        loop {
+            let arena = match pool {
+                Pool::Cube => &mut self.cube_arena,
+                Pool::Model => &mut self.model_arena,
+                Pool::Tint => &mut self.tint_arena,
+            };
+            if let Some(offset) = arena.alloc(units) {
+                return Ok(offset);
+            }
+            if !self.grow(pool, units) {
+                return Err(RenderError::ArenaFull(pool.name()));
+            }
+        }
+    }
+
+    /// Reallocates `pool` at twice its size (at least `units` more) and copies it on the GPU, so live
+    /// offsets stay valid; false at the binding limit.
+    fn grow(&mut self, pool: Pool, units: u32) -> bool {
+        let (arena, buffer, limit) = match pool {
+            Pool::Cube => (
+                &mut self.cube_arena,
+                &mut self.geo.cube_arena,
+                self.arena_limits.cube,
+            ),
+            Pool::Model => (
+                &mut self.model_arena,
+                &mut self.geo.model_arena,
+                self.arena_limits.model,
+            ),
+            Pool::Tint => (
+                &mut self.tint_arena,
+                &mut self.geo.tints,
+                self.arena_limits.tint,
+            ),
+        };
+        let old = arena.capacity();
+        let capacity = old
+            .saturating_mul(2)
+            .max(old.saturating_add(units))
+            .min(limit);
+        if capacity <= old {
+            return false;
+        }
+        let grown = storage_buffer(
+            &self.device,
+            pool.label(),
+            pool.bytes(capacity),
+            wgpu::BufferUsages::COPY_SRC,
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("arena growth"),
+            });
+        encoder.copy_buffer_to_buffer(buffer, 0, &grown, 0, Some(pool.bytes(old)));
+        // Writes already queued to the old buffer run first: the queue flushes them before this submit.
+        self.queue.submit([encoder.finish()]);
+        *buffer = grown;
+        arena.grow(capacity);
+        [self.geom_bg, self.trans_geom_bg] =
+            geometry_bind_groups(&self.device, &self.geom_bgl, &self.geo);
+        tracing::debug!(pool = pool.name(), from = old, to = capacity, "arena grown");
+        true
     }
 
     fn release(&mut self, slot: &SectionSlot) {
@@ -3385,6 +3472,30 @@ fn make_cull_bg(
             },
         ],
     })
+}
+
+fn geometry_bind_groups(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    geo: &Geometry,
+) -> [wgpu::BindGroup; 2] {
+    let group = |label, draws: [&wgpu::Buffer; 2]| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout,
+            entries: &[
+                bind(0, &geo.cube_arena),
+                bind(1, &geo.model_arena),
+                bind(2, draws[0]),
+                bind(3, draws[1]),
+                bind(4, &geo.tints),
+            ],
+        })
+    };
+    [
+        group("geometry", [&geo.cube_draws, &geo.model_draws]),
+        group("translucent geometry", [&geo.trans_draws, &geo.trans_draws]),
+    ]
 }
 
 fn bind(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {

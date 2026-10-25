@@ -7,7 +7,7 @@ use mcr_render::{
 
 use crate::cache::{
     ATTR_HALF_TRANSPARENT, ATTR_LEAVES, ATTR_SOLID, FluidKind, LAYER_NONE, MASK_EMPTY, MASK_FULL,
-    StateModel,
+    META_BLOCKS_FLUID_FLOW, StateModel,
 };
 use crate::mesher::{Ctx, Mesher};
 use crate::tint::{TINT_NONE, TINT_WATER};
@@ -96,7 +96,7 @@ pub(crate) fn flow_vector(ctx: &Ctx, kind: FluidKind, cell: [i32; 3], falling: b
         let mut height = if nk == kind { own_height(ctx, n) } else { 0.0 };
         let mut distance = 0.0f32;
         if height == 0.0 {
-            if ctx.attr(n) & ATTR_SOLID == 0 {
+            if ctx.meta(n) & META_BLOCKS_FLUID_FLOW == 0 {
                 let below = add(n, DOWN);
                 let bk = kind_at(ctx, below);
                 if bk == FluidKind::None || bk == kind {

@@ -78,10 +78,6 @@ pub fn camera_in_lava<W: CollisionWorld + ?Sized>(
         && pos[1] <= f64::from(p[1]) + f64::from(camera_fluid_height(w, data, p, s))
 }
 
-fn blocks_fluid_flow(s: &StateInfo) -> bool {
-    s.has_collision() || s.has(flag::SIGN)
-}
-
 impl PlayerPhysics {
     pub(crate) fn fluid_height_at<W: CollisionWorld + ?Sized>(
         &self,
@@ -121,7 +117,7 @@ impl PlayerPhysics {
             let mut nh = ns.own_fluid_height();
             let mut dist = 0.0f32;
             if nh == 0.0 {
-                if !blocks_fluid_flow(ns) {
+                if !ns.has(flag::BLOCKS_FLUID_FLOW) {
                     let below = self.state_at(w, [np[0], np[1] - 1, np[2]]);
                     if below.fluid == FLUID_NONE || below.fluid == group {
                         nh = below.own_fluid_height();
