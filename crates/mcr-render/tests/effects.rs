@@ -195,6 +195,29 @@ fn cloud_and_weather_screenshots() {
 }
 
 #[test]
+fn fancy_clouds_use_their_own_depth_with_improved_transparency() {
+    let Some(mut r) = renderer() else { return };
+    let mut inside = scene(
+        "clouds_inside_oit_off",
+        Environment::overworld(6000, 0.0, 0.0),
+    );
+    inside.pos.y = 193.0;
+    inside.pitch = -0.1;
+    let classic = shoot(&mut r, &inside);
+    r.set_improved_transparency(true);
+    inside.name = "clouds_inside_oit_on";
+    let improved = shoot(&mut r, &inside);
+    let (a, b) = (mean(&classic, 0..H), mean(&improved, 0..H));
+    assert!(a != b, "the clouds still draw");
+    for c in 0..3 {
+        assert!(
+            b[c] <= a[c] + 1.0,
+            "only the nearest face shades a pixel, so it is never brighter than the stacked faces: {a:?} {b:?}"
+        );
+    }
+}
+
+#[test]
 fn hidden_weather_keeps_the_rainy_sky() {
     let Some(mut r) = renderer() else { return };
     let mut rain = scene("rain_columns", Environment::overworld(6000, 1.0, 0.0));

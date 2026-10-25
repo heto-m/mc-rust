@@ -45,6 +45,16 @@ impl ServerVersion {
     }
 }
 
+/// The wire to join with after probing: a server that closes the status connection (a managed
+/// world opened to LAN answers none) is taken as current, like vanilla, which never pings to join.
+pub(crate) fn auto_wire(probed: Result<ServerVersion>) -> Result<Wire> {
+    match probed {
+        Ok(version) => version.wire(),
+        Err(ClientError::Connection(_)) => Ok(Wire::Canonical),
+        Err(e) => Err(e),
+    }
+}
+
 /// Pings `host:port` with the status protocol and returns the version it reports.
 pub fn probe(host: &str, port: u16, timeout: Duration) -> Result<ServerVersion> {
     let ids = PacketIds::v26_3();
@@ -126,6 +136,22 @@ mod tests {
             protocol: 777,
         };
         assert!(canonical.wire().unwrap().is_canonical());
+    }
+
+    #[test]
+    fn a_server_that_closes_the_status_ping_is_joined_as_current() {
+        let closed = Err(ClientError::Connection("connection closed by peer".into()));
+        assert!(auto_wire(closed).unwrap().is_canonical());
+        let silent = Err(ClientError::Timeout("reading the server's status"));
+        assert!(matches!(auto_wire(silent), Err(ClientError::Timeout(_))));
+        let old = ServerVersion {
+            name: "1.8".into(),
+            protocol: 47,
+        };
+        assert!(matches!(
+            auto_wire(Ok(old)),
+            Err(ClientError::UnsupportedServer { .. })
+        ));
     }
 
     #[test]

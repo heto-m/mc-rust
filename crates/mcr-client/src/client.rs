@@ -133,9 +133,11 @@ impl Client {
                 protocol,
             }
             .wire()?,
-            WireChoice::Auto => {
-                crate::probe(&config.host, config.port, config.connect_timeout)?.wire()?
-            }
+            WireChoice::Auto => crate::probe::auto_wire(crate::probe(
+                &config.host,
+                config.port,
+                config.connect_timeout,
+            ))?,
         };
         if !wire.is_canonical() && (hooks.relay.is_some() || hooks.frame_tap.is_some()) {
             return Err(ClientError::ModModeNeedsCanonical(

@@ -4,6 +4,7 @@ use super::edit_box::EditBox;
 use super::env::{Env, RenderCx};
 use super::input::{Key, UiInput, contains};
 use super::lan_screen::{LanSettings, PortCheck};
+use super::list::ScrollList;
 use super::menus::{WHITE, draw_dim_background};
 use super::restrictions::{ChatLimit, RestrictionsScreen};
 use super::screen::{Screen, ScreenAction};
@@ -23,6 +24,9 @@ const RESTRICTIONS: u32 = 11;
 const GUEST_COMMANDS: u32 = 12;
 const FORCE_MODE: u32 = 13;
 const MIN_PORT: u16 = 1024;
+const VIEW_TOP: i32 = 31;
+const FOOTER: i32 = 28;
+const BAR_GAP: i32 = 6;
 const ERROR: u32 = 0xFFFF_5555;
 const HEADER: &str = "§n§l";
 
@@ -79,6 +83,9 @@ pub struct WorldOptionsChange {
 
 pub struct WorldOptionsScreen {
     widgets: WidgetSet,
+    footer: WidgetSet,
+    base: Vec<(u32, [i32; 4])>,
+    list: ScrollList,
     gui: (i32, i32),
     mouse: (f32, f32),
     init: WorldOptionsInit,
@@ -113,6 +120,9 @@ impl WorldOptionsScreen {
         let local = init.local;
         Self {
             widgets: WidgetSet::default(),
+            footer: WidgetSet::default(),
+            base: Vec::new(),
+            list: ScrollList::new([0; 4], 1),
             gui: (0, 0),
             mouse: (0.0, 0.0),
             wanted: Wanted {
@@ -340,8 +350,47 @@ impl WorldOptionsScreen {
                 .into(),
             );
         }
-        if let Some(b) = w.button_mut(APPLY) {
+        if let Some(b) = self.footer.button_mut(APPLY) {
             b.active = apply;
+        }
+    }
+
+    fn view(&self) -> [i32; 4] {
+        [0, VIEW_TOP, self.gui.0, self.gui.1 - FOOTER - VIEW_TOP]
+    }
+
+    fn bar_x(&self) -> i32 {
+        self.gui.0 / 2 + 155 + BAR_GAP
+    }
+
+    fn scroll_y(&self) -> i32 {
+        self.list.scroll() as i32
+    }
+
+    /// Moves the content widgets to their unscrolled row, less the scroll.
+    fn place_content(&mut self) {
+        let scroll = self.scroll_y();
+        for &(id, [x, y, w, h]) in &self.base {
+            if let Some(widget) = self.widgets.find_mut(id) {
+                widget.set_rect([x, y - scroll, w, h]);
+            }
+        }
+    }
+
+    fn scroll_to_focus(&mut self) {
+        let Some(id) = self.widgets.focused() else {
+            return;
+        };
+        let Some(&(_, [_, y, _, h])) = self.base.iter().find(|(i, _)| *i == id) else {
+            return;
+        };
+        let view = self.view();
+        let (top, bottom) = (y - VIEW_TOP, y + h - VIEW_TOP + 8);
+        let scroll = self.list.scroll();
+        if (top as f32) < scroll {
+            self.list.set_scroll(top as f32);
+        } else if bottom as f32 > scroll + view[3] as f32 {
+            self.list.set_scroll((bottom - view[3]) as f32);
         }
     }
 
@@ -356,7 +405,10 @@ impl WorldOptionsScreen {
         } else {
             match text.parse::<u16>().ok().filter(|p| *p >= MIN_PORT) {
                 None => (None, Some("lanServer.port.invalid")),
-                Some(p) if self.check.as_ref().is_some_and(|c| !c(p)) => {
+                Some(p)
+                    if self.init.local.and_then(|l| l.lan_port) != Some(p)
+                        && self.check.as_ref().is_some_and(|c| !c(p)) =>
+                {
                     (None, Some("lanServer.port.unavailable"))
                 }
                 Some(p) => (Some(p), None),
@@ -375,6 +427,7 @@ impl Screen for WorldOptionsScreen {
         self.gui = (width, height);
         let keep = self.widgets.edit(PORT).map(|e| e.value().to_owned());
         self.widgets.clear();
+        self.footer.clear();
         let left = width / 2 - 155;
         let right = width / 2 + 5;
         let mut y = 46;
@@ -466,16 +519,43 @@ impl Screen for WorldOptionsScreen {
                 usize::from(!self.wanted.force_game_mode),
             ));
         }
-        self.widgets.add(Button::new(
+        self.footer.add(Button::new(
             APPLY,
             [left, height - 28, 150, 20],
             "lang:menu.multiplayerOptions.applyChanges",
         ));
-        self.widgets.add(Button::new(
+        self.footer.add(Button::new(
             CANCEL,
             [right, height - 28, 150, 20],
             "lang:gui.cancel",
         ));
+        self.base = [
+            DEFAULT_MODE,
+            PERSONAL_MODE,
+            ALLOW_COMMANDS,
+            DIFFICULTY,
+            LOCK,
+            GAME_RULES,
+            RESTRICTIONS,
+            LAN,
+            PORT,
+            GUEST_COMMANDS,
+            FORCE_MODE,
+        ]
+        .into_iter()
+        .filter_map(|id| Some((id, self.widgets.find(id)?.rect())))
+        .collect();
+        let bottom = self
+            .base
+            .iter()
+            .map(|(_, r)| r[1] + r[3])
+            .max()
+            .unwrap_or(0);
+        let view = self.view();
+        self.list.set_rect(view);
+        self.list
+            .set_count(usize::try_from(bottom - VIEW_TOP - 8).unwrap_or(0));
+        self.place_content();
         self.read_port();
         self.sync();
     }
@@ -485,8 +565,11 @@ impl Screen for WorldOptionsScreen {
         let center = self.gui.0 / 2;
         let title = cx.lang("options.worldOptions.title");
         cx.centered_text(&title, center, 12, WHITE, true);
+        let scroll = self.scroll_y();
+        let [vx, vy, vw, vh] = self.view();
+        cx.frame.push_scissor(vx, vy, vx + vw, vy + vh);
         let general = format!("{HEADER}{}", cx.lang("options.worldOptions.general.title"));
-        cx.centered_text(&general, center, 32, WHITE, true);
+        cx.centered_text(&general, center, 32 - scroll, WHITE, true);
         if self.init.local.is_some() {
             let top = self.widgets.find(LAN).map_or(0, |w| w.rect()[1]) - 14;
             let multiplayer = format!(
@@ -521,6 +604,9 @@ impl Screen for WorldOptionsScreen {
             (true, false) => base.to_owned(),
         };
         cx.sprite(&sprite, rect[0], rect[1], rect[2], rect[3]);
+        cx.frame.pop_scissor();
+        self.list.render_scrollbar(cx, self.bar_x());
+        self.footer.render(cx);
     }
 
     fn input(&mut self, env: &mut Env<'_>, input: &UiInput, out: &mut Vec<ScreenAction>) -> bool {
@@ -540,8 +626,20 @@ impl Screen for WorldOptionsScreen {
         {
             return true;
         }
+        let bar_x = self.bar_x();
+        let scrolled = self.list.input(input, bar_x);
+        if scrolled {
+            self.place_content();
+        }
+        let outside =
+            matches!(*input, UiInput::MousePress { x, y, .. } if !contains(self.view(), x, y));
         let mut events = Vec::new();
-        let used = self.widgets.input(env, input, &mut events);
+        let mut used = scrolled || self.footer.input(env, input, &mut events);
+        if !scrolled && !outside {
+            used |= self.widgets.input(env, input, &mut events);
+        }
+        self.scroll_to_focus();
+        self.place_content();
         for WidgetEvent { id, kind } in events {
             match (id, kind) {
                 (DEFAULT_MODE, WidgetEventKind::Cycled(i)) => {

@@ -724,7 +724,9 @@ fn depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         })
         .create_view(&wgpu::TextureViewDescriptor::default())
@@ -2965,6 +2967,7 @@ impl Renderer {
             })
         });
         let effects = self.effects.has_oit_work();
+        let cloud_pass = self.effects.oit_cloud_pass();
         let ts = |begin: Option<u32>, end: Option<u32>| {
             self.timestamps
                 .as_ref()
@@ -3028,6 +3031,37 @@ impl Renderer {
                     pass.set_bind_group(2, &oit.targets.stage_groups[i], &[]);
                     self.effects.draw_oit(&mut pass, stage);
                 }
+            }
+            if cloud_pass {
+                if stage == OitStage::DepthBounds {
+                    encoder.copy_texture_to_texture(
+                        self.depth_view.texture().as_image_copy(),
+                        oit.targets.cloud_depth.texture().as_image_copy(),
+                        wgpu::Extent3d {
+                            width: self.size.0,
+                            height: self.size.1,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("oit clouds"),
+                    color_attachments: &oit.targets.attachments_loaded(stage),
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &oit.targets.cloud_depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_bind_group(0, &self.globals_bg, &[]);
+                pass.set_bind_group(2, &oit.targets.stage_groups[i], &[]);
+                self.effects.draw_oit_clouds(&mut pass, stage);
             }
             if stage == OitStage::DepthBounds {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

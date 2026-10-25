@@ -60,9 +60,13 @@ impl OitStage {
 
     /// Depth tested against the opaque world, never written.
     pub fn depth_state() -> wgpu::DepthStencilState {
+        Self::depth_state_writing(false)
+    }
+
+    fn depth_state_writing(write: bool) -> wgpu::DepthStencilState {
         wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
-            depth_write_enabled: Some(false),
+            depth_write_enabled: Some(write),
             depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
             stencil: Default::default(),
             bias: Default::default(),
@@ -95,6 +99,16 @@ pub struct OitPipelineDesc<'a> {
 
 impl OitPipelineDesc<'_> {
     pub fn build(&self, device: &wgpu::Device) -> [wgpu::RenderPipeline; 3] {
+        self.build_with(device, false)
+    }
+
+    /// Like [`Self::build`], but the depth bounds stage writes depth, for a surface drawn into its own
+    /// depth target so that only its nearest fragment passes the later stages.
+    pub fn build_nearest_only(&self, device: &wgpu::Device) -> [wgpu::RenderPipeline; 3] {
+        self.build_with(device, true)
+    }
+
+    fn build_with(&self, device: &wgpu::Device, nearest_only: bool) -> [wgpu::RenderPipeline; 3] {
         OitStage::ALL.map(|stage| {
             let entry = format!("{}_{}", self.fragment, stage.suffix());
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -109,7 +123,7 @@ impl OitPipelineDesc<'_> {
                 primitive: self.primitive,
                 depth_stencil: Some(wgpu::DepthStencilState {
                     bias: self.bias,
-                    ..OitStage::depth_state()
+                    ..OitStage::depth_state_writing(nearest_only && stage == OitStage::DepthBounds)
                 }),
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
@@ -193,12 +207,33 @@ fn target(
         .create_view(&Default::default())
 }
 
+fn depth_target(device: &wgpu::Device, (width, height): (u32, u32)) -> wgpu::TextureView {
+    device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("oit cloud depth"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+        .create_view(&Default::default())
+}
+
 /// The screen-sized targets and the per-stage bind groups.
 pub(crate) struct OitTargets {
     pub bounds: wgpu::TextureView,
     pub culled: wgpu::TextureView,
     pub coeffs: [wgpu::TextureView; 2],
     pub accum: wgpu::TextureView,
+    /// The opaque depth, then the nearest cloud face; fancy clouds draw against it.
+    pub cloud_depth: wgpu::TextureView,
     /// Bound while the stage of the same index draws; a target is never bound while it is written.
     pub stage_groups: [wgpu::BindGroup; 3],
     pub cull_group: wgpu::BindGroup,
@@ -348,6 +383,7 @@ impl OitShared {
             ],
             cull_group: group([&bounds, d, d, d]),
             composite_group: group([&bounds, &coeffs[0], &coeffs[1], &accum]),
+            cloud_depth: depth_target(device, size),
             bounds,
             culled,
             coeffs,
@@ -359,13 +395,33 @@ impl OitShared {
 impl OitTargets {
     /// The colour attachments a stage writes, cleared first.
     pub fn attachments(&self, stage: OitStage) -> Vec<Option<wgpu::RenderPassColorAttachment<'_>>> {
+        self.stage_attachments(stage, true)
+    }
+
+    /// The same attachments, keeping what earlier passes of the stage wrote.
+    pub fn attachments_loaded(
+        &self,
+        stage: OitStage,
+    ) -> Vec<Option<wgpu::RenderPassColorAttachment<'_>>> {
+        self.stage_attachments(stage, false)
+    }
+
+    fn stage_attachments(
+        &self,
+        stage: OitStage,
+        clear_first: bool,
+    ) -> Vec<Option<wgpu::RenderPassColorAttachment<'_>>> {
         let clear = |view, color| {
             Some(wgpu::RenderPassColorAttachment {
                 view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(color),
+                    load: if clear_first {
+                        wgpu::LoadOp::Clear(color)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })

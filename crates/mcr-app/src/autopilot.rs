@@ -55,6 +55,8 @@ pub enum Step {
         dx: f64,
         dy: f64,
     },
+    /// A window file drop, through the same entry point as winit's.
+    Drop(PathBuf),
     SlotClick {
         slot: usize,
         right: bool,
@@ -197,6 +199,7 @@ pub fn parse(text: &str) -> Result<Vec<Step>, String> {
                     right: it.next() == Some("right"),
                 }
             }
+            "drop" => Step::Drop(std::path::absolute(rest).unwrap_or_else(|_| rest.into())),
             "sleep" => Step::Sleep(rest.parse().map_err(|_| err("sleep needs ticks"))?),
             "slot" => Step::Slot(rest.parse().map_err(|_| err("slot 1-9"))?),
             "shot" => Step::Shot(std::path::absolute(rest).unwrap_or_else(|_| rest.into())),
@@ -410,6 +413,7 @@ impl Autopilot {
                 ),
                 Step::Wheel(lines) => sh.wheel(0.0, f64::from(lines), lines),
                 Step::Motion { dx, dy } => sh.mouse_motion(dx, dy),
+                Step::Drop(path) => sh.dropped_file(&path),
                 Step::SlotClick { slot, right } => {
                     if let Some(play) = &mut sh.play {
                         let button = if right {
@@ -536,6 +540,10 @@ mod tests {
             [Step::Hover { x: 12.0, y: 34.5 }]
         );
         assert!(parse("hover 12").is_err());
+        assert_eq!(
+            parse("drop /tmp/pack").unwrap(),
+            [Step::Drop(PathBuf::from("/tmp/pack"))]
+        );
         assert_eq!(
             parse("down 1 2\nup 3 4 right\nwheel -1.5").unwrap(),
             [

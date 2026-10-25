@@ -973,7 +973,18 @@ impl Shell {
         }
         self.sp_was_paused = paused;
         if let Some(sp) = &mut self.sp {
-            sp.sync_guests();
+            let online: Vec<String> = match &self.play {
+                Some(play) if sp.lan_port().is_some() => play
+                    .world
+                    .client
+                    .state
+                    .players
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect(),
+                _ => Vec::new(),
+            };
+            sp.sync_guests(&online);
             if let Some(play) = &mut self.play {
                 play.host = sp.host_options();
                 play.lan_open = play.host.lan_port.is_some();

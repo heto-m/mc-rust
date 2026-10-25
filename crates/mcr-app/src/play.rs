@@ -629,6 +629,9 @@ pub struct Play {
     debug_on: bool,
     debug_keys: crate::debug_keys::DebugKeys,
     debug_entries: mcr_ui::DebugEntries,
+    known_speed: f64,
+    speed_feet: [f64; 3],
+    gpu_ms: Option<f32>,
     fps_charts: bool,
     network_charts: bool,
     lightmap_texture: bool,
@@ -841,6 +844,9 @@ impl Play {
             debug_on: false,
             debug_keys: Default::default(),
             debug_entries: crate::debug_tools::load_entries(&cfg.game_dir),
+            known_speed: 0.0,
+            speed_feet: [0.0; 3],
+            gpu_ms: None,
             fps_charts: false,
             network_charts: false,
             lightmap_texture: false,
@@ -1098,6 +1104,12 @@ impl Play {
         if let Err(e) = self.world.tick(&input) {
             self.fail(&e);
         }
+        let feet = self.feet();
+        self.known_speed = (0..3)
+            .map(|a| (feet[a] - self.speed_feet[a]).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        self.speed_feet = feet;
         self.update_eye();
         if self.spectate_view.is_some() && input.sneak {
             self.world.client.state.camera_entity = None;
@@ -4202,25 +4214,41 @@ impl Play {
         let shows_text = self.debug_entries.any_text_enabled(self.debug_on, reduced);
         let debug = (self.debug_on || shows_text).then(|| {
             let on = |id: &str| self.debug_entries.enabled(id, self.debug_on, reduced);
-            let mut overlay = debug::build(
-                &DebugInput {
-                    state: &self.world.client.state,
-                    data: self.data,
-                    feet: self.feet(),
-                    yaw: self.yaw,
-                    pitch: self.pitch,
-                    target: self.target,
-                    fps: self.fps,
-                    frame_ms: self.frame_ms,
-                    pipeline: self.render.stats(),
-                    tick: self.ticks,
-                    adapter: &self.render.renderer.adapter_info().name,
-                    size,
-                    memory_mb: debug::resident_mb(),
-                    meshed_columns: self.world.loaded_count(),
-                },
-                &on,
-            );
+            let mut overlay =
+                debug::build(
+                    &DebugInput {
+                        state: &self.world.client.state,
+                        data: self.data,
+                        feet: self.feet(),
+                        yaw: self.yaw,
+                        pitch: self.pitch,
+                        options: &self.options,
+                        target: self.target,
+                        fluid_target: self.world.client.state.fluid_pick(20.0).filter(|_| {
+                            on("looking_at_fluid_state") || on("looking_at_fluid_tags")
+                        }),
+                        speed: self.known_speed,
+                        fps: self.fps,
+                        frame_ms: self.frame_ms,
+                        gpu_percent: self
+                            .gpu_ms
+                            .map(|gpu| gpu / self.frame_ms.max(1.0e-3) * 100.0),
+                        pipeline: self.render.stats(),
+                        tick: self.ticks,
+                        adapter: self.render.renderer.adapter_info(),
+                        size,
+                        memory_mb: debug::resident_mb(),
+                        meshed_columns: self.world.loaded_count(),
+                        particles: self.effects.particles.count(),
+                        post_effects: &self.post_chains,
+                        sound: self.audio.as_ref().map(|audio| debug::SoundDebug {
+                            channels: audio.debug_channels(),
+                            mood: self.ambience.moodiness(),
+                            cache: audio.cache_stats(),
+                        }),
+                    },
+                    &on,
+                );
             if self.debug_on {
                 overlay.pie = self.profiler_chart.then(|| self.profiler_pie());
                 overlay.charts = self.debug_charts();
@@ -4424,6 +4452,9 @@ impl Play {
             self.render.renderer.request_capture();
         }
         let stats = self.render.draw_with(&camera, 1.0, Some(&mut overlay));
+        if let Some(gpu) = stats.as_ref().and_then(|s| s.gpu) {
+            self.gpu_ms = Some(gpu.frame_ms);
+        }
         self.sections.lap(crate::debug_tools::SECTION_DRAW);
         if self.spectate_view.is_none() {
             let (yaw, pitch) = self.shown_look(&camera);

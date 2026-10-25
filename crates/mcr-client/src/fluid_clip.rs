@@ -143,6 +143,12 @@ impl ClientState {
         None
     }
 
+    /// `Entity#pick(range, 0, true)`: the cell the eye ray meets first, block or fluid.
+    pub fn fluid_pick(&self, range: f64) -> Option<(BlockPos, u32)> {
+        let hit = self.clip_from_eye(ClipFluid::Any, range)?;
+        Some((hit.pos, hit.state))
+    }
+
     /// Whether `BucketItem#use` or `BoatItem#use` of `item` succeeds (and swings) where the player looks.
     pub(crate) fn fluid_item_succeeds(&self, item: &str) -> bool {
         let item = short(item);

@@ -857,8 +857,12 @@ impl Effects {
             bind_group_layouts: &[Some(globals_bgl), Some(&self.bgl), Some(info.layout)],
             immediate_size: 0,
         });
-        let build = |label: &str, vertex: &str, fragment: &str, cull: Option<wgpu::Face>| {
-            crate::oit::OitPipelineDesc {
+        let build_with = |label: &str,
+                          vertex: &str,
+                          fragment: &str,
+                          cull: Option<wgpu::Face>,
+                          nearest_only: bool| {
+            let desc = crate::oit::OitPipelineDesc {
                 label,
                 layout: &layout,
                 module: &module,
@@ -871,13 +875,25 @@ impl Effects {
                 bias: Default::default(),
                 fragment,
                 bounds_format: info.bounds_format,
+            };
+            if nearest_only {
+                desc.build_nearest_only(device)
+            } else {
+                desc.build(device)
             }
-            .build(device)
         };
+        let build =
+            |label, vertex, fragment, cull| build_with(label, vertex, fragment, cull, false);
         self.oit = Some(OitPipelines {
             border: build("world border oit", "vs_quad", "fs_border", None),
             weather: build("weather oit", "vs_quad", "fs_weather", None),
-            clouds_fancy: build("clouds oit", "vs_cloud", "fs_cloud", Some(wgpu::Face::Back)),
+            clouds_fancy: build_with(
+                "clouds oit",
+                "vs_cloud",
+                "fs_cloud",
+                Some(wgpu::Face::Back),
+                true,
+            ),
             clouds_flat: build("flat clouds oit", "vs_cloud", "fs_cloud", None),
         });
     }
@@ -888,6 +904,7 @@ impl Effects {
         self.draw_translucent(
             pass,
             [&p.border, &p.weather, &p.clouds_fancy, &p.clouds_flat],
+            true,
         );
     }
 
@@ -903,7 +920,8 @@ impl Effects {
         }
     }
 
-    /// The border, weather and clouds in one improved transparency stage; group 2 is bound by the caller.
+    /// The border, weather and flat clouds in one improved transparency stage; group 2 is bound by the
+    /// caller. Fancy clouds draw in [`Self::draw_oit_clouds`], against their own depth.
     pub(crate) fn draw_oit(&self, pass: &mut wgpu::RenderPass<'_>, stage: crate::oit::OitStage) {
         let Some(o) = &self.oit else {
             return;
@@ -917,7 +935,29 @@ impl Effects {
                 &o.clouds_fancy[i],
                 &o.clouds_flat[i],
             ],
+            !self.oit_cloud_pass(),
         );
+    }
+
+    /// Whether fancy clouds draw in a pass of their own, with their own depth target.
+    pub(crate) fn oit_cloud_pass(&self) -> bool {
+        self.groups.is_some()
+            && self.plan.clouds
+            && self.cloud_settings.mode == CloudMode::Fancy
+            && self.oit.is_some()
+    }
+
+    pub(crate) fn draw_oit_clouds(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        stage: crate::oit::OitStage,
+    ) {
+        let (Some(o), Some(g)) = (&self.oit, &self.groups) else {
+            return;
+        };
+        pass.set_pipeline(&o.clouds_fancy[stage.index()]);
+        pass.set_bind_group(1, &g.clouds, &[(slot::CLOUDS as u64 * SLOT) as u32]);
+        pass.draw(0..self.clouds.quads * 6, 0..1);
     }
 
     pub(crate) fn has_oit_work(&self) -> bool {
@@ -929,6 +969,7 @@ impl Effects {
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         pipelines: [&wgpu::RenderPipeline; 4],
+        fancy_clouds: bool,
     ) {
         let (Some(g), p) = (&self.groups, &self.plan) else {
             return;
@@ -951,12 +992,9 @@ impl Effects {
                 pass.draw(p.rain * 6..(p.rain + p.snow) * 6, 0..1);
             }
         }
-        if p.clouds {
-            pass.set_pipeline(if self.cloud_settings.mode == CloudMode::Fancy {
-                clouds_fancy
-            } else {
-                clouds_flat
-            });
+        let fancy = self.cloud_settings.mode == CloudMode::Fancy;
+        if p.clouds && (fancy_clouds || !fancy) {
+            pass.set_pipeline(if fancy { clouds_fancy } else { clouds_flat });
             pass.set_bind_group(1, &g.clouds, &at(slot::CLOUDS));
             pass.draw(0..self.clouds.quads * 6, 0..1);
         }

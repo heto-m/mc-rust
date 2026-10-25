@@ -620,3 +620,74 @@ fn world_options_restrictions_button_opens_the_screen() {
     let out = send(&mut screen, &NoView, &click(213.0 + 5.0 + 75.0, 128.0));
     assert!(out.iter().any(|a| matches!(a, ScreenAction::Push(_))));
 }
+
+#[test]
+fn world_options_scroll_when_the_rows_do_not_fit() {
+    let mut screen = mcr_ui::WorldOptionsScreen::new(mcr_ui::WorldOptionsInit {
+        difficulty: 1,
+        difficulty_locked: false,
+        hardcore: false,
+        gamemaster: true,
+        chat_limit: mcr_ui::ChatLimit::None,
+        local: Some(mcr_ui::LocalWorldOptions {
+            default_mode: 0,
+            personal_mode: 0,
+            allow_commands: true,
+            lan_port: None,
+            guest_commands: false,
+            force_game_mode: true,
+        }),
+    });
+    screen.init(W, 140);
+    let lan_x = 213.0 - 155.0 + 75.0;
+    send(&mut screen, &NoView, &click(lan_x, 176.0));
+    assert!(
+        screen.change().lan.is_none(),
+        "the LAN row is below the view"
+    );
+    let wheel = UiInput::Scroll {
+        x: 213.0,
+        y: 80.0,
+        dx: 0.0,
+        dy: -10.0,
+        mods: mcr_ui::Modifiers::NONE,
+    };
+    send(&mut screen, &NoView, &[wheel]);
+    let apply = (213.0 - 155.0 + 75.0, (140 - 28 + 10) as f32);
+    send(&mut screen, &NoView, &click(lan_x, 78.0));
+    assert!(screen.change().lan.is_some(), "scrolled to the bottom row");
+    assert!(
+        send(&mut screen, &NoView, &click(apply.0, apply.1))
+            .iter()
+            .any(|a| matches!(a, ScreenAction::ApplyWorldOptions(_)))
+    );
+}
+
+#[test]
+fn world_options_do_not_flag_the_port_the_world_is_already_shared_on() {
+    let init = mcr_ui::WorldOptionsInit {
+        difficulty: 1,
+        difficulty_locked: false,
+        hardcore: false,
+        gamemaster: true,
+        chat_limit: mcr_ui::ChatLimit::None,
+        local: Some(mcr_ui::LocalWorldOptions {
+            default_mode: 0,
+            personal_mode: 0,
+            allow_commands: true,
+            lan_port: Some(25570),
+            guest_commands: false,
+            force_game_mode: true,
+        }),
+    };
+    let mut screen = mcr_ui::WorldOptionsScreen::new(init).with_port_check(Box::new(|_| false));
+    screen.init(W, H);
+    send(&mut screen, &NoView, &click(213.0 - 155.0 + 150.0, 56.0));
+    let apply = (213.0 - 155.0 + 75.0, (H - 28 + 10) as f32);
+    assert!(
+        send(&mut screen, &NoView, &click(apply.0, apply.1))
+            .iter()
+            .any(|a| matches!(a, ScreenAction::ApplyWorldOptions(_))),
+        "the open port is not reported as taken"
+    );
+}

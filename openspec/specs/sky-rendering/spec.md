@@ -50,3 +50,11 @@ fog, End flashes and the flat-world horizon.
 #### Scenario: Swamp water
 - **WHEN** the camera is underwater in a swamp
 - **THEN** the fog colour is the swamp water fog colour
+
+### Requirement: Cloud depth with improved transparency
+With improved transparency on, fancy clouds SHALL use their own depth target so only the nearest cloud
+face contributes to a pixel.
+
+#### Scenario: Looking through a cloud
+- **WHEN** the camera looks up through a fancy cloud with improved transparency on
+- **THEN** only the nearest cloud face shades each pixel

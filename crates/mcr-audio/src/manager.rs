@@ -67,6 +67,15 @@ impl SoundManager {
         self.last_range
     }
 
+    /// Decoded buffers held and their size in bytes.
+    pub fn cache_stats(&self) -> (usize, usize) {
+        (self.cache.len(), self.cache.bytes())
+    }
+
+    pub fn active_voices(&self) -> usize {
+        self.handle.active_voices()
+    }
+
     pub fn handle(&mut self) -> &mut AudioHandle {
         &mut self.handle
     }

@@ -644,6 +644,16 @@ pub(crate) fn plain_player(name: &str) -> bool {
     (1..=16).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// The gate's guests that are in the world, under the name they joined with: `op` and `gamemode`
+/// resolve a name that is not online yet to the wrong offline UUID, and the gate keeps names lowercase.
+fn joined_guests(gate: &[String], online: &[String]) -> Vec<String> {
+    online
+        .iter()
+        .filter(|name| gate.iter().any(|g| g.eq_ignore_ascii_case(name)))
+        .cloned()
+        .collect()
+}
+
 /// The console lines that apply Open to LAN's choices for `host`.
 pub fn lan_commands(settings: &LanSettings, host: &str, world_cheats: bool) -> Vec<String> {
     let mode = GAME_MODES[usize::from(settings.mode.min(3))];
@@ -921,10 +931,11 @@ impl Session {
         self.run_console(&lines);
     }
 
-    /// Gives joining guests their access and mode; called every frame.
-    pub fn sync_guests(&mut self) {
+    /// Gives joining guests their access and mode; called every frame with the host's player list.
+    pub fn sync_guests(&mut self, online: &[String]) {
         let Some(lan) = &self.lan else { return };
-        let lines = self.guests.sync(&lan.forwarder.guests());
+        let joined = joined_guests(&lan.forwarder.guests(), online);
+        let lines = self.guests.sync(&joined);
         self.run_console(&lines);
     }
 
@@ -1082,6 +1093,14 @@ mod tests {
             [("keep_inventory".to_owned(), "true".to_owned())]
         );
         assert_eq!(w.experiments, ["trade_rebalance"]);
+    }
+
+    #[test]
+    fn guests_count_once_they_are_in_the_world_under_their_own_case() {
+        let gate = vec!["alex".to_owned(), "sam".to_owned()];
+        let online = vec!["Host".to_owned(), "Alex".to_owned()];
+        assert_eq!(joined_guests(&gate, &online), ["Alex"]);
+        assert!(joined_guests(&gate, &[]).is_empty());
     }
 
     #[test]

@@ -264,6 +264,18 @@ impl std::fmt::Debug for Audio {
 }
 
 impl Audio {
+    pub fn debug_channels(&self) -> String {
+        format!(
+            "Sounds: {}/{}",
+            self.manager.active_voices(),
+            mcr_audio::MAX_VOICES
+        )
+    }
+
+    pub fn cache_stats(&self) -> (usize, usize) {
+        self.manager.cache_stats()
+    }
+
     /// `None` without an output device or sound assets: the client then runs silently.
     pub fn start(
         assets_dir: &Path,

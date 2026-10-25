@@ -14,3 +14,11 @@ The World Options rows SHALL scroll when they do not fit the screen.
 #### Scenario: Small GUI
 - **WHEN** World Options opens at a GUI height under 240 px
 - **THEN** every row can be reached by scrolling
+
+### Requirement: LAN guests
+A guest SHALL be able to join a managed world that is open to LAN, and the host's guest settings SHALL apply to
+the guest once it is in the world.
+
+#### Scenario: Command access
+- **WHEN** the host turns Command Access on and a guest joins
+- **THEN** the guest can run commands, and loses them when the host turns it off

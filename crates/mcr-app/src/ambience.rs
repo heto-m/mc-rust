@@ -171,6 +171,10 @@ impl Ambience {
     }
 
     /// Credits screen open: `music.credits` is wanted, and it ends with the screen.
+    pub fn moodiness(&self) -> f32 {
+        self.mood.moodiness()
+    }
+
     pub fn set_credits(&mut self, open: bool, audio: &mut Audio) {
         if self.credits_open && !open {
             audio.stop_credits_music();

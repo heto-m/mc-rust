@@ -55,12 +55,10 @@ impl PcmCache {
         self.bytes = 0;
     }
 
-    #[cfg(test)]
     pub fn bytes(&self) -> usize {
         self.bytes
     }
 
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }

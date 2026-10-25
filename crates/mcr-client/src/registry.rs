@@ -158,6 +158,20 @@ impl Registries {
         self.tag(registry, tag).is_some_and(|ids| ids.contains(&id))
     }
 
+    /// Names of the tags of `registry` that hold `id`, sorted.
+    pub fn tags_containing(&self, registry: &str, id: i32) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .tags
+            .get(registry)
+            .into_iter()
+            .flatten()
+            .filter(|(_, ids)| ids.contains(&id))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
     pub fn apply_recipes(&mut self, packet: &UpdateRecipes) {
         self.recipe_sets.clear();
         for (key, items) in packet.item_sets.0.iter().take(MAX_RECIPE_SETS) {

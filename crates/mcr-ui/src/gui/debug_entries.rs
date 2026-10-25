@@ -118,21 +118,34 @@ const fn entry(id: &'static str, category: Category, reduced_ok: bool) -> EntryD
     }
 }
 
-/// Sorted by category, then id, as the options screen lists them.
-pub const ENTRIES: [EntryDef; 17] = [
+/// Sorted by category, then id: the options screen lists them so, and F3 text is written in id order.
+pub const ENTRIES: [EntryDef; 30] = [
     entry("biome", Category::Text, false),
     entry("chunk_render_stats", Category::Text, true),
     entry("chunk_source_stats", Category::Text, true),
     entry("day_count", Category::Text, false),
+    entry("detailed_memory", Category::Text, true),
     entry("entity_render_stats", Category::Text, true),
     entry("fps", Category::Text, true),
     entry("game_version", Category::Text, true),
+    entry("gpu_utilization", Category::Text, true),
+    entry("heightmap", Category::Text, false),
     entry("light_levels", Category::Text, false),
     entry("looking_at_block_state", Category::Text, false),
+    entry("looking_at_block_tags", Category::Text, false),
     entry("looking_at_entity", Category::Text, false),
+    entry("looking_at_entity_tags", Category::Text, false),
+    entry("looking_at_fluid_state", Category::Text, false),
+    entry("looking_at_fluid_tags", Category::Text, false),
     entry("memory", Category::Text, true),
+    entry("particle_render_stats", Category::Text, false),
     entry("player_position", Category::Text, false),
     entry("player_section_position", Category::Text, true),
+    entry("player_speed", Category::Text, false),
+    entry("post_effects", Category::Text, false),
+    entry("simple_performance_impactors", Category::Text, true),
+    entry("sound_cache", Category::Text, true),
+    entry("sound_mood", Category::Text, false),
     entry("system_specs", Category::Text, true),
     entry("tps", Category::Text, true),
     entry("chunk_borders", Category::Renderer, false),
@@ -271,6 +284,15 @@ fn qualified(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entries_are_sorted_by_category_then_id() {
+        assert!(
+            ENTRIES
+                .windows(2)
+                .all(|w| (w[0].category, w[0].id) < (w[1].category, w[1].id))
+        );
+    }
 
     #[test]
     fn the_default_profile_matches_vanilla() {
