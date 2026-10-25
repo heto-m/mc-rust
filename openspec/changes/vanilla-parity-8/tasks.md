@@ -21,6 +21,21 @@ Scope: mcr-ui text, font and chat.
 - [ ] 3.2 C2 cape on elytra (owner)
 - [ ] 3.3 C3 server-level F3 entries, if the managed server can expose them
 
-## 4. Close out
+## 4. Text components
 
-- [ ] 4.1 Validate and archive the change
+Scope: mcr-protocol text, mcr-ui text.
+
+- [ ] 4.1 X1–X8; `cargo xtask parity text` at 100%
+- [ ] 4.2 fmt, clippy and workspace tests
+
+## 5. Section meshing
+
+Scope: mcr-mesh, mcr-render vertex formats.
+
+- [ ] 5.1 M1–M8; `cargo xtask parity section_mesh` at 100%, `block_model` still 100%
+- [ ] 5.2 Mesh memory, upload and GPU time before and after; keep vertex formats compact where precision allows
+- [ ] 5.3 fmt, clippy and workspace tests
+
+## 6. Close out
+
+- [ ] 6.1 Validate and archive the change
