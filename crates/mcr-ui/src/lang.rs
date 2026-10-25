@@ -122,7 +122,7 @@ fn append(resources: &ResourceManager, code: &str, map: &mut FxHashMap<String, S
                         if let serde_json::Value::String(text) = value
                             && (map.len() < MAX_TRANSLATIONS || map.contains_key(&key))
                         {
-                            map.insert(key, text);
+                            map.insert(key, rewrite_unsupported_formats(text));
                         }
                     }
                 }
@@ -131,6 +131,51 @@ fn append(resources: &ResourceManager, code: &str, map: &mut FxHashMap<String, S
         }
     }
     any
+}
+
+impl mcr_protocol::types::text::Translate for Lang {
+    fn translate(&self, key: &str) -> Option<&str> {
+        self.get(key)
+    }
+}
+
+/// Vanilla's `%(\d+\$)?[\d.]*[df]` to `%$1s` rewrite of lang values.
+fn rewrite_unsupported_formats(text: String) -> String {
+    if !text.contains('%') {
+        return text;
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        let digits = bytes[j..].iter().take_while(|b| b.is_ascii_digit()).count();
+        let positional = digits > 0 && bytes.get(j + digits) == Some(&b'$');
+        let group = if positional { j..j + digits + 1 } else { j..j };
+        if positional {
+            j += digits + 1;
+        }
+        j += bytes[j..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit() || **b == b'.')
+            .count();
+        if matches!(bytes.get(j), Some(b'd' | b'f')) {
+            out.push_str(&text[copied..i + 1]);
+            out.push_str(&text[group]);
+            out.push('s');
+            copied = j + 1;
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
 }
 
 impl Lang {
@@ -218,6 +263,19 @@ fn apply_deprecated(table: &Deprecated, map: &mut FxHashMap<String, String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unsupported_formats_become_string_slots() {
+        for (from, to) in [
+            ("%d HK", "%s HK"),
+            ("%1$d of %2$.2f", "%1$s of %2$s"),
+            ("%%d", "%%s"),
+            ("100%", "100%"),
+            ("%5s %x", "%5s %x"),
+        ] {
+            assert_eq!(rewrite_unsupported_formats(from.to_owned()), to);
+        }
+    }
+
     use mcr_assets::AssetSource;
 
     use super::*;

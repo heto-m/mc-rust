@@ -371,7 +371,7 @@ fn probe_case(lang: &Lang, case: &Case) -> Result<Value> {
             )
         }))
     });
-    let plain = crate::guarded(|| json!(component.to_plain_string()));
+    let plain = crate::guarded(|| json!(component.to_plain_string_with(lang)));
     Ok(json!({"plain": plain, "runs": runs}))
 }
 

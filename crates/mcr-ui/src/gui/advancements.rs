@@ -494,7 +494,7 @@ impl AdvancementsScreen {
                 let (x, y) = side.position(local);
                 let (w, h) = side.size();
                 if mx > left + x && mx < left + x + w && my > top + y && my < top + y + h {
-                    let text = tab.title.to_plain_string();
+                    let text = cx.plain(&tab.title);
                     cx.set_tooltip(super::tooltip::TooltipLines::text(text));
                 }
             }

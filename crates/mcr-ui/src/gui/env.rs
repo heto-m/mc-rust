@@ -369,6 +369,10 @@ impl<'a, 'f> RenderCx<'a, 'f> {
         self.lang_raw(key).replace("%%", "%")
     }
 
+    pub fn plain(&mut self, component: &Component) -> String {
+        component.to_plain_string_with(self.frame.ui().lang())
+    }
+
     pub fn lang_fmt(&mut self, key: &str, args: &[&str]) -> String {
         let mut out = self.lang_raw(key);
         for (i, arg) in args.iter().enumerate() {

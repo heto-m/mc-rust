@@ -1,8 +1,9 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use mcr_nbt::Value;
-use mcr_protocol::types::text::{Arg, ClickEvent, Component, Content};
+use mcr_protocol::types::text::{
+    Arg, ClickEvent, Component, Content, TemplatePiece, decompose_template, number_to_string,
+};
 
 pub use crate::lang::Lang;
 use crate::style::{Cell, Flags, FontId, Style};
@@ -296,11 +297,10 @@ fn flatten_bounded(
             expand_template(lang, template, args, style, out, budget);
         }
         Content::Keybind(key) => budget.push(out, key, style),
-        Content::Score { name, .. } => budget.push(out, name, style),
+        Content::Score { .. } | Content::Nbt(_) => {}
         Content::Selector { selector, .. } => {
             budget.push(out, selector, style);
         }
-        Content::Nbt(nbt) => budget.push(out, &nbt.path, style),
         Content::Object { fallback, .. } => {
             if let Some(fallback) = fallback {
                 flatten_bounded(lang, fallback, style, out, budget);
@@ -343,49 +343,23 @@ fn expand_template(
     if !budget.charge(template.len(), out) {
         return;
     }
-    let mut literal = String::new();
-    let mut next_arg = 0usize;
-    let mut rest = template;
-    while let Some(pos) = rest.find('%') {
-        literal.push_str(&rest[..pos]);
-        let spec = &rest[pos + 1..];
-        let digits = spec.bytes().take_while(u8::is_ascii_digit).count();
-        let (index, after) = if digits > 0 && spec[digits..].starts_with('$') {
-            (spec[..digits].parse::<usize>().ok(), &spec[digits + 1..])
-        } else {
-            (None, spec)
-        };
-        match after.chars().next() {
-            Some('%') => {
-                literal.push('%');
-                rest = &after[1..];
-            }
-            Some(c @ ('s' | 'd')) => {
-                budget.push(out, &std::mem::take(&mut literal), style);
-                let slot = match index {
-                    Some(n) => n.saturating_sub(1),
-                    None => {
-                        next_arg += 1;
-                        next_arg - 1
-                    }
-                };
-                if let Some(arg) = args.get(slot) {
-                    if budget.steps == 0 || out.len() >= MAX_CELLS {
-                        return;
-                    }
-                    budget.steps -= 1;
-                    push_arg(lang, arg, style, out, budget);
+    let Some(pieces) = decompose_template(template, args.len()) else {
+        budget.push(out, template, style);
+        return;
+    };
+    for piece in pieces {
+        match piece {
+            TemplatePiece::Literal(text) => budget.push(out, text, style),
+            TemplatePiece::Percent => budget.push(out, "%", style),
+            TemplatePiece::Arg(slot) => {
+                if budget.steps == 0 || out.len() >= MAX_CELLS {
+                    return;
                 }
-                rest = &after[c.len_utf8()..];
-            }
-            _ => {
-                literal.push('%');
-                rest = spec;
+                budget.steps -= 1;
+                push_arg(lang, &args[slot], style, out, budget);
             }
         }
     }
-    literal.push_str(rest);
-    budget.push(out, &literal, style);
 }
 
 fn push_arg(lang: &Lang, arg: &Arg, style: Style, out: &mut Vec<Cell>, budget: &mut Budget) {
@@ -395,28 +369,8 @@ fn push_arg(lang: &Lang, arg: &Arg, style: Style, out: &mut Vec<Cell>, budget: &
                 budget.push(out, s, style);
             }
         }
-        Arg::Number(n) => budget.push(out, &number_text(n), style),
+        Arg::Number(n) => budget.push(out, &number_to_string(n), style),
         Arg::Component(c) => flatten_bounded(lang, c, style, out, budget),
-    }
-}
-
-fn number_text(value: &Value) -> String {
-    let float = |f: f64| {
-        if f.fract() == 0.0 {
-            format!("{f:.1}")
-        } else {
-            f.to_string()
-        }
-    };
-    match value {
-        Value::Byte(v) => v.to_string(),
-        Value::Short(v) => v.to_string(),
-        Value::Int(v) => v.to_string(),
-        Value::Long(v) => v.to_string(),
-        Value::Float(v) => float(f64::from(*v)),
-        Value::Double(v) => float(*v),
-        Value::String(s) => s.clone(),
-        _ => String::new(),
     }
 }
 
@@ -721,6 +675,35 @@ mod tests {
             args: vec![Arg::Str("a".into()), Arg::Str("b".into())],
         });
         assert_eq!(plain(&flatten(&lang, &swap)), "b then a, 100%");
+    }
+
+    #[test]
+    fn invalid_templates_draw_raw_and_percent_is_its_own_piece() {
+        let lang = Lang::default();
+        let tr = |fallback: &str, args| {
+            Component::from_content(Content::Translatable {
+                key: "k".into(),
+                fallback: Some(fallback.into()),
+                args,
+            })
+        };
+        assert_eq!(
+            plain(&flatten(&lang, &tr("%0$s %d", vec![Arg::Str("a".into())]))),
+            "%0$s %d"
+        );
+        assert_eq!(plain(&flatten(&lang, &tr("%s %s", vec![]))), "%s %s");
+        let cells = flatten(&lang, &tr("§c%%a", vec![]));
+        assert_eq!(plain(&cells), "%a");
+        assert_eq!(cells[0].style.color, None);
+    }
+
+    #[test]
+    fn score_and_nbt_draw_nothing() {
+        let score = Component::from_content(Content::Score {
+            name: "@s".into(),
+            objective: "o".into(),
+        });
+        assert!(flatten(&Lang::default(), &score).is_empty());
     }
 
     #[test]

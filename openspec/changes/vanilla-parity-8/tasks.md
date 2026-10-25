@@ -25,8 +25,8 @@ Scope: mcr-ui text, font and chat.
 
 Scope: mcr-protocol text, mcr-ui text.
 
-- [ ] 4.1 X1–X8; `cargo xtask parity text` at 100%
-- [ ] 4.2 fmt, clippy and workspace tests
+- [x] 4.1 X1–X8; `cargo xtask parity text` at 100%
+- [x] 4.2 fmt, clippy and workspace tests
 
 ## 5. Section meshing
 

@@ -502,7 +502,7 @@ impl DialogScreen {
     ) -> Row {
         let id = BODY_ID + n as u32;
         let label_part = |cx: &mut RenderCx<'_, '_>, label: &Component| {
-            let text = label.to_plain_string();
+            let text = cx.plain(label);
             let w = cx.text_width(&text);
             (text, w)
         };
@@ -963,7 +963,7 @@ impl DialogScreen {
             }
             x += width + 8;
         }
-        let title = self.dialog.title.to_plain_string();
+        let title = cx.plain(&self.dialog.title);
         let title_w = cx.text_width(&title);
         let row_w = title_w + SPACING + 20;
         let left = (w - row_w) / 2;

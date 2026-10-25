@@ -1,8 +1,18 @@
-use std::fmt::Write as _;
-
 use mcr_buf::{Decode, DecodeError, Encode, Identifier, Result};
 use mcr_nbt::{Compound, Limits, List, Value, read_network, write_network};
 use uuid::Uuid;
+
+pub trait Translate {
+    fn translate(&self, key: &str) -> Option<&str>;
+}
+
+struct NoTranslations;
+
+impl Translate for NoTranslations {
+    fn translate(&self, _key: &str) -> Option<&str> {
+        None
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[error("invalid text component: {0}")]
@@ -256,32 +266,47 @@ impl Component {
     }
 
     pub fn to_plain_string(&self) -> String {
+        self.to_plain_string_with(&NoTranslations)
+    }
+
+    /// Vanilla's `getString`: translatables resolve through `lookup`, then the fallback, then the key.
+    pub fn to_plain_string_with(&self, lookup: &dyn Translate) -> String {
         let mut out = String::new();
-        self.write_plain(&mut out);
+        let mut budget = PlainBudget {
+            steps: MAX_PLAIN_STEPS,
+            depth: 0,
+        };
+        self.write_plain(lookup, &mut budget, &mut out);
         out
     }
 
-    fn write_plain(&self, out: &mut String) {
+    fn write_plain(&self, lookup: &dyn Translate, budget: &mut PlainBudget, out: &mut String) {
+        if !budget.enter(out) {
+            return;
+        }
         match &self.content {
             Content::Text(t) => out.push_str(t),
             Content::Translatable {
                 key,
                 fallback,
                 args,
-            } => format_translation(fallback.as_deref().unwrap_or(key), args, out),
+            } => {
+                let template = lookup.translate(key).or(fallback.as_deref()).unwrap_or(key);
+                write_translation(template, args, lookup, budget, out);
+            }
             Content::Keybind(k) => out.push_str(k),
-            Content::Score { name, .. } => out.push_str(name),
+            Content::Score { .. } | Content::Nbt(_) => {}
             Content::Selector { selector, .. } => out.push_str(selector),
-            Content::Nbt(n) => out.push_str(&n.path),
             Content::Object { fallback, .. } => {
                 if let Some(f) = fallback {
-                    f.write_plain(out);
+                    f.write_plain(lookup, budget, out);
                 }
             }
         }
         for sibling in &self.extra {
-            sibling.write_plain(out);
+            sibling.write_plain(lookup, budget, out);
         }
+        budget.depth -= 1;
     }
 
     pub fn to_nbt(&self) -> Value {
@@ -339,75 +364,178 @@ impl Decode<'_> for Component {
     }
 }
 
-fn format_translation(pattern: &str, args: &[Arg], out: &mut String) {
-    let arg_text = |arg: &Arg| match arg {
-        Arg::Str(s) => s.clone(),
-        Arg::Component(c) => c.to_plain_string(),
-        Arg::Number(v) => number_to_string(v),
+const MAX_PLAIN_STEPS: usize = 100_000;
+const MAX_PLAIN_DEPTH: usize = 64;
+const MAX_PLAIN_BYTES: usize = 1 << 20;
+
+struct PlainBudget {
+    steps: usize,
+    depth: usize,
+}
+
+impl PlainBudget {
+    fn enter(&mut self, out: &str) -> bool {
+        if self.steps == 0 || self.depth >= MAX_PLAIN_DEPTH || out.len() >= MAX_PLAIN_BYTES {
+            return false;
+        }
+        self.steps -= 1;
+        self.depth += 1;
+        true
+    }
+
+    fn charge(&mut self, bytes: usize, out: &str) -> bool {
+        let cost = 1 + bytes / 16;
+        if self.steps < cost || out.len() >= MAX_PLAIN_BYTES {
+            return false;
+        }
+        self.steps -= cost;
+        true
+    }
+}
+
+fn write_translation(
+    template: &str,
+    args: &[Arg],
+    lookup: &dyn Translate,
+    budget: &mut PlainBudget,
+    out: &mut String,
+) {
+    if !budget.charge(template.len(), out) {
+        return;
+    }
+    let Some(pieces) = decompose_template(template, args.len()) else {
+        out.push_str(template);
+        return;
     };
-    let mut next = 0;
-    let mut chars = pattern.char_indices().peekable();
-    while let Some((i, ch)) = chars.next() {
-        if ch != '%' {
-            out.push(ch);
-            continue;
-        }
-        let rest = &pattern[i + 1..];
-        if rest.starts_with('%') {
-            out.push('%');
-            chars.next();
-            continue;
-        }
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        let (index, spec_at) = if digits > 0 && rest[digits..].starts_with('$') {
-            (
-                rest[..digits]
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|n| n.checked_sub(1))
-                    .or(Some(usize::MAX)),
-                digits + 1,
-            )
-        } else {
-            (None, 0)
-        };
-        let spec = rest[spec_at..]
-            .chars()
-            .next()
-            .filter(char::is_ascii_alphabetic);
-        let Some(spec) = spec else {
-            out.push('%');
-            continue;
-        };
-        if spec != 's' && spec != 'd' {
-            out.push('%');
-            continue;
-        }
-        let slot = index.unwrap_or_else(|| {
-            next += 1;
-            next - 1
-        });
-        if let Some(arg) = args.get(slot) {
-            out.push_str(&arg_text(arg));
-        }
-        for _ in 0..spec_at + 1 {
-            chars.next();
+    for piece in pieces {
+        match piece {
+            TemplatePiece::Literal(s) => out.push_str(s),
+            TemplatePiece::Percent => out.push('%'),
+            TemplatePiece::Arg(i) => {
+                if budget.steps == 0 || out.len() >= MAX_PLAIN_BYTES {
+                    return;
+                }
+                budget.steps -= 1;
+                match &args[i] {
+                    Arg::Str(s) => out.push_str(s),
+                    Arg::Component(c) => c.write_plain(lookup, budget, out),
+                    Arg::Number(v) => out.push_str(&number_to_string(v)),
+                }
+            }
         }
     }
 }
 
-fn number_to_string(v: &Value) -> String {
-    let mut s = String::new();
-    let _ = match v {
-        Value::Byte(n) => write!(s, "{n}"),
-        Value::Short(n) => write!(s, "{n}"),
-        Value::Int(n) => write!(s, "{n}"),
-        Value::Long(n) => write!(s, "{n}"),
-        Value::Float(n) => write!(s, "{n}"),
-        Value::Double(n) => write!(s, "{n}"),
-        _ => Ok(()),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplatePiece<'a> {
+    Literal(&'a str),
+    Percent,
+    Arg(usize),
+}
+
+/// Vanilla's `TranslatableContents.decomposeTemplate`: only `%s`, `%n$s` and `%%` are valid, and any
+/// other `%` or an argument out of range makes the whole template render as literal text (`None`).
+pub fn decompose_template(template: &str, arg_count: usize) -> Option<Vec<TemplatePiece<'_>>> {
+    let bytes = template.as_bytes();
+    let mut pieces = Vec::new();
+    let mut next = 0usize;
+    let mut literal_from = 0;
+    let mut i = 0;
+    while let Some(off) = template[i..].find('%') {
+        let at = i + off;
+        let mut j = at + 1;
+        let digits = bytes[j..].iter().take_while(|b| b.is_ascii_digit()).count();
+        let positional = digits > 0 && bytes.get(j + digits) == Some(&b'$');
+        let index = if positional {
+            let n: usize = template[j..j + digits].parse().ok()?;
+            j += digits + 1;
+            Some(n.checked_sub(1)?)
+        } else {
+            None
+        };
+        let piece = match bytes.get(j) {
+            Some(b'%') if !positional => TemplatePiece::Percent,
+            Some(b's') => {
+                let slot = index.unwrap_or_else(|| {
+                    next += 1;
+                    next - 1
+                });
+                if slot >= arg_count {
+                    return None;
+                }
+                TemplatePiece::Arg(slot)
+            }
+            _ => return None,
+        };
+        if at > literal_from {
+            pieces.push(TemplatePiece::Literal(&template[literal_from..at]));
+        }
+        pieces.push(piece);
+        i = j + 1;
+        literal_from = i;
+    }
+    if literal_from < template.len() {
+        pieces.push(TemplatePiece::Literal(&template[literal_from..]));
+    }
+    Some(pieces)
+}
+
+/// Java's `Double.toString`: plain decimal in `[1e-3, 1e7)`, otherwise `d.dddE<exp>`.
+pub fn java_double_string(v: f64) -> String {
+    java_float_string(v, &format!("{:e}", v.abs()))
+}
+
+/// Java's `Float.toString`.
+pub fn java_float_to_string(v: f32) -> String {
+    java_float_string(f64::from(v), &format!("{:e}", v.abs()))
+}
+
+fn java_float_string(v: f64, sci: &str) -> String {
+    if v.is_nan() {
+        return "NaN".into();
+    }
+    let sign = if v.is_sign_negative() { "-" } else { "" };
+    if v.is_infinite() {
+        return format!("{sign}Infinity");
+    }
+    if v == 0.0 {
+        return format!("{sign}0.0");
+    }
+    let plain_range = (1e-3..1e7).contains(&v.abs());
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((sci, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    if !plain_range {
+        let (first, rest) = digits.split_at(1);
+        let rest = if rest.is_empty() { "0" } else { rest };
+        return format!("{sign}{first}.{rest}E{exp}");
+    }
+    let point = exp + 1;
+    let body = if point <= 0 {
+        format!("0.{}{}", "0".repeat(point.unsigned_abs() as usize), digits)
+    } else if digits.len() as i32 <= point {
+        format!(
+            "{}{}.0",
+            digits,
+            "0".repeat((point as usize) - digits.len())
+        )
+    } else {
+        let (int, frac) = digits.split_at(point as usize);
+        format!("{int}.{frac}")
     };
-    s
+    format!("{sign}{body}")
+}
+
+pub fn number_to_string(v: &Value) -> String {
+    match v {
+        Value::Byte(n) => n.to_string(),
+        Value::Short(n) => n.to_string(),
+        Value::Int(n) => n.to_string(),
+        Value::Long(n) => n.to_string(),
+        Value::Float(n) => java_float_to_string(*n),
+        Value::Double(n) => java_double_string(*n),
+        _ => String::new(),
+    }
 }
 
 fn list_from_values(values: Vec<Value>) -> List {
@@ -1274,14 +1402,102 @@ mod tests {
         );
     }
 
-    #[test]
-    fn positional_zero_and_huge_indices_do_not_panic() {
-        let c = Component::from_content(Content::Translatable {
+    struct Fixed(&'static str);
+
+    impl Translate for Fixed {
+        fn translate(&self, key: &str) -> Option<&str> {
+            (key == "x").then_some(self.0)
+        }
+    }
+
+    fn translatable(fallback: &str, args: Vec<Arg>) -> Component {
+        Component::from_content(Content::Translatable {
             key: "x".into(),
-            fallback: Some("a%0$sb%99999999999999999999$sc".into()),
-            args: vec![Arg::Str("Bob".into())],
+            fallback: Some(fallback.into()),
+            args,
+        })
+    }
+
+    #[test]
+    fn invalid_templates_render_raw() {
+        let one = || vec![Arg::Str("Bob".into())];
+        for template in [
+            "a%0$sb",
+            "a%99999999999999999999$sc",
+            "%d",
+            "%2$s",
+            "%s %s",
+            "50%",
+            "%x",
+            "%.2f",
+            "%1$%",
+            "%5s",
+        ] {
+            assert_eq!(translatable(template, one()).to_plain_string(), template);
+        }
+        assert_eq!(translatable("%s%%%1$s", one()).to_plain_string(), "Bob%Bob");
+    }
+
+    #[test]
+    fn plain_string_resolves_through_the_lookup() {
+        let c = translatable("fb", vec![Arg::Str("a".into())]);
+        assert_eq!(c.to_plain_string_with(&Fixed("<%s>")), "<a>");
+        assert_eq!(c.to_plain_string(), "fb");
+    }
+
+    #[test]
+    fn score_and_nbt_have_no_plain_text() {
+        let score = Component::from_content(Content::Score {
+            name: "@s".into(),
+            objective: "o".into(),
         });
-        assert_eq!(c.to_plain_string(), "abc");
+        assert_eq!(score.to_plain_string(), "");
+    }
+
+    #[test]
+    fn java_double_strings() {
+        for (v, s) in [
+            (2.63e9, "2.63E9"),
+            (1e-4, "1.0E-4"),
+            (0.001, "0.001"),
+            (1e7, "1.0E7"),
+            (9_999_999.0, "9999999.0"),
+            (-12.5, "-12.5"),
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (100.0, "100.0"),
+            (123456.789, "123456.789"),
+            (f64::NAN, "NaN"),
+            (f64::NEG_INFINITY, "-Infinity"),
+        ] {
+            assert_eq!(java_double_string(v), s);
+        }
+        assert_eq!(java_float_to_string(0.1), "0.1");
+        assert_eq!(java_float_to_string(1.5e10), "1.5E10");
+    }
+
+    #[test]
+    fn hostile_plain_expansion_is_bounded() {
+        let mut c = Component::text("ab");
+        for _ in 0..40 {
+            c = Component::translatable("x", vec![Arg::Component(c)]);
+        }
+        let start = std::time::Instant::now();
+        assert!(
+            c.to_plain_string_with(&Fixed("%1$s%1$s%1$s%1$s%1$s%1$s%1$s%1$s"))
+                .len()
+                <= 2 * MAX_PLAIN_BYTES
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+
+        let long = format!("{}{}", "%1$s".repeat(10_000), "x".repeat(10_000));
+        let mut c = Component::text("ab");
+        for _ in 0..8 {
+            c = translatable(&long, vec![Arg::Component(c)]);
+        }
+        let start = std::time::Instant::now();
+        assert!(c.to_plain_string().len() <= 2 * MAX_PLAIN_BYTES);
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]
