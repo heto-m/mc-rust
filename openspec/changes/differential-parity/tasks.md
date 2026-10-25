@@ -40,7 +40,7 @@ One harness each; record case count and pass rate. Failures are filed, not fixed
 ## 5. Gate and score
 
 - [ ] 5.1 `merge.sh` runs changed harnesses with known failures (D6)
-- [ ] 5.2 Parity table in the `differential-parity` spec; file mismatches into `vanilla-parity-8`
+- [ ] 5.2 Parity table in the `differential-parity` spec; file mismatches into `vanilla-parity-8`, with the vanilla-parity-7 close-out leftovers
 
 ## 6. Close out
 
