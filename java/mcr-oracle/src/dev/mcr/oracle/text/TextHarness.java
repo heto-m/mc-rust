@@ -71,7 +71,7 @@ public final class TextHarness implements Harness {
         };
     }
 
-    static JsonObject style(Style style) {
+    public static JsonObject style(Style style) {
         JsonObject s = new JsonObject();
         s.add("color", style.getColor() == null ? JsonNull.INSTANCE
                 : new JsonPrimitive(String.format("#%06X", style.getColor().getValue())));
@@ -88,19 +88,20 @@ public final class TextHarness implements Harness {
         return s;
     }
 
-    @Override
-    public JsonElement run(JsonObject testCase) {
-        Component component;
-        try {
-            component = ComponentSerialization.CODEC.parse(NbtOps.INSTANCE, toTag(testCase.get("component"))).getOrThrow();
-        } catch (IllegalStateException e) {
-            JsonObject error = new JsonObject();
-            error.addProperty("error", e.getMessage());
-            return error;
-        }
+    /** The code points vanilla draws for {@code component}, adjacent ones of equal style merged into runs. */
+    public static JsonArray runs(Component component) {
+        return runs(component, false);
+    }
+
+    /** With {@code visibleOnly}, a plain space (no underline, strikethrough or obfuscation) drops its colour and shadow. */
+    public static JsonArray runs(Component component, boolean visibleOnly) {
         JsonArray runs = new JsonArray();
         StringDecomposer.iterateFormatted(component, Style.EMPTY, (position, style, codepoint) -> {
             JsonObject s = style(style);
+            if (visibleOnly && codepoint == ' ' && !style.isUnderlined() && !style.isStrikethrough() && !style.isObfuscated()) {
+                s.add("color", JsonNull.INSTANCE);
+                s.add("shadow", JsonNull.INSTANCE);
+            }
             JsonObject last = runs.isEmpty() ? null : runs.get(runs.size() - 1).getAsJsonObject();
             if (last != null) {
                 JsonObject lastStyle = last.deepCopy();
@@ -114,6 +115,20 @@ public final class TextHarness implements Harness {
             runs.add(s);
             return true;
         });
+        return runs;
+    }
+
+    @Override
+    public JsonElement run(JsonObject testCase) {
+        Component component;
+        try {
+            component = ComponentSerialization.CODEC.parse(NbtOps.INSTANCE, toTag(testCase.get("component"))).getOrThrow();
+        } catch (IllegalStateException e) {
+            JsonObject error = new JsonObject();
+            error.addProperty("error", e.getMessage());
+            return error;
+        }
+        JsonArray runs = runs(component);
         JsonObject out = new JsonObject();
         out.addProperty("plain", component.getString());
         out.add("runs", runs);

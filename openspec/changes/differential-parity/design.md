@@ -274,3 +274,199 @@ Harness bugs found and fixed on the way: vanilla's `FlowingFluid.getFlow` asks
 `is(BlockTags.BLOCKS_FLUID_FLOW)`, so the oracle binds data-pack tags (`Boot.tags()`); unbound tags had
 turned flowing tops still in ~50 cases. Random light ignoring emitters made neighbour emission
 (`LightCoordsUtil.getLightCoords` takes the drawn block's own) look like a mismatch.
+
+### item_model (3000 cases, 2325 match: 77.5%)
+
+Stacks are network bytes from our encoder (vanilla decodes them with `ItemStack.OPTIONAL_STREAM_CODEC` over
+the jar's data-pack registries, so trims and enchantments are real holders; registry ids follow vanilla's
+sorted load order). 40% carry an `item_model` pointing at a generated definition (select, condition,
+range dispatch, composite, empty, every special type, every tint source, matrix and decomposed
+transformations), served to us as a resource pack and to vanilla through `ClientItem.CODEC`. Vanilla bakes
+with `ModelBakery` (leaves wrapped so each layer names its model or special) and updates with no level and
+no owner; definitions that read the level or the clock (compass, clock) are left out. Ours:
+`ItemModels::evaluate` through `StackView` for `gui`, `world_layers` (the `StackProps` path) for every
+other display context. Compared per layer: model id or special (type and fields), base, tints, local
+transform (1/1024, ±2) and glint. Special renderer arguments (patterns, profiles) are not compared. By cause
+(cases; one case can have several):
+
+- **Tint alpha** (≈200). `Dye` and `Firework` return their `default` as written, so an RGB default
+  without alpha draws invisible, and `Constant` forces it opaque (`Constant` constructor,
+  `ARGB.opaque`); `TintSource::tint` makes dye and firework defaults opaque and leaves constants as
+  written. Case 3: dye default `9157281` is `#008BBAA1` in vanilla, `#FF8BBAA1` in ours; case 21: a
+  constant `#BB90B35C` is `#FF90B35C` in vanilla.
+- **Select or range with no fallback** (103). An unmatched `select` or a value below every threshold
+  bakes to `context.missingItemModel` (`SelectItemModel.Unbaked.bake`, `RangeSelectItemModel.Unbaked
+  .bake`), so the missing model draws; `Evaluator::node` draws nothing. Case 16.
+- **Definitions vanilla rejects, ours loads** (≈130). `SelectItemModelProperty.Type.validateCases`
+  rejects a `select` that repeats a value (76), `Transformation.CODEC` needs all four fields of a
+  decomposed transformation (26), and `minecraft:bed` is no special model type (25,
+  `SpecialModelRenderers`). Vanilla then draws the missing model. Case 22 (`rocket` twice), 14 (no
+  `right_rotation`), 8 (bed).
+- **Definitions that fail to load and unknown `item_model` ids** (81 + 21). `ModelManager.getItemModel`
+  falls back to the missing model; `ItemModels::evaluate` falls back to the item's own definition.
+  Unknown model types fail on both sides. Case 202: `item_model` `minecraft:mcr_none`.
+- **Axis-angle rotations** (62). `ExtraCodecs.QUATERNIONF` also takes `{"axis", "angle"}`;
+  `Parser::transformation` only takes `[x, y, z, w]`, rejects the definition and draws the item's own
+  model. Case 168: a composite in vanilla, the item's `red_concrete_stairs` in ours.
+- **Colours as float lists** (46). `ExtraCodecs.RGB_COLOR_CODEC` takes `[r, g, b]` floats;
+  `Parser::int` reads only integers, so the default becomes 0 or -1. Case 44: a `custom_model_data`
+  default `[0.25, 0.375, 0.875]` is `#FF3F5FDF` in vanilla, `#FFFFFFFF` in ours.
+- **Prototype components** (≈70). `ItemStack.get` sees the item's default components; `StackView` and
+  `StackProps` see only the patch. `has_component` on a default (every item has empty `enchantments`,
+  case 1248) is true in vanilla, false in ours; `component` selects never match (`component_string` is
+  not implemented; `rarity` is a default, case 241). `GLINT_BY_DEFAULT` lacks `written_book`'s
+  default `enchantment_glint_override`, and the world path's `has_glint` reads only the patch (20,
+  case 39: `enchanted_book` in hand).
+- **Removed `item_model`** (21). `!minecraft:item_model` leaves `ItemModelResolver.appendItemLayers`
+  with no id, so nothing draws; ours draws the item's own model. Case 47.
+- **Damage on an undamageable item** (≤21). `Damage.get` with `normalize` divides by a max damage of
+  0, the NaN picks the fallback (`RangeSelectItemModel.update`); ours reads 0. Case 79.
+- **Charge type** (≤15). `Charge.get` is `ROCKET` when any projectile is a rocket; `StackView` looks at
+  the first only and `StackProps` always says `ARROW`. Case 501: crossbow with arrow then rocket.
+- **Special fields not kept** (≈35). `SpecialKind` drops `book`'s angles, `end_cube`'s `effect`,
+  `chest`'s `openness` and `chest_type`, `shulker_box`'s `openness`, `banner`'s `attachment` and
+  `head`'s `texture` and `animation`. Case 1 (book).
+- **World path gaps** (≈15). `StackProps` has no `trim_material` (case 2116: a gold-trimmed diamond
+  chestplate in `none`), no firework colours (case 1901) and only `custom_color` potions; the GUI path
+  also ignores the effect colours `PotionContents.getColorOr` mixes (case 568: a splash potion by id).
+
+### tooltip (3000 cases, 2805 match: 93.5%)
+
+Generated stacks (half from 47 tooltip-heavy items, half any item) with up to 30 tooltip-bearing components (names, lore, rarity,
+enchantments, trims, potions, containers, bundles, fireworks, attribute modifiers, books, banners,
+songs, instruments, `tooltip_display`), removed components, advanced and creative flags each way.
+Vanilla runs `ItemStack.getTooltipLines` with a fake player whose level enables the vanilla
+features; ours runs `tooltip_lines` over `JarRegistries` (registry entries and enchantment tags from
+the jar's data). Lines compare as draw runs; a plain space's colour and shadow are dropped on both
+sides since they draw nothing.
+
+- **Custom projectile names** (54). `ChargedProjectiles.addProjectileTooltip` uses
+  `getDisplayName`: `[` + the italic custom name + `]` as separate styled parts; ours builds one plain
+  `[name]` string. Case 66.
+- **Enchantment attribute effects** (52). `LevelBasedValue` has `clamped`, `exponent`, `fraction`,
+  `levels_squared` and `lookup` besides `linear` and `constant`; `level_value` returns `None` for
+  them and the modifier line is lost. Case 264: Sweeping Edge II misses `+0.67 Sweeping Damage Ratio`.
+- **Duplicate enchantment ids** (40). `ItemEnchantments.STREAM_CODEC` decodes into an
+  `Object2IntOpenHashMap`, so a repeated id keeps the last level once; ours lists every entry and
+  sums their modifiers. Case 64: Swift Sneak III in vanilla, I and III in ours.
+- **Prototype pot decorations** (38). `decorated_pot`'s default `pot_decorations` is four bricks
+  (`Items`, `PotDecorations.allBrick`) and `PotDecorations.addToTooltip` lists them; ours reads only
+  the patch. Case 42.
+- **Over-stacked templates** (6). `ItemStackTemplate.create` validates the count against the max
+  stack and yields an empty stack (`0 x Air`, `[Air]`); ours shows the template as sent. Case 1082.
+- **Nested tooltips have no player** (5). Projectiles call `addDetailsToTooltip` with a null player,
+  so attack modifiers lose the player's base value (`+6 Attack Damage`); ours adds it (` 7`). Case 222.
+- **Amplifier above 255** (2). `MobEffectInstance` clamps the amplifier to 255; ours keeps the sent
+  value (`potion.potency.298`). Case 1740.
+- **Durability on unbreakable items** (2). `ItemStack.isDamaged` needs `isDamageableItem`, which is
+  false when unbreakable; ours shows `Durability:`. Case 2444.
+- **Spawner hover text** (1). `Spawner.appendHoverText` adds `spawner.desc1`/`desc2` to `spawner` and
+  `trial_spawner` without spawn data; ours adds nothing. Case 1506.
+
+### options (3000 cases, 0 match: 0%)
+
+Generated `options.txt` files: every key vanilla saves plus the two it reads without a field, values
+in and out of range and in odd syntax, duplicate, unknown and legacy keys (`fancyGraphics`,
+`graphicsMode`, LWJGL 2 key codes), data versions from none through the current 5023, CRLF and lone
+CR line ends, a BOM, and missing files. Vanilla `new Options(client, dir)` loads it (with
+`DataFixTypes.OPTIONS`) and `save()` writes it back; ours runs `OptionsFile::parse` then `to_text`.
+Each saved key compares as a field (`version` left out: ours never writes one, so a vanilla client
+reading our file runs every options fix from version 0), plus the key order, the key-binds screen's
+collisions (`KeyBindsList.KeyEntry.refreshEntry`) and the key mapping table. Counts are cases; most
+cases hit several classes. Ignoring the three universal classes, 106 cases match.
+
+- **Key mapping order** (2462, every case vanilla loads). `Options.keyMappings` puts
+  `key.debug.overlay` and `key.debug.modifier` before the hotbar slots and `key.debug.crash` later
+  among the debug keys; `MAPPINGS` has them after `key.hotbar.9`. The table (names, defaults,
+  categories, orders, toggles) otherwise matches.
+- **Default render distance** (1605). The `Options` constructor's `renderDistance` default is 12;
+  ours is 32. Case 3.
+- **`debugGuiScale` and `glDebugVerbosity`** (1891). `processOptions` reads and writes both; ours has
+  no field and writes them only when the file had them.
+- **Out of range values** (1721). `OptionInstance` codecs (`UnitDouble`, `IntRange`,
+  `Codec.doubleRange`) reject them and the option keeps its default; ours clamps. Case 3:
+  `textBackgroundOpacity:1.477` is 0.5 in vanilla, 1.0 in ours. `-0.0` is out of `[0, 1]` too.
+- **Unknown keys** (1117). Vanilla saves only what `processOptions` knows; ours keeps every other
+  line (by design, for round trips), so legacy and mod keys stay. Case 5: `key_key.modded`.
+- **Slider steps** (796). Sliders built with `IntRange.xmap` round what they load: `maxFps:117` is
+  110, `chunkSectionFadeInTime:1.247` is 1.2, `mouseWheelSensitivity` snaps to its log scale and
+  `fovEffectScale` goes through its square root. Ours keeps the value. Case 7.
+- **Key names** (727). `InputConstants.getKey` also takes `key.keyboard.<code>`/`key.mouse.<n>`
+  for codes without a name (and `key.mouse.3` is the right button again); ours unbinds them. Case 2:
+  `key.keyboard.913`. Most collision differences (347) follow from these aliases.
+- **Lenient booleans** (721). Plain fields use `isTrue` (anything but `true` is false) and
+  `OptionInstance` booleans read lenient JSON (` true` and `"true"` are true); ours falls back to the
+  default. Case 9: `invertYMouse:TRUE` is false in vanilla.
+- **Enum ids out of range** (570). `ByIdMap` with `WRAP` wraps `particles`, `narrator`,
+  `chatVisibility`, `attackIndicator`, `prioritizeChunkUpdates` and `textureFiltering`; ours uses
+  the default. Case 7: `textureFiltering:-1` is 2.
+- **Data fixes** (494 old, 88 versionless). `OptionsMenuBlurrinessFix`, the `graphicsMode` splits,
+  `OptionsSetGraphicsPresetToCustomFix`, `OptionsAccessibilityOnboardFix`, `OptionsKeyLwjgl3Fix`,
+  the `swapHands` rename and the rest; ours applies none. Case 12: `menuBackgroundBlurriness:0.25`
+  from version 1935 is 3, `graphicsPreset` becomes `custom`.
+- **Vanilla abandons the load** (538: 221 `NumberFormatException`, 214 JSON syntax, 75
+  `StringIndexOutOfBoundsException`, 28 `IllegalStateException`). `Options.load` catches one
+  exception for the whole file, so a key name in a pre-1344 file (`OptionsKeyLwjgl3Fix` parses it as
+  an int), invalid JSON (`LenientJsonParser`) or `key.keyboard` with no code leaves every later
+  option at its default; ours skips just that line. Case 6.
+- **Float text** (159). Vanilla prints Java doubles (`1.0E-4`); ours prints `0.0001`. Same value.
+- **Number syntax** (144 + 90). Lenient JSON takes ` 0.5` and integer options take `4.0`; it rejects
+  `.5` and `5.`, which Rust's parser takes. Case 21, 31.
+- **Booleans in unit sliders** (134). `UnitDouble`'s codec also takes `true`/`false` as 1/0; ours
+  uses the default. Case 25.
+- **Escapes in `soundDevice`** (98). Vanilla decodes the JSON string; `QuotedString::parse` only
+  strips the quotes, so each save doubles the backslashes. Case 88: `"C:\\dir"`.
+- **`tutorialStep`** (97). `TutorialSteps.getByName` turns unknown names into `none`; ours keeps them.
+- **Pack lists** (88). Gson reads `[1,2]` as `["1","2"]`; ours drops the list. Case 56.
+- **Lone CR line ends** (78). `BufferedReader.lines` splits on `\r`; `str::lines` does not, so the
+  rest of the file becomes one value. Case 8.
+
+### entity_pose (3000 cases, 2669 match: 89.0%)
+
+35 adult models without keyframe animations (quadrupeds, spiders, golems, fish, flyers, humanoids,
+slimes, the end crystal), cycled evenly, with generated walk position and speed, age, head yaw and
+pitch, plus the state fields each model reads that our `EntityView` can carry (swing progress,
+aggression, creepy, standing, attack and offer ticks, stun and roar, tentacle clock, in water, on
+land, squish). Vanilla bakes the layer with `EntityModelSet.vanilla()`, builds the model class and
+runs `setupAnim` on the render state; ours plans the entity through `base_anim` and
+`Catalog::build`, then poses its first part like `EntityScene` (rig, hidden slots, rotation
+overrides). Parts compare by path within 1/512 (`Mth.sin` is a 65536-entry table). Derived states
+are fed the way our client assumes: guardian spikes out with a 0.45 per tick tail clock, the
+phantom's flap clock is its age, a dolphin moves when it walks, a sheep not eating holds its head at
+its pitch. Not covered: babies, keyframe-animated mobs (armadillo, camel, frog, sniffer, warden,
+breeze, creaking...), arm poses and held items, variant layers.
+
+- **Creeper legs** (74, every case that walks). `CreeperModel` binds `leftHindLeg` to
+  `right_hind_leg` and so on, so each leg swings with its mirror's phase; `legs4` uses the names.
+  Case 8: `right_front_leg` xRot 0.302 in vanilla, -0.302 in ours.
+- **Turtle** (86). `TurtleModel` runs `QuadrupedModel.setupAnim` first (head look, leg xRot) and only
+  then sets the land or swim yRot and zRot; `rig_mobs::turtle` never turns the head and leaves leg
+  xRot at rest. Case 7.
+- **Silverfish** (86). The `SIMPLE` table gives `minecraft:silverfish` `Rig::Endermite`, so its seven
+  segments and three layers move with the endermite's amplitudes and the layers stay still;
+  `SilverfishModel` scales segment `i` by `1 + |i - 2|` (yaw) and `|i - 2|` (sway). Case 15.
+- **Tadpole tail** (85). `TadpoleModel` sets `tail.yRot = -k * 0.25 * sin(0.3 * age)` (k is 1 in
+  water, 1.5 out); the tadpole runs `Rig::Fish`, whose cod-style wobble barely moves it. Case 25:
+  0.25 in vanilla, 0.012 in ours.
+
+### player_physics (1600 cases, 1598 match: 99.9%)
+
+17 scenes (flat stone, oak stairs, slab stairs, a one-block step, ladders and vines on a wall, water
+and lava pools, a 3x3 platform edge, soul sand, honey, cobweb, powder snow, ice, blue ice, a slime
+floor dropped onto, elytra from y 90), each 40 ticks of generated held keys (forward biased, with
+jump, sneak, sprint and strafes) and turning yaw and pitch. Vanilla runs a real `LocalPlayer`
+(`KeyboardInput` over `Options` key mappings, `tick` then `sendChanges`) in a `ClientLevel`
+subclass that serves the scene's blocks, fluids, chunks and collisions and nothing else: no
+entities, sounds, particles, rain or dimension layers (environment attributes at their defaults,
+the overworld's). Ours runs `PlayerPhysics::tick` over the same blocks. Each tick's position and
+velocity compare within 1e-6, and the ground flag exactly. Survival defaults only: no effects,
+attributes, abilities, vehicles, entities or server corrections; elytra cases wear one and glide
+once a jump starts it.
+
+- **First move after standing in powder snow** (2). After several still ticks inside powder snow,
+  vanilla's first tick that moves (a jump in case 743, a sprint step in case 301)
+  is not slowed: it rises the plain 0.42, or walks 0.12, and keeps its velocity, and the stuck
+  multiplier only applies from the next tick. Ours applies `PowderSnowBlock.entityInside`'s
+  `(0.9, 1.5, 0.9)` on that first tick too and zeroes the velocity, so every later tick drifts
+  (case 301: z 2.618 in vanilla, 2.606 in ours). Not pinned down further; the likely seam is
+  `Entity.applyEffectsFromBlocks` checking a zero-length movement after still ticks.

@@ -36,23 +36,26 @@ pub use assets::{
     EquipmentInfo, EquipmentLayer, Equippable, ImageRgba, MAX_EQUIPMENT_MISSES, SceneAssets,
     TrimOverride, load_jar_texture, missing_image,
 };
-pub use catalog::{Catalog, PlanCx, Simple, is_baby};
+pub use catalog::{Catalog, PlanCx, Simple, base_anim, is_baby};
 pub use cube::{Vertex, unwrap_cube};
 pub use data::{
     AnimationDef, AnimationSet, ChannelDef, CubeDef, Interp, KeyframeDef, LayerDef, LayerSet,
     PartDef, RendererInfo, RendererSet, Target,
 };
 pub use display::{DisplaySample, DisplayTrack, PoseLerp, teleport_duration};
+pub use equipment::has_glint;
 pub use gpu::{
     Bone34, CLASS_SIZES, EntityRenderer, LightInfo, MAX_BONES, MAX_INSTANCES, ModelId,
     OUTLINE_COLOR_FORMAT, OUTLINE_DEPTH_FORMAT, PartInstance, Pipeline, TargetFormats, TexId,
 };
 pub use humanoids::default_skin;
-pub use items::{ItemOwner, ItemWorld, clone_count};
+pub use items::{ItemOwner, ItemWorld, clone_count, world_layers};
 pub use maps::{LABEL_SCALE, MapDecoration, MapLabels, stack_map_id};
 pub use misc::{cluster_offset, display_local, hidden_while_fresh};
 pub use model::{Bone, BoneId, Model};
-pub use plan::{Attach, AttachKind, FreeGeo, ItemContext, ItemSource, Part, Plan};
+pub use plan::{
+    Attach, AttachKind, FreeGeo, ItemContext, ItemSource, Part, Plan, Pose as PartPose,
+};
 pub use pose::{Pose, evaluate};
 pub use rig::{
     AnimIn, ArmPose, Binding, HumanoidStyle, IllagerPose, PiglinPose, Rig, Slot, animate,

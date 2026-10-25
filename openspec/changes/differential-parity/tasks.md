@@ -19,11 +19,11 @@ One harness each; record case count and pass rate. Failures are filed, not fixed
 - [x] 2.1 Text components: style merge, legacy codes, translation with arguments, component to plain and to draw runs (4000 cases, 58.5%)
 - [x] 2.2 Block model baking: quads per block state (faces, UV, rotation, tint index, shade, cullface) (35723 states, 100%)
 - [x] 2.3 Section meshing: generated sections incl. fluids, AO, smooth lighting, culling, tint (400 cases, 2.75%)
-- [ ] 2.4 Item models: model selection and layers over generated stacks with components
-- [ ] 2.5 Tooltips: lines and styles for generated stacks with components, advanced tooltips on and off
-- [ ] 2.6 options.txt and key mappings: parse, defaults, round-trip
-- [ ] 2.7 Entity model poses: `setupAnim` part transforms over generated render states
-- [ ] 2.8 Local player physics: move and collide over block scenes and input sequences (stairs, slabs, ladders, fluids, sneaking edges, elytra)
+- [x] 2.4 Item models: model selection and layers over generated stacks with components (3000 cases, 77.5%)
+- [x] 2.5 Tooltips: lines and styles for generated stacks with components, advanced tooltips on and off (3000 cases, 93.5%)
+- [x] 2.6 options.txt and key mappings: parse, defaults, round-trip (3000 cases, 0%)
+- [x] 2.7 Entity model poses: `setupAnim` part transforms over generated render states (3000 cases, 89.0%)
+- [x] 2.8 Local player physics: move and collide over block scenes and input sequences (stairs, slabs, ladders, fluids, sneaking edges, elytra) (1600 cases, 99.9%)
 
 ## 3. Draw-stream harness
 

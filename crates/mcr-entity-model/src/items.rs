@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 use glam::{Mat4, Quat, Vec3};
 use mcr_assets::{
     BakedItemModel, ChargeType, CompassInputs, DisplayContext, Identifier, ItemBaker,
-    ItemContext as AssetCtx, ItemLayer, ItemProps, LayerKind, ModelBaker,
+    ItemContext as AssetCtx, ItemLayer, ItemModels, ItemProps, LayerKind, ModelBaker,
 };
 use mcr_protocol::types::ItemStack;
 use mcr_protocol::types::component::{DataComponent, component_type_id};
@@ -220,6 +220,34 @@ impl ItemProps for StackProps<'_> {
             _ => ChargeType::None,
         }
     }
+}
+
+fn stack_props(stack: &ItemStack) -> Option<(&'static str, StackProps<'_>)> {
+    let version = mcr_data::v26_3();
+    let id = u32::try_from(stack.item).ok()?;
+    let info = version.item_info(id);
+    let props = StackProps {
+        stack,
+        max_damage: info.map_or(0, |i| i.max_damage as i32),
+        max_stack: info.map_or(64, |i| i32::from(i.max_stack_size)),
+    };
+    Some((version.item_name(id)?, props))
+}
+
+/// The layers the world path picks for `stack` held by no one, outside any world.
+pub fn world_layers(
+    items: &ItemModels,
+    stack: &ItemStack,
+    display: DisplayContext,
+) -> Vec<ItemLayer> {
+    let Some((name, props)) = stack_props(stack) else {
+        return Vec::new();
+    };
+    let ctx = AssetCtx {
+        display,
+        ..AssetCtx::default()
+    };
+    items.evaluate(&Identifier::parse(name), &props, &ctx)
 }
 
 fn display_context(c: ItemContext) -> DisplayContext {
@@ -459,17 +487,7 @@ impl ItemGeometry {
                 return hit.clone();
             }
         }
-        let version = mcr_data::v26_3();
-        let name = version.item_name(u32::try_from(stack.item).ok()?)?;
-        let props = StackProps {
-            stack,
-            max_damage: version
-                .item_info(u32::try_from(stack.item).ok()?)
-                .map_or(0, |i| i.max_damage as i32),
-            max_stack: version
-                .item_info(u32::try_from(stack.item).ok()?)
-                .map_or(64, |i| i32::from(i.max_stack_size)),
-        };
+        let (name, props) = stack_props(stack)?;
         let known_model = props
             .item_model()
             .filter(|m| self.assets.items.get(&Identifier::parse(m)).is_some());

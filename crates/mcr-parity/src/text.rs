@@ -269,7 +269,7 @@ fn component(rng: &mut Rng, depth: u32, bare_ok: bool) -> Value {
     Value::Object(c)
 }
 
-fn to_nbt(v: &Value) -> Result<Nbt> {
+pub(crate) fn to_nbt(v: &Value) -> Result<Nbt> {
     Ok(match v {
         Value::Bool(b) => Nbt::Byte(i8::from(*b)),
         Value::Number(n) => match n.as_i64() {
@@ -308,7 +308,7 @@ fn insertion_at(spans: &[InsertSpan], index: usize) -> Option<&str> {
         .map(|s| s.text.as_str())
 }
 
-fn run_style(cell: &Cell, click: Option<&ClickEvent>, insertion: Option<&str>) -> Value {
+pub(crate) fn run_style(cell: &Cell, click: Option<&ClickEvent>, insertion: Option<&str>) -> Value {
     let s = cell.style;
     let mut out = json!({
         "bold": s.bold(),

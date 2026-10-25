@@ -3,11 +3,16 @@
 
 pub mod block_model;
 pub mod diff;
+pub mod entity_pose;
 pub mod font;
+pub mod item_model;
 pub mod jsonl;
+pub mod options;
+pub mod player_physics;
 pub mod rng;
 pub mod section_mesh;
 pub mod text;
+pub mod tooltip;
 
 use std::path::PathBuf;
 
@@ -73,6 +78,11 @@ pub static HARNESSES: &[&dyn Harness] = &[
     &text::TextHarness,
     &block_model::BlockModelHarness,
     &section_mesh::SectionMeshHarness,
+    &item_model::ItemModelHarness,
+    &tooltip::TooltipHarness,
+    &options::OptionsHarness,
+    &entity_pose::EntityPoseHarness,
+    &player_physics::PlayerPhysicsHarness,
 ];
 
 pub fn harness(name: &str) -> Option<&'static dyn Harness> {

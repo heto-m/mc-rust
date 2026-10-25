@@ -52,6 +52,12 @@ public final class VanillaModels {
     }
 
     private SpriteLoader.Preparations atlas(ResourceManager resources, Identifier atlasId, Identifier location) {
+        return atlas(resources, atlasId, location, byCell);
+    }
+
+    /** One atlas whose sprites take the next cells of {@code byCell}. */
+    public static SpriteLoader.Preparations atlas(
+            ResourceManager resources, Identifier atlasId, Identifier location, List<TextureAtlasSprite> byCell) {
         SpriteResourceLoader loader = SpriteResourceLoader.create(Set.of());
         Map<Identifier, TextureAtlasSprite> regions = new HashMap<>();
         TextureAtlasSprite missing = null;
@@ -84,14 +90,7 @@ public final class VanillaModels {
         SpriteLoader.Preparations blockAtlas = atlas(resources, AtlasIds.BLOCKS, TextureAtlas.LOCATION_BLOCKS);
         SpriteLoader.Preparations itemAtlas = atlas(resources, AtlasIds.ITEMS, TextureAtlas.LOCATION_ITEMS);
         MaterialBaker materials = new MaterialBaker(blockAtlas, itemAtlas);
-        Map<Identifier, UnbakedModel> unbaked;
-        try {
-            Method load = ModelManager.class.getDeclaredMethod("loadBlockModels", ResourceManager.class, Executor.class);
-            load.setAccessible(true);
-            unbaked = ((CompletableFuture<Map<Identifier, UnbakedModel>>) load.invoke(null, resources, direct)).join();
-        } catch (ReflectiveOperationException e) {
-            throw new IllegalStateException("loading block models", e);
-        }
+        Map<Identifier, UnbakedModel> unbaked = unbakedModels(resources);
         BlockStateModelLoader.LoadedModels states = BlockStateModelLoader.loadBlockStates(resources, direct).join();
         ModelDiscovery discovery = new ModelDiscovery(unbaked, MissingCuboidModel.missingModel());
         discovery.addSpecialModel(ItemModelGenerator.GENERATED_ITEM_MODEL_ID, new ItemModelGenerator());
@@ -103,6 +102,19 @@ public final class VanillaModels {
         Map<BlockState, BlockStateModel> models = baked.blockStateModels();
         this.blocks = new BlockStateModelSet(models, baked.missingModels().block());
         this.fluids = new FluidStateModelSet(FluidStateModelSet.bake(materials), baked.missingModels().fluid());
+    }
+
+    /** Every {@code models/*.json} of the pack, through {@code ModelManager.loadBlockModels}. */
+    @SuppressWarnings("unchecked")
+    public static Map<Identifier, UnbakedModel> unbakedModels(ResourceManager resources) {
+        Executor direct = Runnable::run;
+        try {
+            Method load = ModelManager.class.getDeclaredMethod("loadBlockModels", ResourceManager.class, Executor.class);
+            load.setAccessible(true);
+            return ((CompletableFuture<Map<Identifier, UnbakedModel>>) load.invoke(null, resources, direct)).join();
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("loading block models", e);
+        }
     }
 
     public boolean hasModel(BlockState state) {

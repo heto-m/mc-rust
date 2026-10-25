@@ -9,12 +9,16 @@ publish.workspace = true
 mcr-buf.workspace = true
 mcr-assets = { path = "../mcr-assets" }
 mcr-data = { path = "../mcr-data" }
+mcr-entity-model = { path = "../mcr-entity-model" }
 mcr-mesh = { path = "../mcr-mesh" }
 mcr-nbt = { path = "../mcr-nbt" }
+mcr-physics = { path = "../mcr-physics" }
 mcr-protocol = { path = "../mcr-protocol" }
 mcr-render = { path = "../mcr-render" }
+mcr-settings = { path = "../mcr-settings" }
 mcr-ui = { path = "../mcr-ui" }
 mcr-world = { path = "../mcr-world" }
+rustc-hash.workspace = true
 anyhow = "1"
 serde_json.workspace = true
 thiserror.workspace = true
