@@ -20,6 +20,7 @@ Scope: mcr-ui text, font and chat.
 - [ ] 3.1 C1 stop_sound in mod mode (after mods resume)
 - [ ] 3.2 C2 cape on elytra (owner)
 - [ ] 3.3 C3 server-level F3 entries, if the managed server can expose them
+- [ ] 3.4 C4 thread the language-aware plain string through the remaining callers
 
 ## 4. Text components
 

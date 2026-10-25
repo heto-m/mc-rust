@@ -59,3 +59,4 @@ Severity: **G** gameplay-breaking, **V** visible, **M** minor.
 - **C2 (M)** Cape on elytra, which needs the owner's online-mode account.
 - **C3 (M)** The `local_difficulty`, `entity_spawn_counts` and `chunk_generation_stats` F3 entries, which
   need a server level.
+- **C4 (M)** The language-aware plain string (`to_plain_string_with`) is not yet threaded through the `mcr-app` and `mcr-client` callers: shell, hud, nametags, entities, map, editors, the sign character limit in `mcr-block-entity`, `dialog_screen` option and slider labels, and `tooltip::first_plain`. This affects emptiness checks, the sign limit and logs.
