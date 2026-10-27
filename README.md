@@ -11,3 +11,9 @@ cargo xtask --help        # dev tooling
 ```
 
 You need your own copy of Minecraft; no Mojang assets are distributed here.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT)
+at your option. Minecraft is a trademark of Mojang Synergies AB; this project is not affiliated with
+Mojang or Microsoft.
